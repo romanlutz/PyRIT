@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from dataclasses import dataclass
+from pathlib import Path
 from textwrap import dedent
-from typing import Generator
+from typing import Any, Generator, Union
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,6 +44,18 @@ def scorer_likert_response() -> PromptRequestResponse:
 @pytest.fixture
 def memory() -> Generator[MemoryInterface, None, None]:
     yield from get_memory_interface()
+
+
+# Parametrize all tests to work with scale path OR scale
+@dataclass
+class TestScaleArg:
+    arg_name: str
+    arg_value: Union[Path, Any]
+
+
+LIKERT_SCALES_ARGS = [
+
+]
 
 
 @pytest.mark.asyncio

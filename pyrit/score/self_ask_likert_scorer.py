@@ -48,19 +48,24 @@ class SelfAskLikertScorer(Scorer):
 
         self._memory = memory if memory else DuckDBMemory()
 
-        if not likert_scale_path and not likert_scale:
+        if not (likert_scale_path or likert_scale):
             raise ValueError("Either likert_scale_path or likert_scale must be provided.")
         if likert_scale_path and likert_scale:
             raise ValueError("Only one of likert_scale_path or likert_scale should be provided.")
         if likert_scale_path:
             likert_scale = yaml.safe_load(likert_scale_path.read_text(encoding="utf-8"))
-        elif "category" not in likert_scale or "scale_descriptions" not in likert_scale:
+        
+        if not ("category" in likert_scale or not "scale_descriptions" in likert_scale):
             raise ValueError("category and scale_descriptions must be provided in likert_scale.")
 
         if likert_scale["category"]:
             self._score_category = likert_scale["category"]
         else:
-            raise ValueError(f"Improperly formated likert scale yaml file. Missing category in {likert_scale_path}.")
+            raise ValueError(f"Improperly formated likert scale YAML file. Missing category in {likert_scale_path}.")
+        
+        for key in ["score_value", "description"]:
+            if key not in self._score_category:
+                raise ValueError(f"Improperly formated likert scale YAML file. Missing {key}.")
 
         likert_scale = self._likert_scale_description_to_string(likert_scale["scale_descriptions"])
 
