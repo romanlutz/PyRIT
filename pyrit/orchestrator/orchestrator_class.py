@@ -2,13 +2,15 @@
 # Licensed under the MIT license.
 
 import abc
+from collections import defaultdict
 import logging
 import uuid
 
-from typing import Optional
+from typing import Dict, List, Optional
 
-from pyrit.memory import MemoryInterface, DuckDBMemory
+from pyrit.memory import MemoryInterface, DuckDBMemory, MemoryExporter
 from pyrit.models import PromptDataType, Identifier
+from pyrit.models.prompt_request_piece import PromptRequestPiece
 from pyrit.prompt_converter import PromptConverter
 from pyrit.prompt_normalizer import NormalizerRequest, NormalizerRequestPiece
 
@@ -80,6 +82,25 @@ class Orchestrator(abc.ABC, Identifier):
         These exist if a scorer is provided to the orchestrator.
         """
         return self._memory.get_scores_by_orchestrator_id(orchestrator_id=self._id)
+    
+    def export_memory(self, *, file_path: str, export_type: str = "csv"):
+        """Exports both conversation history and scores to a file.
+        
+        Args:
+            file_path (str): Path to the file.
+            export_type (str): The format for exporting data. Defaults to "csv".
+        """
+        # TODO add filtering mechanism to include/exclude only subset
+        all_messages: List[PromptRequestPiece] = self.get_memory()
+
+        all_messages.sort(key=lambda x: (x.conversation_id, x.sequence))
+
+        # for message in all_messages:
+        #     scores = self._memory.get_scores_by_prompt_ids(prompt_request_response_ids=[message.id])
+
+        
+        exporter = MemoryExporter()
+        exporter.export_data(export_type=export_type, data=all_messages, file_path=file_path)
 
     def get_identifier(self) -> dict[str, str]:
         orchestrator_dict = {}
