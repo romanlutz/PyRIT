@@ -251,6 +251,47 @@ class AzureOpenAITextChatTarget(OpenAIChatInterface):
             )
 
 
+class AzureOpenAITextChatAttackTarget(AzureOpenAITextChatTarget):
+    def __init__(
+        self,
+        *,
+        deployment_name: str = None,
+        endpoint: str = None,
+        api_key: str = None,
+        use_aad_auth: bool = False,
+        memory: MemoryInterface = None,
+        api_version: str = "2024-02-01",
+        max_tokens: int = 1024,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        frequency_penalty: float = 0.5,
+        presence_penalty: float = 0.5,
+        max_requests_per_minute: Optional[int] = None,
+        system_prompt: str,
+    ) -> None:
+        AzureOpenAITextChatTarget.__init__(
+            self,
+            deployment_name=deployment_name,
+            endpoint=endpoint,
+            api_key=api_key,
+            use_aad_auth=use_aad_auth,
+            memory=memory,
+            api_version=api_version,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            max_requests_per_minute=max_requests_per_minute,
+        )
+        self._system_prompt = system_prompt
+
+    async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
+        messages = self._memory.get_conversation(conversation_id=prompt_request.request_pieces[0].conversation_id)
+        if not messages:
+            self.set_system_prompt(self._system_prompt, conversation_id=prompt_request)
+        return AzureOpenAITextChatTarget.send_prompt_async(self, prompt_request=prompt_request)
+
 class OpenAIChatTarget(OpenAIChatInterface):
     API_KEY_ENVIRONMENT_VARIABLE: str = "OPENAI_CHAT_KEY"
     ENDPOINT_URI_ENVIRONMENT_VARIABLE: str = "OPENAI_CHAT_ENDPOINT"
