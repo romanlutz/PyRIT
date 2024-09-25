@@ -18,10 +18,11 @@ def limit_requests_per_minute(func: Callable) -> Callable:
     """
 
     async def set_max_rpm(*args, **kwargs):
-        self = args[0]
-        rpm = getattr(self, "_max_requests_per_minute", None)
-        if rpm and rpm > 0:
-            await asyncio.sleep(60 / rpm)
+        if len(args) > 0:
+            self = args[0]
+            rpm = getattr(self, "_max_requests_per_minute", None)
+            if rpm and rpm > 0:
+                await asyncio.sleep(60 / rpm)
 
         return await func(*args, **kwargs)
 

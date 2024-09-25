@@ -286,11 +286,12 @@ class AzureOpenAITextChatAttackTarget(AzureOpenAITextChatTarget):
         )
         self._system_prompt = system_prompt
 
+    @limit_requests_per_minute
     async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
         messages = self._memory.get_conversation(conversation_id=prompt_request.request_pieces[0].conversation_id)
         if not messages:
-            self.set_system_prompt(self._system_prompt, conversation_id=prompt_request)
-        return AzureOpenAITextChatTarget.send_prompt_async(self, prompt_request=prompt_request)
+            self.set_system_prompt(system_prompt=self._system_prompt, conversation_id=prompt_request.request_pieces[0].conversation_id)
+        return await super().send_prompt_async(prompt_request=prompt_request)
 
 class OpenAIChatTarget(OpenAIChatInterface):
     API_KEY_ENVIRONMENT_VARIABLE: str = "OPENAI_CHAT_KEY"
