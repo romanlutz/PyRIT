@@ -93,6 +93,7 @@ dev = [
     "respx>=0.22.0",
     "semantic-kernel==0.9.4b1",
     "types-PyYAML>=6.0.12.9",
+    "websockets>=14.1",
 ]
 torch = [
     "torch>=2.3.0",
@@ -136,6 +137,7 @@ all = [
     "flask>=3.1.0",
     "ollama>=0.4.4",
     "types-PyYAML>=6.0.12.9",
+    "websockets>=14.1",
 ]
 
 [tool.pytest.ini_options]
