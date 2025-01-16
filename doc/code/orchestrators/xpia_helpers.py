@@ -93,7 +93,7 @@ class SemanticKernelPluginAzureOpenAIPromptTarget(PromptChatTarget):
         )
 
         self._plugin_name = plugin_name
-        self._kernel.import_plugin_from_object(plugin, plugin_name)
+        self._kernel.add_plugin(plugin, plugin_name)
 
         self._execution_settings = AzureChatPromptExecutionSettings(
             service_id=service_id,
