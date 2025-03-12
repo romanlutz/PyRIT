@@ -34,8 +34,6 @@ class AzureRAIServiceTarget(PromptChatTarget):
 
         messages = list(self._memory.get_chat_messages_with_conversation_id(conversation_id=request.conversation_id))
 
-        messages.append(request.to_chat_message())
-
         logger.info(f"Sending the following prompt to the prompt target: {request}")
 
         # Extracting template key and objective from the memory labels is a hacky workaround.
@@ -55,6 +53,7 @@ class AzureRAIServiceTarget(PromptChatTarget):
         if "max_turns" in memory_labels:
             template_parameters["max_turns"] = memory_labels["max_turns"]
         prompt = prompt_request.request_pieces[0].converted_value
+        # TODO: add messages as conversation history
         payload = {"prompt": prompt}
 
         token = self.token_manager.get_token()
