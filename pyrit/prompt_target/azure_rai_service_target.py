@@ -36,22 +36,20 @@ class AzureRAIServiceTarget(PromptChatTarget):
 
         logger.info(f"Sending the following prompt to the prompt target: {request}")
 
-        # Extracting template key and objective from the memory labels is a hacky workaround.
-        # There may be a cleaner way to do this in the future.
-        memory_labels = prompt_request.request_pieces[0].labels
-        template_key = memory_labels.get("templatekey")
+        metadata = prompt_request.request_pieces[0].prompt_metadata
+        template_key = metadata.get("templatekey")
         if not template_key:
             raise ValueError("Template key is required to send a prompt to the Azure RAI service.")
-        objective = memory_labels.get("objective")
+        objective = metadata.get("objective")
         if not objective:
             raise ValueError("Objective is required to send a prompt to the Azure RAI service.")
         template_parameters = {"objective": objective}
         # special template param for TAP
-        if "desired_prefix" in memory_labels:
-            template_parameters["desired_prefix"] = memory_labels["desired_prefix"]
+        if "desired_prefix" in metadata:
+            template_parameters["desired_prefix"] = metadata["desired_prefix"]
         # special template param for Crescendo
-        if "max_turns" in memory_labels:
-            template_parameters["max_turns"] = memory_labels["max_turns"]
+        if "max_turns" in metadata:
+            template_parameters["max_turns"] = metadata["max_turns"]
         prompt = prompt_request.request_pieces[0].converted_value
         # TODO: add messages as conversation history
         payload = {"prompt": prompt}
