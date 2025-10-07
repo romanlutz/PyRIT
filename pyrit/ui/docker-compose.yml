@@ -1,0 +1,36 @@
+# Docker Compose for PyRIT Endpoint Chat App
+#
+# Documentation: See README.md for full usage guide
+#
+# Usage:
+#   # Create a .env file in the workspace root (see ../../.env_example)
+#   docker-compose -f pyrit/ui/docker-compose.yml up
+#
+#   # Or specify a custom env file:
+#   docker-compose -f pyrit/ui/docker-compose.yml --env-file /path/to/.env up
+#
+#   # Run in background:
+#   docker-compose -f pyrit/ui/docker-compose.yml up -d
+
+version: '3.8'
+
+services:
+  pyrit-chat:
+    build:
+      context: ../..
+      dockerfile: pyrit/ui/Dockerfile
+    container_name: pyrit-chat
+    ports:
+      - "7860:7860"
+    env_file:
+      - ../../.env  # Automatically loads .env from workspace root
+    environment:
+      - OPENAI_CHAT_ENDPOINT=${OPENAI_CHAT_ENDPOINT}
+      - OPENAI_CHAT_KEY=${OPENAI_CHAT_KEY}
+      - OPENAI_CHAT_MODEL=${OPENAI_CHAT_MODEL}
+    volumes:
+      - ../../dbdata:/workspace/dbdata  # Persist conversation history
+    command: >
+      --target OpenAIChatTarget
+      --host 0.0.0.0
+      --port 7860
