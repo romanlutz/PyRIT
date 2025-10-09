@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
+import json
 import logging
 from typing import Literal, Optional
 
@@ -43,10 +44,13 @@ class OpenAISora2Target(OpenAISoraTargetBase):
 
         Args:
             model_name (str, Optional): The name of the model. Defaults to "sora-2".
+                Can be set via OPENAI_SORA2_MODEL environment variable.
             endpoint (str, Optional): The target URL for the OpenAI service.
+                Can be set via OPENAI_SORA2_ENDPOINT environment variable.
             api_key (str, Optional): The API key for accessing the service.
-                Defaults to the `OPENAI_SORA2_KEY` environment variable.
+                Can be set via OPENAI_SORA2_KEY environment variable.
             headers (str, Optional): Extra headers of the endpoint (JSON).
+                Can be set via OPENAI_ADDITIONAL_REQUEST_HEADERS environment variable.
             max_requests_per_minute (int, Optional): Number of requests the target can handle per
                 minute before hitting a rate limit.
             httpx_client_kwargs (dict, Optional): Additional kwargs to be passed to the
@@ -86,7 +90,7 @@ class OpenAISora2Target(OpenAISoraTargetBase):
 
         # No api-version parameter for Sora-2
 
-    def _set_openai_env_configuration_vars(self):
+    def _set_openai_env_configuration_vars(self) -> None:
         """Override to use OPENAI_SORA2_* environment variables."""
         self.model_name_environment_variable = "OPENAI_SORA2_MODEL"
         self.endpoint_environment_variable = "OPENAI_SORA2_ENDPOINT"
@@ -178,7 +182,6 @@ class OpenAISora2Target(OpenAISoraTargetBase):
         
         # Log the current status for visibility
         try:
-            import json
             content = json.loads(response.content)
             status = content.get("status", "unknown")
             logger.info(f"Task {task_id} status: {status}")
