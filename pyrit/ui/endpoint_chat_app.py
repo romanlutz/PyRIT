@@ -21,6 +21,7 @@ from uuid import uuid4
 import gradio as gr
 
 from pyrit.common import IN_MEMORY, initialize_pyrit
+from pyrit.common.path import DB_DATA_PATH
 from pyrit.memory import CentralMemory
 from pyrit.prompt_normalizer import PromptNormalizer
 
@@ -56,7 +57,6 @@ class EndpointChatApp:
         # Track messages per conversation to prevent mixing
         self._conversation_message_count = 0
         self._last_cleared_conversation_id = None
-
 
     def _rebuild_history_from_database(self) -> list[dict]:
         """
@@ -358,4 +358,19 @@ class EndpointChatApp:
             **kwargs: Additional arguments to pass to gr.launch()
         """
         demo = self.build_interface()
+        
+        # Add DB_DATA_PATH to allowed_paths so Gradio can serve media files
+        # Using .resolve() to get the absolute path that Gradio recognizes
+        allowed_paths = kwargs.get("allowed_paths", [])
+        if not isinstance(allowed_paths, list):
+            allowed_paths = []
+        
+        db_data_str = str(DB_DATA_PATH.resolve())
+        if db_data_str not in allowed_paths:
+            allowed_paths.append(db_data_str)
+        
+        kwargs["allowed_paths"] = allowed_paths
+        
+        logger.info(f"🔓 Gradio allowed_paths: {db_data_str}")
+        
         demo.launch(**kwargs)

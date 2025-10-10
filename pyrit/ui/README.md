@@ -66,6 +66,12 @@ docker run -p 7860:7860 --env-file .env pyrit-chat --target-class OpenAIChatTarg
 docker run -p 7860:7860 --env-file .env -v $(pwd)/dbdata:/workspace/dbdata pyrit-chat --target-class OpenAIChatTarget
 ```
 
+> ⚠️ **Docker Environment File Format**: When using `--env-file` with Docker, the file must follow Docker's env file syntax:
+> - **No quotes** around values: `KEY=value` not `KEY="value"`
+> - **No spaces** around `=`: `KEY=value` not `KEY = value`
+> - **No variable substitution**: Use actual values, not `${OTHER_VAR}`
+> - JSON values should be unquoted: `HEADERS={"key": "value"}` not `HEADERS='{"key": "value"}'`
+
 ## 🔧 Configuration Examples
 
 > 💡 See [`../../.env_example`](../../.env_example) for complete examples with all PyRIT targets
