@@ -245,13 +245,16 @@ class EndpointChatApp:
                     'conversation_id': conv_id,
                     'labels': piece.labels or {},
                     'metadata': piece.prompt_metadata or {},
-                    'message_count': 0,
+                    'non_system_messages': set(),  # Track unique (sequence, role) pairs for non-system messages
                     'first_message': None,
                     'last_message': None,
                     'first_user_prompt': None,
                 }
             
-            conversations_dict[conv_id]['message_count'] += 1
+            # Count non-system messages by (sequence, role) pair - each unique pair is one message
+            # This correctly handles multimodal messages that have multiple pieces with the same sequence
+            if piece.role in ["user", "assistant"] and piece.sequence is not None:
+                conversations_dict[conv_id]['non_system_messages'].add((piece.sequence, piece.role))
             
             # Track first user prompt (role == "user" and converted_value_data_type == "text")
             if (conversations_dict[conv_id]['first_user_prompt'] is None 
@@ -284,7 +287,7 @@ class EndpointChatApp:
         for conv_data in conversations_dict.values():
             table_data.append([
                 conv_data['conversation_id'],
-                conv_data['message_count'],
+                len(conv_data['non_system_messages']),  # Count unique non-system messages
                 conv_data['first_user_prompt'] or 'N/A',
                 str(conv_data['labels']),
                 str(conv_data['metadata']),
@@ -328,53 +331,49 @@ class EndpointChatApp:
                         value=[],
                     )
                     
-                    # Input textbox
-                    with gr.Row():
-                        msg = gr.Textbox(
-                            placeholder="Type your message here...",
-                            show_label=False,
-                            scale=4,
-                        )
-                        send_btn = gr.Button("Send", scale=1)
-                    
-                    # File upload
-                    files = gr.Files(
-                        label="Attach files (images, videos, audio)",
+                    # Multimodal input - combines text and file uploads
+                    chat_input = gr.MultimodalTextbox(
+                        interactive=True,
                         file_count="multiple",
-                        type="filepath",
+                        placeholder="Enter message or upload files...",
+                        show_label=False,
                     )
                     
                     # Handle send message - show user message immediately, then get response
-                    async def send_message_async(user_message, uploaded_files, current_history):
+                    async def send_message_async(message, current_history):
                         """Send a message and update UI immediately"""
-                        if not user_message or not user_message.strip():
-                            yield current_history, "", None
+                        # Check if there's any content
+                        text_content = message.get("text", "")
+                        files = message.get("files", [])
+                        
+                        if not text_content and not files:
+                            yield current_history, gr.MultimodalTextbox(value=None, interactive=True)
                             return
                         
-                        # Build the user's message for display
-                        user_content = user_message
+                        # Add user message(s) to history immediately for instant feedback
+                        updated_history = current_history.copy()
                         
-                        # Add user message to history immediately for instant feedback
-                        updated_history = current_history + [{"role": "user", "content": user_content}]
+                        # Add files first
+                        for file_path in files:
+                            updated_history.append({"role": "user", "content": {"path": file_path}})
+                        
+                        # Add text if present
+                        if text_content:
+                            updated_history.append({"role": "user", "content": text_content})
                         
                         # Yield the updated history with user message (clears input too)
-                        yield updated_history, "", None
-                        
-                        # Now build message dict for chat function
-                        message_dict = {"text": user_message}
-                        if uploaded_files:
-                            message_dict["files"] = [f.name if hasattr(f, 'name') else f for f in uploaded_files]
+                        yield updated_history, gr.MultimodalTextbox(value=None, interactive=False)
                         
                         # Call chat function (returns response and rebuilt history from database)
-                        response_text, rebuilt_history = await self._chat_async(message_dict, [])
+                        response_text, rebuilt_history = await self._chat_async(message, [])
                         
-                        # Return the final rebuilt history (which now includes both user message and response)
-                        yield rebuilt_history, "", None
+                        # Return the final rebuilt history and re-enable input
+                        yield rebuilt_history, gr.MultimodalTextbox(value=None, interactive=True)
                     
-                    def send_message(user_message, uploaded_files, current_history):
+                    def send_message(message, current_history):
                         """Synchronous wrapper with generator support"""
                         # Run the async generator and yield results
-                        async_gen = send_message_async(user_message, uploaded_files, current_history)
+                        async_gen = send_message_async(message, current_history)
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
@@ -387,16 +386,11 @@ class EndpointChatApp:
                         finally:
                             loop.close()
                     
-                    # Connect send button and Enter key
-                    send_btn.click(
+                    # Connect input submit
+                    chat_input.submit(
                         fn=send_message,
-                        inputs=[msg, files, chatbot],
-                        outputs=[chatbot, msg, files],
-                    )
-                    msg.submit(
-                        fn=send_message,
-                        inputs=[msg, files, chatbot],
-                        outputs=[chatbot, msg, files],
+                        inputs=[chat_input, chatbot],
+                        outputs=[chatbot, chat_input],
                     )
                     
                     # Connect new chat button
@@ -426,7 +420,7 @@ class EndpointChatApp:
                             
                             ### Features:
                             - 💬 **Natural Chat Flow**: Conversation history in a single pane
-                            - 📎 **Multi-modal Input**: Attach images, videos, or audio to your messages
+                            - 📎 **Multi-modal Input**: Type text and attach images, videos, or audio in one input box
                             - 🔄 **Conversation History**: All turns visible in chat interface
                             - 🎯 **Multiple Targets**: OpenAI, Azure OpenAI, Azure ML, HuggingFace, and more
                             
@@ -436,11 +430,10 @@ class EndpointChatApp:
                             - And any PyRIT PromptTarget
                             
                             ### Usage Tips:
-                            - Type your message and press Enter or click Send
-                            - Click the 📎 icon to attach images, videos, or audio
-                            - Use 🔄 Retry to resend the last message
-                            - Use ↩️ Undo to remove the last exchange
-                            - Use 🗑️ Clear Chat to start a new conversation
+                            - Type your message and press Enter to send
+                            - Click the 📎 icon to attach images, videos, or audio files
+                            - Use 🆕 New Chat to start a fresh conversation
+                            - Visit the � Conversations tab to browse and load previous chats
                             """
                         )
         
