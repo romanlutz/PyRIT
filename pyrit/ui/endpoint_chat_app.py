@@ -269,26 +269,48 @@ class EndpointChatApp:
                 type="filepath",
             )
             
-            # Handle send message - rebuild history from database
+            # Handle send message - show user message immediately, then get response
             async def send_message_async(user_message, uploaded_files, current_history):
-                """Send a message and rebuild the complete history from database"""
+                """Send a message and update UI immediately"""
                 if not user_message or not user_message.strip():
-                    return current_history, "", None
+                    yield current_history, "", None
+                    return
                 
-                # Build message dict for chat function
+                # Build the user's message for display
+                user_content = user_message
+                
+                # Add user message to history immediately for instant feedback
+                updated_history = current_history + [{"role": "user", "content": user_content}]
+                
+                # Yield the updated history with user message (clears input too)
+                yield updated_history, "", None
+                
+                # Now build message dict for chat function
                 message_dict = {"text": user_message}
                 if uploaded_files:
                     message_dict["files"] = [f.name if hasattr(f, 'name') else f for f in uploaded_files]
                 
-                # Call chat function (returns response and rebuilt history)
+                # Call chat function (returns response and rebuilt history from database)
                 response_text, rebuilt_history = await self._chat_async(message_dict, [])
                 
-                # Return the rebuilt history (which now includes the new exchange)
-                return rebuilt_history, "", None  # Clear textbox and files
+                # Return the final rebuilt history (which now includes both user message and response)
+                yield rebuilt_history, "", None
             
             def send_message(user_message, uploaded_files, current_history):
-                """Synchronous wrapper"""
-                return asyncio.run(send_message_async(user_message, uploaded_files, current_history))
+                """Synchronous wrapper with generator support"""
+                # Run the async generator and yield results
+                async_gen = send_message_async(user_message, uploaded_files, current_history)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    while True:
+                        try:
+                            result = loop.run_until_complete(async_gen.__anext__())
+                            yield result
+                        except StopAsyncIteration:
+                            break
+                finally:
+                    loop.close()
             
             # Connect send button and Enter key
             send_btn.click(
