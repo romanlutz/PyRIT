@@ -328,7 +328,7 @@ def main() -> None:
         logging.basicConfig(level=logging.DEBUG)
 
     # Initialize PyRIT memory (required for targets)
-    from pyrit.common import SQLITE, initialize_pyrit
+    from pyrit.setup import SQLITE, initialize_pyrit
     from pyrit.memory import CentralMemory
 
     print(f"🔧 Initializing PyRIT memory...")

@@ -20,13 +20,14 @@ from uuid import uuid4
 
 import gradio as gr
 
-from pyrit.common import IN_MEMORY, initialize_pyrit
 from pyrit.common.path import DB_DATA_PATH
 from pyrit.memory import CentralMemory
+from pyrit.models import SeedGroup, SeedPrompt
 from pyrit.prompt_normalizer import PromptNormalizer
+from pyrit.prompt_target import PromptChatTarget, PromptTarget
+from pyrit.setup import IN_MEMORY, initialize_pyrit
 
 logger = logging.getLogger(__name__)
-from pyrit.prompt_target import PromptChatTarget, PromptTarget
 
 
 class EndpointChatApp:
@@ -71,7 +72,7 @@ class EndpointChatApp:
         gradio_history = []
         
         for response in conversation:
-            for piece in response.request_pieces:
+            for piece in response.message_pieces:
                 if piece.role in ["user", "assistant"]:
                     # Determine content type and format accordingly
                     data_type = piece.converted_value_data_type or piece.original_value_data_type
@@ -134,8 +135,6 @@ class EndpointChatApp:
         Returns:
             Tuple of (response text, complete conversation history from database)
         """
-        from pyrit.models import SeedPrompt, SeedPromptGroup
-        
         # Log the current state
         logger.info(f"💬 Sending message in conversation {self.conversation_id} (ignoring Gradio history with {len(history)} messages)")
         
@@ -182,19 +181,19 @@ class EndpointChatApp:
 
         try:
             # Create seed prompt group
-            seed_prompt_group = SeedPromptGroup(prompts=seed_prompts)
+            seed_group = SeedGroup(prompts=seed_prompts)
             
             # Send using PromptNormalizer - this handles conversation history automatically
             # by using the conversation_id to track and include previous messages
             response = await self.prompt_normalizer.send_prompt_async(
-                seed_prompt_group=seed_prompt_group,
+                seed_group=seed_group,
                 target=self.target,
                 conversation_id=self.conversation_id,
             )
 
             # Collect all response pieces into a single message
             response_parts = []
-            for piece in response.request_pieces:
+            for piece in response.message_pieces:
                 if piece.converted_value_data_type == "text":
                     response_parts.append(piece.converted_value)
                 elif piece.converted_value_data_type in ["image_path", "video_path", "audio_path"]:
