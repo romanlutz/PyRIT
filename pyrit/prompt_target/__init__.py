@@ -30,12 +30,14 @@ from pyrit.prompt_target.openai.openai_sora1_target import OpenAISora1Target
 from pyrit.prompt_target.openai.openai_sora2_target import OpenAISora2Target
 from pyrit.prompt_target.openai.openai_tts_target import OpenAITTSTarget
 from pyrit.prompt_target.playwright_target import PlaywrightTarget
+from pyrit.prompt_target.playwright_copilot_target import CopilotType, PlaywrightCopilotTarget
 from pyrit.prompt_target.prompt_shield_target import PromptShieldTarget
 from pyrit.prompt_target.text_target import TextTarget
 
 __all__ = [
     "AzureBlobStorageTarget",
     "AzureMLChatTarget",
+    "CopilotType",
     "CrucibleTarget",
     "GandalfLevel",
     "GandalfTarget",
@@ -57,6 +59,7 @@ __all__ = [
     "OpenAITTSTarget",
     "OpenAITarget",
     "PlaywrightTarget",
+    "PlaywrightCopilotTarget",
     "PromptChatTarget",
     "PromptShieldTarget",
     "PromptTarget",

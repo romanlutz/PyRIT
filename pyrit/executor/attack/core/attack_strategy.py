@@ -11,6 +11,7 @@ from typing import Dict, Optional, TypeVar, overload
 
 from pyrit.common.logger import logger
 from pyrit.common.utils import get_kwarg_param
+from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.core import (
     Strategy,
     StrategyContext,
@@ -23,8 +24,9 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     ConversationReference,
-    PromptRequestResponse,
+    Message,
 )
+from pyrit.prompt_target import PromptTarget
 
 AttackStrategyContextT = TypeVar("AttackStrategyContextT", bound="AttackContext")
 AttackStrategyResultT = TypeVar("AttackStrategyResultT", bound="AttackResult")
@@ -47,7 +49,7 @@ class AttackContext(StrategyContext, ABC):
     related_conversations: set[ConversationReference] = field(default_factory=set)
 
     # Conversation that is automatically prepended to the target model
-    prepended_conversation: list[PromptRequestResponse] = field(default_factory=list)
+    prepended_conversation: list[Message] = field(default_factory=list)
 
 
 class _DefaultAttackStrategyEventHandler(StrategyEventHandler[AttackStrategyContextT, AttackStrategyResultT]):
@@ -161,11 +163,18 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], AB
     Defines the interface for executing attacks and handling results.
     """
 
-    def __init__(self, *, context_type: type[AttackStrategyContextT], logger: logging.Logger = logger):
+    def __init__(
+        self,
+        *,
+        objective_target: PromptTarget,
+        context_type: type[AttackStrategyContextT],
+        logger: logging.Logger = logger,
+    ):
         """
         Initialize the attack strategy with a specific context type and logger.
 
         Args:
+            objective_target (PromptTarget): The target system to attack.
             context_type (type[AttackStrategyContextT]): The type of context this strategy operates on.
             logger (logging.Logger): Logger instance for logging events.
         """
@@ -176,13 +185,36 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], AB
             ),
             logger=logger,
         )
+        self._objective_target = objective_target
+
+    def get_objective_target(self) -> PromptTarget:
+        """
+        Get the objective target for this attack strategy.
+
+        Returns:
+            PromptTarget: The target system being attacked.
+        """
+        return self._objective_target
+
+    def get_attack_scoring_config(self) -> Optional[AttackScoringConfig]:
+        """
+        Get the attack scoring configuration used by this strategy.
+
+        Returns:
+            Optional[AttackScoringConfig]: The scoring configuration, or None if not applicable.
+
+        Note:
+            Subclasses that use scoring should override this method to return their
+            scoring configuration. The default implementation returns None.
+        """
+        return None
 
     @overload
     async def execute_async(
         self,
         *,
         objective: str,
-        prepended_conversation: Optional[list[PromptRequestResponse]] = None,
+        prepended_conversation: Optional[list[Message]] = None,
         memory_labels: Optional[dict[str, str]] = None,
         **kwargs,
     ) -> AttackStrategyResultT:
@@ -190,7 +222,7 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], AB
         Execute the attack strategy asynchronously with the provided parameters.
         Args:
             objective (str): The objective of the attack.
-            prepended_conversation (Optional[List[PromptRequestResponse]]): Conversation to prepend.
+            prepended_conversation (Optional[List[Message]]): Conversation to prepend.
             memory_labels (Optional[Dict[str, str]]): Memory labels for the attack context.
             **kwargs: Additional parameters for the attack.
         Returns:

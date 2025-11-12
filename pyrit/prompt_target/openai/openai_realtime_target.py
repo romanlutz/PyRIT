@@ -13,9 +13,11 @@ from urllib.parse import urlencode
 import websockets
 
 from pyrit.exceptions.exception_classes import ServerErrorException
-from pyrit.models import PromptRequestResponse
-from pyrit.models.data_type_serializer import data_serializer_factory
-from pyrit.models.prompt_request_response import construct_response_from_request
+from pyrit.models import (
+    Message,
+    construct_response_from_request,
+    data_serializer_factory,
+)
 from pyrit.prompt_target import OpenAITarget, limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,6 @@ class RealtimeTarget(OpenAITarget):
     def __init__(
         self,
         *,
-        api_version: str = "2025-04-01-preview",
         system_prompt: Optional[str] = None,
         voice: Optional[RealTimeVoice] = None,
         existing_convo: Optional[dict] = None,
@@ -69,16 +70,13 @@ class RealtimeTarget(OpenAITarget):
             api_key (str, Optional): The API key for accessing the Azure OpenAI service.
                 Defaults to the `OPENAI_CHAT_KEY` environment variable.
             headers (str, Optional): Headers of the endpoint (JSON).
-            use_aad_auth (bool, Optional): When set to True, user authentication is used
+            use_entra_auth (bool, Optional): When set to True, user authentication is used
                 instead of API Key. DefaultAzureCredential is taken for
                 https://cognitiveservices.azure.com/.default . Please run `az login` locally
                 to leverage user AuthN.
-            api_version (str, Optional): The version of the Azure OpenAI API. Defaults to
-                "2024-06-01".
             max_requests_per_minute (int, Optional): Number of requests the target can handle per
                 minute before hitting a rate limit. The number of requests sent to the target
                 will be capped at the value provided.
-            api_version (str, Optional): The version of the Azure OpenAI API. Defaults to "2024-10-01-preview".
             system_prompt (str, Optional): The system prompt to use. Defaults to "You are a helpful AI assistant".
             voice (literal str, Optional): The voice to use. Defaults to None.
                 the only supported voices by the AzureOpenAI Realtime API are "alloy", "echo", and "shimmer".
@@ -88,7 +86,7 @@ class RealtimeTarget(OpenAITarget):
                 For example, to specify a 3 minutes timeout: httpx_client_kwargs={"timeout": 180}
         """
 
-        super().__init__(api_version=api_version, **kwargs)
+        super().__init__(**kwargs)
 
         self.system_prompt = system_prompt or "You are a helpful AI assistant"
         self.voice = voice
@@ -114,11 +112,9 @@ class RealtimeTarget(OpenAITarget):
 
         self._add_auth_param_to_query_params(query_params)
 
-        if self._api_version is not None:
-            query_params["api-version"] = self._api_version
-
-        url = f"{self._endpoint}?{urlencode(query_params)}"
-
+        # Check if endpoint already has query parameters
+        separator = "&" if "?" in self._endpoint else "?"
+        url = f"{self._endpoint}{separator}{urlencode(query_params)}"
         websocket = await websockets.connect(url)
         logger.info("Successfully connected to AzureOpenAI Realtime API")
         return websocket
@@ -135,7 +131,7 @@ class RealtimeTarget(OpenAITarget):
             query_params["api-key"] = self._api_key
 
         if self._azure_auth:
-            query_params["access_token"] = self._azure_auth.refresh_token()
+            query_params["Authorization"] = f"Bearer {self._azure_auth.refresh_token()}"
 
     def _set_system_prompt_and_config_vars(self):
 
@@ -180,9 +176,9 @@ class RealtimeTarget(OpenAITarget):
         logger.info("Session set up")
 
     @limit_requests_per_minute
-    async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
+    async def send_prompt_async(self, *, message: Message) -> Message:
 
-        convo_id = prompt_request.request_pieces[0].conversation_id
+        convo_id = message.message_pieces[0].conversation_id
         if convo_id not in self._existing_conversation:
             websocket = await self.connect()
             self._existing_conversation[convo_id] = websocket
@@ -195,10 +191,10 @@ class RealtimeTarget(OpenAITarget):
 
         websocket = self._existing_conversation[convo_id]
 
-        self._validate_request(prompt_request=prompt_request)
+        self._validate_request(message=message)
 
         await self.send_config(conversation_id=convo_id)
-        request = prompt_request.request_pieces[0]
+        request = message.message_pieces[0]
         response_type = request.converted_value_data_type
 
         # Order of messages sent varies based on the data format of the prompt
@@ -216,13 +212,13 @@ class RealtimeTarget(OpenAITarget):
 
         text_response_piece = construct_response_from_request(
             request=request, response_text_pieces=[result.flatten_transcripts()], response_type="text"
-        ).request_pieces[0]
+        ).message_pieces[0]
 
         audio_response_piece = construct_response_from_request(
             request=request, response_text_pieces=[output_audio_path], response_type="audio_path"
-        ).request_pieces[0]
+        ).message_pieces[0]
 
-        response_entry = PromptRequestResponse(request_pieces=[text_response_piece, audio_response_piece])
+        response_entry = Message(message_pieces=[text_response_piece, audio_response_piece])
         return response_entry
 
     async def save_audio(
@@ -520,23 +516,23 @@ class RealtimeTarget(OpenAITarget):
         output_audio_path = await self.save_audio(result.audio_bytes, num_channels, sample_width, frame_rate)
         return output_audio_path, result
 
-    def _validate_request(self, *, prompt_request: PromptRequestResponse) -> None:
-        """Validates the structure and content of a prompt request for compatibility of this target.
+    def _validate_request(self, *, message: Message) -> None:
+        """Validates the structure and content of a message for compatibility of this target.
 
         Args:
-            prompt_request (PromptRequestResponse): The prompt request response object.
+            message (Message): The message object.
 
         Raises:
-            ValueError: If more than two request pieces are provided.
-            ValueError: If any of the request pieces have a data type other than 'text' or 'audio_path'.
+            ValueError: If more than two message pieces are provided.
+            ValueError: If any of the message pieces have a data type other than 'text' or 'audio_path'.
         """
 
-        # Check the number of request pieces
-        n_pieces = len(prompt_request.request_pieces)
+        # Check the number of message pieces
+        n_pieces = len(message.message_pieces)
         if n_pieces != 1:
-            raise ValueError(f"This target only supports one request piece. Received: {n_pieces} pieces.")
+            raise ValueError(f"This target only supports one message piece. Received: {n_pieces} pieces.")
 
-        piece_type = prompt_request.request_pieces[0].converted_value_data_type
+        piece_type = message.message_pieces[0].converted_value_data_type
         if piece_type not in ["text", "audio_path"]:
             raise ValueError(f"This target only supports text and audio_path prompt input. Received: {piece_type}.")
 

@@ -1,3 +1,13 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.17.3
+# ---
+
 # %% [markdown]
 # # Score Azure ML Managed Online Endpoint
 #
@@ -19,11 +29,11 @@
 #    - This deployment name can be acquired from the Azure ML managed online endpoint, as illustrated in image below.
 #    <br> <img src="./../../assets/aml_deployment_name.png" alt="AML Deployment Name" height="400"/> <br>
 #
-# 2. **AZURE_ML_SCORE_URI**
-#    - To obtain the score URI, navigate through the Azure ML workspace by selecting 'Launch Studio', then 'Endpoints' on the left side, followed by 'Consume'. Copy the REST endpoint as depicted below.
+# 2. **AZURE_ML_MANAGED_ENDPOINT**
+#    - To obtain the managed endpoint, navigate through the Azure ML workspace by selecting 'Launch Studio', then 'Endpoints' on the left side, followed by 'Consume'. Copy the REST endpoint as depicted below.
 #     <br> <img src="./../../assets/aml_score_uri.png" alt="AML Score URI" height="400"/> <br>
 #
-# 3. **AZURE_ML_SCORE_API_KEY**
+# 3. **AZURE_ML_KEY**
 #    - Navigate through the Azure ML workspace by selecting 'Launch Studio', then 'Endpoints' on the left side, followed by 'Consume'. The primary key can be obtained as shown in the subsequent image.
 #    <br> <img src="./../../assets/aml_score_key.png" alt="AML Score Key" height="400"/> <br>
 #
@@ -37,24 +47,21 @@ from dotenv import load_dotenv
 load_dotenv()
 deployment_name = os.getenv("AZURE_ML_SCORE_DEPLOYMENT_NAME")  # ex., "mistralai-mixtral-8x7b-instru-1"
 # The URL for the request
-url = os.getenv("AZURE_ML_SCORE_URI")
+url = os.getenv("AZURE_ML_MANAGED_ENDPOINT")
 
 # Replace this with your API key or token
-api_key = os.getenv("AZURE_ML_SCORE_API_KEY")
+api_key = os.getenv("AZURE_ML_KEY")
 
 # %%
 print(f"Deployment name {deployment_name}")
 print(f"Azure ML endpoint uri: {url}")
-if api_key:
-    print("API key is set.")
-else:
-    print("API key is not set.")
+print(f"API key loaded" if api_key else "API key not set.")
 
 # %% [markdown]
 # **Azure ML endpoint JSON body**
 #
 # The JSON body can be acquired by the following method: Access the Hugging Face model within the Azure ML model catalog by going to the workspace, then to the studio, selecting 'Model Catalog', and using the search bar to find the model ID. Open the model to view the sample input schema as shown in the image below.
-# <br> <img src="./../../assets/aml_model_endpoint_schema.png" alt="AML Model Endpoint Schema" height="400"/> <br>
+# <br> <img src="./../../assets/aml_model_endpoint_schema.png" alt="aml_model_endpoint_schema.png" height="400"/> <br>
 #
 # In addition, we have compiled the details of the request and response for the Hugging Face models hosted on the Azure Machine Learning (Azure ML) endpoint. Please review the [provided link](./hf_aml_model_endpoint_guide.md) to access the JSON request body and response for the Azure ML endpoint. Additionally, you can deduce the schema from the response if a bad request was sent to the inference endpoint.
 # %%

@@ -7,11 +7,11 @@ from typing import MutableSequence
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unit.mocks import get_sample_conversations
+from unit.mocks import get_image_message_piece, get_sample_conversations
 
 from pyrit.memory.central_memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.models import PromptRequestPiece, PromptRequestResponse
+from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import OpenAICompletionTarget
 
 
@@ -38,57 +38,42 @@ def azure_completion_target(patch_central_database) -> OpenAICompletionTarget:
         model_name="gpt-35-turbo",
         endpoint="https://mock.azure.com/",
         api_key="mock-api-key",
-        api_version="some_version",
     )
 
 
 @pytest.fixture
-def sample_conversations() -> MutableSequence[PromptRequestPiece]:
-    return get_sample_conversations()
+def sample_conversations() -> MutableSequence[MessagePiece]:
+    conversations = get_sample_conversations()
+    return Message.flatten_to_message_pieces(conversations)
 
 
 @pytest.mark.asyncio
-async def test_azure_completion_validate_request_length(
-    azure_completion_target: OpenAICompletionTarget, sample_conversations: MutableSequence[PromptRequestPiece]
-):
-    request = PromptRequestResponse(request_pieces=sample_conversations)
-    with pytest.raises(ValueError, match="This target only supports a single prompt request piece."):
-        await azure_completion_target.send_prompt_async(prompt_request=request)
-
-
-@pytest.mark.asyncio
-async def test_azure_completion_validate_prompt_type(
-    azure_completion_target: OpenAICompletionTarget, sample_conversations: MutableSequence[PromptRequestPiece]
-):
-    request_piece = sample_conversations[0]
-    request_piece.converted_value_data_type = "image_path"
-    request = PromptRequestResponse(request_pieces=[request_piece])
-    with pytest.raises(ValueError, match="This target only supports text prompt input."):
-        await azure_completion_target.send_prompt_async(prompt_request=request)
-
-
-@pytest.mark.asyncio
-async def test_azure_completion_validate_prev_convs(
-    azure_completion_target: OpenAICompletionTarget, sample_conversations: MutableSequence[PromptRequestPiece]
-):
-    request_piece = sample_conversations[0]
-    azure_completion_target._memory.add_request_response_to_memory(
-        request=PromptRequestResponse(request_pieces=[request_piece])
+async def test_azure_completion_validate_request_length(azure_completion_target: OpenAICompletionTarget):
+    request = Message(
+        message_pieces=[
+            MessagePiece(role="user", conversation_id="123", original_value="test"),
+            MessagePiece(role="user", conversation_id="123", original_value="test2"),
+        ]
     )
-    request = PromptRequestResponse(request_pieces=[request_piece])
+    with pytest.raises(ValueError, match="This target only supports a single message piece."):
+        await azure_completion_target.send_prompt_async(message=request)
 
-    with pytest.raises(ValueError, match="This target only supports a single turn conversation."):
-        await azure_completion_target.send_prompt_async(prompt_request=request)
+
+@pytest.mark.asyncio
+async def test_azure_completion_validate_prompt_type(azure_completion_target: OpenAICompletionTarget):
+    request = Message(message_pieces=[get_image_message_piece()])
+    with pytest.raises(ValueError, match="This target only supports text prompt input."):
+        await azure_completion_target.send_prompt_async(message=request)
 
 
 @pytest.mark.asyncio
 async def test_azure_complete_async_return(
     completions_response_json: dict,
     azure_completion_target: OpenAICompletionTarget,
-    sample_conversations: MutableSequence[PromptRequestPiece],
+    sample_conversations: MutableSequence[MessagePiece],
 ):
-    request_piece = sample_conversations[0]
-    request = PromptRequestResponse(request_pieces=[request_piece])
+    message_piece = sample_conversations[0]
+    request = Message(message_pieces=[message_piece])
 
     openai_mock_return = MagicMock()
     openai_mock_return.text = json.dumps(completions_response_json)
@@ -97,8 +82,8 @@ async def test_azure_complete_async_return(
         "pyrit.common.net_utility.make_request_and_raise_if_error_async", new_callable=AsyncMock
     ) as mock_request:
         mock_request.return_value = openai_mock_return
-        response: PromptRequestResponse = await azure_completion_target.send_prompt_async(prompt_request=request)
-        assert len(response.request_pieces) == 1
+        response: Message = await azure_completion_target.send_prompt_async(message=request)
+        assert len(response.message_pieces) == 1
         assert response.get_value() == "hi"
 
 
@@ -117,52 +102,15 @@ def test_azure_invalid_endpoint_raises():
                     model_name="gpt-4",
                     endpoint="",
                     api_key="xxxxx",
-                    api_version="some_version",
                 )
 
 
 @pytest.mark.asyncio
-async def test_openai_completion_target_no_api_version(sample_conversations: MutableSequence[PromptRequestPiece]):
-    target = OpenAICompletionTarget(
-        api_key="test_key", endpoint="https://mock.azure.com", model_name="gpt-35-turbo", api_version=None
-    )
-    request_piece = sample_conversations[0]
-    request = PromptRequestResponse(request_pieces=[request_piece])
-
-    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
-        mock_request.return_value = MagicMock()
-        mock_request.return_value.status_code = 200
-        mock_request.return_value.text = '{"choices": [{"text": "hi"}]}'
-
-        await target.send_prompt_async(prompt_request=request)
-
-        called_params = mock_request.call_args[1]["params"]
-        assert "api-version" not in called_params
-
-
-@pytest.mark.asyncio
-async def test_openai_completion_target_default_api_version(sample_conversations: MutableSequence[PromptRequestPiece]):
-    target = OpenAICompletionTarget(api_key="test_key", endpoint="https://mock.azure.com", model_name="gpt-35-turbo")
-    request_piece = sample_conversations[0]
-    request = PromptRequestResponse(request_pieces=[request_piece])
-
-    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
-        mock_request.return_value = MagicMock()
-        mock_request.return_value.status_code = 200
-        mock_request.return_value.text = '{"choices": [{"text": "hi"}]}'
-
-        await target.send_prompt_async(prompt_request=request)
-
-        called_params = mock_request.call_args[1]["params"]
-        assert "api-version" in called_params
-        assert called_params["api-version"] == "2024-10-21"
-
-
 @pytest.mark.asyncio
 async def test_send_prompt_async_calls_refresh_auth_headers(azure_completion_target: OpenAICompletionTarget):
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation.return_value = []
-    mock_memory.add_request_response_to_memory = AsyncMock()
+    mock_memory.add_message_to_memory = AsyncMock()
 
     azure_completion_target._memory = mock_memory
 
@@ -177,9 +125,9 @@ async def test_send_prompt_async_calls_refresh_auth_headers(azure_completion_tar
         with patch("pyrit.common.net_utility.make_request_and_raise_if_error_async") as mock_make_request:
             mock_make_request.return_value = MagicMock(text='{"choices": [{"text": "test response"}]}')
 
-            prompt_request = PromptRequestResponse(
-                request_pieces=[
-                    PromptRequestPiece(
+            message = Message(
+                message_pieces=[
+                    MessagePiece(
                         role="user",
                         original_value="test prompt",
                         converted_value="test prompt",
@@ -187,6 +135,6 @@ async def test_send_prompt_async_calls_refresh_auth_headers(azure_completion_tar
                     )
                 ]
             )
-            await azure_completion_target.send_prompt_async(prompt_request=prompt_request)
+            await azure_completion_target.send_prompt_async(message=message)
 
             mock_refresh.assert_called_once()

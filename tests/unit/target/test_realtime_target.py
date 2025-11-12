@@ -4,25 +4,24 @@
 import json
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
 from pyrit.exceptions.exception_classes import ServerErrorException
-from pyrit.models import PromptRequestPiece, PromptRequestResponse
+from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import RealtimeTarget
 from pyrit.prompt_target.openai.openai_realtime_target import RealtimeTargetResult
 
 
 @pytest.fixture
 def target(sqlite_instance):
-    return RealtimeTarget(api_key="test_key", endpoint="wss://test_url", model_name="test", api_version="v1")
+    return RealtimeTarget(api_key="test_key", endpoint="wss://test_url", model_name="test")
 
 
 @pytest.fixture
-def target_with_aad(sqlite_instance):
+def target_with_entra(sqlite_instance):
     target = RealtimeTarget(endpoint="wss://test_url", api_key="test_api_key")
     target._azure_auth = MagicMock()
     target._azure_auth.refresh_token = MagicMock(return_value="test_access_token")
@@ -34,7 +33,7 @@ async def test_connect_success(target):
     with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
         await target.connect()
         mock_connect.assert_called_once_with(
-            "wss://test_url?deployment=test&OpenAI-Beta=realtime%3Dv1&api-key=test_key&api-version=v1"
+            "wss://test_url?deployment=test&OpenAI-Beta=realtime%3Dv1&api-key=test_key"
         )
     await target.cleanup_target()
 
@@ -48,8 +47,8 @@ async def test_send_prompt_async(target):
     target.send_text_async = AsyncMock(return_value=("output.wav", result))
     target.set_system_prompt = MagicMock()
 
-    # Create a mock PromptRequestResponse with a valid data type
-    request_piece = PromptRequestPiece(
+    # Create a mock Message with a valid data type
+    message_piece = MessagePiece(
         original_value="Hello",
         original_value_data_type="text",
         converted_value="Hello",
@@ -57,10 +56,10 @@ async def test_send_prompt_async(target):
         role="user",
         conversation_id="test_conversation_id",
     )
-    prompt_request = PromptRequestResponse(request_pieces=[request_piece])
+    message = Message(message_pieces=[message_piece])
 
     # Call the send_prompt_async method
-    response = await target.send_prompt_async(prompt_request=prompt_request)
+    response = await target.send_prompt_async(message=message)
 
     assert response
 
@@ -85,8 +84,8 @@ async def test_send_prompt_async_adds_system_prompt_to_memory(target):
     target.send_text_async = AsyncMock(return_value=("output_audio_path", result))
     target.set_system_prompt = MagicMock()
 
-    # Create a mock PromptRequestResponse with a valid data type
-    request_piece = PromptRequestPiece(
+    # Create a mock Message with a valid data type
+    message_piece = MessagePiece(
         original_value="Hello",
         original_value_data_type="text",
         converted_value="Hello",
@@ -94,10 +93,10 @@ async def test_send_prompt_async_adds_system_prompt_to_memory(target):
         role="user",
         conversation_id="new_conversation_id",
     )
-    prompt_request = PromptRequestResponse(request_pieces=[request_piece])
+    message = Message(message_pieces=[message_piece])
 
     # Call the send_prompt_async method
-    await target.send_prompt_async(prompt_request=prompt_request)
+    await target.send_prompt_async(message=message)
 
     # Assert that set_system_prompt was called with the correct arguments
     target.set_system_prompt.assert_called_once_with(
@@ -121,8 +120,8 @@ async def test_multiple_websockets_created_for_multiple_conversations(target):
     target.send_text_async = AsyncMock(return_value=("output_audio_path", result))
     target.set_system_prompt = MagicMock()
 
-    # Create mock PromptRequestResponses for two different conversations
-    request_piece_1 = PromptRequestPiece(
+    # Create mock Messages for two different conversations
+    message_piece_1 = MessagePiece(
         original_value="Hello",
         original_value_data_type="text",
         converted_value="Hello",
@@ -130,9 +129,9 @@ async def test_multiple_websockets_created_for_multiple_conversations(target):
         role="user",
         conversation_id="conversation_1",
     )
-    prompt_request_1 = PromptRequestResponse(request_pieces=[request_piece_1])
+    message_1 = Message(message_pieces=[message_piece_1])
 
-    request_piece_2 = PromptRequestPiece(
+    message_piece_2 = MessagePiece(
         original_value="Hi",
         original_value_data_type="text",
         converted_value="Hi",
@@ -140,11 +139,11 @@ async def test_multiple_websockets_created_for_multiple_conversations(target):
         role="user",
         conversation_id="conversation_2",
     )
-    prompt_request_2 = PromptRequestResponse(request_pieces=[request_piece_2])
+    message_2 = Message(message_pieces=[message_piece_2])
 
     # Call the send_prompt_async method for both conversations
-    await target.send_prompt_async(prompt_request=prompt_request_1)
-    await target.send_prompt_async(prompt_request=prompt_request_2)
+    await target.send_prompt_async(message=message_1)
+    await target.send_prompt_async(message=message_2)
 
     # Assert that two different WebSocket connections were created
     assert "conversation_1" in target._existing_conversation
@@ -158,129 +157,39 @@ async def test_multiple_websockets_created_for_multiple_conversations(target):
 @pytest.mark.asyncio
 async def test_send_prompt_async_invalid_request(target):
 
-    # Create a mock PromptRequestResponse with an invalid data type
-    request_piece = PromptRequestPiece(
+    # Create a mock Message with an invalid data type
+    message_piece = MessagePiece(
         original_value="Invalid",
         original_value_data_type="image_path",
         converted_value="Invalid",
         converted_value_data_type="image_path",
         role="user",
     )
-    prompt_request = PromptRequestResponse(request_pieces=[request_piece])
+    message = Message(message_pieces=[message_piece])
     with pytest.raises(ValueError) as excinfo:
-        target._validate_request(prompt_request=prompt_request)
+        target._validate_request(message=message)
 
     assert "This target only supports text and audio_path prompt input. Received: image_path." == str(excinfo.value)
 
 
 @pytest.mark.asyncio
-async def test_realtime_target_no_api_version(target):
-    target._api_version = None  # No API version set
-    target._existing_conversation.clear()  # Ensure no conversation exists
-
-    # Mock necessary methods
-    target.send_config = AsyncMock()
-    target.set_system_prompt = MagicMock()
-    result = RealtimeTargetResult(audio_bytes=b"file", transcripts=["hello"])
-    target.send_text_async = AsyncMock(return_value=("output.wav", result))
-
-    with patch("websockets.connect", new_callable=AsyncMock) as mock_websocket_connect:
-        mock_websocket = AsyncMock()
-        mock_websocket_connect.return_value = mock_websocket
-
-        # Create a mock request
-        request_piece = PromptRequestPiece(
-            original_value="Hello",
-            original_value_data_type="text",
-            converted_value="Hello",
-            converted_value_data_type="text",
-            role="user",
-            conversation_id="test_conversation_id",
-        )
-        prompt_request = PromptRequestResponse(request_pieces=[request_piece])
-
-        # Call the method
-        response = await target.send_prompt_async(prompt_request=prompt_request)
-
-        assert response
-
-        # Ensure `websockets.connect()` was called and capture the WebSocket URL
-        mock_websocket_connect.assert_called_once()
-        called_url = mock_websocket_connect.call_args[0][0]
-
-        # Parse the query parameters from the URL
-        parsed_url = urlparse(called_url)
-        query_params = parse_qs(parsed_url.query)
-
-        # Ensure API version is NOT in the request
-        assert "api-version" not in query_params
-
-
-@pytest.mark.asyncio
-async def test_realtime_target_default_api_version(target):
-    # Explicitly set default API version
-    target._api_version = "2024-06-01"
-
-    # Ensure no conversation exists
-    target._existing_conversation.clear()
-
-    # Mock necessary methods
-    target.send_config = AsyncMock()
-    target.set_system_prompt = MagicMock()
-
-    result = RealtimeTargetResult(audio_bytes=b"file", transcripts=["hello"])
-    target.send_text_async = AsyncMock(return_value=("output.wav", result))
-
-    with patch("websockets.connect", new_callable=AsyncMock) as mock_websocket_connect:
-        mock_websocket = AsyncMock()
-        mock_websocket_connect.return_value = mock_websocket
-
-        # Create a mock request
-        request_piece = PromptRequestPiece(
-            original_value="Hello",
-            original_value_data_type="text",
-            converted_value="Hello",
-            converted_value_data_type="text",
-            role="user",
-            conversation_id="test_conversation_id",
-        )
-        prompt_request = PromptRequestResponse(request_pieces=[request_piece])
-
-        # Call the method
-        response = await target.send_prompt_async(prompt_request=prompt_request)
-
-        assert response
-
-        # Ensure `websockets.connect()` was called and capture the WebSocket URL
-        mock_websocket_connect.assert_called_once()
-        called_url = mock_websocket_connect.call_args[0][0]
-
-        # Parse the query parameters from the URL
-        parsed_url = urlparse(called_url)
-        query_params = parse_qs(parsed_url.query)
-
-        # Ensure API version IS in the request
-        assert "api-version" in query_params
-        assert query_params["api-version"][0] == "2024-06-01"
-
-
-def test_add_auth_param_to_query_params_with_api_key(target_with_aad):
+def test_add_auth_param_to_query_params_with_api_key(target_with_entra):
     query_params = {}
-    target_with_aad._add_auth_param_to_query_params(query_params)
+    target_with_entra._add_auth_param_to_query_params(query_params)
     assert query_params["api-key"] == "test_api_key"
 
 
-def test_add_auth_param_to_query_params_with_azure_auth(target_with_aad):
+def test_add_auth_param_to_query_params_with_azure_auth(target_with_entra):
     query_params = {}
-    target_with_aad._add_auth_param_to_query_params(query_params)
-    assert query_params["access_token"] == "test_access_token"
+    target_with_entra._add_auth_param_to_query_params(query_params)
+    assert "test_access_token" in query_params["Authorization"]
 
 
-def test_add_auth_param_to_query_params_with_both_auth_methods(target_with_aad):
+def test_add_auth_param_to_query_params_with_both_auth_methods(target_with_entra):
     query_params = {}
-    target_with_aad._add_auth_param_to_query_params(query_params)
+    target_with_entra._add_auth_param_to_query_params(query_params)
     assert query_params["api-key"] == "test_api_key"
-    assert query_params["access_token"] == "test_access_token"
+    assert "test_access_token" in query_params["Authorization"]
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,8 @@ API Reference
     :nosignatures:
     :toctree: _autosummary/
 
+    analyze_results
+    AttackStats
     ConversationAnalytics
 
 :py:mod:`pyrit.auth`
@@ -82,9 +84,12 @@ API Reference
     :nosignatures:
     :toctree: _autosummary/
 
+    apply_defaults
+    apply_defaults_to_method
     combine_dict
     combine_list
     convert_local_image_to_data_url
+    DefaultValueScope
     deprecation_message
     display_image_response
     download_chunk
@@ -92,15 +97,17 @@ API Reference
     download_files
     download_specific_files
     get_available_files
+    get_global_default_values
     get_httpx_client
     get_kwarg_param
     get_non_required_value
     get_random_indices
     get_required_value
-    initialize_pyrit
     is_in_ipython_session
     make_request_and_raise_if_error_async
     print_chat_messages_with_color
+    reset_default_values
+    set_default_value
     Singleton
     warn_if_set
     YamlLoadable
@@ -126,6 +133,7 @@ API Reference
     fetch_examples
     fetch_forbidden_questions_dataset
     fetch_harmbench_dataset
+    fetch_harmbench_multimodal_dataset_async
     fetch_librAI_do_not_answer_dataset
     fetch_llm_latent_adversarial_training_harmful_dataset
     fetch_jbb_behaviors_by_harm_category
@@ -137,6 +145,7 @@ API Reference
     fetch_multilingual_vulnerability_dataset
     fetch_pku_safe_rlhf_dataset
     fetch_seclists_bias_testing_dataset
+    fetch_sorry_bench_dataset
     fetch_sosbench_dataset
     fetch_tdc23_redteaming_dataset
     fetch_wmdp_dataset
@@ -207,6 +216,7 @@ API Reference
     MultiPromptSendingAttack
     MultiPromptSendingAttackContext
     MultiTurnAttackContext
+    AttackExecutorResult
     PromptSendingAttack
     RTASystemPromptPaths
     RedTeamingAttack
@@ -279,7 +289,7 @@ API Reference
     MemoryEmbedding
     MemoryExporter
     PromptMemoryEntry
-    SeedPromptEntry
+    SeedEntry
     SQLiteMemory
 
 :py:mod:`pyrit.models`
@@ -311,22 +321,21 @@ API Reference
     EmbeddingSupport
     EmbeddingUsageInformation
     ErrorDataTypeSerializer
-    group_conversation_request_pieces_by_sequence
+    group_conversation_message_pieces_by_sequence
     Identifier
     ImagePathDataTypeSerializer
-    PromptRequestPiece
-    PromptResponse
-    PromptResponseError
+    Message
+    MessagePiece
     PromptDataType
-    PromptRequestResponse
+    PromptResponseError
     QuestionAnsweringDataset
     QuestionAnsweringEntry
     QuestionChoice
     Score
     ScoreType
     SeedPrompt
-    SeedPromptDataset
-    SeedPromptGroup
+    SeedDataset
+    SeedGroup
     StorageIO
     StrategyResult
     TextDataTypeSerializer
@@ -355,6 +364,7 @@ API Reference
     AzureSpeechAudioToTextConverter
     AzureSpeechTextToAudioConverter
     Base64Converter
+    BinAsciiConverter
     BinaryConverter
     CaesarConverter
     CharacterSpaceConverter
@@ -396,7 +406,6 @@ API Reference
     TemplateSegmentConverter
     TenseConverter
     TextJailbreakConverter
-    TextToHexConverter
     ToneConverter
     ToxicSentenceGeneratorConverter
     TranslationConverter
@@ -481,13 +490,12 @@ API Reference
     AzureContentFilterScorer
     BatchScorer
     ContentClassifierPaths
-    CompositeScorer
+    FloatScaleScorer
     FloatScaleThresholdScorer
     GandalfScorer
     HarmHumanLabeledEntry
     HarmScorerEvaluator
     HarmScorerMetrics
-    HumanInTheLoopScorer
     HumanInTheLoopScorerGradio
     HumanLabeledDataset
     HumanLabeledEntry
@@ -499,21 +507,77 @@ API Reference
     ObjectiveHumanLabeledEntry
     ObjectiveScorerEvaluator
     ObjectiveScorerMetrics
+    PlagiarismMetric
     PlagiarismScorer
     PromptShieldScorer
     QuestionAnswerScorer
     Scorer
     ScorerEvaluator
     ScorerMetrics
-    ScoreAggregator
+    ScorerPromptValidator
     SelfAskCategoryScorer
-    SelfAskGeneralScorer
+    SelfAskGeneralFloatScaleScorer
+    SelfAskGeneralTrueFalseScorer
     SelfAskLikertScorer
+    SelfAskQuestionAnswerScorer
     SelfAskRefusalScorer
     SelfAskScaleScorer
     SelfAskTrueFalseScorer
-    SelfAskQuestionAnswerScorer
     SubStringScorer
+    TrueFalseCompositeScorer
     TrueFalseInverterScorer
     TrueFalseQuestion
     TrueFalseQuestionPaths
+    TrueFalseScoreAggregator
+    TrueFalseScorer
+
+:py:mod:`pyrit.scenarios`
+=========================
+
+.. automodule:: pyrit.scenarios
+    :no-members:
+    :no-inherited-members:
+
+.. autosummary::
+    :nosignatures:
+    :toctree: _autosummary/
+
+    AtomicAttack
+    EncodingScenario
+    FoundryStrategy
+    FoundryScenario
+    Scenario
+    ScenarioStrategy
+    ScenarioIdentifier
+    ScenarioResult
+
+:py:mod:`pyrit.setup`
+=====================
+
+.. automodule:: pyrit.setup
+    :no-members:
+    :no-inherited-members:
+
+.. autosummary::
+    :nosignatures:
+    :toctree: _autosummary/
+
+    initialize_pyrit
+    AZURE_SQL
+    SQLITE
+    IN_MEMORY
+
+:py:mod:`pyrit.setup.initializers`
+==================================
+
+.. automodule:: pyrit.setup.initializers
+    :no-members:
+    :no-inherited-members:
+
+.. autosummary::
+    :nosignatures:
+    :toctree: _autosummary/
+
+    PyRITInitializer
+    AIRTInitializer
+    SimpleInitializer

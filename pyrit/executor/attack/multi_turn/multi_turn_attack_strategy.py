@@ -17,9 +17,10 @@ from pyrit.executor.attack.core import (
     AttackStrategyResultT,
 )
 from pyrit.models import (
-    PromptRequestResponse,
+    Message,
     Score,
 )
+from pyrit.prompt_target import PromptTarget
 
 MultiTurnAttackStrategyContextT = TypeVar("MultiTurnAttackStrategyContextT", bound="MultiTurnAttackContext")
 
@@ -46,7 +47,7 @@ class MultiTurnAttackContext(AttackContext):
     executed_turns: int = 0
 
     # Model response produced in the latest turn
-    last_response: Optional[PromptRequestResponse] = None
+    last_response: Optional[Message] = None
 
     # Score assigned to the latest response by a scorer component
     last_score: Optional[Score] = None
@@ -56,28 +57,30 @@ class MultiTurnAttackContext(AttackContext):
 
 
 class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, AttackStrategyResultT], ABC):
-    """
-    Strategy for executing single-turn attacks.
-    This strategy is designed to handle attacks that consist of a single turn
-    of interaction with the target model.
-    """
 
-    def __init__(self, *, context_type: type[MultiTurnAttackStrategyContextT], logger: logging.Logger = logger):
+    def __init__(
+        self,
+        *,
+        objective_target: PromptTarget,
+        context_type: type[MultiTurnAttackStrategyContextT],
+        logger: logging.Logger = logger,
+    ):
         """
         The base class for multi-turn attack strategies.
 
         Args:
+            objective_target (PromptTarget): The target system to attack.
             context_type (type[MultiTurnAttackContext]): The type of context this strategy will use
             logger (logging.Logger): Logger instance for logging events and messages
         """
-        super().__init__(context_type=context_type, logger=logger)
+        super().__init__(objective_target=objective_target, context_type=context_type, logger=logger)
 
     @overload
     async def execute_async(
         self,
         *,
         objective: str,
-        prepended_conversation: Optional[List[PromptRequestResponse]] = None,
+        prepended_conversation: Optional[List[Message]] = None,
         custom_prompt: Optional[str] = None,
         memory_labels: Optional[dict[str, str]] = None,
         **kwargs,
@@ -87,7 +90,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
 
         Args:
             objective (str): The objective of the attack.
-            prepended_conversation (Optional[List[PromptRequestResponse]]): Conversation to prepend.
+            prepended_conversation (Optional[List[Message]]): Conversation to prepend.
             custom_prompt (Optional[str]): Custom prompt for the attack.
             memory_labels (Optional[Dict[str, str]]): Memory labels for the attack context.
             **kwargs: Additional parameters for the attack.

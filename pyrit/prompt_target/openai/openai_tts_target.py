@@ -13,11 +13,11 @@ from pyrit.exceptions import (
     pyrit_target_retry,
 )
 from pyrit.models import (
-    PromptRequestResponse,
+    Message,
+    MessagePiece,
     construct_response_from_request,
     data_serializer_factory,
 )
-from pyrit.models.prompt_request_piece import PromptRequestPiece
 from pyrit.prompt_target import OpenAITarget, limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,6 @@ class OpenAITTSTarget(OpenAITarget):
         response_format: TTSResponseFormat = "mp3",
         language: str = "en",
         speed: Optional[float] = None,
-        api_version: Optional[str] = "2025-02-01-preview",
         **kwargs,
     ):
         """
@@ -48,12 +47,10 @@ class OpenAITTSTarget(OpenAITarget):
             api_key (str, Optional): The API key for accessing the Azure OpenAI service.
                 Defaults to the `OPENAI_TTS_KEY` environment variable.
             headers (str, Optional): Headers of the endpoint (JSON).
-            use_aad_auth (bool, Optional): When set to True, user authentication is used
+            use_entra_auth (bool, Optional): When set to True, user authentication is used
                 instead of API Key. DefaultAzureCredential is taken for
                 https://cognitiveservices.azure.com/.default . Please run `az login` locally
                 to leverage user AuthN.
-            api_version (str, Optional): The version of the Azure OpenAI API. Defaults to
-                "2025-02-01-preview".
             max_requests_per_minute (int, Optional): Number of requests the target can handle per
                 minute before hitting a rate limit. The number of requests sent to the target
                 will be capped at the value provided.
@@ -66,10 +63,13 @@ class OpenAITTSTarget(OpenAITarget):
                 For example, to specify a 3 minutes timeout: httpx_client_kwargs={"timeout": 180}
         """
 
-        super().__init__(api_version=api_version, **kwargs)
+        super().__init__(**kwargs)
 
         if not self._model_name:
             self._model_name = "tts-1"
+
+        tts_url_patterns = [r"/audio/speech"]
+        self._warn_if_irregular_endpoint(tts_url_patterns)
 
         self._voice = voice
         self._response_format = response_format
@@ -83,20 +83,16 @@ class OpenAITTSTarget(OpenAITarget):
 
     @limit_requests_per_minute
     @pyrit_target_retry
-    async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
-        self._validate_request(prompt_request=prompt_request)
-        request = prompt_request.request_pieces[0]
+    async def send_prompt_async(self, *, message: Message) -> Message:
+        self._validate_request(message=message)
+        request = message.message_pieces[0]
 
         logger.info(f"Sending the following prompt to the prompt target: {request}")
 
-        # Refresh auth headers if using AAD
+        # Refresh auth headers if using Entra authentication
         self.refresh_auth_headers()
 
         body = self._construct_request_body(request=request)
-
-        params = {}
-        if self._api_version is not None:
-            params["api-version"] = self._api_version
 
         try:
             response = await net_utility.make_request_and_raise_if_error_async(
@@ -104,7 +100,6 @@ class OpenAITTSTarget(OpenAITarget):
                 method="POST",
                 headers=self._headers,
                 request_body=body,
-                params=params,
                 **self._httpx_client_kwargs,
             )
         except httpx.HTTPStatusError as StatusError:
@@ -132,7 +127,7 @@ class OpenAITTSTarget(OpenAITarget):
 
         return response_entry
 
-    def _construct_request_body(self, request: PromptRequestPiece) -> dict:
+    def _construct_request_body(self, request: MessagePiece) -> dict:
 
         body_parameters: dict[str, object] = {
             "model": self._model_name,
@@ -146,18 +141,16 @@ class OpenAITTSTarget(OpenAITarget):
         # Filter out None values
         return {k: v for k, v in body_parameters.items() if v is not None}
 
-    def _validate_request(self, *, prompt_request: PromptRequestResponse) -> None:
-        n_pieces = len(prompt_request.request_pieces)
+    def _validate_request(self, *, message: Message) -> None:
+        n_pieces = len(message.message_pieces)
         if n_pieces != 1:
-            raise ValueError(
-                "This target only supports a single prompt request piece. " f"Received: {n_pieces} pieces."
-            )
+            raise ValueError("This target only supports a single message piece. " f"Received: {n_pieces} pieces.")
 
-        piece_type = prompt_request.request_pieces[0].converted_value_data_type
+        piece_type = message.message_pieces[0].converted_value_data_type
         if piece_type != "text":
             raise ValueError(f"This target only supports text prompt input. Received: {piece_type}.")
 
-        request = prompt_request.request_pieces[0]
+        request = message.message_pieces[0]
         messages = self._memory.get_conversation(conversation_id=request.conversation_id)
 
         n_messages = len(messages)

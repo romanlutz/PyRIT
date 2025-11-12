@@ -14,8 +14,7 @@ from pyrit.exceptions.exception_classes import (
     handle_bad_request_exception,
     pyrit_target_retry,
 )
-from pyrit.models import PromptRequestResponse, construct_response_from_request
-from pyrit.models.prompt_request_piece import PromptRequestPiece
+from pyrit.models import Message, MessagePiece, construct_response_from_request
 from pyrit.prompt_target import OpenAITarget, limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
@@ -41,12 +40,10 @@ class OpenAICompletionTarget(OpenAITarget):
             api_key (str, Optional): The API key for accessing the Azure OpenAI service.
                 Defaults to the `OPENAI_CHAT_KEY` environment variable.
             headers (str, Optional): Headers of the endpoint (JSON).
-            use_aad_auth (bool, Optional): When set to True, user authentication is used
+            use_entra_auth (bool, Optional): When set to True, user authentication is used
                 instead of API Key. DefaultAzureCredential is taken for
                 https://cognitiveservices.azure.com/.default . Please run `az login` locally
                 to leverage user AuthN.
-            api_version (str, Optional): The version of the Azure OpenAI API. Defaults to
-                "2024-06-01".
             max_requests_per_minute (int, Optional): Number of requests the target can handle per
                 minute before hitting a rate limit. The number of requests sent to the target
                 will be capped at the value provided.
@@ -83,20 +80,16 @@ class OpenAICompletionTarget(OpenAITarget):
 
     @limit_requests_per_minute
     @pyrit_target_retry
-    async def send_prompt_async(self, *, prompt_request: PromptRequestResponse) -> PromptRequestResponse:
+    async def send_prompt_async(self, *, message: Message) -> Message:
 
-        self._validate_request(prompt_request=prompt_request)
-        request_piece = prompt_request.request_pieces[0]
+        self._validate_request(message=message)
+        message_piece = message.message_pieces[0]
 
-        logger.info(f"Sending the following prompt to the prompt target: {request_piece}")
+        logger.info(f"Sending the following prompt to the prompt target: {message_piece}")
 
         self.refresh_auth_headers()
 
-        body = await self._construct_request_body(request=request_piece)
-
-        params = {}
-        if self._api_version is not None:
-            params["api-version"] = self._api_version
+        body = await self._construct_request_body(request=message_piece)
 
         try:
             str_response: httpx.Response = await net_utility.make_request_and_raise_if_error_async(
@@ -104,13 +97,12 @@ class OpenAICompletionTarget(OpenAITarget):
                 method="POST",
                 headers=self._headers,
                 request_body=body,
-                params=params,
                 **self._httpx_client_kwargs,
             )
         except httpx.HTTPStatusError as StatusError:
             if StatusError.response.status_code == 400:
                 # Handle Bad Request
-                return handle_bad_request_exception(response_text=StatusError.response.text, request=request_piece)
+                return handle_bad_request_exception(response_text=StatusError.response.text, request=message_piece)
             elif StatusError.response.status_code == 429:
                 raise RateLimitException()
             else:
@@ -118,13 +110,13 @@ class OpenAICompletionTarget(OpenAITarget):
 
         logger.info(f'Received the following response from the prompt target "{str_response.text}"')
 
-        response_entry = self._construct_prompt_response_from_openai_json(
-            open_ai_str_response=str_response.text, request_piece=request_piece
+        response_entry = self._construct_message_from_openai_json(
+            open_ai_str_response=str_response.text, message_piece=message_piece
         )
 
         return response_entry
 
-    async def _construct_request_body(self, request: PromptRequestPiece) -> dict:
+    async def _construct_request_body(self, request: MessagePiece) -> dict:
 
         body_parameters = {
             "model": self._model_name,
@@ -140,12 +132,12 @@ class OpenAICompletionTarget(OpenAITarget):
         # Filter out None values
         return {k: v for k, v in body_parameters.items() if v is not None}
 
-    def _construct_prompt_response_from_openai_json(
+    def _construct_message_from_openai_json(
         self,
         *,
         open_ai_str_response: str,
-        request_piece: PromptRequestPiece,
-    ) -> PromptRequestResponse:
+        message_piece: MessagePiece,
+    ) -> Message:
 
         response = json.loads(open_ai_str_response)
 
@@ -157,25 +149,16 @@ class OpenAICompletionTarget(OpenAITarget):
             logger.log(logging.ERROR, "The chat returned an empty response.")
             raise EmptyResponseException(message="The chat returned an empty response.")
 
-        return construct_response_from_request(request=request_piece, response_text_pieces=extracted_response)
+        return construct_response_from_request(request=message_piece, response_text_pieces=extracted_response)
 
-    def _validate_request(self, *, prompt_request: PromptRequestResponse) -> None:
-        n_pieces = len(prompt_request.request_pieces)
+    def _validate_request(self, *, message: Message) -> None:
+        n_pieces = len(message.message_pieces)
         if n_pieces != 1:
-            raise ValueError(f"This target only supports a single prompt request piece. Received: {n_pieces} pieces.")
+            raise ValueError(f"This target only supports a single message piece. Received: {n_pieces} pieces.")
 
-        piece_type = prompt_request.request_pieces[0].converted_value_data_type
+        piece_type = message.message_pieces[0].converted_value_data_type
         if piece_type != "text":
             raise ValueError(f"This target only supports text prompt input. Received: {piece_type}.")
-
-        request = prompt_request.request_pieces[0]
-        messages = self._memory.get_chat_messages_with_conversation_id(conversation_id=request.conversation_id)
-        n_messages = len(messages)
-        if n_messages > 0:
-            raise ValueError(
-                "This target only supports a single turn conversation. "
-                f"Received: {n_messages} messages which indicates a prior turn."
-            )
 
     def is_json_response_supported(self) -> bool:
         """Indicates that this target supports JSON response format."""
