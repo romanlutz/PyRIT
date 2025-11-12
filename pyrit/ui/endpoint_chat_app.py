@@ -226,9 +226,80 @@ class EndpointChatApp:
         response_text, _ = asyncio.run(self._chat_async(message, history))
         return response_text
 
+    def _get_all_conversations_table(self):
+        """
+        Get all conversations from memory and format them as a table.
+        
+        Returns:
+            List of lists for Gradio DataFrame
+        """
+        # Get all message pieces from memory
+        all_pieces = self.memory.get_message_pieces()
+        
+        # Group by conversation_id and collect metadata
+        conversations_dict = {}
+        for piece in all_pieces:
+            conv_id = piece.conversation_id
+            if conv_id not in conversations_dict:
+                conversations_dict[conv_id] = {
+                    'conversation_id': conv_id,
+                    'labels': piece.labels or {},
+                    'metadata': piece.prompt_metadata or {},
+                    'message_count': 0,
+                    'first_message': None,
+                    'last_message': None,
+                    'first_user_prompt': None,
+                }
+            
+            conversations_dict[conv_id]['message_count'] += 1
+            
+            # Track first user prompt (role == "user" and converted_value_data_type == "text")
+            if (conversations_dict[conv_id]['first_user_prompt'] is None 
+                and piece.role == "user" 
+                and piece.converted_value_data_type == "text"):
+                # Truncate long prompts
+                prompt_text = piece.converted_value or ""
+                if len(prompt_text) > 100:
+                    prompt_text = prompt_text[:97] + "..."
+                conversations_dict[conv_id]['first_user_prompt'] = prompt_text
+            
+            # Track first and last message timestamps
+            if piece.timestamp:
+                if conversations_dict[conv_id]['first_message'] is None:
+                    conversations_dict[conv_id]['first_message'] = piece.timestamp
+                else:
+                    conversations_dict[conv_id]['first_message'] = min(
+                        conversations_dict[conv_id]['first_message'], piece.timestamp
+                    )
+                
+                if conversations_dict[conv_id]['last_message'] is None:
+                    conversations_dict[conv_id]['last_message'] = piece.timestamp
+                else:
+                    conversations_dict[conv_id]['last_message'] = max(
+                        conversations_dict[conv_id]['last_message'], piece.timestamp
+                    )
+        
+        # Convert to table format
+        table_data = []
+        for conv_data in conversations_dict.values():
+            table_data.append([
+                conv_data['conversation_id'],
+                conv_data['message_count'],
+                conv_data['first_user_prompt'] or 'N/A',
+                str(conv_data['labels']),
+                str(conv_data['metadata']),
+                str(conv_data['first_message']) if conv_data['first_message'] else 'N/A',
+                str(conv_data['last_message']) if conv_data['last_message'] else 'N/A',
+            ])
+        
+        # Sort by last message (most recent first)
+        table_data.sort(key=lambda x: x[6], reverse=True)
+        
+        return table_data
+
     def build_interface(self) -> gr.Blocks:
         """
-        Build and return the Gradio interface.
+        Build and return the Gradio interface with multiple pages.
 
         Returns:
             Gradio Blocks interface
@@ -236,138 +307,207 @@ class EndpointChatApp:
         # Get target info for display
         target_name = self.target.__class__.__name__
         
-        with gr.Blocks(title="PyRIT Endpoint Chat", theme=gr.themes.Soft()) as demo:
+        with gr.Blocks(title="PyRIT Endpoint Chat", theme=gr.themes.Default()) as demo:
             gr.Markdown("# PyRIT Endpoint Chat 🤖")
             
-            with gr.Row():
-                gr.Markdown(
-                    f"**Target:** `{target_name}` | **Multi-modal**: Text, Images, Videos, Audio"
-                )
-                new_chat_btn = gr.Button("🆕 New Chat", size="sm", scale=0)
+            # Navigation tabs - store reference to control selected tab
+            with gr.Tabs(selected="chat_tab") as tabs:
+                # ===== CHAT PAGE =====
+                with gr.Tab("💬 Chat", id="chat_tab") as chat_tab:
+                    with gr.Row():
+                        gr.Markdown(
+                            f"**Target:** `{target_name}` | **Multi-modal**: Text, Images, Videos, Audio"
+                        )
+                        new_chat_btn = gr.Button("🆕 New Chat", size="sm", scale=0)
 
-            # Manual chatbot with full control over history
-            chatbot = gr.Chatbot(
-                height=500,
-                type="messages",
-                show_copy_button=True,
-                value=[],
-            )
-            
-            # Input textbox
-            with gr.Row():
-                msg = gr.Textbox(
-                    placeholder="Type your message here...",
-                    show_label=False,
-                    scale=4,
-                )
-                send_btn = gr.Button("Send", scale=1)
-            
-            # File upload
-            files = gr.Files(
-                label="Attach files (images, videos, audio)",
-                file_count="multiple",
-                type="filepath",
-            )
-            
-            # Handle send message - show user message immediately, then get response
-            async def send_message_async(user_message, uploaded_files, current_history):
-                """Send a message and update UI immediately"""
-                if not user_message or not user_message.strip():
-                    yield current_history, "", None
-                    return
-                
-                # Build the user's message for display
-                user_content = user_message
-                
-                # Add user message to history immediately for instant feedback
-                updated_history = current_history + [{"role": "user", "content": user_content}]
-                
-                # Yield the updated history with user message (clears input too)
-                yield updated_history, "", None
-                
-                # Now build message dict for chat function
-                message_dict = {"text": user_message}
-                if uploaded_files:
-                    message_dict["files"] = [f.name if hasattr(f, 'name') else f for f in uploaded_files]
-                
-                # Call chat function (returns response and rebuilt history from database)
-                response_text, rebuilt_history = await self._chat_async(message_dict, [])
-                
-                # Return the final rebuilt history (which now includes both user message and response)
-                yield rebuilt_history, "", None
-            
-            def send_message(user_message, uploaded_files, current_history):
-                """Synchronous wrapper with generator support"""
-                # Run the async generator and yield results
-                async_gen = send_message_async(user_message, uploaded_files, current_history)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    while True:
+                    # Manual chatbot with full control over history
+                    chatbot = gr.Chatbot(
+                        height=500,
+                        type="messages",
+                        show_copy_button=True,
+                        value=[],
+                    )
+                    
+                    # Input textbox
+                    with gr.Row():
+                        msg = gr.Textbox(
+                            placeholder="Type your message here...",
+                            show_label=False,
+                            scale=4,
+                        )
+                        send_btn = gr.Button("Send", scale=1)
+                    
+                    # File upload
+                    files = gr.Files(
+                        label="Attach files (images, videos, audio)",
+                        file_count="multiple",
+                        type="filepath",
+                    )
+                    
+                    # Handle send message - show user message immediately, then get response
+                    async def send_message_async(user_message, uploaded_files, current_history):
+                        """Send a message and update UI immediately"""
+                        if not user_message or not user_message.strip():
+                            yield current_history, "", None
+                            return
+                        
+                        # Build the user's message for display
+                        user_content = user_message
+                        
+                        # Add user message to history immediately for instant feedback
+                        updated_history = current_history + [{"role": "user", "content": user_content}]
+                        
+                        # Yield the updated history with user message (clears input too)
+                        yield updated_history, "", None
+                        
+                        # Now build message dict for chat function
+                        message_dict = {"text": user_message}
+                        if uploaded_files:
+                            message_dict["files"] = [f.name if hasattr(f, 'name') else f for f in uploaded_files]
+                        
+                        # Call chat function (returns response and rebuilt history from database)
+                        response_text, rebuilt_history = await self._chat_async(message_dict, [])
+                        
+                        # Return the final rebuilt history (which now includes both user message and response)
+                        yield rebuilt_history, "", None
+                    
+                    def send_message(user_message, uploaded_files, current_history):
+                        """Synchronous wrapper with generator support"""
+                        # Run the async generator and yield results
+                        async_gen = send_message_async(user_message, uploaded_files, current_history)
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
                         try:
-                            result = loop.run_until_complete(async_gen.__anext__())
-                            yield result
-                        except StopAsyncIteration:
-                            break
-                finally:
-                    loop.close()
-            
-            # Connect send button and Enter key
-            send_btn.click(
-                fn=send_message,
-                inputs=[msg, files, chatbot],
-                outputs=[chatbot, msg, files],
-            )
-            msg.submit(
-                fn=send_message,
-                inputs=[msg, files, chatbot],
-                outputs=[chatbot, msg, files],
-            )
-            
-            # Connect new chat button
-            def handle_new_chat():
-                """Handle new chat button click - reset conversation and clear UI"""
-                old_id = self.conversation_id
-                new_id = str(uuid4())
-                self.conversation_id = new_id
-                self._conversation_message_count = 0
-                logger.info(f"🆕 Started new conversation: {new_id} (cleared: {old_id})")
-                return []  # Return empty history
-            
-            new_chat_btn.click(
-                fn=handle_new_chat,
-                inputs=None,
-                outputs=chatbot,
-            )
+                            while True:
+                                try:
+                                    result = loop.run_until_complete(async_gen.__anext__())
+                                    yield result
+                                except StopAsyncIteration:
+                                    break
+                        finally:
+                            loop.close()
+                    
+                    # Connect send button and Enter key
+                    send_btn.click(
+                        fn=send_message,
+                        inputs=[msg, files, chatbot],
+                        outputs=[chatbot, msg, files],
+                    )
+                    msg.submit(
+                        fn=send_message,
+                        inputs=[msg, files, chatbot],
+                        outputs=[chatbot, msg, files],
+                    )
+                    
+                    # Connect new chat button
+                    def handle_new_chat():
+                        """Handle new chat button click - reset conversation and clear UI"""
+                        old_id = self.conversation_id
+                        new_id = str(uuid4())
+                        self.conversation_id = new_id
+                        self._conversation_message_count = 0
+                        logger.info(f"🆕 Started new conversation: {new_id} (cleared: {old_id})")
+                        return []  # Return empty history
+                    
+                    new_chat_btn.click(
+                        fn=handle_new_chat,
+                        inputs=None,
+                        outputs=chatbot,
+                    )
 
-            with gr.Accordion("ℹ️ About", open=False):
-                gr.Markdown(
-                    f"""
-                    ## PyRIT Endpoint Chat
+                    with gr.Accordion("ℹ️ About", open=False):
+                        gr.Markdown(
+                            f"""
+                            ## PyRIT Endpoint Chat
+                            
+                            Chat naturally with AI endpoints through PyRIT. Send text messages and attach images, videos, or audio files inline.
+                            
+                            **Current Target:** `{target_name}`
+                            
+                            ### Features:
+                            - 💬 **Natural Chat Flow**: Conversation history in a single pane
+                            - 📎 **Multi-modal Input**: Attach images, videos, or audio to your messages
+                            - 🔄 **Conversation History**: All turns visible in chat interface
+                            - 🎯 **Multiple Targets**: OpenAI, Azure OpenAI, Azure ML, HuggingFace, and more
+                            
+                            ### Supported Targets:
+                            - `OpenAIChatTarget`: OpenAI API, Azure OpenAI, Groq, OpenRouter, etc.
+                            - `OpenAISoraTarget`: Video generation endpoints
+                            - And any PyRIT PromptTarget
+                            
+                            ### Usage Tips:
+                            - Type your message and press Enter or click Send
+                            - Click the 📎 icon to attach images, videos, or audio
+                            - Use 🔄 Retry to resend the last message
+                            - Use ↩️ Undo to remove the last exchange
+                            - Use 🗑️ Clear Chat to start a new conversation
+                            """
+                        )
+        
+                # ===== CONVERSATIONS TABLE PAGE =====
+                with gr.Tab("📋 Conversations", id="conversations_tab"):
+                    gr.Markdown("## All Conversations in Memory")
                     
-                    Chat naturally with AI endpoints through PyRIT. Send text messages and attach images, videos, or audio files inline.
+                    with gr.Row():
+                        refresh_btn = gr.Button("🔄 Refresh", size="sm")
                     
-                    **Current Target:** `{target_name}`
+                    # Conversations table
+                    conversations_table = gr.Dataframe(
+                        headers=["Conversation ID", "Message Count", "First User Prompt", "Labels", "Metadata", "First Message", "Last Message"],
+                        datatype=["str", "number", "str", "str", "str", "str", "str"],
+                        interactive=False,
+                        wrap=True,
+                        value=self._get_all_conversations_table(),
+                    )
                     
-                    ### Features:
-                    - 💬 **Natural Chat Flow**: Conversation history in a single pane
-                    - 📎 **Multi-modal Input**: Attach images, videos, or audio to your messages
-                    - 🔄 **Conversation History**: All turns visible in chat interface
-                    - 🎯 **Multiple Targets**: OpenAI, Azure OpenAI, Azure ML, HuggingFace, and more
+                    # Handle table row selection - load conversation and switch to chat
+                    def handle_table_click(evt: gr.SelectData):
+                        """Handle clicking on a table row - loads conversation and switches to Chat tab"""
+                        if evt.index is not None and len(evt.index) >= 1:
+                            row_index = evt.index[0]
+                            
+                            # Get current table data
+                            current_data = self._get_all_conversations_table()
+                            if row_index < len(current_data):
+                                conv_id = current_data[row_index][0]  # First column is conversation ID
+                                
+                                # Set the app's conversation ID to the selected one
+                                self.conversation_id = conv_id.strip()
+                                
+                                # Rebuild history from database
+                                history = self._rebuild_history_from_database()
+                                
+                                logger.info(f"📖 Loaded conversation {conv_id} from table click - switching to Chat tab")
+                                
+                                # Return: history and switch to Chat tab
+                                return history, gr.Tabs(selected="chat_tab")
+                        
+                        return [], gr.Tabs(selected="conversations_tab")
                     
-                    ### Supported Targets:
-                    - `OpenAIChatTarget`: OpenAI API, Azure OpenAI, Groq, OpenRouter, etc.
-                    - `OpenAISoraTarget`: Video generation endpoints
-                    - And any PyRIT PromptTarget
+                    conversations_table.select(
+                        fn=handle_table_click,
+                        inputs=None,
+                        outputs=[chatbot, tabs],  # Update chatbot and switch tabs
+                    )
                     
-                    ### Usage Tips:
-                    - Type your message and press Enter or click Send
-                    - Click the 📎 icon to attach images, videos, or audio
-                    - Use 🔄 Retry to resend the last message
-                    - Use ↩️ Undo to remove the last exchange
-                    - Use 🗑️ Clear Chat to start a new conversation
-                    """
-                )
+                    # Handle refresh button
+                    def handle_refresh():
+                        """Refresh the conversations table"""
+                        return self._get_all_conversations_table()
+                    
+                    refresh_btn.click(
+                        fn=handle_refresh,
+                        inputs=None,
+                        outputs=conversations_table,
+                    )
+                    
+                    gr.Markdown("""
+                    ### Instructions:
+                    - **Click on any row** in the table to load that conversation and switch to the Chat tab
+                    - Use the **🔄 Refresh** button to update the table with latest conversations
+                    
+                    💡 **Tip**: Clicking a row automatically loads it and switches to the chat view!
+                    """)
 
         return demo
 
