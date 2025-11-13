@@ -9,35 +9,36 @@ This CLI allows you to launch the chat interface with different prompt targets.
 Target parameters (API keys, endpoints, model names) are read from environment
 variables, which in Docker can be populated from Azure Key Vault.
 
+The app includes a Configuration tab where you can dynamically select and configure
+any PyRIT target without restarting the application.
+
 Usage:
-    # OpenAI Chat Target (parameters from environment)
-    export ENDPOINT="https://api.openai.com/v1/chat/completions"
-    export API_KEY="sk-..."
-    export MODEL_NAME="gpt-4o"
-    python -m pyrit.ui.gradio_chat_cli --target-class OpenAIChatTarget
+    # Launch with default OpenAI Chat Target (uses OPENAI_CHAT_ENDPOINT, OPENAI_CHAT_KEY, OPENAI_CHAT_MODEL)
+    python -m pyrit.ui.gradio_chat_cli
 
-    # Azure ML Target
-    export ENDPOINT="https://your-endpoint.inference.ml.azure.com/score"
-    export API_KEY="your-key"
-    python -m pyrit.ui.gradio_chat_cli --target-class AzureMLChatTarget
+    # Launch on a specific port
+    python -m pyrit.ui.gradio_chat_cli --port 8080
 
-    # Hugging Face Endpoint Target
-    export HF_TOKEN="hf_..."
-    export ENDPOINT="https://api-inference.huggingface.co/models/..."
-    export MODEL_ID="meta-llama/Llama-2-7b-chat-hf"
-    python -m pyrit.ui.gradio_chat_cli --target-class HuggingFaceEndpointTarget
+    # Enable debug logging
+    python -m pyrit.ui.gradio_chat_cli --debug
 
 Docker Usage (with Key Vault integration):
     # The Docker container can be configured to pull secrets from Azure Key Vault
     # and populate them as environment variables automatically
     docker run -p 7860:7860 \\
-        -e ENDPOINT \\
-        -e API_KEY \\
-        -e MODEL_NAME \\
-        pyrit-chat --target-class OpenAIChatTarget
+        -e OPENAI_CHAT_ENDPOINT \\
+        -e OPENAI_CHAT_KEY \\
+        -e OPENAI_CHAT_MODEL \\
+        pyrit-chat
 
     # Or with Key Vault auto-injection (no -e flags needed)
-    docker run -p 7860:7860 pyrit-chat --target-class OpenAIChatTarget
+    docker run -p 7860:7860 pyrit-chat
+
+Configuration Tab:
+    Once the app is running, use the ⚙️ Configuration tab to:
+    - Select from ALL available PyRIT targets (discovered dynamically)
+    - Configure environment variables for endpoint, API key, and model
+    - Apply changes without restarting the application
 """
 
 import argparse
@@ -201,48 +202,39 @@ def parse_args():
     """
     Parse command-line arguments.
     
-    This parser handles app-specific arguments and optional target parameters.
-    Target constructor parameters can be provided via:
-    1. Command-line arguments (highest priority)
-    2. Environment variables (fallback)
+    The app always starts with OpenAIChatTarget by default.
+    Use the Configuration tab in the UI to switch to other targets.
     """
     parser = argparse.ArgumentParser(
-        description="Launch PyRIT Endpoint Chat Gradio app with dynamic target loading",
+        description="Launch PyRIT Endpoint Chat Gradio app",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --target-class OpenAIChatTarget
+  # Launch with default settings
+  %(prog)s
 
-  %(prog)s --target-class OpenAISora2Target --resolution-dimensions 720x1280 --n-seconds 12
+  # Launch on a specific port
+  %(prog)s --port 8080
 
-  %(prog)s --target-class OpenAIDALLETarget --response-format url --image-size 1024x1024
+  # Enable debug logging
+  %(prog)s --debug
 
-Available Target Classes:
-  OpenAIChatTarget, OpenAISora2Target, OpenAIDALLETarget, OpenAITTSTarget,
-  AzureMLChatTarget, HuggingFaceChatTarget, HuggingFaceEndpointTarget,
-  HTTPTarget, HTTPXAPITarget, PlaywrightTarget, TextTarget, and more.
+Configuration Tab:
+  The app includes a ⚙️ Configuration tab where you can dynamically switch between
+  ANY available PyRIT target and configure environment variables without restarting.
+  All targets from pyrit.prompt_target are discovered automatically.
 
-  See: https://github.com/Azure/PyRIT/tree/main/pyrit/prompt_target/
-
-Note:
-  Target constructor parameters can be set as:
-  1. Command-line arguments: --param-name value (e.g., --resolution-dimensions 720x1280 --n-seconds 12)
-     Dashes in parameter names are automatically converted to underscores.
-  2. Environment variables: OPENAI_SORA2_ENDPOINT, etc.
+Default Target:
+  The app starts with OpenAIChatTarget using these environment variables:
+  - OPENAI_CHAT_ENDPOINT (required)
+  - OPENAI_CHAT_KEY (optional, for API authentication)
+  - OPENAI_CHAT_MODEL (optional, model name)
   
-  Any --argument not recognized as a server option will be passed to the target constructor.
-  This allows you to pass ANY parameter supported by the target class.
+  You can switch to any other target using the Configuration tab.
         """,
     )
 
-    parser.add_argument(
-        "--target-class",
-        "-t",
-        required=True,
-        help="Target class name (e.g., OpenAIChatTarget, OpenAISora2Target)",
-    )
-
-    # Server configuration (not target parameters)
+    # Server configuration
     parser.add_argument(
         "--host",
         default="0.0.0.0",
@@ -269,43 +261,7 @@ Note:
         help="Enable debug logging",
     )
 
-    # Parse known args and capture unknown args as target parameters
-    # This allows any --param-name value to be passed to the target constructor
-    args, unknown = parser.parse_known_args()
-    
-    # Process unknown arguments as target parameters
-    # Convert --param-name value to param_name: value
-    target_params = {}
-    i = 0
-    while i < len(unknown):
-        arg = unknown[i]
-        if arg.startswith('--'):
-            param_name = arg.lstrip('--').replace('-', '_')
-            # Get the value (next argument)
-            if i + 1 < len(unknown) and not unknown[i + 1].startswith('--'):
-                param_value = unknown[i + 1]
-                # Try to convert to int if it looks like a number
-                try:
-                    param_value = int(param_value)
-                except ValueError:
-                    # Try float
-                    try:
-                        param_value = float(param_value)
-                    except ValueError:
-                        pass
-                target_params[param_name] = param_value
-                i += 2
-            else:
-                # Boolean flag (no value)
-                target_params[param_name] = True
-                i += 1
-        else:
-            i += 1
-    
-    # Add target_params as an attribute to args
-    args.target_params = target_params
-    
-    return args
+    return parser.parse_args()
 
 
 def main() -> None:
@@ -349,37 +305,31 @@ def main() -> None:
             traceback.print_exc()
         sys.exit(1)
 
-    # Get target parameters from parsed unknown arguments
-    target_kwargs = args.target_params
-    
-    # Create the target (parameters come from kwargs + environment variables)
+    # Create the default target (OpenAIChatTarget)
     try:
-        print(f"🔧 Creating {args.target_class} target...")
-        if target_kwargs:
-            print(f"📝 Using command-line parameters: {list(target_kwargs.keys())}")
-        else:
-            print(f"📝 No command-line parameters provided")
-        print(f"📝 Additional parameters will be loaded from environment variables")
+        print(f"🔧 Creating OpenAIChatTarget (default)...")
+        print(f"📝 Parameters will be loaded from environment variables:")
+        print(f"    - OPENAI_CHAT_ENDPOINT (required)")
+        print(f"    - OPENAI_CHAT_KEY (optional)")
+        print(f"    - OPENAI_CHAT_MODEL (optional)")
         
-        target = create_target(target_class_name=args.target_class, **target_kwargs)
+        target = create_target(target_class_name="OpenAIChatTarget")
         print(f"✅ Target created: {target.__class__.__name__}")
         
         # Print detailed configuration
-        print_target_config(target, target_kwargs)
+        print_target_config(target, {})
         
     except Exception as e:
         print(f"❌ Error creating target: {e}")
-        print(f"\n💡 Tip: Ensure all required parameters are set as:")
-        print(f"    1. Command-line arguments (--resolution-dimensions, --n-seconds, etc.)")
-        print(f"    2. Environment variables (OPENAI_SORA2_ENDPOINT, etc.)")
-        print(f"    Refer to the {args.target_class} documentation for required parameters.")
+        print(f"\n💡 Tip: Ensure the required environment variables are set:")
+        print(f"    - OPENAI_CHAT_ENDPOINT is required")
+        print(f"    - OPENAI_CHAT_KEY (if authentication is needed)")
+        print(f"    - OPENAI_CHAT_MODEL (optional model name)")
+        print(f"\n💡 You can also switch to a different target using the ⚙️ Configuration tab after launch.")
         if args.debug:
             import traceback
-
             traceback.print_exc()
-        sys.exit(1)
-
-    # Create and launch the app
+        sys.exit(1)    # Create and launch the app
     try:
         from pyrit.ui.endpoint_chat_app import EndpointChatApp
 
@@ -392,6 +342,7 @@ def main() -> None:
         print("  • Multi-modal input (text, image, video, audio)")
         print("  • Multi-modal output (text, image, video, audio)")
         print("  • Conversation management")
+        print("  • Dynamic target switching via ⚙️ Configuration tab")
         print("\nPress Ctrl+C to stop the app.\n")
 
         app = EndpointChatApp(target=target)

@@ -4,7 +4,7 @@
 import json
 import logging
 import re
-from abc import abstractmethod
+from abc import abstractmethod, ABC
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -16,7 +16,7 @@ from pyrit.prompt_target import PromptChatTarget
 logger = logging.getLogger(__name__)
 
 
-class OpenAITarget(PromptChatTarget):
+class OpenAITarget(PromptChatTarget, ABC):
 
     ADDITIONAL_REQUEST_HEADERS: str = "OPENAI_ADDITIONAL_REQUEST_HEADERS"
 

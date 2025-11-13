@@ -12,6 +12,8 @@ Usage:
 """
 
 import asyncio
+import importlib
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -26,6 +28,8 @@ from pyrit.models import SeedGroup, SeedPrompt
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptChatTarget, PromptTarget
 from pyrit.setup import IN_MEMORY, initialize_pyrit
+from pyrit.ui.tabs import build_chat_tab, build_conversations_tab, build_configuration_tab
+from pyrit.ui.tabs.helpers import get_available_targets, get_available_env_vars, get_env_var_suggestions
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ logger = logging.getLogger(__name__)
 class EndpointChatApp:
     """Gradio application for chatting with PyRIT endpoints."""
 
-    def __init__(self, *, target: Union[PromptTarget, PromptChatTarget]):
+    def __init__(self, *, target: Union[PromptTarget, PromptChatTarget], enable_config_tab: bool = True):
         """
         Initialize the chat app with a prompt target.
 
@@ -41,6 +45,7 @@ class EndpointChatApp:
             target: The prompt target to use for sending messages.
                     Can be any PromptTarget or PromptChatTarget instance
                     (e.g., OpenAIChatTarget, AzureMLChatTarget, etc.)
+            enable_config_tab: Whether to enable the configuration tab for dynamic target switching
         
         Note:
             Memory must be initialized before creating the app (via initialize_pyrit).
@@ -48,6 +53,7 @@ class EndpointChatApp:
         """
         self.target = target
         self.conversation_id = str(uuid4())
+        self.enable_config_tab = enable_config_tab
         
         # Get the already-initialized memory instance
         self.memory = CentralMemory.get_memory_instance()
@@ -58,6 +64,54 @@ class EndpointChatApp:
         # Track messages per conversation to prevent mixing
         self._conversation_message_count = 0
         self._last_cleared_conversation_id = None
+
+    def _create_target_from_config(self, target_class_name: str, endpoint_var: str, api_key_var: str, model_var: str):
+        """
+        Create a new target instance from configuration.
+        
+        Args:
+            target_class_name: Name of the target class (e.g., 'OpenAIChatTarget')
+            endpoint_var: Environment variable name for endpoint
+            api_key_var: Environment variable name for API key
+            model_var: Environment variable name for model name
+            
+        Returns:
+            Tuple of (target_instance, error_message or None)
+        """
+        try:
+            # Get environment variable values
+            endpoint = os.environ.get(endpoint_var)
+            api_key = os.environ.get(api_key_var)
+            model_name = os.environ.get(model_var)
+            
+            # Validate required values
+            if not endpoint:
+                return None, f"❌ Environment variable '{endpoint_var}' is not set"
+            
+            # Import the target class
+            module = importlib.import_module('pyrit.prompt_target')
+            target_class = getattr(module, target_class_name)
+            
+            # Create kwargs dict with non-None values
+            kwargs = {}
+            if endpoint:
+                kwargs['endpoint'] = endpoint
+            if api_key:
+                kwargs['api_key'] = api_key
+            if model_name:
+                kwargs['model_name'] = model_name
+            
+            # Create the target
+            target = target_class(**kwargs)
+            
+            logger.info(f"✅ Created {target_class_name} with endpoint={endpoint}, model={model_name}")
+            
+            return target, None
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to create target: {str(e)}"
+            logger.error(error_msg)
+            return None, error_msg
 
     def _rebuild_history_from_database(self) -> list[dict]:
         """
@@ -320,298 +374,42 @@ class EndpointChatApp:
                     gr.Image(value=str(roakey_path), height=60, width=70, show_label=False, show_download_button=False, show_fullscreen_button=False, container=False, scale=0, min_width=70)
                 gr.Markdown("# Co-PyRIT")
             
-            # Navigation tabs - store reference to control selected tab
-            with gr.Tabs(selected="chat_tab") as tabs:
-                # ===== CHAT PAGE =====
-                with gr.Tab("💬 Chat", id="chat_tab") as chat_tab:
-                    with gr.Row():
-                        gr.Markdown(
-                            f"**Target:** `{target_name}` | **Multi-modal**: Text, Images, Videos, Audio"
-                        )
-                        new_chat_btn = gr.Button("🆕 New Chat", size="sm", scale=0)
-
-                    # Manual chatbot with full control over history
-                    chatbot = gr.Chatbot(
-                        height=500,
-                        type="messages",
-                        show_copy_button=True,
-                        value=[],
-                    )
-                    
-                    # Multimodal input - combines text and file uploads
-                    chat_input = gr.MultimodalTextbox(
-                        interactive=True,
-                        file_count="multiple",
-                        placeholder="Enter message or upload files...",
-                        show_label=False,
-                    )
-                    
-                    # Handle send message - show user message immediately, then get response
-                    async def send_message_async(message, current_history):
-                        """Send a message and update UI immediately"""
-                        # Check if there's any content
-                        text_content = message.get("text", "")
-                        files = message.get("files", [])
-                        
-                        if not text_content and not files:
-                            yield current_history, gr.MultimodalTextbox(value=None, interactive=True)
-                            return
-                        
-                        # Add user message(s) to history immediately for instant feedback
-                        updated_history = current_history.copy()
-                        
-                        # Add files first
-                        for file_path in files:
-                            updated_history.append({"role": "user", "content": {"path": file_path}})
-                        
-                        # Add text if present
-                        if text_content:
-                            updated_history.append({"role": "user", "content": text_content})
-                        
-                        # Yield the updated history with user message (clears input too)
-                        yield updated_history, gr.MultimodalTextbox(value=None, interactive=False)
-                        
-                        # Call chat function (returns response and rebuilt history from database)
-                        response_text, rebuilt_history = await self._chat_async(message, [])
-                        
-                        # Return the final rebuilt history and re-enable input
-                        yield rebuilt_history, gr.MultimodalTextbox(value=None, interactive=True)
-                    
-                    def send_message(message, current_history):
-                        """Synchronous wrapper with generator support"""
-                        # Run the async generator and yield results
-                        async_gen = send_message_async(message, current_history)
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            while True:
-                                try:
-                                    result = loop.run_until_complete(async_gen.__anext__())
-                                    yield result
-                                except StopAsyncIteration:
-                                    break
-                        finally:
-                            loop.close()
-                    
-                    # Connect input submit
-                    chat_input.submit(
-                        fn=send_message,
-                        inputs=[chat_input, chatbot],
-                        outputs=[chatbot, chat_input],
-                    )
-                    
-                    # Handle retry - duplicate conversation excluding last turn and resend
-                    async def handle_retry_async(current_history):
-                        """Handle retry by duplicating conversation without last turn and resending"""
-                        # Get the current conversation history BEFORE duplication to find the last user message(s)
-                        original_history = self._rebuild_history_from_database()
-                        
-                        # Find all consecutive user messages (skipping past any assistant messages at the end)
-                        # This handles multimodal messages that appear as multiple user entries
-                        last_user_messages = []
-                        found_assistant = False
-                        
-                        for msg in reversed(original_history):
-                            if msg["role"] == "assistant":
-                                if found_assistant and last_user_messages:
-                                    # We've already collected user messages and hit another assistant - stop here
-                                    break
-                                # Skip assistant messages at the end
-                                found_assistant = True
-                            elif msg["role"] == "user":
-                                if found_assistant:
-                                    # We've found user messages after skipping assistant messages
-                                    last_user_messages.insert(0, msg)  # Insert at beginning to maintain order
-                                else:
-                                    # Still at the end, no assistant message yet - shouldn't happen but handle it
-                                    last_user_messages.insert(0, msg)
-                            else:
-                                # Hit a non-user, non-assistant message (like system) - stop
-                                if last_user_messages:
-                                    break
-                        
-                        if not last_user_messages:
-                            # No user message found, just return current history
-                            logger.warning("🔄 Retry failed - no user message found in conversation")
-                            yield current_history, gr.MultimodalTextbox(value=None, interactive=True)
-                            return
-                        
-                        # Duplicate conversation excluding the last turn (removes last user message(s) and assistant response)
-                        new_conv_id = self.memory.duplicate_conversation_excluding_last_turn(conversation_id=self.conversation_id)
-                        
-                        # Update to the new conversation ID
-                        old_id = self.conversation_id
-                        self.conversation_id = new_conv_id
-                        
-                        logger.info(f"🔄 Retrying - duplicated conversation {old_id} -> {new_conv_id} (excluding last turn)")
-                        
-                        # Get the history from the new conversation (without the last turn)
-                        updated_history = self._rebuild_history_from_database()
-                        
-                        # Build message dict from the last user message(s) we saved
-                        # Collect text and files from all the user messages
-                        text_parts = []
-                        files = []
-                        
-                        for msg in last_user_messages:
-                            if isinstance(msg["content"], str):
-                                text_parts.append(msg["content"])
-                            elif isinstance(msg["content"], dict) and "path" in msg["content"]:
-                                # It's a file
-                                files.append(msg["content"]["path"])
-                            else:
-                                # Fallback - convert to string
-                                text_parts.append(str(msg["content"]))
-                        
-                        message_dict = {
-                            "text": " ".join(text_parts) if text_parts else "",
-                            "files": files
-                        }
-                        
-                        # Show the user message(s) immediately by adding them to the history
-                        display_history = updated_history.copy()
-                        for msg in last_user_messages:
-                            display_history.append(msg)
-                        
-                        # Yield to show user message(s) immediately
-                        yield display_history, gr.MultimodalTextbox(value=None, interactive=False)
-                        
-                        # Resend the message
-                        response_text, rebuilt_history = await self._chat_async(message_dict, [])
-                        
-                        # Return final history with new response
-                        yield rebuilt_history, gr.MultimodalTextbox(value=None, interactive=True)
-                    
-                    def handle_retry(current_history):
-                        """Synchronous wrapper for retry"""
-                        async_gen = handle_retry_async(current_history)
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            while True:
-                                try:
-                                    result = loop.run_until_complete(async_gen.__anext__())
-                                    yield result
-                                except StopAsyncIteration:
-                                    break
-                        finally:
-                            loop.close()
-                    
-                    # Connect retry event
-                    chatbot.retry(
-                        fn=handle_retry,
-                        inputs=[chatbot],
-                        outputs=[chatbot, chat_input],
-                    )
-                    
-                    # Connect new chat button
-                    def handle_new_chat():
-                        """Handle new chat button click - reset conversation and clear UI"""
-                        old_id = self.conversation_id
-                        new_id = str(uuid4())
-                        self.conversation_id = new_id
-                        self._conversation_message_count = 0
-                        logger.info(f"🆕 Started new conversation: {new_id} (cleared: {old_id})")
-                        return []  # Return empty history
-                    
-                    new_chat_btn.click(
-                        fn=handle_new_chat,
-                        inputs=None,
-                        outputs=chatbot,
-                    )
-
-                    with gr.Accordion("ℹ️ About", open=False):
-                        gr.Markdown(
-                            f"""
-                            ## Co-PyRIT
-                            
-                            Chat naturally with AI endpoints through PyRIT. Send text messages and attach images, videos, or audio files inline.
-                            
-                            **Current Target:** `{target_name}`
-                            
-                            ### Features:
-                            - 💬 **Natural Chat Flow**: Conversation history in a single pane
-                            - 📎 **Multi-modal Input**: Type text and attach images, videos, or audio in one input box
-                            - 🔄 **Conversation History**: All turns visible in chat interface
-                            - 🎯 **Multiple Targets**: OpenAI, Azure OpenAI, Azure ML, HuggingFace, and more
-                            
-                            ### Supported Targets:
-                            - `OpenAIChatTarget`: OpenAI API, Azure OpenAI, Groq, OpenRouter, etc.
-                            - `OpenAISoraTarget`: Video generation endpoints
-                            - And any PyRIT PromptTarget
-                            
-                            ### Usage Tips:
-                            - Type your message and press Enter to send
-                            - Click the 📎 icon to attach images, videos, or audio files
-                            - Use 🆕 New Chat to start a fresh conversation
-                            - Visit the � Conversations tab to browse and load previous chats
-                            """
-                        )
+            # Create chatbot component first (outside tabs) so all tabs can reference it
+            chatbot = gr.Chatbot(
+                height=500,
+                type="messages",
+                show_copy_button=True,
+                value=[],
+                visible=False,  # Will be made visible in Chat tab
+                render=False  # Don't render it yet
+            )
+            
+            # Navigation tabs - Configuration tab is selected by default
+            with gr.Tabs(selected="config_tab") as tabs:
+                # ===== CONFIGURATION TAB (FIRST) =====
+                build_configuration_tab(self, tabs, chatbot, target_name)
         
-                # ===== CONVERSATIONS TABLE PAGE =====
-                with gr.Tab("📋 Conversations", id="conversations_tab"):
-                    gr.Markdown("## All Conversations in Memory")
-                    
-                    with gr.Row():
-                        refresh_btn = gr.Button("🔄 Refresh", size="sm")
-                    
-                    # Conversations table
-                    conversations_table = gr.Dataframe(
-                        headers=["Conversation ID", "Message Count", "First User Prompt", "Labels", "Metadata", "First Message", "Last Message"],
-                        datatype=["str", "number", "str", "str", "str", "str", "str"],
-                        interactive=False,
-                        wrap=True,
-                        value=self._get_all_conversations_table(),
-                    )
-                    
-                    # Handle table row selection - load conversation and switch to chat
-                    def handle_table_click(evt: gr.SelectData):
-                        """Handle clicking on a table row - loads conversation and switches to Chat tab"""
-                        if evt.index is not None and len(evt.index) >= 1:
-                            row_index = evt.index[0]
-                            
-                            # Get current table data
-                            current_data = self._get_all_conversations_table()
-                            if row_index < len(current_data):
-                                conv_id = current_data[row_index][0]  # First column is conversation ID
-                                
-                                # Set the app's conversation ID to the selected one
-                                self.conversation_id = conv_id.strip()
-                                
-                                # Rebuild history from database
-                                history = self._rebuild_history_from_database()
-                                
-                                logger.info(f"📖 Loaded conversation {conv_id} from table click - switching to Chat tab")
-                                
-                                # Return: history and switch to Chat tab
-                                return history, gr.Tabs(selected="chat_tab")
-                        
-                        return [], gr.Tabs(selected="conversations_tab")
-                    
-                    conversations_table.select(
-                        fn=handle_table_click,
-                        inputs=None,
-                        outputs=[chatbot, tabs],  # Update chatbot and switch tabs
-                    )
-                    
-                    # Handle refresh button
-                    def handle_refresh():
-                        """Refresh the conversations table"""
-                        return self._get_all_conversations_table()
-                    
-                    refresh_btn.click(
-                        fn=handle_refresh,
-                        inputs=None,
-                        outputs=conversations_table,
-                    )
-                    
-                    gr.Markdown("""
-                    ### Instructions:
-                    - **Click on any row** in the table to load that conversation and switch to the Chat tab
-                    - Use the **🔄 Refresh** button to update the table with latest conversations
-                    
-                    💡 **Tip**: Clicking a row automatically loads it and switches to the chat view!
-                    """)
+                # ===== CONVERSATIONS TAB (SECOND) =====
+                conversations_tab_component, conversations_table = build_conversations_tab(self, tabs, chatbot)
+
+                # ===== CHAT TAB (THIRD) =====
+                build_chat_tab(self, tabs, target_name, chatbot)
+            
+            # Auto-refresh conversations table when tab is selected
+            def refresh_on_tab_select(evt: gr.SelectData):
+                """Refresh conversations table when Conversations tab is selected"""
+                # Check if the selected tab is the conversations tab
+                # evt.value contains the tab ID
+                if evt.value == "conversations_tab" or "Conversations" in str(evt.value):
+                    logger.info(f"🔄 Auto-refreshing conversations table (tab selected: {evt.value})")
+                    return self._get_all_conversations_table()
+                return gr.update()  # Return empty update for other tabs
+            
+            tabs.select(
+                fn=refresh_on_tab_select,
+                inputs=None,
+                outputs=[conversations_table]
+            )
 
         return demo
 
