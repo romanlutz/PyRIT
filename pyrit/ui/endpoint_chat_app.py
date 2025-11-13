@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 """
-Gradio chat application for interacting with PyRIT endpoints.
+Co-PyRIT: Gradio chat application for interacting with PyRIT endpoints.
 
 This app supports multi-modal inputs (text, image, video, audio) and outputs,
 allowing users to chat with any PyRIT-compatible endpoint.
@@ -310,8 +310,15 @@ class EndpointChatApp:
         # Get target info for display
         target_name = self.target.__class__.__name__
         
-        with gr.Blocks(title="PyRIT Endpoint Chat", theme=gr.themes.Default()) as demo:
-            gr.Markdown("# PyRIT Endpoint Chat 🤖")
+        # Get path to roakey.png image
+        roakey_path = Path(__file__).parent.parent.parent / "doc" / "roakey.png"
+        
+        with gr.Blocks(title="Co-PyRIT", theme=gr.themes.Default()) as demo:
+            # Header with logo and title
+            with gr.Row():
+                if roakey_path.exists():
+                    gr.Image(value=str(roakey_path), height=60, width=70, show_label=False, show_download_button=False, show_fullscreen_button=False, container=False, scale=0, min_width=70)
+                gr.Markdown("# Co-PyRIT")
             
             # Navigation tabs - store reference to control selected tab
             with gr.Tabs(selected="chat_tab") as tabs:
@@ -516,7 +523,7 @@ class EndpointChatApp:
                     with gr.Accordion("ℹ️ About", open=False):
                         gr.Markdown(
                             f"""
-                            ## PyRIT Endpoint Chat
+                            ## Co-PyRIT
                             
                             Chat naturally with AI endpoints through PyRIT. Send text messages and attach images, videos, or audio files inline.
                             
