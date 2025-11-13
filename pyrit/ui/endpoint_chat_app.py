@@ -393,6 +393,110 @@ class EndpointChatApp:
                         outputs=[chatbot, chat_input],
                     )
                     
+                    # Handle retry - duplicate conversation excluding last turn and resend
+                    async def handle_retry_async(current_history):
+                        """Handle retry by duplicating conversation without last turn and resending"""
+                        # Get the current conversation history BEFORE duplication to find the last user message(s)
+                        original_history = self._rebuild_history_from_database()
+                        
+                        # Find all consecutive user messages (skipping past any assistant messages at the end)
+                        # This handles multimodal messages that appear as multiple user entries
+                        last_user_messages = []
+                        found_assistant = False
+                        
+                        for msg in reversed(original_history):
+                            if msg["role"] == "assistant":
+                                if found_assistant and last_user_messages:
+                                    # We've already collected user messages and hit another assistant - stop here
+                                    break
+                                # Skip assistant messages at the end
+                                found_assistant = True
+                            elif msg["role"] == "user":
+                                if found_assistant:
+                                    # We've found user messages after skipping assistant messages
+                                    last_user_messages.insert(0, msg)  # Insert at beginning to maintain order
+                                else:
+                                    # Still at the end, no assistant message yet - shouldn't happen but handle it
+                                    last_user_messages.insert(0, msg)
+                            else:
+                                # Hit a non-user, non-assistant message (like system) - stop
+                                if last_user_messages:
+                                    break
+                        
+                        if not last_user_messages:
+                            # No user message found, just return current history
+                            logger.warning("🔄 Retry failed - no user message found in conversation")
+                            yield current_history, gr.MultimodalTextbox(value=None, interactive=True)
+                            return
+                        
+                        # Duplicate conversation excluding the last turn (removes last user message(s) and assistant response)
+                        new_conv_id = self.memory.duplicate_conversation_excluding_last_turn(conversation_id=self.conversation_id)
+                        
+                        # Update to the new conversation ID
+                        old_id = self.conversation_id
+                        self.conversation_id = new_conv_id
+                        
+                        logger.info(f"🔄 Retrying - duplicated conversation {old_id} -> {new_conv_id} (excluding last turn)")
+                        
+                        # Get the history from the new conversation (without the last turn)
+                        updated_history = self._rebuild_history_from_database()
+                        
+                        # Build message dict from the last user message(s) we saved
+                        # Collect text and files from all the user messages
+                        text_parts = []
+                        files = []
+                        
+                        for msg in last_user_messages:
+                            if isinstance(msg["content"], str):
+                                text_parts.append(msg["content"])
+                            elif isinstance(msg["content"], dict) and "path" in msg["content"]:
+                                # It's a file
+                                files.append(msg["content"]["path"])
+                            else:
+                                # Fallback - convert to string
+                                text_parts.append(str(msg["content"]))
+                        
+                        message_dict = {
+                            "text": " ".join(text_parts) if text_parts else "",
+                            "files": files
+                        }
+                        
+                        # Show the user message(s) immediately by adding them to the history
+                        display_history = updated_history.copy()
+                        for msg in last_user_messages:
+                            display_history.append(msg)
+                        
+                        # Yield to show user message(s) immediately
+                        yield display_history, gr.MultimodalTextbox(value=None, interactive=False)
+                        
+                        # Resend the message
+                        response_text, rebuilt_history = await self._chat_async(message_dict, [])
+                        
+                        # Return final history with new response
+                        yield rebuilt_history, gr.MultimodalTextbox(value=None, interactive=True)
+                    
+                    def handle_retry(current_history):
+                        """Synchronous wrapper for retry"""
+                        async_gen = handle_retry_async(current_history)
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            while True:
+                                try:
+                                    result = loop.run_until_complete(async_gen.__anext__())
+                                    yield result
+                                except StopAsyncIteration:
+                                    break
+                        finally:
+                            loop.close()
+                    
+                    # Connect retry event
+                    chatbot.retry(
+                        fn=handle_retry,
+                        inputs=[chatbot],
+                        outputs=[chatbot, chat_input],
+                    )
+                    
                     # Connect new chat button
                     def handle_new_chat():
                         """Handle new chat button click - reset conversation and clear UI"""
