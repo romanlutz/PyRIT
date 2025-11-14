@@ -26,7 +26,7 @@ from pyrit.common.path import DB_DATA_PATH
 from pyrit.memory import CentralMemory
 from pyrit.models import SeedGroup, SeedPrompt
 from pyrit.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import PromptChatTarget, PromptTarget
+from pyrit.prompt_target import PromptChatTarget, PromptTarget, OpenAIChatTarget
 from pyrit.setup import IN_MEMORY, initialize_pyrit
 from pyrit.ui.tabs import build_chat_tab, build_conversations_tab, build_configuration_tab
 from pyrit.ui.tabs.helpers import get_available_targets, get_available_env_vars, get_env_var_suggestions
@@ -54,6 +54,19 @@ class EndpointChatApp:
         self.target = target
         self.conversation_id = str(uuid4())
         self.enable_config_tab = enable_config_tab
+        self.prompt_converters = []  # List of converters to apply to prompts
+        
+        # Initialize a default adversarial chat target for LLM-based converters
+        # This is separate from the target being tested/attacked
+        try:
+            self.adversarial_chat = OpenAIChatTarget()
+            logger.info("Initialized default OpenAIChatTarget for LLM-based converters")
+        except Exception as e:
+            logger.error(f"Failed to initialize adversarial chat target: {e}")
+            raise RuntimeError(
+                "Could not initialize OpenAIChatTarget for converters. "
+                "Ensure AZURE_OPENAI_CHAT_ENDPOINT and AZURE_OPENAI_CHAT_KEY are set."
+            ) from e
         
         # Get the already-initialized memory instance
         self.memory = CentralMemory.get_memory_instance()
@@ -117,6 +130,7 @@ class EndpointChatApp:
         """
         Rebuild the complete conversation history from the database for the current conversation_id.
         Handles text, images, video, and audio content types.
+        Shows both original and converted values for user messages when a converter was applied.
         
         Returns:
             List of message dictionaries in Gradio's "messages" format with multi-modal content
@@ -130,7 +144,19 @@ class EndpointChatApp:
                 if piece.role in ["user", "assistant"]:
                     # Determine content type and format accordingly
                     data_type = piece.converted_value_data_type or piece.original_value_data_type
-                    value = piece.converted_value or piece.original_value
+                    original_value = piece.original_value
+                    converted_value = piece.converted_value
+                    
+                    # Check if conversion was applied (values differ and both exist)
+                    conversion_applied = (
+                        original_value != converted_value 
+                        and original_value is not None 
+                        and converted_value is not None
+                        and piece.role == "user"  # Only show for user messages
+                        and data_type == "text"  # Only for text
+                    )
+                    
+                    value = converted_value or original_value
                     
                     if data_type == "image_path":
                         # Image - use file path for Gradio to render
@@ -159,10 +185,15 @@ class EndpointChatApp:
                                 "content": f"{media_type}: {value}"
                             })
                     elif data_type == "text":
-                        # Text content
+                        # Text content - show both original and converted if different
+                        if conversion_applied:
+                            content = f"**Original:** {original_value}\n\n**Converted:** {converted_value}"
+                        else:
+                            content = value
+                        
                         gradio_history.append({
                             "role": piece.role,
-                            "content": value
+                            "content": content
                         })
                     else:
                         # Fallback to text representation
@@ -237,12 +268,20 @@ class EndpointChatApp:
             # Create seed prompt group
             seed_group = SeedGroup(prompts=seed_prompts)
             
+            # Prepare converter configurations if converters are active
+            from pyrit.prompt_normalizer import PromptConverterConfiguration
+            converter_configs = []
+            if self.prompt_converters:
+                converter_configs = PromptConverterConfiguration.from_converters(converters=self.prompt_converters)
+                logger.info(f"🔄 Applying {len(self.prompt_converters)} converter(s) to prompt")
+            
             # Send using PromptNormalizer - this handles conversation history automatically
             # by using the conversation_id to track and include previous messages
             response = await self.prompt_normalizer.send_prompt_async(
                 seed_group=seed_group,
                 target=self.target,
                 conversation_id=self.conversation_id,
+                request_converter_configurations=converter_configs,
             )
 
             # Collect all response pieces into a single message
