@@ -64,3 +64,26 @@ services:
 volumes:
   notebooks:
   data:
+
+  pyrit-gcg:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gcg
+      args:
+        BASE_IMAGE: pyrit:latest
+    image: pyrit-gcg:latest
+    container_name: pyrit-gcg
+    volumes:
+      - data:/app/data
+      - ../assets:/app/assets
+      - ~/.pyrit/.env:/home/vscode/.pyrit/.env:ro
+      - ~/.pyrit/.env.local:/home/vscode/.pyrit/.env.local:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles:
+      - gcg

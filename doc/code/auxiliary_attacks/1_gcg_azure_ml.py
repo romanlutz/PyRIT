@@ -47,7 +47,7 @@ ml_client = MLClient(AzureCliCredential(), subscription_id, resource_group, work
 # ## Create AML Environment
 
 # %% [markdown]
-# To install the dependencies needed to run GCG, we create an AML environment from a [Dockerfile](../../../pyrit/auxiliary_attacks/gcg/src/Dockerfile).
+# To install the dependencies needed to run GCG, we create an AML environment from a [Dockerfile](../../../docker/Dockerfile.gcg).
 # %%
 from pathlib import Path
 

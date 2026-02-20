@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.4
+# ============================================================================
+# PyRIT GCG Dockerfile
+#
+# Builds on the base PyRIT image and adds GPU support and GCG dependencies
+# (torch, mlflow, accelerate, FastChat, etc.).
+#
+# Build with:
+#   docker compose --profile gcg build
+# Or standalone:
+#   docker build -f docker/Dockerfile.gcg -t pyrit-gcg:latest \
+#     --build-arg BASE_IMAGE=pyrit:latest .
+# ============================================================================
+
+ARG BASE_IMAGE=pyrit:latest
+FROM ${BASE_IMAGE}
+
+LABEL description="PyRIT with GCG adversarial suffix generation support (GPU-enabled)"
+
+USER root
+
+# Enable GPU support
+ENV CUDA_VISIBLE_DEVICES=all
+ENV ENABLE_GPU=true
+
+# Install GCG extras (torch, mlflow, accelerate, etc.) and FastChat
+RUN uv pip install --python /opt/venv/bin/python -e ".[gcg]" && \
+    uv pip install --python /opt/venv/bin/python \
+        "git+https://github.com/lm-sys/FastChat.git@2c68a13bfe10b86f40e3eefc3fcfacb32c00b02a"
+
+USER vscode
+
+WORKDIR /app
