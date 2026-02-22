@@ -10,7 +10,6 @@ components without actually running a full optimization (which would require
 a GPU and take minutes/hours).
 """
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,16 +19,15 @@ torch = pytest.importorskip("torch", reason="GCG integration tests require torch
 mlflow = pytest.importorskip("mlflow", reason="GCG integration tests require mlflow (install with gcg extra)")
 pytest.importorskip("ml_collections", reason="GCG integration tests require ml_collections (install with gcg extra)")
 
-from pyrit.auxiliary_attacks.gcg.attack.base.attack_manager import get_goals_and_targets  # noqa: E402
 from pyrit.auxiliary_attacks.gcg.experiments.train import (  # noqa: E402
     GreedyCoordinateGradientAdversarialSuffixGenerator,
 )
 from pyrit.executor.workflow.gcg import (  # noqa: E402
+    _DEFAULT_CONTROL_INIT,
     GCGContext,
     GCGResult,
     GCGStatus,
     GCGWorkflow,
-    _DEFAULT_CONTROL_INIT,
 )
 
 
@@ -180,11 +178,9 @@ class TestGCGWorkflowApplyTargetAugmentation:
         train_targets = ["Sure, here is a plan"]
         test_targets = ["Sure, here is some info"]
 
-        result_train, result_test = (
-            GreedyCoordinateGradientAdversarialSuffixGenerator._apply_target_augmentation(
-                train_targets=train_targets,
-                test_targets=test_targets,
-            )
+        result_train, result_test = GreedyCoordinateGradientAdversarialSuffixGenerator._apply_target_augmentation(
+            train_targets=train_targets,
+            test_targets=test_targets,
         )
 
         # Results should be lists of same length
@@ -193,11 +189,9 @@ class TestGCGWorkflowApplyTargetAugmentation:
 
     def test_augmentation_with_empty_lists(self) -> None:
         """Test augmentation with empty target lists."""
-        result_train, result_test = (
-            GreedyCoordinateGradientAdversarialSuffixGenerator._apply_target_augmentation(
-                train_targets=[],
-                test_targets=[],
-            )
+        result_train, result_test = GreedyCoordinateGradientAdversarialSuffixGenerator._apply_target_augmentation(
+            train_targets=[],
+            test_targets=[],
         )
         assert result_train == []
         assert result_test == []

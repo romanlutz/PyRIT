@@ -6,3 +6,4 @@ This is the most generic component under the `pyrit.executor` module. Continue o
 
 - [Website XPIA](./1_xpia_website.ipynb)
 - [AI Recruiter XPIA](./2_xpia_ai_recruiter.ipynb)
+- [GCG Adversarial Suffix Generation](./3_gcg.ipynb)

@@ -66,6 +66,7 @@ Read more about Prompt Generators [here](../executor/promptgen/0_promptgen.md)
 Workflows orchestrate complex multi-step operations. Examples include:
 
 - **XPIA Workflow**: This workflow orchestrates an cross prompt-injection attack (XPIA), where one might hide a prompt injection within a website or PDF and ask a target system to evaluate the contents to trigger the prompt injection.
+- **GCG Workflow**: This workflow generates adversarial suffixes using the Greedy Coordinate Gradient (GCG) algorithm, which can be appended to prompts to jailbreak language models.
 
 Read more about Workflows [here](../executor/workflow/0_workflow.md)
 
