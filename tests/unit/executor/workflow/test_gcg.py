@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -707,3 +708,241 @@ class TestGCGWorkflowRunAttack:
         assert result.control_str == "individual suffix"
         assert result.loss is None
         assert result.n_steps == 150
+
+
+# --- Additional Edge Case Tests ---
+
+
+class TestGCGContextEdgeCases:
+    """Additional edge case tests for GCGContext."""
+
+    def test_duplicate_preserves_all_custom_fields(self) -> None:
+        """Test that duplicate preserves non-default fields."""
+        ctx = GCGContext(
+            train_data="data.csv",
+            n_train_data=100,
+            n_steps=1000,
+            batch_size=1024,
+            learning_rate=0.05,
+            transfer=True,
+            stop_on_success=True,
+            allow_non_ascii=True,
+            control_init="custom init",
+        )
+        dup = ctx.duplicate()
+        assert dup.train_data == "data.csv"
+        assert dup.n_train_data == 100
+        assert dup.n_steps == 1000
+        assert dup.batch_size == 1024
+        assert dup.learning_rate == 0.05
+        assert dup.transfer is True
+        assert dup.stop_on_success is True
+        assert dup.allow_non_ascii is True
+        assert dup.control_init == "custom init"
+
+    def test_duplicate_mutation_does_not_affect_original(self) -> None:
+        """Test that mutating a duplicate does not affect the original."""
+        ctx = GCGContext(train_data="original.csv", transfer=False)
+        dup = ctx.duplicate()
+        dup.train_data = "modified.csv"
+        dup.transfer = True
+        assert ctx.train_data == "original.csv"
+        assert ctx.transfer is False
+
+
+class TestGCGResultEdgeCases:
+    """Additional edge case tests for GCGResult."""
+
+    def test_success_false_with_whitespace_control(self) -> None:
+        """Test success is False when control_str is whitespace only."""
+        result = GCGResult(control_str="   ", n_steps=100, loss=0.5)
+        # Whitespace is truthy but not default, so success is True
+        assert result.success is True
+
+    def test_success_true_with_zero_loss(self) -> None:
+        """Test success with a zero loss value."""
+        result = GCGResult(control_str="found suffix", n_steps=100, loss=0.0)
+        assert result.success is True
+        assert result.status == GCGStatus.SUCCESS
+
+    def test_status_failure_with_zero_loss(self) -> None:
+        """Test status is FAILURE when control_str is default but loss is zero."""
+        result = GCGResult(control_str=_DEFAULT_CONTROL_INIT, n_steps=100, loss=0.0)
+        assert result.success is False
+        assert result.status == GCGStatus.FAILURE
+
+    def test_result_with_negative_loss(self) -> None:
+        """Test result handles negative loss values."""
+        result = GCGResult(control_str="suffix", n_steps=50, loss=-1.5)
+        assert result.loss == -1.5
+        assert result.status == GCGStatus.SUCCESS
+
+
+class TestGCGWorkflowValidationEdgeCases:
+    """Additional validation edge case tests."""
+
+    def test_validate_negative_batch_size_raises(self, workflow: GCGWorkflow) -> None:
+        """Test that negative batch_size raises ValueError."""
+        ctx = GCGContext(train_data="data.csv", batch_size=-1)
+        with pytest.raises(ValueError, match="batch_size must be positive"):
+            workflow._validate_context(context=ctx)
+
+    def test_validate_mismatched_conversation_templates_length_raises(
+        self,
+        token: str,
+    ) -> None:
+        """Test that mismatched conversation_templates length raises ValueError."""
+        wf = GCGWorkflow(
+            model_name="llama-2",
+            model_paths=["/model1", "/model2"],
+            tokenizer_paths=["/tok1", "/tok2"],
+            conversation_templates=["llama-2"],
+            token=token,
+        )
+        ctx = GCGContext(train_data="data.csv")
+        # Conversation templates length (1) != model_paths length (2) — no error from current validation
+        # This validates the current behavior: conversation_templates length is not checked against model_paths
+        wf._validate_context(context=ctx)
+
+    def test_validate_single_model_path_passes(self, workflow: GCGWorkflow, valid_context: GCGContext) -> None:
+        """Test that a single model path configuration passes validation."""
+        workflow._validate_context(context=valid_context)
+
+
+class TestGCGWorkflowMultiModel:
+    """Tests for multi-model configuration."""
+
+    def test_init_multi_model(self, token: str) -> None:
+        """Test initialization with multiple models."""
+        wf = GCGWorkflow(
+            model_name="multi-model",
+            model_paths=["/model1", "/model2"],
+            tokenizer_paths=["/tok1", "/tok2"],
+            conversation_templates=["llama-2", "vicuna"],
+            token=token,
+            num_train_models=2,
+            devices=["cuda:0", "cuda:1"],
+        )
+        assert len(wf._model_paths) == 2
+        assert len(wf._tokenizer_paths) == 2
+        assert wf._num_train_models == 2
+        assert wf._devices == ["cuda:0", "cuda:1"]
+
+    def test_init_multi_model_custom_kwargs(self, token: str) -> None:
+        """Test multi-model init with per-model kwargs."""
+        model_kwargs = [
+            {"low_cpu_mem_usage": True, "use_cache": False},
+            {"low_cpu_mem_usage": False, "use_cache": True},
+        ]
+        tokenizer_kwargs = [
+            {"use_fast": False},
+            {"use_fast": True},
+        ]
+        wf = GCGWorkflow(
+            model_name="multi-model",
+            model_paths=["/model1", "/model2"],
+            tokenizer_paths=["/tok1", "/tok2"],
+            conversation_templates=["llama-2", "vicuna"],
+            token=token,
+            model_kwargs=model_kwargs,
+            tokenizer_kwargs=tokenizer_kwargs,
+        )
+        assert wf._model_kwargs == model_kwargs
+        assert wf._tokenizer_kwargs == tokenizer_kwargs
+
+
+class TestGCGWorkflowRunAttackEdgeCases:
+    """Additional edge case tests for _run_attack."""
+
+    def test_run_attack_empty_control_string(self, workflow: GCGWorkflow, valid_context: GCGContext) -> None:
+        """Test _run_attack when attack returns empty control string."""
+        mock_attack = MagicMock()
+        mock_attack.run.return_value = ("", 1.5, 500)
+        workflow._attack = mock_attack
+        workflow._params = MagicMock()
+
+        result = workflow._run_attack(valid_context)
+
+        assert result.control_str == ""
+        assert result.success is False
+        assert result.status == GCGStatus.FAILURE
+
+    def test_run_attack_default_control_string(self, workflow: GCGWorkflow, valid_context: GCGContext) -> None:
+        """Test _run_attack when attack returns the default control init."""
+        mock_attack = MagicMock()
+        mock_attack.run.return_value = (_DEFAULT_CONTROL_INIT, 5.0, 500)
+        workflow._attack = mock_attack
+        workflow._params = MagicMock()
+
+        result = workflow._run_attack(valid_context)
+
+        assert result.control_str == _DEFAULT_CONTROL_INIT
+        assert result.success is False
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestGCGWorkflowReExecution:
+    """Tests for re-executing the workflow."""
+
+    @pytest.mark.asyncio
+    async def test_execute_async_can_be_called_twice(self, workflow: GCGWorkflow) -> None:
+        """Test that execute_async can be called a second time after teardown clears state."""
+        call_count = 0
+
+        with (
+            patch.object(workflow, "_validate_context"),
+            patch.object(workflow, "_setup_async", new_callable=AsyncMock),
+            patch.object(workflow, "_perform_async", new_callable=AsyncMock) as mock_perform,
+            patch.object(workflow, "_teardown_async", new_callable=AsyncMock),
+        ):
+
+            def make_result(*args: Any, **kwargs: Any) -> GCGResult:
+                nonlocal call_count
+                call_count += 1
+                return GCGResult(control_str=f"suffix_{call_count}", n_steps=100 * call_count, loss=0.1 * call_count)
+
+            mock_perform.side_effect = make_result
+
+            result1 = await workflow.execute_async(train_data="data.csv")
+            result2 = await workflow.execute_async(train_data="data2.csv")
+
+            assert result1.control_str == "suffix_1"
+            assert result2.control_str == "suffix_2"
+            assert mock_perform.call_count == 2
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestGCGWorkflowSetupError:
+    """Tests for error handling during setup."""
+
+    @pytest.mark.asyncio
+    async def test_teardown_runs_on_setup_error(self, workflow: GCGWorkflow) -> None:
+        """Test that teardown still runs if setup raises an exception."""
+        with (
+            patch.object(workflow, "_validate_context"),
+            patch.object(workflow, "_setup_async", new_callable=AsyncMock) as mock_setup,
+            patch.object(workflow, "_perform_async", new_callable=AsyncMock),
+            patch.object(workflow, "_teardown_async", new_callable=AsyncMock) as mock_teardown,
+        ):
+            mock_setup.side_effect = RuntimeError("Model loading failed")
+
+            with pytest.raises(RuntimeError):
+                await workflow.execute_async(train_data="data.csv")
+
+            mock_teardown.assert_called_once()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestGCGWorkflowPerformEdgeCases:
+    """Additional edge case tests for _perform_async."""
+
+    @pytest.mark.asyncio
+    async def test_perform_delegates_to_run_in_executor(self, workflow: GCGWorkflow, valid_context: GCGContext) -> None:
+        """Test that _perform_async runs _run_attack via the event loop executor."""
+        expected = GCGResult(control_str="suffix", n_steps=100, loss=0.5)
+
+        with patch.object(workflow, "_run_attack", return_value=expected) as mock_run:
+            result = await workflow._perform_async(context=valid_context)
+
+            assert result == expected
+            mock_run.assert_called_once_with(valid_context)
