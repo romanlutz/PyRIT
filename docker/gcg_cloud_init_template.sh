@@ -5,7 +5,7 @@
 # It installs NVIDIA drivers, Python 3.12, PyRIT with GCG extras, runs the
 # GCG workflow, uploads results to Azure Blob Storage, and deallocates the VM.
 #
-# Placeholders (replace before use — see gcg_configure_cloud_init.py):
+# Placeholders (replace before use -- see gcg_configure_cloud_init.py):
 #   {{STORAGE_ACCOUNT}}  - Azure Storage account name
 #   {{STORAGE_KEY}}       - Azure Storage account key
 #   {{CONTAINER}}         - Blob container name

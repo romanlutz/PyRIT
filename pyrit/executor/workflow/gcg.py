@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -14,6 +15,13 @@ from pyrit.executor.workflow.core import (
     WorkflowContext,
     WorkflowResult,
     WorkflowStrategy,
+)
+
+warnings.warn(
+    "GCGWorkflow is experimental and will have substantial changes in upcoming versions. "
+    "Import directly from pyrit.executor.workflow.gcg.",
+    FutureWarning,
+    stacklevel=2,
 )
 
 logger = logging.getLogger(__name__)

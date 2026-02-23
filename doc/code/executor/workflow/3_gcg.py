@@ -12,6 +12,9 @@
 # %% [markdown]
 # # GCG Adversarial Suffix Generation
 #
+# > **⚠️ Experimental:** GCG support in PyRIT is experimental and will have substantial
+# > changes in upcoming versions. APIs may change without notice.
+#
 # The [Greedy Coordinate Gradient (GCG)](https://arxiv.org/abs/2307.15043) algorithm generates adversarial
 # suffixes that, when appended to a prompt, can cause language models to comply with harmful instructions.
 # A GCG suffix is a string of tokens optimized via gradient-based search — for example:
@@ -48,7 +51,7 @@
 # %%
 import os
 
-from pyrit.executor.workflow import GCGWorkflow
+from pyrit.executor.workflow.gcg import GCGWorkflow
 
 # Configure the workflow with model infrastructure
 workflow = GCGWorkflow(
@@ -78,7 +81,7 @@ print(f"Suffix: {result.control_str}")
 # `learning_rate`, and other hyperparameters via `GCGContext`:
 
 # %%
-from pyrit.executor.workflow import GCGContext
+from pyrit.executor.workflow.gcg import GCGContext
 
 context = GCGContext(
     train_data="https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv",
