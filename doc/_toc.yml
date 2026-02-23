@@ -61,6 +61,7 @@ chapters:
           - file: code/executor/workflow/1_xpia_website
           - file: code/executor/workflow/2_xpia_ai_recruiter
           - file: code/executor/workflow/3_gcg
+          - file: code/executor/workflow/gcg_azure_setup
         - file: code/executor/benchmark/0_benchmark
           sections:
           - file: code/executor/benchmark/1_qa_benchmark

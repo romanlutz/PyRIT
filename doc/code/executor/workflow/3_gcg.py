@@ -92,62 +92,36 @@ result = await workflow.execute_with_context_async(context=context)  # type: ign
 print(f"Suffix: {result.control_str}")
 
 # %% [markdown]
-# ## Running on Azure with Docker
+# ## Running on an Azure GPU VM
 #
-# If you don't have a local GPU, you can run GCG on an Azure VM with GPU support using
-# the provided Docker setup. This uses `docker compose` with the `gcg` profile.
+# If you don't have a local GPU, you can run GCG on an Azure VM that automatically
+# installs everything, runs the workflow, uploads results, and deallocates itself.
 #
-# ### 1. Provision an Azure GPU VM
+# See the full guide: [Running GCG on an Azure GPU VM](gcg_azure_setup.md)
 #
-# Create a VM with GPU support (e.g., `Standard_NC24ads_A100_v4` with an A100 GPU):
+# The setup uses:
+# - A **cloud-init template** (`docker/gcg_cloud_init_template.sh`) passed to the VM at creation
+# - A **configuration script** (`docker/gcg_configure_cloud_init.py`) that fills in your secrets
+#
+# Quick start:
 #
 # ```bash
+# # Configure the cloud-init script with your secrets
+# python docker/gcg_configure_cloud_init.py \
+#     --storage-account "$STORAGE_ACCOUNT" \
+#     --storage-key "$STORAGE_KEY" \
+#     --hf-token "$HF_TOKEN" \
+#     --output /tmp/gcg-cloud-init.sh
+#
+# # Create the GPU VM (it runs GCG and deallocates itself)
 # az vm create \
-#     --resource-group <your-resource-group> \
-#     --name pyrit-gcg-vm \
-#     --image Ubuntu2204 \
+#     --resource-group gcg-test \
+#     --name gcg-runner \
+#     --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest \
 #     --size Standard_NC24ads_A100_v4 \
 #     --admin-username azureuser \
-#     --generate-ssh-keys
+#     --generate-ssh-keys \
+#     --assign-identity "[system]" \
+#     --custom-data /tmp/gcg-cloud-init.sh \
+#     --os-disk-size-gb 128
 # ```
-#
-# Then install the NVIDIA drivers and Docker on the VM. See the
-# [Azure GPU VM docs](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/n-series-driver-setup)
-# for driver setup.
-#
-# ### 2. Build and Run the GCG Container
-#
-# Clone the PyRIT repo on the VM and run:
-#
-# ```bash
-# # Build the base image first
-# docker build -f .devcontainer/Dockerfile -t pyrit-devcontainer .devcontainer
-# docker compose -f docker/docker-compose.yaml build pyrit-jupyter
-#
-# # Build and run the GCG container
-# docker compose -f docker/docker-compose.yaml --profile gcg build
-# docker compose -f docker/docker-compose.yaml --profile gcg run pyrit-gcg \
-#     python -c "
-# import os
-# from pyrit.executor.workflow import GCGWorkflow
-#
-# workflow = GCGWorkflow(
-#     model_name='phi_3_mini',
-#     model_paths=['microsoft/Phi-3-mini-4k-instruct'],
-#     tokenizer_paths=['microsoft/Phi-3-mini-4k-instruct'],
-#     conversation_templates=['phi3'],
-#     token=os.environ['HUGGINGFACE_TOKEN'],
-# )
-#
-# import asyncio
-# result = asyncio.run(workflow.execute_async(
-#     train_data='https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv',
-#     n_train_data=25,
-#     n_steps=500,
-#     batch_size=256,
-# ))
-# print(f'Suffix: {result.control_str}')
-# "
-# ```
-#
-# The `docker-compose.yaml` `gcg` profile automatically configures NVIDIA GPU passthrough.
