@@ -80,6 +80,7 @@ curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 cat > /opt/run_gcg.py << 'PYEOF'
 import asyncio
 import json
+import os
 import sys
 import traceback
 
@@ -87,29 +88,36 @@ import traceback
 async def main():
     from pyrit.executor.workflow.gcg import GCGContext, GCGWorkflow
 
+    token = os.environ.get("HF_TOKEN", "")
+
+    workflow = GCGWorkflow(
+        model_name="vikhyatk/moondream2",
+        model_paths=["vikhyatk/moondream2"],
+        tokenizer_paths=["vikhyatk/moondream2"],
+        conversation_templates=["moondream2"],
+        token=token,
+    )
+
     context = GCGContext(
-        targets=["vikhyatk/moondream2"],
-        num_steps=50,
+        n_steps=50,
         batch_size=128,
-        search_width=128,
         topk=128,
         control_init="! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
     )
 
-    workflow = GCGWorkflow()
     result = await workflow.execute_with_context_async(context=context)
 
     output = {
         "success": result.success,
         "status": result.status.value if hasattr(result.status, "value") else str(result.status),
         "loss": result.loss,
-        "suffix": result.suffix,
+        "suffix": result.control_str,
         "error": result.error,
     }
     with open("/opt/gcg_result.json", "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"GCG Result: success={result.success}, loss={result.loss}, suffix={result.suffix}")
+    print(f"GCG Result: success={result.success}, loss={result.loss}, suffix={result.control_str}")
 
 
 if __name__ == "__main__":
