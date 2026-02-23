@@ -27,8 +27,24 @@ export PYRIT_REPO="{{PYRIT_REPO}}"
 export PYRIT_BRANCH="{{PYRIT_BRANCH}}"
 export DEBIAN_FRONTEND=noninteractive
 
+# Wait for any existing apt/dpkg locks to release (e.g., unattended-upgrades on first boot)
+wait_for_apt() {
+    local max_wait=300
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        if [ $waited -ge $max_wait ]; then
+            echo "WARNING: apt lock held for over ${max_wait}s, proceeding anyway"
+            break
+        fi
+        echo "Waiting for apt lock to release... (${waited}s)"
+        sleep 10
+        waited=$((waited + 10))
+    done
+}
+
 # Install NVIDIA drivers + CUDA toolkit
 echo "=== $(date) Installing NVIDIA drivers ==="
+wait_for_apt
 apt-get update -qq
 apt-get install -y -qq linux-headers-$(uname -r) build-essential
 curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
@@ -43,7 +59,9 @@ nvidia-smi || echo "nvidia-smi failed, driver may need reboot"
 
 # Install Python 3.12 + pip
 echo "=== $(date) Installing Python 3.12 ==="
+wait_for_apt
 add-apt-repository -y ppa:deadsnakes/ppa
+wait_for_apt
 apt-get update -qq
 apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
 

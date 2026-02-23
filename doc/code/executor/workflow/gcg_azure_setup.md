@@ -10,6 +10,11 @@ uploads results to Azure Blob Storage, and deallocates itself to free GPU quota.
 - An Azure subscription with **NCADS_A100_v4** (or similar GPU) compute quota
 - A [HuggingFace](https://huggingface.co/) API token
 - Python 3 (for the configuration script)
+- PyRIT installed with GCG extras: `pip install pyrit[gcg]`
+
+> **Branch note:** The GCG workflow is experimental. If it has not yet been merged to
+> `main`, use `--pyrit-repo` and `--pyrit-branch` in Step 5 to point at the branch
+> or fork that contains `GCGWorkflow`.
 
 > **Quota note:** Azure Compute quota and Azure Machine Learning quota are separate.
 > `az vm create` uses **Microsoft.Compute** quota. Check yours with:
@@ -66,8 +71,12 @@ az storage container create \
 ## 4. (Optional) Network Security Perimeter
 
 For production use, restrict storage access with a Network Security Perimeter (NSP).
-During initial setup, use **Learning** mode so that container creation and blob
-uploads work. Switch to **Enforced** after the run completes.
+Use **Learning** mode during setup so that container creation and blob uploads work.
+Switch to **Enforced** only after the run completes (Step 8).
+
+> **Important:** If you set the NSP to Enforced mode before creating the blob container
+> in Step 3, the container creation will be blocked. Always create the container first
+> or use Learning mode.
 
 ```bash
 # Create NSP + profile
