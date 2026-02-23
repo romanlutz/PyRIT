@@ -92,10 +92,10 @@ async def main():
     token = os.environ.get("HF_TOKEN", "")
 
     workflow = GCGWorkflow(
-        model_name="vikhyatk/moondream2",
-        model_paths=["vikhyatk/moondream2"],
-        tokenizer_paths=["vikhyatk/moondream2"],
-        conversation_templates=["moondream2"],
+        model_name="phi_3_mini",
+        model_paths=["microsoft/Phi-3-mini-4k-instruct"],
+        tokenizer_paths=["microsoft/Phi-3-mini-4k-instruct"],
+        conversation_templates=["phi3"],
         token=token,
     )
 

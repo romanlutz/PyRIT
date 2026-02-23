@@ -147,9 +147,13 @@ az vm create \
     --assign-identity "[system]" \
     --custom-data /tmp/gcg-cloud-init.sh \
     --os-disk-size-gb 128 \
-    --public-ip-sku Standard
+    --public-ip-sku Standard \
+    --security-type TrustedLaunch \
+    --enable-secure-boot false \
+    --enable-vtpm true
 ```
 
+The `--enable-secure-boot false` flag is required for NVIDIA DKMS drivers to load.
 The `--assign-identity "[system]"` flag gives the VM a managed identity, which it uses
 to call the Azure Management API and deallocate itself after the run completes.
 
@@ -237,5 +241,6 @@ az group delete --name $RG --subscription $SUB --yes --no-wait
 | `QuotaExceeded` on VM create | Check compute quota with `az vm list-usage`. Azure ML quota is separate from Compute quota. |
 | Storage operations blocked | NSP in Enforced mode blocks external traffic. Switch to Learning mode or add inbound access rules. |
 | `nvidia-smi` not found | Driver installation may require a reboot. SSH in and run `sudo reboot`. |
+| `Key was rejected by service` on `modprobe nvidia` | Secure Boot is blocking unsigned NVIDIA modules. Recreate the VM with `--enable-secure-boot false`. |
 | Blob upload fails | Verify local auth is enabled (`--allow-shared-key-access true`) and the storage key is correct. |
 | VM doesn't deallocate | The managed identity needs **Virtual Machine Contributor** role. Deallocate manually if RBAC can't be assigned. |
