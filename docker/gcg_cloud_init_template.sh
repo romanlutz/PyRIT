@@ -55,7 +55,7 @@ apt-get install -y -qq cuda-toolkit-12-4 nvidia-driver-550
 
 echo "=== $(date) Loading NVIDIA driver ==="
 modprobe nvidia || true
-nvidia-smi || echo "nvidia-smi failed, driver may need reboot"
+nvidia-smi || echo "nvidia-smi failed, will reboot after setup"
 
 # Install Python 3.12 + pip
 echo "=== $(date) Installing Python 3.12 ==="
@@ -132,33 +132,39 @@ if __name__ == "__main__":
         sys.exit(1)
 PYEOF
 
-# Run GCG
+# Create a post-reboot runner script (GPU driver needs reboot to load)
+cat > /opt/run_gcg_and_upload.sh << 'RUNEOF'
+#!/bin/bash
+set -euo pipefail
+exec >> /var/log/gcg-setup.log 2>&1
+
+echo "=== $(date) Post-reboot: verifying GPU ==="
+nvidia-smi
+
 echo "=== $(date) Running GCG workflow ==="
 source /opt/gcg-env/bin/activate
-export HF_TOKEN
+export HF_TOKEN="PLACEHOLDER_HF_TOKEN"
 export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
 python /opt/run_gcg.py || true
 
-# Upload results
 echo "=== $(date) Uploading results ==="
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 az storage blob upload \
-    --account-name "$STORAGE_ACCOUNT" \
-    --account-key "$STORAGE_KEY" \
-    --container-name "$CONTAINER" \
+    --account-name "PLACEHOLDER_STORAGE_ACCOUNT" \
+    --account-key "PLACEHOLDER_STORAGE_KEY" \
+    --container-name "PLACEHOLDER_CONTAINER" \
     --name "gcg_result_${TIMESTAMP}.json" \
     --file /opt/gcg_result.json \
     --overwrite 2>&1 || echo "Blob upload failed"
 
 az storage blob upload \
-    --account-name "$STORAGE_ACCOUNT" \
-    --account-key "$STORAGE_KEY" \
-    --container-name "$CONTAINER" \
+    --account-name "PLACEHOLDER_STORAGE_ACCOUNT" \
+    --account-key "PLACEHOLDER_STORAGE_KEY" \
+    --container-name "PLACEHOLDER_CONTAINER" \
     --name "gcg_setup_log_${TIMESTAMP}.txt" \
     --file /var/log/gcg-setup.log \
     --overwrite 2>&1 || echo "Log upload failed"
 
-# Deallocate VM to free quota
 echo "=== $(date) Deallocating VM ==="
 RESOURCE_GROUP=$(curl -sH Metadata:true \
     "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text")
@@ -178,3 +184,33 @@ curl -X POST \
     -d '{}' || echo "Deallocate failed"
 
 echo "=== $(date) Done ==="
+RUNEOF
+
+# Substitute actual values into the runner script
+sed -i "s|PLACEHOLDER_HF_TOKEN|${HF_TOKEN}|g" /opt/run_gcg_and_upload.sh
+sed -i "s|PLACEHOLDER_STORAGE_ACCOUNT|${STORAGE_ACCOUNT}|g" /opt/run_gcg_and_upload.sh
+sed -i "s|PLACEHOLDER_STORAGE_KEY|${STORAGE_KEY}|g" /opt/run_gcg_and_upload.sh
+sed -i "s|PLACEHOLDER_CONTAINER|${CONTAINER}|g" /opt/run_gcg_and_upload.sh
+chmod +x /opt/run_gcg_and_upload.sh
+
+# Create systemd one-shot service to run GCG after reboot
+cat > /etc/systemd/system/gcg-runner.service << 'SVCEOF'
+[Unit]
+Description=Run GCG workflow after reboot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/run_gcg_and_upload.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+systemctl daemon-reload
+systemctl enable gcg-runner.service
+
+echo "=== $(date) Rebooting to load NVIDIA driver ==="
+reboot
