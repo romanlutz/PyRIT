@@ -95,7 +95,7 @@ async def main():
         model_name="vicuna",
         model_paths=["lmsys/vicuna-7b-v1.5"],
         tokenizer_paths=["lmsys/vicuna-7b-v1.5"],
-        conversation_templates=["vicuna_v1.1"],
+        conversation_templates=["vicuna"],
         token=token,
     )
 
