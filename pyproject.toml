@@ -106,6 +106,7 @@ gcg = [
     "accelerate>=1.7.0",
     "azure-ai-ml>=1.27.1",
     "azureml-mlflow>=1.60.0",
+    "fschat>=0.2.36",
     "mlflow>=2.22.0",
     "ml-collections>=1.1.0",
     "sentencepiece>=0.2.0",
