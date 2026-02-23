@@ -42,7 +42,7 @@ wait_for_apt() {
     done
 }
 
-# Install NVIDIA drivers + CUDA toolkit
+# Install NVIDIA drivers via the Ubuntu cuda-drivers meta-package (handles signing for Secure Boot)
 echo "=== $(date) Installing NVIDIA drivers ==="
 wait_for_apt
 apt-get update -qq
@@ -51,7 +51,8 @@ curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x
     -o /tmp/cuda-keyring.deb
 dpkg -i /tmp/cuda-keyring.deb
 apt-get update -qq
-apt-get install -y -qq cuda-toolkit-12-4 nvidia-driver-550
+# Use cuda-drivers which pulls the open kernel module (works with Secure Boot)
+apt-get install -y -qq cuda-toolkit-12-4 cuda-drivers
 
 echo "=== $(date) Loading NVIDIA driver ==="
 modprobe nvidia || true
