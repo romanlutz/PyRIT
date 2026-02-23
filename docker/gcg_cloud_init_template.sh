@@ -99,6 +99,8 @@ async def main():
     )
 
     context = GCGContext(
+        train_data="https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv",
+        n_train_data=25,
         n_steps=50,
         batch_size=128,
         topk=128,
