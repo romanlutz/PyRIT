@@ -598,6 +598,7 @@ class MultiPromptAttack:
         test_goals: Optional[list[str]] = None,
         test_targets: Optional[list[str]] = None,
         test_workers: Optional[list["ModelWorker"]] = None,
+        **kwargs: Any,
     ) -> None:
         """
         Initializes the MultiPromptAttack object with the provided parameters.
