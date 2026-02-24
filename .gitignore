@@ -205,3 +205,6 @@ doc/_autosummary/
 
 # Custom user instructions
 .github/instructions/user-custom.instructions.md
+
+# Generated cloud-init scripts (contain secrets)
+gcg_cloud_init.sh
