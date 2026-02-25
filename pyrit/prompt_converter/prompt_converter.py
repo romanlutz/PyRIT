@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union, get_args
+from typing import Any, Optional, Union, get_args
 
 from pyrit import prompt_converter
 from pyrit.identifiers import ComponentIdentifier, Identifiable
@@ -162,8 +162,7 @@ class PromptConverter(Identifiable):
         return ConverterResult(output_text=prompt, output_type="text")
 
     async def _replace_text_match(self, match: str) -> ConverterResult:
-        result = await self.convert_async(prompt=match, input_type="text")
-        return result
+        return await self.convert_async(prompt=match, input_type="text")
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -182,8 +181,8 @@ class PromptConverter(Identifiable):
     def _create_identifier(
         self,
         *,
-        params: Optional[Dict[str, Any]] = None,
-        children: Optional[Dict[str, Union[ComponentIdentifier, List[ComponentIdentifier]]]] = None,
+        params: Optional[dict[str, Any]] = None,
+        children: Optional[dict[str, Union[ComponentIdentifier, list[ComponentIdentifier]]]] = None,
     ) -> ComponentIdentifier:
         """
         Construct and return the converter identifier.
@@ -204,7 +203,7 @@ class PromptConverter(Identifiable):
         Returns:
             ComponentIdentifier: The identifier for this converter.
         """
-        all_params: Dict[str, Any] = {
+        all_params: dict[str, Any] = {
             "supported_input_types": self.SUPPORTED_INPUT_TYPES,
             "supported_output_types": self.SUPPORTED_OUTPUT_TYPES,
         }

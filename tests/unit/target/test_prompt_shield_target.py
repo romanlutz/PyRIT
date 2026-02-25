@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import MutableSequence
+from collections.abc import MutableSequence
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,8 +46,7 @@ def sample_delineated_prompt_as_dict() -> dict:
 
 @pytest.fixture
 def sample_conversation_piece(sample_delineated_prompt_as_str: str) -> MessagePiece:
-    prp = MessagePiece(role="user", original_value=sample_delineated_prompt_as_str)
-    return prp
+    return MessagePiece(role="user", original_value=sample_delineated_prompt_as_str)
 
 
 def test_promptshield_init(promptshield_target: PromptShieldTarget):

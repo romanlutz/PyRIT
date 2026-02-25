@@ -4,7 +4,6 @@
 """Tests for the LeakageScenario class."""
 
 import pathlib
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,8 +77,7 @@ def role_play_strategy():
 def leakage_prompts():
     """The default leakage prompts."""
     leakage_path = pathlib.Path(DATASETS_PATH) / "seed_datasets" / "local" / "airt"
-    seed_prompts = list(SeedDataset.from_yaml_file(leakage_path / "leakage.prompt").get_values())
-    return seed_prompts
+    return list(SeedDataset.from_yaml_file(leakage_path / "leakage.prompt").get_values())
 
 
 @pytest.fixture
@@ -120,7 +118,7 @@ def mock_adversarial_target():
 
 
 @pytest.fixture
-def sample_objectives() -> List[str]:
+def sample_objectives() -> list[str]:
     return ["test leakage prompt 1", "test leakage prompt 2"]
 
 

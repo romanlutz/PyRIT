@@ -3,7 +3,7 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from pyrit.common import apply_defaults
 from pyrit.datasets import TextJailBreak
@@ -124,7 +124,7 @@ class Jailbreak(Scenario):
         scenario_result_id: Optional[str] = None,
         num_templates: Optional[int] = None,
         num_attempts: int = 1,
-        jailbreak_names: List[str] = [],
+        jailbreak_names: list[str] = [],
     ) -> None:
         """
         Initialize the jailbreak scenario.
@@ -186,7 +186,7 @@ class Jailbreak(Scenario):
         )
 
         # Will be resolved in _get_atomic_attacks_async
-        self._seed_groups: Optional[List[SeedAttackGroup]] = None
+        self._seed_groups: Optional[list[SeedAttackGroup]] = None
 
     def _get_default_objective_scorer(self) -> TrueFalseScorer:
         """
@@ -199,7 +199,7 @@ class Jailbreak(Scenario):
         Returns:
             TrueFalseScorer: A scorer that returns True when the model does NOT refuse.
         """
-        refusal_scorer = TrueFalseInverterScorer(
+        return TrueFalseInverterScorer(
             scorer=SelfAskRefusalScorer(
                 chat_target=OpenAIChatTarget(
                     endpoint=os.environ.get("AZURE_OPENAI_GPT4O_UNSAFE_CHAT_ENDPOINT"),
@@ -208,7 +208,6 @@ class Jailbreak(Scenario):
                 )
             )
         )
-        return refusal_scorer
 
     def _create_adversarial_target(self) -> OpenAIChatTarget:
         """
@@ -238,7 +237,7 @@ class Jailbreak(Scenario):
             self._adversarial_target = self._create_adversarial_target()
         return self._adversarial_target
 
-    def _resolve_seed_groups(self) -> List[SeedAttackGroup]:
+    def _resolve_seed_groups(self) -> list[SeedAttackGroup]:
         """
         Resolve seed groups from dataset configuration.
 
@@ -315,7 +314,7 @@ class Jailbreak(Scenario):
             atomic_attack_name=f"jailbreak_{template_name}", attack=attack, seed_groups=self._seed_groups
         )
 
-    async def _get_atomic_attacks_async(self) -> List[AtomicAttack]:
+    async def _get_atomic_attacks_async(self) -> list[AtomicAttack]:
         """
         Generate atomic attacks for each jailbreak template.
 
@@ -324,7 +323,7 @@ class Jailbreak(Scenario):
         Returns:
             List[AtomicAttack]: List of atomic attacks to execute, one per jailbreak template.
         """
-        atomic_attacks: List[AtomicAttack] = []
+        atomic_attacks: list[AtomicAttack] = []
 
         # Retrieve seed prompts based on selected strategies
         self._seed_groups = self._resolve_seed_groups()

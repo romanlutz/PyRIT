@@ -4,7 +4,6 @@
 """Tests for the Cyber class."""
 
 import pathlib
-from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,8 +67,7 @@ def slow_cyberstrategy():
 def malware_prompts():
     """The default malware prompts."""
     malware_path = pathlib.Path(DATASETS_PATH) / "seed_datasets" / "local" / "airt"
-    seed_prompts = list(SeedDataset.from_yaml_file(malware_path / "malware.prompt").get_values())
-    return seed_prompts
+    return list(SeedDataset.from_yaml_file(malware_path / "malware.prompt").get_values())
 
 
 @pytest.fixture
@@ -113,7 +111,7 @@ def mock_adversarial_target():
 
 
 @pytest.fixture
-def sample_objectives() -> List[str]:
+def sample_objectives() -> list[str]:
     """Create sample objectives for testing."""
     return ["test prompt 1", "test prompt 2"]
 

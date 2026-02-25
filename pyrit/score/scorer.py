@@ -9,13 +9,11 @@ import json
 import logging
 import uuid
 from abc import abstractmethod
+from collections.abc import Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    List,
     Optional,
-    Sequence,
     Union,
     cast,
 )
@@ -58,7 +56,7 @@ class Scorer(Identifiable, abc.ABC):
 
     # Evaluation configuration - maps input dataset files to a result file
     # Specifies glob patterns for datasets and a result file name
-    evaluation_file_mapping: Optional["ScorerEvalDatasetFiles"] = None
+    evaluation_file_mapping: Optional[ScorerEvalDatasetFiles] = None
 
     _identifier: Optional[ComponentIdentifier] = None
 
@@ -87,10 +85,9 @@ class Scorer(Identifiable, abc.ABC):
 
         if isinstance(self, TrueFalseScorer):
             return "true_false"
-        elif isinstance(self, FloatScaleScorer):
+        if isinstance(self, FloatScaleScorer):
             return "float_scale"
-        else:
-            return "unknown"
+        return "unknown"
 
     @property
     def _memory(self) -> MemoryInterface:
@@ -99,8 +96,8 @@ class Scorer(Identifiable, abc.ABC):
     def _create_identifier(
         self,
         *,
-        params: Optional[Dict[str, Any]] = None,
-        children: Optional[Dict[str, Union[ComponentIdentifier, List[ComponentIdentifier]]]] = None,
+        params: Optional[dict[str, Any]] = None,
+        children: Optional[dict[str, Union[ComponentIdentifier, list[ComponentIdentifier]]]] = None,
     ) -> ComponentIdentifier:
         """
         Construct the scorer identifier.
@@ -121,7 +118,7 @@ class Scorer(Identifiable, abc.ABC):
         Returns:
             ComponentIdentifier: The identifier for this scorer.
         """
-        all_params: Dict[str, Any] = {
+        all_params: dict[str, Any] = {
             "scorer_type": self.scorer_type,
         }
         if params:
@@ -251,12 +248,12 @@ class Scorer(Identifiable, abc.ABC):
 
     async def evaluate_async(
         self,
-        file_mapping: Optional["ScorerEvalDatasetFiles"] = None,
+        file_mapping: Optional[ScorerEvalDatasetFiles] = None,
         *,
         num_scorer_trials: int = 3,
-        update_registry_behavior: "RegistryUpdateBehavior" = None,
+        update_registry_behavior: RegistryUpdateBehavior = None,
         max_concurrency: int = 10,
-    ) -> Optional["ScorerMetrics"]:
+    ) -> Optional[ScorerMetrics]:
         """
         Evaluate this scorer against human-labeled datasets.
 
@@ -305,7 +302,7 @@ class Scorer(Identifiable, abc.ABC):
         )
 
     @abstractmethod
-    def get_scorer_metrics(self) -> Optional["ScorerMetrics"]:
+    def get_scorer_metrics(self) -> Optional[ScorerMetrics]:
         """
         Get evaluation metrics for this scorer from the configured evaluation result file.
 
@@ -475,8 +472,7 @@ class Scorer(Identifiable, abc.ABC):
         if max_value == min_value:
             return 0.0
 
-        normalized_value = (value - min_value) / (max_value - min_value)
-        return normalized_value
+        return (value - min_value) / (max_value - min_value)
 
     @pyrit_json_retry
     async def _score_value_with_llm(
@@ -614,7 +610,7 @@ class Scorer(Identifiable, abc.ABC):
 
             # Normalize metadata to a dictionary with string keys and string/int/float values
             raw_md = parsed_response.get(metadata_output_key)
-            normalized_md: Optional[Dict[str, Union[str, int, float]]]
+            normalized_md: Optional[dict[str, Union[str, int, float]]]
             if raw_md is None:
                 normalized_md = None
             elif isinstance(raw_md, dict):
@@ -669,7 +665,7 @@ class Scorer(Identifiable, abc.ABC):
         last_prompt = max(conversation, key=lambda x: x.sequence)
 
         # Every text message piece from the last turn
-        last_turn_text = "\n".join(
+        return "\n".join(
             [
                 piece.original_value
                 for piece in conversation
@@ -677,18 +673,16 @@ class Scorer(Identifiable, abc.ABC):
             ]
         )
 
-        return last_turn_text
-
     @staticmethod
     async def score_response_async(
         *,
         response: Message,
         objective_scorer: Optional[Scorer] = None,
-        auxiliary_scorers: Optional[List[Scorer]] = None,
+        auxiliary_scorers: Optional[list[Scorer]] = None,
         role_filter: ChatMessageRole = "assistant",
         objective: Optional[str] = None,
         skip_on_error_result: bool = True,
-    ) -> Dict[str, List[Score]]:
+    ) -> dict[str, list[Score]]:
         """
         Score a response using an objective scorer and optional auxiliary scorers.
 
@@ -708,7 +702,7 @@ class Scorer(Identifiable, abc.ABC):
         Raises:
             ValueError: If response is not provided.
         """
-        result: Dict[str, List[Score]] = {"auxiliary_scores": [], "objective_scores": []}
+        result: dict[str, list[Score]] = {"auxiliary_scores": [], "objective_scores": []}
 
         if not response:
             raise ValueError("Response must be provided for scoring.")
@@ -759,11 +753,11 @@ class Scorer(Identifiable, abc.ABC):
     async def score_response_multiple_scorers_async(
         *,
         response: Message,
-        scorers: List[Scorer],
+        scorers: list[Scorer],
         role_filter: ChatMessageRole = "assistant",
         objective: Optional[str] = None,
         skip_on_error_result: bool = True,
-    ) -> List[Score]:
+    ) -> list[Score]:
         """
         Score a response using multiple scorers in parallel.
 

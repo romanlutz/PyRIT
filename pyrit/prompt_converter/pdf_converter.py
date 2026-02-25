@@ -5,7 +5,7 @@ import ast
 import hashlib
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from pypdf import PageObject, PdfReader, PdfWriter
 from reportlab.lib.units import mm
@@ -48,7 +48,7 @@ class PDFConverter(PromptConverter):
         column_width: int = 0,
         row_height: int = 10,
         existing_pdf: Optional[Path] = None,
-        injection_items: Optional[List[Dict[str, Any]]] = None,
+        injection_items: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         """
         Initialize the converter with the specified parameters.
@@ -204,9 +204,8 @@ class PDFConverter(PromptConverter):
         if isinstance(prompt, str):
             logger.debug("No template provided. Using raw prompt.")
             return prompt
-        else:
-            logger.error("Prompt must be a string when no template is provided.")
-            raise ValueError("Prompt must be a string when no template is provided.")
+        logger.error("Prompt must be a string when no template is provided.")
+        raise ValueError("Prompt must be a string when no template is provided.")
 
     def _generate_pdf(self, content: str) -> bytes:
         """

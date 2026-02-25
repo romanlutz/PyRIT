@@ -66,44 +66,41 @@ class NpEncoder(json.JSONEncoder):
 def get_embedding_layer(model: Any) -> Any:
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte
-    elif isinstance(model, LlamaForCausalLM):
+    if isinstance(model, LlamaForCausalLM):
         return model.model.embed_tokens
-    elif isinstance(model, GPTNeoXForCausalLM):
+    if isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in
-    elif isinstance(model, Phi3ForCausalLM):
+    if isinstance(model, Phi3ForCausalLM):
         return model.model.embed_tokens
-    else:
-        raise ValueError(f"Unknown model type: {type(model)}")
+    raise ValueError(f"Unknown model type: {type(model)}")
 
 
 def get_embedding_matrix(model: Any) -> Any:
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
-    elif isinstance(model, LlamaForCausalLM):
+    if isinstance(model, LlamaForCausalLM):
         return model.model.embed_tokens.weight
-    elif isinstance(model, GPTNeoXForCausalLM):
+    if isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in.weight  # type: ignore[union-attr, unused-ignore]
-    elif isinstance(model, MixtralForCausalLM) or isinstance(model, MistralForCausalLM):
+    if isinstance(model, MixtralForCausalLM) or isinstance(model, MistralForCausalLM):
         return model.model.embed_tokens.weight
-    elif isinstance(model, Phi3ForCausalLM):
+    if isinstance(model, Phi3ForCausalLM):
         return model.model.embed_tokens.weight
-    else:
-        raise ValueError(f"Unknown model type: {type(model)}")
+    raise ValueError(f"Unknown model type: {type(model)}")
 
 
 def get_embeddings(model: Any, input_ids: torch.Tensor) -> Any:
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte(input_ids).half()
-    elif isinstance(model, LlamaForCausalLM):
+    if isinstance(model, LlamaForCausalLM):
         return model.model.embed_tokens(input_ids)
-    elif isinstance(model, GPTNeoXForCausalLM):
+    if isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in(input_ids).half()  # type: ignore[operator, unused-ignore]
-    elif isinstance(model, MixtralForCausalLM) or isinstance(model, MistralForCausalLM):
+    if isinstance(model, MixtralForCausalLM) or isinstance(model, MistralForCausalLM):
         return model.model.embed_tokens(input_ids)
-    elif isinstance(model, Phi3ForCausalLM):
+    if isinstance(model, Phi3ForCausalLM):
         return model.model.embed_tokens(input_ids)
-    else:
-        raise ValueError(f"Unknown model type: {type(model)}")
+    raise ValueError(f"Unknown model type: {type(model)}")
 
 
 def get_nonascii_toks(tokenizer: Any, device: str = "cpu") -> torch.Tensor:
@@ -340,11 +337,9 @@ class AttackPrompt:
 
         if not (test_ids[0].shape[0] == self._control_slice.stop - self._control_slice.start):
             raise ValueError(
-                (
-                    f"test_controls must have shape "
-                    f"(n, {self._control_slice.stop - self._control_slice.start}), "
-                    f"got {test_ids.shape}"
-                )
+                f"test_controls must have shape "
+                f"(n, {self._control_slice.stop - self._control_slice.start}), "
+                f"got {test_ids.shape}"
             )
 
         locs = (
@@ -364,24 +359,21 @@ class AttackPrompt:
             del locs, test_ids
             gc.collect()
             return model(input_ids=ids, attention_mask=attn_mask).logits, ids
-        else:
-            del locs, test_ids
-            logits = model(input_ids=ids, attention_mask=attn_mask).logits
-            del ids
-            gc.collect()
-            return logits
+        del locs, test_ids
+        logits = model(input_ids=ids, attention_mask=attn_mask).logits
+        del ids
+        gc.collect()
+        return logits
 
     def target_loss(self, logits: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         crit = nn.CrossEntropyLoss(reduction="none")
         loss_slice = slice(self._target_slice.start - 1, self._target_slice.stop - 1)
-        loss = crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, self._target_slice])
-        return loss  # type: ignore[no-any-return, unused-ignore]
+        return crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, self._target_slice])  # type: ignore[no-any-return]
 
     def control_loss(self, logits: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         crit = nn.CrossEntropyLoss(reduction="none")
         loss_slice = slice(self._control_slice.start - 1, self._control_slice.stop - 1)
-        loss = crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, self._control_slice])
-        return loss  # type: ignore[no-any-return, unused-ignore]
+        return crit(logits[:, loss_slice, :].transpose(1, 2), ids[:, self._control_slice])  # type: ignore[no-any-return]
 
     @property
     def assistant_str(self) -> Any:
@@ -527,8 +519,7 @@ class PromptManager:
         vals = [prompt.logits(model, test_controls, return_ids) for prompt in self._prompts]
         if return_ids:
             return [val[0] for val in vals], [val[1] for val in vals]
-        else:
-            return vals
+        return vals
 
     def target_loss(self, logits: list[torch.Tensor], ids: list[torch.Tensor]) -> torch.Tensor:
         return torch.cat(
@@ -590,14 +581,14 @@ class MultiPromptAttack:
         self,
         goals: list[str],
         targets: list[str],
-        workers: list["ModelWorker"],
+        workers: list[ModelWorker],
         control_init: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
         test_prefixes: Optional[list[str]] = None,
         logfile: Optional[str] = None,
         managers: Optional[dict[str, Any]] = None,
         test_goals: Optional[list[str]] = None,
         test_targets: Optional[list[str]] = None,
-        test_workers: Optional[list["ModelWorker"]] = None,
+        test_workers: Optional[list[ModelWorker]] = None,
     ) -> None:
         """
         Initializes the MultiPromptAttack object with the provided parameters.
@@ -805,7 +796,7 @@ class MultiPromptAttack:
         return self.control_str, loss, steps
 
     def test(
-        self, workers: list["ModelWorker"], prompts: list[PromptManager], include_loss: bool = False
+        self, workers: list[ModelWorker], prompts: list[PromptManager], include_loss: bool = False
     ) -> tuple[list[list[bool]], list[list[int]], list[list[float]]]:
         for j, worker in enumerate(workers):
             worker(prompts[j], "test", worker.model)
@@ -881,7 +872,7 @@ class MultiPromptAttack:
         tests["n_loss"] = n_loss
         tests["total"] = total_tests
 
-        with open(self.logfile, "r") as f:
+        with open(self.logfile) as f:
             log = json.load(f)
 
         log["controls"].append(control)
@@ -926,7 +917,7 @@ class ProgressiveMultiPromptAttack:
         self,
         goals: list[str],
         targets: list[str],
-        workers: list["ModelWorker"],
+        workers: list[ModelWorker],
         progressive_goals: bool = True,
         progressive_models: bool = True,
         control_init: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
@@ -935,7 +926,7 @@ class ProgressiveMultiPromptAttack:
         managers: Optional[dict[str, Any]] = None,
         test_goals: Optional[list[str]] = None,
         test_targets: Optional[list[str]] = None,
-        test_workers: Optional[list["ModelWorker"]] = None,
+        test_workers: Optional[list[ModelWorker]] = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -1084,7 +1075,7 @@ class ProgressiveMultiPromptAttack:
                 Whether to filter candidates whose lengths changed after re-tokenization (default is True)
         """
         if self.logfile is not None:
-            with open(self.logfile, "r") as f:
+            with open(self.logfile) as f:
                 log = json.load(f)
 
             log["params"]["n_steps"] = n_steps
@@ -1175,14 +1166,14 @@ class IndividualPromptAttack:
         self,
         goals: list[str],
         targets: list[str],
-        workers: list["ModelWorker"],
+        workers: list[ModelWorker],
         control_init: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
         test_prefixes: Optional[list[str]] = None,
         logfile: Optional[str] = None,
         managers: Optional[dict[str, Any]] = None,
         test_goals: Optional[list[str]] = None,
         test_targets: Optional[list[str]] = None,
-        test_workers: Optional[list["ModelWorker"]] = None,
+        test_workers: Optional[list[ModelWorker]] = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -1324,7 +1315,7 @@ class IndividualPromptAttack:
                 Whether to filter candidates (default is True)
         """
         if self.logfile is not None:
-            with open(self.logfile, "r") as f:
+            with open(self.logfile) as f:
                 log = json.load(f)
 
             log["params"]["n_steps"] = n_steps
@@ -1388,14 +1379,14 @@ class EvaluateAttack:
         self,
         goals: list[str],
         targets: list[str],
-        workers: list["ModelWorker"],
+        workers: list[ModelWorker],
         control_init: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !",
         test_prefixes: Optional[list[str]] = None,
         logfile: Optional[str] = None,
         managers: Optional[dict[str, Any]] = None,
         test_goals: Optional[list[str]] = None,
         test_targets: Optional[list[str]] = None,
-        test_workers: Optional[list["ModelWorker"]] = None,
+        test_workers: Optional[list[ModelWorker]] = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -1506,7 +1497,7 @@ class EvaluateAttack:
         tokenizer.padding_side = "left"
 
         if self.logfile is not None:
-            with open(self.logfile, "r") as f:
+            with open(self.logfile) as f:
                 log = json.load(f)
 
             log["params"]["num_tests"] = len(controls)
@@ -1637,20 +1628,20 @@ class ModelWorker:
                         results.put(fn(*args, **kwargs))
             tasks.task_done()
 
-    def start(self) -> "ModelWorker":
+    def start(self) -> ModelWorker:
         self.process = mp.Process(target=ModelWorker.run, args=(self.model, self.tasks, self.results))
         self.process.start()
         logger.info(f"Started worker {self.process.pid} for model {self.model.name_or_path}")
         return self
 
-    def stop(self) -> "ModelWorker":
+    def stop(self) -> ModelWorker:
         self.tasks.put(None)
         if self.process is not None:
             self.process.join()
         torch.cuda.empty_cache()
         return self
 
-    def __call__(self, ob: Any, fn: str, *args: Any, **kwargs: Any) -> "ModelWorker":
+    def __call__(self, ob: Any, fn: str, *args: Any, **kwargs: Any) -> ModelWorker:
         self.tasks.put((deepcopy(ob), fn, args, kwargs))
         return self
 
@@ -1727,8 +1718,8 @@ def get_workers(params: Any, eval: bool = False) -> tuple[list[ModelWorker], lis
             worker.start()
 
     num_train_models = getattr(params, "num_train_models", len(workers))
-    logger.info("Loaded {} train models".format(num_train_models))
-    logger.info("Loaded {} test models".format(len(workers) - num_train_models))
+    logger.info(f"Loaded {num_train_models} train models")
+    logger.info(f"Loaded {len(workers) - num_train_models} test models")
 
     return workers[:num_train_models], workers[num_train_models:]
 
@@ -1770,7 +1761,7 @@ def get_goals_and_targets(params: Any) -> tuple[list[str], list[str], list[str],
         )
     if len(test_goals) != len(test_targets):
         raise ValueError(f"Length of test_goals ({len(test_goals)}) and test_targets ({len(test_targets)}) must match")
-    logger.info("Loaded {} train goals".format(len(train_goals)))
-    logger.info("Loaded {} test goals".format(len(test_goals)))
+    logger.info(f"Loaded {len(train_goals)} train goals")
+    logger.info(f"Loaded {len(test_goals)} test goals")
 
     return train_goals, train_targets, test_goals, test_targets

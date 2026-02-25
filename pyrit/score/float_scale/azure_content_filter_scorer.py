@@ -2,7 +2,8 @@
 # Licensed under the MIT license.
 
 import base64
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Optional
 
 from azure.ai.contentsafety import ContentSafetyClient
 from azure.ai.contentsafety.models import (
@@ -339,5 +340,4 @@ class AzureContentFilterScorer(FloatScaleScorer):
         image_serializer = data_serializer_factory(
             category="prompt-memory-entries", value=image_path, data_type="image_path", extension=ext
         )
-        base64_encoded_data = await image_serializer.read_data_base64()
-        return base64_encoded_data
+        return await image_serializer.read_data_base64()
