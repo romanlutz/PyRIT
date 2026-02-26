@@ -11,7 +11,7 @@ which are class-based alternatives to initialization scripts.
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from pyrit.common.apply_defaults import get_global_default_values
@@ -32,7 +32,6 @@ class PyRITInitializer(ABC):
 
     def __init__(self) -> None:
         """Initialize the PyRIT initializer with no parameters."""
-        pass
 
     @property
     @abstractmethod
@@ -43,7 +42,6 @@ class PyRITInitializer(ABC):
         Returns:
             str: A clear, descriptive name for this initializer.
         """
-        pass
 
     @property
     def description(self) -> str:
@@ -100,7 +98,6 @@ class PyRITInitializer(ABC):
         calls to set_default_value() and set_global_variable() as needed.
         All initializers must implement this as an async method.
         """
-        pass
 
     def validate(self) -> None:
         """
@@ -163,7 +160,7 @@ class PyRITInitializer(ABC):
                         tracking_info["default_values"].append(class_param)
 
             # Track global variables that were added - just collect the variable names
-            for name in new_main_dict.keys():
+            for name in new_main_dict:
                 if name not in current_main_dict and name not in tracking_info["global_variables"]:
                     tracking_info["global_variables"].append(name)
 
@@ -232,12 +229,13 @@ class PyRITInitializer(ABC):
 
             current_main_keys = set(sys.modules["__main__"].__dict__.keys())
             for var_name in list(current_main_keys):
-                if var_name in temp_backup_globals or var_name in original_main_keys:
-                    if var_name in sys.modules["__main__"].__dict__ and not var_name.startswith("_"):
-                        try:
-                            del sys.modules["__main__"].__dict__[var_name]
-                        except KeyError:
-                            pass
+                if (
+                    (var_name in temp_backup_globals or var_name in original_main_keys)
+                    and var_name in sys.modules["__main__"].__dict__
+                    and not var_name.startswith("_")
+                ):
+                    with suppress(KeyError):
+                        del sys.modules["__main__"].__dict__[var_name]
 
             # Then restore what was there originally
             for scope_key, value in temp_backup_defaults.items():
