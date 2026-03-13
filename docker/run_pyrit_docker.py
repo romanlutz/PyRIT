@@ -29,6 +29,7 @@ def run_container(mode, tag="latest"):
     pyrit_config_dir = Path.home() / ".pyrit"
     env_file = pyrit_config_dir / ".env"
     env_local_file = pyrit_config_dir / ".env.local"
+    pyrit_conf_file = pyrit_config_dir / ".pyrit_conf"
 
     print("🐳 PyRIT Docker Runner")
     print("=" * 60)
@@ -88,6 +89,11 @@ def run_container(mode, tag="latest"):
     if env_local_file.exists():
         print(f"   Found .env.local - including it")
         cmd.extend(["-v", f"{env_local_file}:/home/vscode/.pyrit/.env.local:ro"])
+
+    # Add .pyrit_conf if it exists (sets operator, operation, initializers)
+    if pyrit_conf_file.exists():
+        print(f"   Found .pyrit_conf - including it")
+        cmd.extend(["-v", f"{pyrit_conf_file}:/home/vscode/.pyrit/.pyrit_conf:ro"])
 
     cmd.append(f"pyrit:{tag}")
 

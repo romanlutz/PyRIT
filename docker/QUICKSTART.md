@@ -4,8 +4,29 @@ Docker container for PyRIT with support for both **Jupyter Notebook** and **GUI*
 
 ## Prerequisites
 - Docker installed and running
-- `.env` file at `~/.pyrit/.env` with API keys
-- Optionally, `~/.pyrit/.env.local` for additional environment variables
+- `~/.pyrit/.env` with your API keys and Azure service principal credentials
+- `~/.pyrit/.pyrit_conf` with your configuration (operator, operation, initializers)
+- Optionally, `~/.pyrit/.env.local` for additional environment overrides
+
+## Azure Authentication in Docker
+
+Inside a container there is no interactive `az login`. Instead, use a
+**service principal** by adding these variables to your `~/.pyrit/.env`:
+
+```bash
+AZURE_TENANT_ID=<your-tenant-id>
+AZURE_CLIENT_ID=<your-client-id>
+AZURE_CLIENT_SECRET=<your-client-secret>
+```
+
+The Azure SDK's `DefaultAzureCredential` picks these up automatically via
+`EnvironmentCredential` and refreshes tokens without any manual intervention.
+
+To create a service principal:
+```bash
+az ad sp create-for-rbac --name pyrit-docker --role "Cognitive Services OpenAI User" \
+    --scopes /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<account>
+```
 
 ## Quick Start
 
@@ -40,6 +61,11 @@ GUI mode (port 8000):
 ```bash
 python docker/run_pyrit_docker.py gui
 ```
+
+The run script automatically mounts these files from `~/.pyrit/`:
+- `.env` — API keys and service principal credentials (required)
+- `.env.local` — Additional environment overrides (optional)
+- `.pyrit_conf` — PyRIT configuration: operator, operation, initializers (optional)
 
 ## Image Tags
 
@@ -76,6 +102,9 @@ docker-compose --profile gui up
 **Image not found**: Run `python docker/build_pyrit_docker.py --source local` first
 
 **.env missing**: Create `.env` file at `~/.pyrit/.env` with your API keys
+
+**Azure auth fails in container**: Add `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and
+`AZURE_CLIENT_SECRET` to your `.env` file (see Azure Authentication section above)
 
 **GUI frontend missing**: Build with `--source local` (PyPI builds before GUI release won't work)
 
