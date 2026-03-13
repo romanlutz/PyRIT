@@ -50,6 +50,7 @@ services:
       - ~/.pyrit/.env:/home/vscode/.pyrit/.env:ro
       - ~/.pyrit/.env.local:/home/vscode/.pyrit/.env.local:ro
       - ~/.pyrit/.pyrit_conf:/home/vscode/.pyrit/.pyrit_conf:ro
+      - ~/.azure:/home/vscode/.azure
     environment:
       - PYRIT_MODE=gui
     restart: unless-stopped

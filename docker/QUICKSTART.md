@@ -10,8 +10,19 @@ Docker container for PyRIT with support for both **Jupyter Notebook** and **GUI*
 
 ## Azure Authentication in Docker
 
-Inside a container there is no interactive `az login`. Instead, use a
-**service principal** by adding these variables to your `~/.pyrit/.env`:
+`DefaultAzureCredential` is used automatically. The method depends on
+where the container runs:
+
+### Azure infrastructure (AKS, ACI, Azure VM)
+
+Managed identity works out of the box — no configuration needed.
+Assign the managed identity the **Cognitive Services OpenAI User** role
+on your Azure OpenAI resources.
+
+### Local Docker Desktop
+
+Managed identity is not available locally. Use a **service principal**
+by adding these variables to your `~/.pyrit/.env`:
 
 ```bash
 AZURE_TENANT_ID=<your-tenant-id>
@@ -19,8 +30,8 @@ AZURE_CLIENT_ID=<your-client-id>
 AZURE_CLIENT_SECRET=<your-client-secret>
 ```
 
-The Azure SDK's `DefaultAzureCredential` picks these up automatically via
-`EnvironmentCredential` and refreshes tokens without any manual intervention.
+The Azure SDK picks these up automatically and refreshes tokens
+without any manual intervention.
 
 To create a service principal:
 ```bash

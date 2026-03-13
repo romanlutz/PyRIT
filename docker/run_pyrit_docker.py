@@ -71,10 +71,12 @@ def run_container(mode, tag="latest"):
 
     # Build docker run command
     # Mount env files to ~/.pyrit/ where PyRIT expects them
+    # Use -it for interactive mode (needed for az login device code prompt)
     cmd = [
         "docker",
         "run",
         "--rm",
+        "-it",
         "--name",
         container_name,
         "-p",
@@ -94,6 +96,12 @@ def run_container(mode, tag="latest"):
     if pyrit_conf_file.exists():
         print(f"   Found .pyrit_conf - including it")
         cmd.extend(["-v", f"{pyrit_conf_file}:/home/vscode/.pyrit/.pyrit_conf:ro"])
+
+    # Mount Azure CLI config so 'az login' tokens persist across container restarts
+    azure_dir = Path.home() / ".azure"
+    if azure_dir.exists():
+        print(f"   Found .azure/ - mounting for Azure CLI auth")
+        cmd.extend(["-v", f"{azure_dir}:/home/vscode/.azure"])
 
     cmd.append(f"pyrit:{tag}")
 
