@@ -1,147 +1,14 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle, KeyboardEvent } from 'react'
 import {
-  makeStyles,
   Button,
-  tokens,
   Caption1,
   Tooltip,
   Text,
+  tokens,
 } from '@fluentui/react-components'
 import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular } from '@fluentui/react-icons'
 import { MessageAttachment, TargetInstance } from '../../types'
-
-const useStyles = makeStyles({
-  root: {
-    padding: `${tokens.spacingVerticalXL} ${tokens.spacingHorizontalXXL}`,
-    backgroundColor: tokens.colorNeutralBackground2,
-  },
-  inputContainer: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalM,
-    maxWidth: '900px',
-    margin: '0 auto',
-  },
-  attachmentsContainer: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: tokens.spacingHorizontalS,
-    paddingLeft: tokens.spacingHorizontalL,
-    paddingRight: tokens.spacingHorizontalL,
-    paddingTop: tokens.spacingVerticalS,
-  },
-  attachmentChip: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: tokens.spacingHorizontalXXS,
-    padding: `${tokens.spacingVerticalXXS} ${tokens.spacingHorizontalS}`,
-    backgroundColor: tokens.colorNeutralBackground4,
-    borderRadius: tokens.borderRadiusLarge,
-  },
-  inputWrapper: {
-    position: 'relative',
-    display: 'flex',
-    flexDirection: 'column',
-    backgroundColor: tokens.colorNeutralBackground3,
-    borderRadius: '28px',
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-    transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-    ':focus-within': {
-      borderTopColor: tokens.colorBrandStroke1,
-      borderRightColor: tokens.colorBrandStroke1,
-      borderBottomColor: tokens.colorBrandStroke1,
-      borderLeftColor: tokens.colorBrandStroke1,
-      boxShadow: `0 0 0 2px ${tokens.colorBrandBackground2}`,
-    },
-  },
-  inputRow: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalL}`,
-  },
-  textInput: {
-    flex: 1,
-    backgroundColor: 'transparent',
-    border: 'none',
-    outline: 'none',
-    fontSize: tokens.fontSizeBase300,
-    fontFamily: tokens.fontFamilyBase,
-    color: tokens.colorNeutralForeground1,
-    resize: 'none',
-    minHeight: '24px',
-    maxHeight: '96px',
-    overflowY: 'auto',
-    '::placeholder': {
-      color: tokens.colorNeutralForeground4,
-    },
-    '::-webkit-scrollbar': {
-      width: '8px',
-    },
-    '::-webkit-scrollbar-track': {
-      backgroundColor: 'transparent',
-    },
-    '::-webkit-scrollbar-thumb': {
-      backgroundColor: tokens.colorNeutralStroke1,
-      borderRadius: '4px',
-    },
-  },
-  iconButtonsLeft: {
-    display: 'flex',
-    gap: tokens.spacingHorizontalXS,
-    marginRight: tokens.spacingHorizontalS,
-  },
-  iconButtonsRight: {
-    display: 'flex',
-    gap: tokens.spacingHorizontalXS,
-    marginLeft: tokens.spacingHorizontalS,
-  },
-  iconButton: {
-    minWidth: '32px',
-    width: '32px',
-    height: '32px',
-    padding: 0,
-    borderRadius: '50%',
-  },
-  sendButton: {
-    minWidth: '32px',
-    width: '32px',
-    height: '32px',
-    padding: 0,
-    borderRadius: '50%',
-  },
-  singleTurnWarning: {
-    display: 'flex',
-    alignItems: 'center',
-    color: tokens.colorPaletteYellowForeground2,
-  },
-  singleTurnBanner: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: tokens.spacingHorizontalM,
-    padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalL}`,
-    backgroundColor: tokens.colorNeutralBackground3,
-    borderRadius: '28px',
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
-  },
-  singleTurnText: {
-    color: tokens.colorNeutralForeground2,
-  },
-  noTargetBanner: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: tokens.spacingHorizontalM,
-    padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalL}`,
-    backgroundColor: tokens.colorPaletteRedBackground1,
-    borderRadius: '28px',
-    border: `1px solid ${tokens.colorPaletteRedBorder1}`,
-  },
-  noTargetText: {
-    color: tokens.colorPaletteRedForeground1,
-    fontWeight: tokens.fontWeightSemibold as unknown as string,
-  },
-})
+import { useChatInputAreaStyles } from './ChatInputArea.styles'
 
 // ---------------------------------------------------------------------------
 // Banner sub-components
@@ -277,10 +144,12 @@ interface ChatInputAreaProps {
   attackOperator?: string
   noTargetSelected?: boolean
   onConfigureTarget?: () => void
+  onToggleConverterPanel?: () => void
+  isConverterPanelOpen?: boolean
 }
 
-const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget }, ref) {
-  const styles = useStyles()
+const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget, onToggleConverterPanel, isConverterPanelOpen = false }, ref) {
+  const styles = useChatInputAreaStyles()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -446,6 +315,15 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
               disabled={disabled}
               title="Attach files"
             />
+            <Button
+              className={styles.convertButton}
+              appearance={isConverterPanelOpen ? 'primary' : 'subtle'}
+              onClick={onToggleConverterPanel}
+              disabled={disabled || !onToggleConverterPanel}
+              data-testid="toggle-converter-panel-btn"
+            >
+              Convert
+            </Button>
             </div>
           <textarea
             ref={textareaRef}
