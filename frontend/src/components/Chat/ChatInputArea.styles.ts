@@ -135,16 +135,19 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorPaletteRedForeground1,
     fontWeight: tokens.fontWeightSemibold as unknown as string,
   },
-  conversionBar: {
+  conversionBarBottom: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalL}`,
+    borderTop: `1px solid ${tokens.colorNeutralStroke1}`,
+    backgroundColor: tokens.colorNeutralBackground4,
+    overflow: 'hidden',
+  },
+  conversionBarHeader: {
     display: 'flex',
     alignItems: 'center',
-    gap: tokens.spacingHorizontalS,
-    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalL}`,
-    borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
-    backgroundColor: tokens.colorNeutralBackground4,
-    borderTopLeftRadius: '28px',
-    borderTopRightRadius: '28px',
-    overflow: 'hidden',
+    justifyContent: 'space-between',
   },
   conversionLabel: {
     display: 'flex',
@@ -157,8 +160,11 @@ export const useChatInputAreaStyles = makeStyles({
   conversionText: {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
     minWidth: 0,
+    maxHeight: '60px',
+    overflowY: 'auto',
   },
   originalBadge: {
     display: 'inline-block',
