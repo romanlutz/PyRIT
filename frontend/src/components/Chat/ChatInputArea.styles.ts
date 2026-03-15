@@ -93,9 +93,6 @@ export const useChatInputAreaStyles = makeStyles({
     padding: 0,
     borderRadius: '50%',
   },
-  convertButton: {
-    flexShrink: 0,
-  },
   sendButton: {
     minWidth: '32px',
     width: '32px',
@@ -137,17 +134,13 @@ export const useChatInputAreaStyles = makeStyles({
   },
   conversionBarBottom: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXXS,
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalXS,
     padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalL}`,
+    paddingLeft: `calc(${tokens.spacingHorizontalL} + 32px + ${tokens.spacingHorizontalXS} + 32px + ${tokens.spacingHorizontalS})`,
     borderTop: `1px solid ${tokens.colorNeutralStroke1}`,
     backgroundColor: tokens.colorNeutralBackground4,
     overflow: 'hidden',
-  },
-  conversionBarHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
   },
   conversionLabel: {
     display: 'flex',
@@ -160,15 +153,14 @@ export const useChatInputAreaStyles = makeStyles({
   conversionText: {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
+    whiteSpace: 'nowrap',
     minWidth: 0,
-    maxHeight: '60px',
-    overflowY: 'auto',
+    flex: 1,
   },
   originalBadge: {
     display: 'inline-block',
     padding: `0 ${tokens.spacingHorizontalXS}`,
+    marginRight: tokens.spacingHorizontalXS,
     borderRadius: tokens.borderRadiusSmall,
     backgroundColor: tokens.colorPaletteBlueBackground2,
     color: tokens.colorPaletteBlueForeground2,
