@@ -17,7 +17,8 @@ from fastapi.staticfiles import StaticFiles
 
 import pyrit
 from pyrit.backend.middleware import RequestIdMiddleware, register_error_handlers
-from pyrit.backend.routes import attacks, converters, health, labels, media, targets, version
+from pyrit.backend.middleware.auth import EntraAuthMiddleware
+from pyrit.backend.routes import attacks, auth, converters, health, labels, media, targets, version
 from pyrit.memory import CentralMemory
 
 # Check for development mode from environment variable
@@ -55,6 +56,10 @@ register_error_handlers(app)
 # Attach X-Request-ID to every request/response for log correlation
 app.add_middleware(RequestIdMiddleware)
 
+# Entra ID JWT validation (PKCE — no client secrets needed)
+# Disabled automatically if ENTRA_TENANT_ID / ENTRA_CLIENT_ID are not set
+app.add_middleware(EntraAuthMiddleware)
+
 
 # Configure CORS
 _default_origins = "http://localhost:3000,http://localhost:5173"
@@ -75,6 +80,7 @@ app.include_router(targets.router, prefix="/api", tags=["targets"])
 app.include_router(converters.router, prefix="/api", tags=["converters"])
 app.include_router(labels.router, prefix="/api", tags=["labels"])
 app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(media.router, prefix="/api", tags=["media"])
 app.include_router(version.router, tags=["version"])
 

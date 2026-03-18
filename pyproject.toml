@@ -47,6 +47,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "pillow>=12.1.1",
     "pydantic>=2.11.5",
+    "PyJWT[crypto]>=2.8.0",
     "pyodbc>=5.1.0",
     "pypdf>=6.7.5",
     "python-docx>=1.1.0",
