@@ -25,6 +25,10 @@ from pyrit.datasets.seed_datasets.remote.cbt_bench_dataset import (
 from pyrit.datasets.seed_datasets.remote.ccp_sensitive_prompts_dataset import (
     _CCPSensitivePromptsDataset,
 )  # noqa: F401
+from pyrit.datasets.seed_datasets.remote.comic_jailbreak_dataset import (
+    COMIC_JAILBREAK_TEMPLATES,
+    _ComicJailbreakDataset,
+)  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.darkbench_dataset import (
     _DarkBenchDataset,
 )  # noqa: F401
@@ -117,6 +121,8 @@ __all__ = [
     "_BeaverTailsDataset",
     "_CBTBenchDataset",
     "_CCPSensitivePromptsDataset",
+    "_ComicJailbreakDataset",
+    "COMIC_JAILBREAK_TEMPLATES",
     "_DarkBenchDataset",
     "_EquityMedQADataset",
     "_ForbiddenQuestionsDataset",

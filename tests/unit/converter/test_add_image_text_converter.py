@@ -16,6 +16,15 @@ def image_text_converter_sample_image():
     return "test.png"
 
 
+@pytest.fixture
+def large_sample_image():
+    img = Image.new("RGB", (1600, 800), color=(200, 200, 200))
+    img.save("test_large.png")
+    yield "test_large.png"
+    if os.path.exists("test_large.png"):
+        os.remove("test_large.png")
+
+
 def test_add_image_text_converter_initialization(image_text_converter_sample_image):
     converter = AddImageTextConverter(
         img_to_add=image_text_converter_sample_image,
@@ -131,3 +140,101 @@ async def test_add_image_text_converter_equal_to_add_text_image(
         os.remove(converted_text_image.output_text)
     if os.path.exists("test.png"):
         os.remove("test.png")
+
+
+# --- Bounding box feature tests ---
+
+
+def test_add_image_text_converter_invalid_bounding_box(image_text_converter_sample_image):
+    with pytest.raises(ValueError, match="bounding_box must have x2 > x1 and y2 > y1"):
+        AddImageTextConverter(
+            img_to_add=image_text_converter_sample_image,
+            bounding_box=(100, 100, 50, 200),
+        )
+    os.remove("test.png")
+
+
+def test_add_image_text_converter_bounding_box_renders_text(large_sample_image):
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        font_size=20,
+        bounding_box=(100, 100, 400, 300),
+    )
+    with Image.open(large_sample_image) as image:
+        pixels_before = list(image.get_flattened_data())
+    updated_image = converter._add_text_to_image("Hello World")
+    pixels_after = list(updated_image.get_flattened_data())
+    assert pixels_before != pixels_after
+
+
+def test_add_image_text_converter_bounding_box_with_center(large_sample_image):
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        font_size=20,
+        bounding_box=(100, 100, 500, 400),
+        center_text=True,
+    )
+    updated_image = converter._add_text_to_image("Centered Text")
+    assert updated_image is not None
+    assert updated_image.size == (1600, 800)
+
+
+def test_add_image_text_converter_bounding_box_with_rotation(large_sample_image):
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        font_size=20,
+        bounding_box=(100, 100, 500, 400),
+        rotation=10.0,
+        center_text=True,
+    )
+    updated_image = converter._add_text_to_image("Rotated Text")
+    assert updated_image is not None
+    assert updated_image.size == (1600, 800)
+
+
+def test_add_image_text_converter_auto_font_size(large_sample_image):
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        font_size=60,
+        min_font_size=10,
+        bounding_box=(100, 100, 300, 200),
+        auto_font_size=True,
+        center_text=True,
+    )
+    updated_image = converter._add_text_to_image(
+        "This is a long text that should auto-shrink to fit inside the small bounding box region"
+    )
+    assert updated_image is not None
+
+
+def test_add_image_text_converter_bounding_box_identifier(large_sample_image):
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        bounding_box=(100, 100, 400, 300),
+        rotation=10.0,
+        center_text=True,
+        auto_font_size=True,
+        min_font_size=8,
+    )
+    identifier = converter.get_identifier()
+    params = identifier.params
+    assert params["bounding_box"] == (100, 100, 400, 300)
+    assert params["rotation"] == 10.0
+    assert params["center_text"] is True
+    assert params["auto_font_size"] is True
+    assert params["min_font_size"] == 8
+
+
+@pytest.mark.asyncio
+async def test_add_image_text_converter_bounding_box_convert_async(large_sample_image, patch_central_database) -> None:
+    converter = AddImageTextConverter(
+        img_to_add=large_sample_image,
+        font_size=30,
+        bounding_box=(100, 100, 500, 400),
+        center_text=True,
+        auto_font_size=True,
+    )
+    result = await converter.convert_async(prompt="Comic text in a box", input_type="text")
+    assert result.output_type == "image_path"
+    assert os.path.exists(result.output_text)
+    os.remove(result.output_text)
