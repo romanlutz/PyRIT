@@ -277,6 +277,30 @@ class TestCreateTarget:
         target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
         assert target_obj is not None
 
+    @pytest.mark.asyncio
+    async def test_create_target_model_name_not_overridden_by_env_var(self, sqlite_instance) -> None:
+        """Test that explicit model_name is not overridden by underlying_model env var."""
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"OPENAI_CHAT_UNDERLYING_MODEL": "gpt-4o"}):
+            service = TargetService()
+
+            request = CreateTargetRequest(
+                type="OpenAIChatTarget",
+                params={
+                    "model_name": "claude-sonnet-4-6",
+                    "endpoint": "https://test.openai.azure.com/",
+                    "api_key": "test-key",
+                },
+            )
+
+            result = await service.create_target_async(request=request)
+
+            assert result.deployment_name == "claude-sonnet-4-6"
+            # model_name in identifier should also be claude-sonnet-4-6, not gpt-4o
+            assert result.model_name == "claude-sonnet-4-6"
+
 
 class TestTargetServiceSingleton:
     """Tests for get_target_service singleton function."""

@@ -177,7 +177,7 @@ test.describe("Create Target Dialog", () => {
     await dialog.getByPlaceholder("https://your-resource.openai.azure.com/").fill("https://my-endpoint.openai.azure.com/");
 
     // Fill model name
-    await dialog.getByPlaceholder("e.g. gpt-4o, dall-e-3").fill("gpt-4o-test");
+    await dialog.getByPlaceholder("e.g. gpt-4o, my-deployment").fill("gpt-4o-test");
 
     // Click Create Target
     await dialog.getByRole("button", { name: "Create Target" }).click();

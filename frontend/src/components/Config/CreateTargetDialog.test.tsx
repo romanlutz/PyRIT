@@ -112,7 +112,7 @@ describe("CreateTargetDialog", () => {
     fireEvent.change(endpointInput, { target: { value: "https://api.openai.com" } });
 
     // Fill model name — use fireEvent.change for consistency (same reason as endpoint)
-    const modelInput = screen.getByPlaceholderText("e.g. gpt-4o, dall-e-3");
+    const modelInput = screen.getByPlaceholderText("e.g. gpt-4o, my-deployment");
     fireEvent.change(modelInput, { target: { value: "gpt-4" } });
 
     // Submit

@@ -124,10 +124,19 @@ class OpenAITarget(PromptTarget):
             env_var_name=self.endpoint_environment_variable, passed_value=endpoint
         )
 
-        # Get underlying_model from passed value or environment variable
-        underlying_model_value = default_values.get_non_required_value(
-            env_var_name=self.underlying_model_environment_variable, passed_value=underlying_model
-        )
+        # Get underlying_model from passed value or environment variable.
+        # Only fall back to the env var when model_name was also resolved from env vars
+        # (i.e., no explicit model_name was passed). This prevents the generic
+        # OPENAI_CHAT_UNDERLYING_MODEL env var from overriding an explicitly provided
+        # model_name for unrelated targets (e.g., deepseek, gemini, mistral).
+        if underlying_model is not None:
+            underlying_model_value = underlying_model
+        elif model_name is None:
+            underlying_model_value = default_values.get_non_required_value(
+                env_var_name=self.underlying_model_environment_variable, passed_value=None
+            )
+        else:
+            underlying_model_value = None
 
         # Initialize parent with endpoint and model_name
         PromptTarget.__init__(

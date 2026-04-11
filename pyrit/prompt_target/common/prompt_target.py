@@ -179,6 +179,7 @@ class PromptTarget(Identifiable):
         all_params: dict[str, Any] = {
             "endpoint": self._endpoint,
             "model_name": model_name,
+            "deployment_name": self._model_name or "",
             "max_requests_per_minute": self._max_requests_per_minute,
             "supports_multi_turn": self.capabilities.supports_multi_turn,
         }

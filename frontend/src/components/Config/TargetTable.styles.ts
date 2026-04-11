@@ -17,4 +17,8 @@ export const useTargetTableStyles = makeStyles({
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
+  paramsCell: {
+    whiteSpace: 'pre-line',
+    wordBreak: 'break-word',
+  },
 })
