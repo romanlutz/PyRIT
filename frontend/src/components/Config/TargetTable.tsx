@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   Table,
   TableHeader,
@@ -99,11 +99,13 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
   })
 
   // When active target changes, ensure its section is expanded
-  useMemo(() => {
-    if (activeGroup && !expandedSections.has(activeGroup)) {
-      setExpandedSections(prev => new Set([...prev, activeGroup]))
+  useEffect(() => {
+    if (activeGroup) {
+      setExpandedSections(prev => {
+        if (prev.has(activeGroup)) return prev
+        return new Set([...prev, activeGroup])
+      })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeGroup])
 
   const toggleSection = (typeName: string) => {

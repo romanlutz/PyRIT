@@ -5,7 +5,8 @@
 Tests for backend target service.
 """
 
-from unittest.mock import MagicMock
+import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -280,9 +281,6 @@ class TestCreateTarget:
     @pytest.mark.asyncio
     async def test_create_target_model_name_not_overridden_by_env_var(self, sqlite_instance) -> None:
         """Test that explicit model_name is not overridden by underlying_model env var."""
-        import os
-        from unittest.mock import patch
-
         with patch.dict(os.environ, {"OPENAI_CHAT_UNDERLYING_MODEL": "gpt-4o"}):
             service = TargetService()
 
