@@ -53,10 +53,9 @@ class TestScenarioIdentifier:
         assert si.pyrit_version == pyrit.__version__
 
 
+@patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize", side_effect=lambda x: x)
 class TestScenarioResult:
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_init_basic(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_init_basic(self, _mock_normalize):
         si = _make_scenario_identifier()
         target_id = _make_component_identifier_dict()
         scorer_id = _make_component_identifier_dict("TestScorer")
@@ -72,9 +71,7 @@ class TestScenarioResult:
         assert result.number_tries == 0
         assert isinstance(result.id, uuid.UUID)
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_init_with_explicit_id(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_init_with_explicit_id(self, _mock_normalize):
         si = _make_scenario_identifier()
         explicit_id = uuid.uuid4()
         result = ScenarioResult(
@@ -86,9 +83,7 @@ class TestScenarioResult:
         )
         assert result.id == explicit_id
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_get_strategies_used(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_get_strategies_used(self, _mock_normalize):
         si = _make_scenario_identifier()
         result = ScenarioResult(
             scenario_identifier=si,
@@ -99,9 +94,7 @@ class TestScenarioResult:
         strategies = result.get_strategies_used()
         assert sorted(strategies) == ["crescendo", "flip"]
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_get_objectives_all(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_get_objectives_all(self, _mock_normalize):
         ar1 = _make_attack_result(objective="obj1")
         ar2 = _make_attack_result(objective="obj2")
         ar3 = _make_attack_result(objective="obj1")
@@ -114,9 +107,7 @@ class TestScenarioResult:
         objectives = result.get_objectives()
         assert sorted(objectives) == ["obj1", "obj2"]
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_get_objectives_by_attack_name(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_get_objectives_by_attack_name(self, _mock_normalize):
         ar1 = _make_attack_result(objective="obj1")
         ar2 = _make_attack_result(objective="obj2")
         result = ScenarioResult(
@@ -128,9 +119,7 @@ class TestScenarioResult:
         assert result.get_objectives(atomic_attack_name="s1") == ["obj1"]
         assert result.get_objectives(atomic_attack_name="nonexistent") == []
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_objective_achieved_rate_all(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_objective_achieved_rate_all(self, _mock_normalize):
         results = [
             _make_attack_result(outcome=AttackOutcome.SUCCESS),
             _make_attack_result(outcome=AttackOutcome.FAILURE),
@@ -145,9 +134,7 @@ class TestScenarioResult:
         )
         assert sr.objective_achieved_rate() == 50
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_objective_achieved_rate_empty(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_objective_achieved_rate_empty(self, _mock_normalize):
         sr = ScenarioResult(
             scenario_identifier=_make_scenario_identifier(),
             objective_target_identifier={},
@@ -156,9 +143,7 @@ class TestScenarioResult:
         )
         assert sr.objective_achieved_rate() == 0
 
-    @patch("pyrit.identifiers.component_identifier.ComponentIdentifier.normalize")
-    def test_objective_achieved_rate_by_name(self, mock_normalize):
-        mock_normalize.side_effect = lambda x: x
+    def test_objective_achieved_rate_by_name(self, _mock_normalize):
         sr = ScenarioResult(
             scenario_identifier=_make_scenario_identifier(),
             objective_target_identifier={},
@@ -172,12 +157,12 @@ class TestScenarioResult:
         assert sr.objective_achieved_rate(atomic_attack_name="s2") == 0
         assert sr.objective_achieved_rate(atomic_attack_name="missing") == 0
 
-    def test_normalize_scenario_name_snake_case(self):
+    def test_normalize_scenario_name_snake_case(self, _mock_normalize):
         assert ScenarioResult.normalize_scenario_name("content_harms") == "ContentHarms"
         assert ScenarioResult.normalize_scenario_name("foundry") == "foundry"
 
-    def test_normalize_scenario_name_already_pascal(self):
+    def test_normalize_scenario_name_already_pascal(self, _mock_normalize):
         assert ScenarioResult.normalize_scenario_name("ContentHarms") == "ContentHarms"
 
-    def test_normalize_scenario_name_mixed_case_with_underscore(self):
+    def test_normalize_scenario_name_mixed_case_with_underscore(self, _mock_normalize):
         assert ScenarioResult.normalize_scenario_name("Content_harms") == "Content_harms"

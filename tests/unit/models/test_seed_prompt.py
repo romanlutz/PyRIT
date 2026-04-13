@@ -41,25 +41,19 @@ def test_seed_prompt_infers_text_data_type():
     assert sp.data_type == "text"
 
 
+@pytest.mark.parametrize(
+    "extension, expected_type",
+    [
+        (".mp4", "video_path"),
+        (".wav", "audio_path"),
+        (".png", "image_path"),
+    ],
+)
 @patch("os.path.isfile", return_value=True)
-@patch("os.path.splitext", return_value=("/path/file", ".mp4"))
-def test_seed_prompt_infers_video_data_type(mock_splitext, mock_isfile):
-    sp = SeedPrompt(value="/path/file.mp4")
-    assert sp.data_type == "video_path"
-
-
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.splitext", return_value=("/path/file", ".wav"))
-def test_seed_prompt_infers_audio_data_type(mock_splitext, mock_isfile):
-    sp = SeedPrompt(value="/path/file.wav")
-    assert sp.data_type == "audio_path"
-
-
-@patch("os.path.isfile", return_value=True)
-@patch("os.path.splitext", return_value=("/path/file", ".png"))
-def test_seed_prompt_infers_image_data_type(mock_splitext, mock_isfile):
-    sp = SeedPrompt(value="/path/file.png")
-    assert sp.data_type == "image_path"
+def test_seed_prompt_infers_data_type_from_extension(mock_isfile, extension, expected_type):
+    with patch("os.path.splitext", return_value=("/path/file", extension)):
+        sp = SeedPrompt(value=f"/path/file{extension}")
+        assert sp.data_type == expected_type
 
 
 @patch("os.path.isfile", return_value=True)

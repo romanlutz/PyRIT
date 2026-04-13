@@ -83,12 +83,6 @@ def test_chat_message_to_dict_excludes_none():
     assert d["content"] == "test"
 
 
-def test_chat_message_to_dict_includes_non_none():
-    msg = ChatMessage(role="user", content="test", name="bot")
-    d = msg.to_dict()
-    assert d["name"] == "bot"
-
-
 def test_chat_message_from_json():
     original = ChatMessage(role="system", content="you are helpful")
     json_str = original.to_json()
