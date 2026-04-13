@@ -57,7 +57,6 @@ class OpenAITarget(PromptTarget):
     model_name_environment_variable: str
     endpoint_environment_variable: str
     api_key_environment_variable: str
-    underlying_model_environment_variable: str
 
     _async_client: Optional[AsyncOpenAI] = None
 
@@ -96,8 +95,7 @@ class OpenAITarget(PromptTarget):
                 `httpx.AsyncClient()` constructor.
             underlying_model (str, Optional): The underlying model name (e.g., "gpt-4o") used solely for
                 target identifier purposes. This is useful when the deployment name in Azure differs
-                from the actual model. If not provided, will attempt to fetch from environment variable.
-                If it is not there either, the identifier "model_name" attribute will use the model_name.
+                from the actual model. If not provided, the identifier will use the model_name.
                 Defaults to None.
             custom_capabilities (TargetCapabilities, Optional): Override the default capabilities for
                 this target instance. If None, uses the class-level defaults. Defaults to None.
@@ -125,15 +123,12 @@ class OpenAITarget(PromptTarget):
         )
 
         # Initialize parent with endpoint and model_name
-        # Pass underlying_model_env_var so PromptTarget can resolve it centrally
         PromptTarget.__init__(
             self,
             max_requests_per_minute=max_requests_per_minute,
             endpoint=endpoint_value,
             model_name=self._model_name,
             underlying_model=underlying_model,
-            underlying_model_env_var=self.underlying_model_environment_variable,
-            model_name_was_explicit=model_name is not None,
             custom_capabilities=custom_capabilities,
         )
 

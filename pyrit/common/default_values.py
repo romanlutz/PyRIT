@@ -59,27 +59,3 @@ def get_non_required_value(*, env_var_name: str, passed_value: Optional[str] = N
         return value
 
     return ""
-
-
-def resolve_underlying_model(
-    *,
-    underlying_model: Optional[str],
-    underlying_model_env_var: str,
-    model_name_was_explicit: bool,
-) -> Optional[str]:
-    """
-    Resolve the underlying model name.
-
-    Returns the explicitly passed underlying_model if provided,
-    otherwise None. The model_name is always the source of truth
-    for display/identity unless explicitly overridden.
-
-    Args:
-        underlying_model: Explicit underlying model value (from constructor param).
-        underlying_model_env_var: Env var name (reserved for future use, currently unused).
-        model_name_was_explicit: Whether model_name was passed directly (currently unused).
-
-    Returns:
-        The underlying model name if explicitly provided, otherwise None.
-    """
-    return underlying_model
