@@ -520,7 +520,7 @@ export default function ChatWindow({
                 <Tooltip content={activeTarget.target_registry_name} relationship="label">
                   <Badge appearance="outline" size="medium">
                     {activeTarget.target_type}
-                    {activeTarget.deployment_name ? ` (${activeTarget.deployment_name})` : activeTarget.model_name ? ` (${activeTarget.model_name})` : ''}
+                    {activeTarget.model_name ? ` (${activeTarget.model_name})` : ''}
                   </Badge>
                 </Tooltip>
               </div>

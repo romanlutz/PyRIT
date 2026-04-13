@@ -175,12 +175,10 @@ class PromptTarget(Identifiable):
         Returns:
             ComponentIdentifier: The identifier for this prompt target.
         """
-        model_name = self._underlying_model or self._model_name or ""
-
         all_params: dict[str, Any] = {
             "endpoint": self._endpoint,
-            "model_name": model_name,
-            "deployment_name": self._model_name or "",
+            "model_name": self._model_name or "",
+            "underlying_model_name": self._underlying_model or "",
             "max_requests_per_minute": self._max_requests_per_minute,
             "supports_multi_turn": self.capabilities.supports_multi_turn,
         }

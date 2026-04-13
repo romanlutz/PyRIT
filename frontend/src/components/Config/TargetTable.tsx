@@ -41,15 +41,15 @@ function formatParams(params?: Record<string, unknown> | null): string {
 
 /** Render the model cell with a tooltip when underlying model differs. */
 function ModelCell({ target }: { target: TargetInstance }) {
-  const displayName = target.deployment_name || target.model_name || '—'
-  const hasUnderlying = target.model_name
-    && target.deployment_name
-    && target.model_name !== target.deployment_name
+  const displayName = target.model_name || '—'
+  const hasUnderlying = target.underlying_model_name
+    && target.model_name
+    && target.underlying_model_name !== target.model_name
 
   if (hasUnderlying) {
     return (
       <Tooltip
-        content={`Underlying model: ${target.model_name} (deployment name differs from actual model)`}
+        content={`Underlying model: ${target.underlying_model_name}`}
         relationship="description"
       >
         <Text size={200} style={{ textDecoration: 'underline dotted', cursor: 'help' }}>

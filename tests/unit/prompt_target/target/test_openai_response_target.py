@@ -1302,4 +1302,4 @@ def test_get_identifier_ignores_underlying_model_env_var_when_model_name_explici
 
         # model_name was explicit, so underlying_model env var should be ignored
         assert identifier.params["model_name"] == "gpt-4.1"
-        assert identifier.params["deployment_name"] == "gpt-4.1"
+        assert identifier.params["underlying_model_name"] == ""

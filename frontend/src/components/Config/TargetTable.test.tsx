@@ -17,21 +17,18 @@ const sampleTargets: TargetInstance[] = [
     target_type: 'OpenAIChatTarget',
     endpoint: 'https://api.openai.com',
     model_name: 'gpt-4',
-    deployment_name: 'gpt-4',
   },
   {
     target_registry_name: 'azure_image_dalle',
     target_type: 'AzureImageTarget',
     endpoint: 'https://azure.openai.com',
     model_name: 'dall-e-3',
-    deployment_name: 'dall-e-3',
   },
   {
     target_registry_name: 'text_target_basic',
     target_type: 'TextTarget',
     endpoint: null,
     model_name: null,
-    deployment_name: null,
   },
 ]
 
@@ -188,8 +185,8 @@ describe('TargetTable', () => {
         target_registry_name: 'azure_deployment',
         target_type: 'OpenAIChatTarget',
         endpoint: 'https://azure.openai.com',
-        model_name: 'gpt-4o',
-        deployment_name: 'my-gpt4o-deployment',
+        model_name: 'my-gpt4o-deployment',
+        underlying_model_name: 'gpt-4o',
       },
     ]
 
