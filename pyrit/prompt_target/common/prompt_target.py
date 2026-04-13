@@ -5,6 +5,7 @@ import abc
 import logging
 from typing import Any, Optional, Union
 
+from pyrit.common import default_values
 from pyrit.identifiers import ComponentIdentifier, Identifiable
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import Message
@@ -47,6 +48,8 @@ class PromptTarget(Identifiable):
         endpoint: str = "",
         model_name: str = "",
         underlying_model: Optional[str] = None,
+        underlying_model_env_var: Optional[str] = None,
+        model_name_was_explicit: bool = True,
         custom_capabilities: Optional[TargetCapabilities] = None,
     ) -> None:
         """
@@ -59,8 +62,13 @@ class PromptTarget(Identifiable):
             model_name (str): The model name. Defaults to empty string.
             underlying_model (str, Optional): The underlying model name (e.g., "gpt-4o") for
                 identification purposes. This is useful when the deployment name in Azure differs
-                from the actual model. If not provided, `model_name` will be used for the identifier.
+                from the actual model. If not provided, may be resolved from ``underlying_model_env_var``.
                 Defaults to None.
+            underlying_model_env_var (str, Optional): Environment variable name for the underlying
+                model. Used as a fallback only when ``model_name`` was also resolved from env vars
+                (not explicitly passed). Defaults to None.
+            model_name_was_explicit (bool): Whether model_name was passed directly (not from env).
+                Controls whether underlying_model_env_var is consulted. Defaults to True.
             custom_capabilities (TargetCapabilities, Optional): Override the default capabilities for
                 this target instance. Useful for targets whose capabilities depend on deployment
                 configuration (e.g., Playwright, HTTP). If None, uses the class-level
@@ -71,11 +79,21 @@ class PromptTarget(Identifiable):
         self._max_requests_per_minute = max_requests_per_minute
         self._endpoint = endpoint
         self._model_name = model_name
-        self._underlying_model = underlying_model
+
+        # Resolve underlying_model using the centralized policy
+        if underlying_model_env_var and underlying_model is None:
+            self._underlying_model = default_values.resolve_underlying_model(
+                underlying_model=underlying_model,
+                underlying_model_env_var=underlying_model_env_var,
+                model_name_was_explicit=model_name_was_explicit,
+            )
+        else:
+            self._underlying_model = underlying_model
+
         self._capabilities = (
             custom_capabilities
             if custom_capabilities is not None
-            else type(self).get_default_capabilities(underlying_model)
+            else type(self).get_default_capabilities(self._underlying_model)
         )
 
         if self._verbose:

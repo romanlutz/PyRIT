@@ -124,19 +124,16 @@ class OpenAITarget(PromptTarget):
             env_var_name=self.endpoint_environment_variable, passed_value=endpoint
         )
 
-        underlying_model_value = default_values.resolve_underlying_model(
-            underlying_model=underlying_model,
-            underlying_model_env_var=self.underlying_model_environment_variable,
-            model_name_was_explicit=model_name is not None,
-        )
-
         # Initialize parent with endpoint and model_name
+        # Pass underlying_model_env_var so PromptTarget can resolve it centrally
         PromptTarget.__init__(
             self,
             max_requests_per_minute=max_requests_per_minute,
             endpoint=endpoint_value,
             model_name=self._model_name,
-            underlying_model=underlying_model_value,
+            underlying_model=underlying_model,
+            underlying_model_env_var=self.underlying_model_environment_variable,
+            model_name_was_explicit=model_name is not None,
             custom_capabilities=custom_capabilities,
         )
 
