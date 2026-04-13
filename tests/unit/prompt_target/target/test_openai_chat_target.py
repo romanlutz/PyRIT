@@ -1114,11 +1114,9 @@ def test_get_identifier_uses_underlying_model_when_provided_as_param(patch_centr
     assert identifier.class_name == "OpenAIChatTarget"
 
 
-def test_get_identifier_uses_underlying_model_from_env_var(patch_central_database):
-    """Test that get_identifier uses underlying_model env var only when model_name is NOT explicitly passed."""
+def test_get_identifier_ignores_underlying_model_env_var_even_when_model_from_env(patch_central_database):
+    """Test that underlying_model env var is never used — model_name is always the truth."""
     with patch.dict(os.environ, {"OPENAI_CHAT_UNDERLYING_MODEL": "gpt-4o", "OPENAI_CHAT_MODEL": "my-deployment"}):
-        # When model_name is resolved from env var (not passed explicitly),
-        # underlying_model env var should be used
         target = OpenAIChatTarget(
             endpoint="https://mock.azure.com/",
             api_key="mock-api-key",
@@ -1126,7 +1124,8 @@ def test_get_identifier_uses_underlying_model_from_env_var(patch_central_databas
 
         identifier = target.get_identifier()
 
-        assert identifier.params["model_name"] == "gpt-4o"
+        # underlying_model env var is ignored; model_name from OPENAI_CHAT_MODEL is used
+        assert identifier.params["model_name"] == "my-deployment"
 
 
 def test_get_identifier_ignores_underlying_model_env_var_when_model_name_explicit(patch_central_database):

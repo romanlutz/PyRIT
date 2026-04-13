@@ -33,24 +33,14 @@ def test_resolve_underlying_model_explicit_value():
     assert result == "gpt-4o"
 
 
-def test_resolve_underlying_model_env_var_when_model_name_not_explicit():
+def test_resolve_underlying_model_returns_none_when_not_passed():
     os.environ["TEST_UNDERLYING"] = "gpt-4o-from-env"
     result = default_values.resolve_underlying_model(
         underlying_model=None,
         underlying_model_env_var="TEST_UNDERLYING",
         model_name_was_explicit=False,
     )
-    assert result == "gpt-4o-from-env"
-    del os.environ["TEST_UNDERLYING"]
-
-
-def test_resolve_underlying_model_ignores_env_var_when_model_name_explicit():
-    os.environ["TEST_UNDERLYING"] = "gpt-4o-from-env"
-    result = default_values.resolve_underlying_model(
-        underlying_model=None,
-        underlying_model_env_var="TEST_UNDERLYING",
-        model_name_was_explicit=True,
-    )
+    # env var is NOT consulted — only explicit underlying_model matters
     assert result is None
     del os.environ["TEST_UNDERLYING"]
 

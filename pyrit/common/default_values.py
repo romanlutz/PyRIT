@@ -68,26 +68,18 @@ def resolve_underlying_model(
     model_name_was_explicit: bool,
 ) -> Optional[str]:
     """
-    Resolve the underlying model name using a priority chain.
+    Resolve the underlying model name.
 
-    Policy:
-    1. If ``underlying_model`` is explicitly passed, use it.
-    2. If ``model_name`` was also resolved from env vars (not explicit),
-       fall back to the ``underlying_model_env_var``.
-    3. Otherwise return ``None`` — the caller's explicit ``model_name``
-       should not be overridden by an unrelated env var.
+    Returns the explicitly passed underlying_model if provided,
+    otherwise None. The model_name is always the source of truth
+    for display/identity unless explicitly overridden.
 
     Args:
         underlying_model: Explicit underlying model value (from constructor param).
-        underlying_model_env_var: Env var name to fall back to.
-        model_name_was_explicit: True if model_name was passed directly (not from env).
+        underlying_model_env_var: Env var name (reserved for future use, currently unused).
+        model_name_was_explicit: Whether model_name was passed directly (currently unused).
 
     Returns:
-        The resolved underlying model name, or None.
+        The underlying model name if explicitly provided, otherwise None.
     """
-    if underlying_model is not None:
-        return underlying_model
-    if not model_name_was_explicit:
-        value = os.environ.get(underlying_model_env_var)
-        return value if value else None
-    return None
+    return underlying_model
