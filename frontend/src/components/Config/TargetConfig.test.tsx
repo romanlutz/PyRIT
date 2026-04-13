@@ -97,8 +97,8 @@ describe("TargetConfig", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("OpenAIChatTarget")).toBeInTheDocument();
-      expect(screen.getByText("OpenAIImageTarget")).toBeInTheDocument();
+      expect(screen.getAllByText("OpenAIChatTarget").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("OpenAIImageTarget").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -159,11 +159,8 @@ describe("TargetConfig", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("OpenAIChatTarget")).toBeInTheDocument();
+      expect(screen.getAllByText("OpenAIChatTarget").length).toBeGreaterThanOrEqual(1);
     });
-
-    // Expand section to reveal Set Active buttons
-    await userEvent.click(screen.getByRole("button", { name: /OpenAIChatTarget/i }));
 
     const setActiveButtons = screen.getAllByText("Set Active");
     await userEvent.click(setActiveButtons[0]);
@@ -187,7 +184,7 @@ describe("TargetConfig", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Active")).toBeInTheDocument();
+      expect(screen.getAllByText("Active").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -204,7 +201,7 @@ describe("TargetConfig", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("OpenAIChatTarget")).toBeInTheDocument();
+      expect(screen.getAllByText("OpenAIChatTarget").length).toBeGreaterThanOrEqual(1);
     });
 
     expect(mockedTargetsApi.listTargets).toHaveBeenCalledTimes(1);
@@ -257,7 +254,7 @@ describe("TargetConfig", () => {
     await userEvent.click(screen.getByTestId("dialog-create"));
 
     await waitFor(() => {
-      expect(screen.getByText("OpenAIChatTarget")).toBeInTheDocument();
+      expect(screen.getAllByText("OpenAIChatTarget").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -274,13 +271,7 @@ describe("TargetConfig", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("OpenAIChatTarget")).toBeInTheDocument();
-    });
-
-    // Expand section to reveal target data
-    await userEvent.click(screen.getByRole("button", { name: /OpenAIChatTarget/i }));
-
-    await waitFor(() => {
+      expect(screen.getAllByText("OpenAIChatTarget").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("gpt-4")).toBeInTheDocument();
       expect(
         screen.getAllByText("https://api.openai.com").length
@@ -316,12 +307,7 @@ describe("TargetConfig", () => {
 
     await waitFor(() => {
       expect(screen.getByText("OpenAIResponseTarget")).toBeInTheDocument();
-    });
-
-    // Expand section to reveal params
-    await userEvent.click(screen.getByRole("button", { name: /OpenAIResponseTarget/i }));
-
-    await waitFor(() => {
+      // formatParams renders as "key: value, key: value"
       expect(screen.getByText(/reasoning_effort: high/)).toBeInTheDocument();
       expect(screen.getByText(/reasoning_summary: auto/)).toBeInTheDocument();
       expect(screen.getByText(/max_output_tokens: 4096/)).toBeInTheDocument();
@@ -352,9 +338,6 @@ describe("TargetConfig", () => {
     await waitFor(() => {
       expect(screen.getByText("TextTarget")).toBeInTheDocument();
     });
-
-    // Expand section
-    await userEvent.click(screen.getByRole("button", { name: /TextTarget/i }));
 
     // No reasoning or other special params should be displayed
     expect(screen.queryByText(/reasoning_effort/)).not.toBeInTheDocument();

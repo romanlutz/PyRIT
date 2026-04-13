@@ -130,9 +130,6 @@ async function activateMockTarget(page: Page) {
   await page.getByTitle("Configuration").click();
   await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
 
-  // Sections are collapsed by default — expand all to reveal Set Active buttons
-  await page.getByRole("button", { name: /expand all/i }).click();
-
   // Set the mock target active
   const setActiveBtn = page.getByRole("button", { name: /set active/i });
   await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
@@ -716,13 +713,9 @@ test.describe("Target type scenarios", () => {
 
     await page.goto("/");
     await page.getByTitle("Configuration").click();
-    await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
-
-    // Expand all sections to reveal targets
-    await page.getByRole("button", { name: /expand all/i }).click();
     await expect(page.getByText("dall-e-3")).toBeVisible({ timeout: 10000 });
 
-    // Activate the DALL-E target (second row across all expanded sections)
+    // Activate the DALL-E target (second row)
     const setActiveBtns = page.getByRole("button", { name: /set active/i });
     await setActiveBtns.nth(1).click();
 

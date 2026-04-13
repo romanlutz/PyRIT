@@ -156,8 +156,6 @@ async function createConversation(
 async function activateTarget(page: Page, targetType: string): Promise<void> {
   await page.getByTitle("Configuration").click();
   await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10_000 });
-  // Sections are collapsed by default — expand the target type's section
-  await page.getByRole("button", { name: new RegExp(targetType, "i") }).click();
   // The table displays target_type (not registry name), so match by type.
   // Use .first() because multiple targets of the same type may exist.
   const row = page.locator("tr", { has: page.getByText(targetType, { exact: true }) }).first();

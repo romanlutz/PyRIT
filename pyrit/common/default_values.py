@@ -59,3 +59,35 @@ def get_non_required_value(*, env_var_name: str, passed_value: Optional[str] = N
         return value
 
     return ""
+
+
+def resolve_underlying_model(
+    *,
+    underlying_model: Optional[str],
+    underlying_model_env_var: str,
+    model_name_was_explicit: bool,
+) -> Optional[str]:
+    """
+    Resolve the underlying model name using a priority chain.
+
+    Policy:
+    1. If ``underlying_model`` is explicitly passed, use it.
+    2. If ``model_name`` was also resolved from env vars (not explicit),
+       fall back to the ``underlying_model_env_var``.
+    3. Otherwise return ``None`` — the caller's explicit ``model_name``
+       should not be overridden by an unrelated env var.
+
+    Args:
+        underlying_model: Explicit underlying model value (from constructor param).
+        underlying_model_env_var: Env var name to fall back to.
+        model_name_was_explicit: True if model_name was passed directly (not from env).
+
+    Returns:
+        The resolved underlying model name, or None.
+    """
+    if underlying_model is not None:
+        return underlying_model
+    if not model_name_was_explicit:
+        value = os.environ.get(underlying_model_env_var)
+        return value if value else None
+    return None

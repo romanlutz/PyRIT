@@ -52,14 +52,11 @@ test.describe("Target Configuration Page", () => {
 
     await goToConfig(page);
 
-    // Section headings should appear (collapsed by default)
-    await expect(page.getByText("OpenAIChatTarget")).toBeVisible({ timeout: 10000 });
-    await expect(page.getByText("OpenAIImageTarget")).toBeVisible();
-
-    // Expand all to see target data
-    await page.getByRole("button", { name: /expand all/i }).click();
-    await expect(page.getByText("gpt-4o")).toBeVisible();
+    // Table should appear with both targets
+    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
     await expect(page.getByText("dall-e-3")).toBeVisible();
+    await expect(page.getByText("OpenAIChatTarget")).toBeVisible();
+    await expect(page.getByText("OpenAIImageTarget")).toBeVisible();
   });
 
   test("should show empty state when no targets exist", async ({ page }) => {
@@ -89,11 +86,9 @@ test.describe("Target Configuration Page", () => {
     });
 
     await goToConfig(page);
-    await expect(page.getByText("OpenAIChatTarget")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
 
-    // Expand section to reveal Set Active buttons
-    await page.getByRole("button", { name: /OpenAIChatTarget/i }).click();
-
+    // Both rows should have a "Set Active" button initially
     const setActiveBtns = page.getByRole("button", { name: /set active/i });
     await expect(setActiveBtns.first()).toBeVisible();
     await setActiveBtns.first().click();
@@ -128,16 +123,16 @@ test.describe("Target Configuration Page", () => {
     });
 
     await goToConfig(page);
-    // First load shows one section heading
-    await expect(page.getByText("OpenAIChatTarget")).toBeVisible({ timeout: 10000 });
-    await expect(page.getByText("OpenAIImageTarget")).not.toBeVisible();
+    // First load shows one target
+    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("dall-e-3")).not.toBeVisible();
 
     // Flip the flag and click refresh
     showExtra = true;
     await page.getByRole("button", { name: /refresh/i }).click();
 
-    // Second target type section should now appear
-    await expect(page.getByText("OpenAIImageTarget")).toBeVisible({ timeout: 10000 });
+    // Second target should now appear
+    await expect(page.getByText("dall-e-3")).toBeVisible({ timeout: 10000 });
   });
 });
 
@@ -230,10 +225,9 @@ test.describe("Target Config ↔ Chat Navigation", () => {
     });
 
     await goToConfig(page);
-    await expect(page.getByText("OpenAIChatTarget")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
 
-    // Expand section and set first target active
-    await page.getByRole("button", { name: /OpenAIChatTarget/i }).click();
+    // Set first target active
     await page.getByRole("button", { name: /set active/i }).first().click();
 
     // Navigate back to chat
@@ -254,10 +248,9 @@ test.describe("Target Config ↔ Chat Navigation", () => {
     await page.goto("/");
     await expect(page.getByTestId("no-target-banner")).toBeVisible();
 
-    // Go to config, expand section, set a target
+    // Go to config, set a target
     await page.getByTitle("Configuration").click();
-    await expect(page.getByText("OpenAIChatTarget")).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: /OpenAIChatTarget/i }).click();
+    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
     await page.getByRole("button", { name: /set active/i }).first().click();
 
     // Return to chat — send should be enabled when there's text

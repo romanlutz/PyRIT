@@ -28,7 +28,6 @@ test.describe("Accessibility", () => {
     // Navigate to config, set active, return to chat so input is enabled
     await page.getByTitle("Configuration").click();
     await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: /expand all/i }).click();
     const setActiveBtn = page.getByRole("button", { name: /set active/i });
     await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
     await setActiveBtn.click();
@@ -95,7 +94,6 @@ test.describe("Accessibility", () => {
     // Navigate to config, set active, return to chat so input is enabled
     await page.getByTitle("Configuration").click();
     await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: /expand all/i }).click();
     const setActiveBtn = page.getByRole("button", { name: /set active/i });
     await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
     await setActiveBtn.click();

@@ -171,8 +171,6 @@ async function activateMockTarget(page: Page) {
   await expect(page.getByText("Target Configuration")).toBeVisible({
     timeout: 10000,
   });
-  // Sections are collapsed by default — expand all to reveal Set Active buttons
-  await page.getByRole("button", { name: /expand all/i }).click();
   const setActiveBtn = page.getByRole("button", { name: /set active/i });
   await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
   await setActiveBtn.click();
