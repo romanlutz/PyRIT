@@ -299,6 +299,26 @@ class TestCreateTarget:
             # model_name in identifier should also be claude-sonnet-4-6, not gpt-4o
             assert result.model_name == "claude-sonnet-4-6"
 
+    @pytest.mark.asyncio
+    async def test_create_target_with_different_underlying_model(self, sqlite_instance) -> None:
+        """Test that explicit underlying_model is used when it differs from model_name."""
+        service = TargetService()
+
+        request = CreateTargetRequest(
+            type="OpenAIChatTarget",
+            params={
+                "model_name": "my-gpt4o-deployment",
+                "endpoint": "https://test.openai.azure.com/",
+                "api_key": "test-key",
+                "underlying_model": "gpt-4o",
+            },
+        )
+
+        result = await service.create_target_async(request=request)
+
+        assert result.deployment_name == "my-gpt4o-deployment"
+        assert result.model_name == "gpt-4o"
+
 
 class TestTargetServiceSingleton:
     """Tests for get_target_service singleton function."""

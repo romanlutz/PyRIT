@@ -11,7 +11,6 @@ import {
   Text,
   Tooltip,
   Select,
-  tokens,
 } from '@fluentui/react-components'
 import { CheckmarkRegular } from '@fluentui/react-icons'
 import type { TargetInstance } from '../../types'
@@ -83,16 +82,31 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
   return (
     <div className={styles.tableContainer}>
       {activeTarget && (
-        <div style={{ marginBottom: '12px', padding: '8px 12px', background: tokens.colorBrandBackground2, borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Badge appearance="filled" color="brand" icon={<CheckmarkRegular />}>Active</Badge>
-          <Badge appearance="outline">{activeTarget.target_type}</Badge>
-          <Text size={200} weight="semibold">
-            {activeTarget.deployment_name || activeTarget.model_name || '—'}
-          </Text>
-          <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
-            {activeTarget.endpoint || ''}
-          </Text>
-        </div>
+        <Table aria-label="Active target" className={styles.table} style={{ marginBottom: '12px' }}>
+          <TableBody>
+            <TableRow className={styles.activeRow}>
+              <TableCell style={{ width: '120px' }}>
+                <Badge appearance="filled" color="brand" icon={<CheckmarkRegular />}>Active</Badge>
+              </TableCell>
+              <TableCell style={{ width: '200px' }}>
+                <Badge appearance="outline">{activeTarget.target_type}</Badge>
+              </TableCell>
+              <TableCell style={{ width: '180px' }}>
+                <ModelCell target={activeTarget} />
+              </TableCell>
+              <TableCell style={{ minWidth: '300px' }}>
+                <Text size={200} className={styles.endpointCell} title={activeTarget.endpoint || undefined}>
+                  {activeTarget.endpoint || '—'}
+                </Text>
+              </TableCell>
+              <TableCell style={{ width: '200px' }}>
+                <Text size={200} className={styles.paramsCell}>
+                  {formatParams(activeTarget.target_specific_params) || '—'}
+                </Text>
+              </TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
       )}
 
       {targetTypes.length > 1 && (
