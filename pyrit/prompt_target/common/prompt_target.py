@@ -76,7 +76,7 @@ class PromptTarget(Identifiable):
         self._capabilities = (
             custom_capabilities
             if custom_capabilities is not None
-            else type(self).get_default_capabilities(self._underlying_model)
+            else type(self).get_default_capabilities(self._underlying_model or self._model_name or None)
         )
 
         if self._verbose:
