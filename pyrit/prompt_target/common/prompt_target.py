@@ -102,7 +102,7 @@ class PromptTarget(Identifiable):
         self._configuration = (
             custom_configuration
             if custom_configuration is not None
-            else type(self).get_default_configuration(self._underlying_model or self._model_name or None)
+            else type(self).get_default_configuration(self._underlying_model)
         )
 
         if self._verbose:
