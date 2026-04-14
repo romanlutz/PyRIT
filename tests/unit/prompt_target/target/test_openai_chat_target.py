@@ -35,6 +35,7 @@ from pyrit.prompt_target import (
     PromptChatTarget,
 )
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
 
 def fake_construct_response_from_request(request, response_text_pieces):
@@ -261,16 +262,18 @@ async def test_send_prompt_async_empty_response_adds_to_memory(openai_response_j
         model_name="gpt-o",
         endpoint="https://mock.azure.com/",
         api_key="mock-api-key",
-        custom_capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_json_output=True,
-            supports_multi_message_pieces=True,
-            input_modalities=frozenset(
-                {
-                    frozenset(["text"]),
-                    frozenset(["text", "image_path"]),
-                }
-            ),
+        custom_configuration=TargetConfiguration(
+            capabilities=TargetCapabilities(
+                supports_multi_turn=True,
+                supports_json_output=True,
+                supports_multi_message_pieces=True,
+                input_modalities=frozenset(
+                    {
+                        frozenset(["text"]),
+                        frozenset(["text", "image_path"]),
+                    }
+                ),
+            )
         ),
     )
     mock_memory = MagicMock()
@@ -377,16 +380,18 @@ async def test_send_prompt_async(openai_response_json: dict, patch_central_datab
         model_name="gpt-o",
         endpoint="https://mock.azure.com/",
         api_key="mock-api-key",
-        custom_capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_json_output=True,
-            supports_multi_message_pieces=True,
-            input_modalities=frozenset(
-                {
-                    frozenset(["text"]),
-                    frozenset(["text", "image_path"]),
-                }
-            ),
+        custom_configuration=TargetConfiguration(
+            capabilities=TargetCapabilities(
+                supports_multi_turn=True,
+                supports_json_output=True,
+                supports_multi_message_pieces=True,
+                input_modalities=frozenset(
+                    {
+                        frozenset(["text"]),
+                        frozenset(["text", "image_path"]),
+                    }
+                ),
+            )
         ),
     )
     with NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
@@ -441,16 +446,18 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
         model_name="gpt-o",
         endpoint="https://mock.azure.com/",
         api_key="mock-api-key",
-        custom_capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_json_output=True,
-            supports_multi_message_pieces=True,
-            input_modalities=frozenset(
-                {
-                    frozenset(["text"]),
-                    frozenset(["text", "image_path"]),
-                }
-            ),
+        custom_configuration=TargetConfiguration(
+            capabilities=TargetCapabilities(
+                supports_multi_turn=True,
+                supports_json_output=True,
+                supports_multi_message_pieces=True,
+                input_modalities=frozenset(
+                    {
+                        frozenset(["text"]),
+                        frozenset(["text", "image_path"]),
+                    }
+                ),
+            )
         ),
     )
     with NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:

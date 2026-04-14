@@ -31,6 +31,7 @@ from pyrit.exceptions.exception_classes import (
 from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target.common.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.openai.openai_error_handling import (
     _extract_error_payload,
     _extract_request_id_from_exception,
@@ -52,7 +53,9 @@ class OpenAITarget(PromptTarget):
     """
 
     ADDITIONAL_REQUEST_HEADERS: str = "OPENAI_ADDITIONAL_REQUEST_HEADERS"
-    _DEFAULT_CAPABILITIES: TargetCapabilities = TargetCapabilities(supports_multi_message_pieces=True)
+    _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
+        capabilities=TargetCapabilities(supports_multi_message_pieces=True)
+    )
 
     model_name_environment_variable: str
     endpoint_environment_variable: str
@@ -70,6 +73,7 @@ class OpenAITarget(PromptTarget):
         max_requests_per_minute: Optional[int] = None,
         httpx_client_kwargs: Optional[dict[str, Any]] = None,
         underlying_model: Optional[str] = None,
+        custom_configuration: Optional[TargetConfiguration] = None,
         custom_capabilities: Optional[TargetCapabilities] = None,
     ) -> None:
         """
@@ -97,8 +101,10 @@ class OpenAITarget(PromptTarget):
                 target identifier purposes. This is useful when the deployment name in Azure differs
                 from the actual model. If not provided, the identifier will use the model_name.
                 Defaults to None.
-            custom_capabilities (TargetCapabilities, Optional): Override the default capabilities for
+            custom_configuration (TargetConfiguration, Optional): Override the default configuration for
                 this target instance. If None, uses the class-level defaults. Defaults to None.
+            custom_capabilities (TargetCapabilities, Optional): **Deprecated.** Use
+                ``custom_configuration`` instead. Will be removed in v0.14.0.
 
         Raises:
             ValueError: If no API key is provided and the endpoint is not an Azure endpoint.
@@ -129,6 +135,7 @@ class OpenAITarget(PromptTarget):
             endpoint=endpoint_value,
             model_name=self._model_name,
             underlying_model=underlying_model,
+            custom_configuration=custom_configuration,
             custom_capabilities=custom_capabilities,
         )
 
@@ -668,4 +675,4 @@ class OpenAITarget(PromptTarget):
         Returns:
             bool: True if JSON response is supported, False otherwise.
         """
-        return self._capabilities.supports_json_output
+        return self.capabilities.supports_json_output
