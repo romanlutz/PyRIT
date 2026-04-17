@@ -72,6 +72,9 @@ class OpenAIChatTarget(OpenAITarget, PromptChatTarget):
             supports_json_output=True,
             supports_multi_message_pieces=True,
             supports_system_prompt=True,
+            input_modalities=frozenset(
+                {frozenset({"text"}), frozenset({"image_path"}), frozenset({"text", "image_path"})}
+            ),
         )
     )
 
