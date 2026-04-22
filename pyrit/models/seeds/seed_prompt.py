@@ -67,7 +67,7 @@ class SeedPrompt(Seed):
             # Note: Does not assign 'error' or 'url' implicitly
             if os.path.isfile(self.value):
                 _, ext = os.path.splitext(self.value)
-                ext = ext.lstrip(".")
+                ext = ext.lstrip(".").lower()
                 if ext in ["mp4", "avi", "mov", "mkv", "ogv", "flv", "wmv", "webm"]:
                     self.data_type = "video_path"
                 elif ext in ["flac", "mp3", "mpeg", "mpga", "m4a", "ogg", "wav"]:
