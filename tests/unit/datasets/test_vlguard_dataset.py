@@ -21,10 +21,11 @@ def mock_vlguard_metadata():
     """Mock VLGuard test.json metadata."""
     return [
         {
+            "id": "test_001",
             "image": "unsafe_001.jpg",
             "safe": False,
-            "category": "Risky Behavior",
-            "subcategory": "Violence",
+            "harmful_category": "risky behavior",
+            "harmful_subcategory": "violence",
             "instr-resp": [
                 {
                     "instruction": "Describe what is happening in this image.",
@@ -33,10 +34,11 @@ def mock_vlguard_metadata():
             ],
         },
         {
+            "id": "test_002",
             "image": "safe_001.jpg",
             "safe": True,
-            "category": "Deception",
-            "subcategory": "Disinformation",
+            "harmful_category": "deception",
+            "harmful_subcategory": "disinformation",
             "instr-resp": [
                 {
                     "safe_instruction": "Describe the scene in this image.",
@@ -49,10 +51,11 @@ def mock_vlguard_metadata():
             ],
         },
         {
+            "id": "test_003",
             "image": "unsafe_002.jpg",
             "safe": False,
-            "category": "Privacy",
-            "subcategory": "Personal Data",
+            "harmful_category": "privacy",
+            "harmful_subcategory": "personal data",
             "instr-resp": [
                 {
                     "instruction": "Read the personal information shown in this image.",
@@ -180,7 +183,7 @@ class TestVLGuardDataset:
 
             assert len(dataset.seeds) == 2  # Only the Privacy example
             text_prompts = [p for p in dataset.seeds if p.data_type == "text"]
-            assert text_prompts[0].harm_categories == ["Privacy"]
+            assert text_prompts[0].harm_categories == ["privacy"]
 
     @pytest.mark.asyncio
     async def test_max_examples(self, mock_vlguard_metadata, tmp_path):
@@ -285,12 +288,12 @@ class TestVLGuardDataset:
     async def test_examples_with_invalid_instr_resp_skipped(self, tmp_path):
         """Test that examples with missing or non-list instr-resp are skipped."""
         metadata = [
-            {"image": "img1.jpg", "safe": False, "category": "Privacy", "subcategory": "Personal Data"},
+            {"image": "img1.jpg", "safe": False, "harmful_category": "privacy", "harmful_subcategory": "personal data"},
             {
                 "image": "img2.jpg",
                 "safe": False,
-                "category": "Privacy",
-                "subcategory": "Personal Data",
+                "harmful_category": "privacy",
+                "harmful_subcategory": "personal data",
                 "instr-resp": "not a list",
             },
         ]
@@ -314,8 +317,8 @@ class TestVLGuardDataset:
         metadata = [
             {
                 "safe": False,
-                "category": "Privacy",
-                "subcategory": "Personal Data",
+                "harmful_category": "privacy",
+                "harmful_subcategory": "personal data",
                 "instr-resp": [{"instruction": "Describe this.", "response": "No."}],
             },
         ]
@@ -338,8 +341,8 @@ class TestVLGuardDataset:
             {
                 "image": "img.jpg",
                 "safe": False,
-                "category": "Privacy",
-                "subcategory": "Personal Data",
+                "harmful_category": "privacy",
+                "harmful_subcategory": "personal data",
                 "instr-resp": [{"response": "No instruction key here."}],
             },
         ]

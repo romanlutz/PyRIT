@@ -27,26 +27,27 @@ class VLGuardCategory(Enum):
     PRIVACY: Content involving personal data exposure or surveillance (e.g., reading IDs, tracking individuals).
     RISKY_BEHAVIOR: Content depicting or encouraging dangerous activities (e.g., violence, professional advice).
     DECEPTION: Content related to misleading or false information (e.g., disinformation, political manipulation).
-    HATEFUL_SPEECH: Content targeting groups based on identity (e.g., discrimination by sex or race).
+    DISCRIMINATION: Content targeting groups based on identity (e.g., discrimination by sex or race).
     """
 
-    PRIVACY = "Privacy"
-    RISKY_BEHAVIOR = "Risky Behavior"
-    DECEPTION = "Deception"
-    HATEFUL_SPEECH = "Hateful Speech"
+    PRIVACY = "privacy"
+    RISKY_BEHAVIOR = "risky behavior"
+    DECEPTION = "deception"
+    DISCRIMINATION = "discrimination"
 
 
 class VLGuardSubcategory(Enum):
     """Subcategories in the VLGuard dataset, nested under the main categories."""
 
-    PERSONAL_DATA = "Personal Data"
-    PROFESSIONAL_ADVICE = "Professional Advice"
-    POLITICAL = "Political"
-    SEXUALLY_EXPLICIT = "Sexually Explicit"
-    VIOLENCE = "Violence"
-    DISINFORMATION = "Disinformation"
-    DISCRIMINATION_BY_SEX = "Discrimination by Sex"
-    DISCRIMINATION_BY_RACE = "Discrimination by Race"
+    PERSONAL_DATA = "personal data"
+    PROFESSIONAL_ADVICE = "professional advice"
+    POLITICAL = "political"
+    SEXUALLY_EXPLICIT = "sexually explicit"
+    VIOLENCE = "violence"
+    DISINFORMATION = "disinformation"
+    SEX = "sex"
+    RACE = "race"
+    OTHER = "other"
 
 
 class VLGuardSubset(Enum):
@@ -71,9 +72,9 @@ class _VLGuardDataset(_RemoteDatasetLoader):
     It includes both unsafe and safe images paired with various instructions to test whether
     models refuse unsafe content while remaining helpful on safe content.
 
-    The dataset covers 4 categories (Privacy, Risky Behavior, Deception, Hateful Speech)
-    with 8 subcategories (Personal Data, Professional Advice, Political, Sexually Explicit,
-    Violence, Disinformation, Discrimination by Sex, Discrimination by Race).
+    The dataset covers 4 categories (privacy, risky behavior, deception, discrimination)
+    with 9 subcategories (personal data, professional advice, political, sexually explicit,
+    violence, disinformation, sex, race, other).
 
     Note: This is a gated dataset on HuggingFace. You must accept the terms at
     https://huggingface.co/datasets/ys-zong/VLGuard before use, and provide
@@ -148,8 +149,8 @@ class _VLGuardDataset(_RemoteDatasetLoader):
         for example in metadata:
             image_filename = example.get("image")
             is_safe = example.get("safe")
-            category = example.get("category", "")
-            subcategory = example.get("subcategory", "")
+            category = example.get("harmful_category", "")
+            subcategory = example.get("harmful_subcategory", "")
             instr_resp_raw = example.get("instr-resp")
             if not instr_resp_raw or not isinstance(instr_resp_raw, list):
                 continue
