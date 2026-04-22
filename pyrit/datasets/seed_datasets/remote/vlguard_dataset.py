@@ -8,7 +8,6 @@ import uuid
 import zipfile
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from pyrit.common.path import DB_DATA_PATH
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
@@ -22,12 +21,32 @@ _HF_REPO_ID = "ys-zong/VLGuard"
 
 
 class VLGuardCategory(Enum):
-    """Categories in the VLGuard dataset."""
+    """
+    Categories in the VLGuard dataset.
+
+    PRIVACY: Content involving personal data exposure or surveillance (e.g., reading IDs, tracking individuals).
+    RISKY_BEHAVIOR: Content depicting or encouraging dangerous activities (e.g., violence, professional advice).
+    DECEPTION: Content related to misleading or false information (e.g., disinformation, political manipulation).
+    HATEFUL_SPEECH: Content targeting groups based on identity (e.g., discrimination by sex or race).
+    """
 
     PRIVACY = "Privacy"
     RISKY_BEHAVIOR = "Risky Behavior"
     DECEPTION = "Deception"
     HATEFUL_SPEECH = "Hateful Speech"
+
+
+class VLGuardSubcategory(Enum):
+    """Subcategories in the VLGuard dataset, nested under the main categories."""
+
+    PERSONAL_DATA = "Personal Data"
+    PROFESSIONAL_ADVICE = "Professional Advice"
+    POLITICAL = "Political"
+    SEXUALLY_EXPLICIT = "Sexually Explicit"
+    VIOLENCE = "Violence"
+    DISINFORMATION = "Disinformation"
+    DISCRIMINATION_BY_SEX = "Discrimination by Sex"
+    DISCRIMINATION_BY_RACE = "Discrimination by Race"
 
 
 class VLGuardSubset(Enum):
@@ -68,20 +87,20 @@ class _VLGuardDataset(_RemoteDatasetLoader):
         self,
         *,
         subset: VLGuardSubset = VLGuardSubset.UNSAFES,
-        categories: Optional[list[VLGuardCategory]] = None,
-        max_examples: Optional[int] = None,
-        token: Optional[str] = None,
+        categories: list[VLGuardCategory] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
     ) -> None:
         """
         Initialize the VLGuard dataset loader.
 
         Args:
             subset (VLGuardSubset): Which evaluation subset to load. Defaults to UNSAFES.
-            categories (Optional[list[VLGuardCategory]]): List of VLGuard categories to filter by.
+            categories (list[VLGuardCategory] | None): List of VLGuard categories to filter by.
                 If None, all categories are included.
-            max_examples (Optional[int]): Maximum number of multimodal examples to fetch. Each example
+            max_examples (int | None): Maximum number of multimodal examples to fetch. Each example
                 produces 2 prompts (text + image). If None, fetches all examples.
-            token (Optional[str]): HuggingFace authentication token for accessing the gated dataset.
+            token (str | None): HuggingFace authentication token for accessing the gated dataset.
                 If None, uses the default token from the environment or HuggingFace CLI login.
 
         Raises:
@@ -202,6 +221,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
             prompts.append(text_prompt)
             prompts.append(image_prompt)
 
+            # len(prompts) is divided by two since each example produces one image and one text prompt.
             if self.max_examples is not None and len(prompts) >= self.max_examples * 2:
                 break
 
@@ -209,7 +229,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
 
         return SeedDataset(seeds=prompts, dataset_name=self.dataset_name)
 
-    def _extract_instruction(self, instr_resp: list[dict[str, str]]) -> Optional[str]:
+    def _extract_instruction(self, instr_resp: list[dict[str, str]]) -> str | None:
         """
         Extract the instruction text from an example based on the current subset.
 
@@ -217,7 +237,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
             instr_resp (list[dict[str, str]]): List of instruction-response dictionaries from VLGuard.
 
         Returns:
-            Optional[str]: The instruction text, or None if not found for the given subset.
+            str | None: The instruction text, or None if not found for the given subset.
         """
         if self.subset == VLGuardSubset.UNSAFES:
             if instr_resp and "instruction" in instr_resp[0]:

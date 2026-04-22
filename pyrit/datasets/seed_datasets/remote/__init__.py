@@ -100,6 +100,7 @@ from pyrit.datasets.seed_datasets.remote.transphobia_awareness_dataset import ( 
 )
 from pyrit.datasets.seed_datasets.remote.vlguard_dataset import (
     VLGuardCategory,
+    VLGuardSubcategory,
     VLGuardSubset,
     _VLGuardDataset,
 )  # noqa: F401
@@ -114,6 +115,7 @@ __all__ = [
     "PromptIntelCategory",
     "PromptIntelSeverity",
     "VLGuardCategory",
+    "VLGuardSubcategory",
     "VLGuardSubset",
     "_AegisContentSafetyDataset",
     "_AyaRedteamingDataset",
