@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import json
+import zipfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -268,3 +271,144 @@ class TestVLGuardDataset:
         loader = _VLGuardDataset(subset=VLGuardSubset.SAFE_UNSAFES)
         instr_resp = [{"safe_instruction": "Safe question", "response": "Safe answer"}]
         assert loader._extract_instruction(instr_resp) is None
+
+    @pytest.mark.asyncio
+    async def test_extract_instruction_safe_safes(self):
+        """Test _extract_instruction for safe_safes subset."""
+        loader = _VLGuardDataset(subset=VLGuardSubset.SAFE_SAFES)
+        instr_resp = [
+            {"safe_instruction": "Describe the park", "response": "A peaceful park."},
+        ]
+        assert loader._extract_instruction(instr_resp) == "Describe the park"
+
+    @pytest.mark.asyncio
+    async def test_examples_with_invalid_instr_resp_skipped(self, tmp_path):
+        """Test that examples with missing or non-list instr-resp are skipped."""
+        metadata = [
+            {"image": "img1.jpg", "safe": False, "category": "Privacy", "subcategory": "Personal Data"},
+            {
+                "image": "img2.jpg",
+                "safe": False,
+                "category": "Privacy",
+                "subcategory": "Personal Data",
+                "instr-resp": "not a list",
+            },
+        ]
+        image_dir = tmp_path / "test"
+        image_dir.mkdir()
+        (image_dir / "img1.jpg").write_bytes(b"fake")
+        (image_dir / "img2.jpg").write_bytes(b"fake")
+
+        loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES)
+        with patch.object(
+            loader,
+            "_download_dataset_files_async",
+            new=AsyncMock(return_value=(metadata, image_dir)),
+        ):
+            with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
+                await loader.fetch_dataset()
+
+    @pytest.mark.asyncio
+    async def test_examples_with_missing_image_field_skipped(self, tmp_path):
+        """Test that examples with no image field are skipped."""
+        metadata = [
+            {
+                "safe": False,
+                "category": "Privacy",
+                "subcategory": "Personal Data",
+                "instr-resp": [{"instruction": "Describe this.", "response": "No."}],
+            },
+        ]
+        image_dir = tmp_path / "test"
+        image_dir.mkdir()
+
+        loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES)
+        with patch.object(
+            loader,
+            "_download_dataset_files_async",
+            new=AsyncMock(return_value=(metadata, image_dir)),
+        ):
+            with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
+                await loader.fetch_dataset()
+
+    @pytest.mark.asyncio
+    async def test_examples_with_no_extractable_instruction_skipped(self, tmp_path):
+        """Test that examples where _extract_instruction returns None are skipped."""
+        metadata = [
+            {
+                "image": "img.jpg",
+                "safe": False,
+                "category": "Privacy",
+                "subcategory": "Personal Data",
+                "instr-resp": [{"response": "No instruction key here."}],
+            },
+        ]
+        image_dir = tmp_path / "test"
+        image_dir.mkdir()
+        (image_dir / "img.jpg").write_bytes(b"fake")
+
+        loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES)
+        with patch.object(
+            loader,
+            "_download_dataset_files_async",
+            new=AsyncMock(return_value=(metadata, image_dir)),
+        ):
+            with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
+                await loader.fetch_dataset()
+
+    @pytest.mark.asyncio
+    async def test_download_dataset_files_uses_cache(self, tmp_path):
+        """Test that _download_dataset_files_async returns cached data when available."""
+        cache_dir = tmp_path / "seed-prompt-entries" / "vlguard"
+        cache_dir.mkdir(parents=True)
+
+        json_path = cache_dir / "test.json"
+        image_dir = cache_dir / "test"
+        image_dir.mkdir()
+        (image_dir / "img.jpg").write_bytes(b"fake")
+
+        test_metadata = [{"image": "img.jpg", "safe": False}]
+        json_path.write_text(json.dumps(test_metadata), encoding="utf-8")
+
+        loader = _VLGuardDataset()
+
+        with patch("pyrit.datasets.seed_datasets.remote.vlguard_dataset.DB_DATA_PATH", tmp_path):
+            metadata, result_dir = await loader._download_dataset_files_async(cache=True)
+
+        assert metadata == test_metadata
+        assert result_dir == image_dir
+
+    @pytest.mark.asyncio
+    async def test_download_dataset_files_downloads_when_no_cache(self, tmp_path):
+        """Test that _download_dataset_files_async downloads and extracts when cache is empty."""
+        cache_dir = tmp_path / "seed-prompt-entries" / "vlguard"
+
+        test_metadata = [{"image": "test/img.jpg", "safe": False}]
+
+        def mock_hf_download(*, repo_id, filename, repo_type, local_dir, token):
+            local = Path(local_dir)
+            local.mkdir(parents=True, exist_ok=True)
+            if filename == "test.json":
+                path = local / "test.json"
+                path.write_text(json.dumps(test_metadata), encoding="utf-8")
+                return str(path)
+            if filename == "test.zip":
+                zip_path = local / "test.zip"
+                img_dir = local / "test"
+                img_dir.mkdir(exist_ok=True)
+                (img_dir / "img.jpg").write_bytes(b"fake image")
+                with zipfile.ZipFile(str(zip_path), "w") as zf:
+                    zf.write(str(img_dir / "img.jpg"), "test/img.jpg")
+                return str(zip_path)
+            return None
+
+        loader = _VLGuardDataset(token="fake_token")
+
+        with (
+            patch("pyrit.datasets.seed_datasets.remote.vlguard_dataset.DB_DATA_PATH", tmp_path),
+            patch("huggingface_hub.hf_hub_download", side_effect=mock_hf_download),
+        ):
+            metadata, result_dir = await loader._download_dataset_files_async(cache=False)
+
+        assert metadata == test_metadata
+        assert result_dir == cache_dir / "test"
