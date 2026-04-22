@@ -5,14 +5,15 @@
 Tests for backend target service.
 """
 
-from unittest.mock import MagicMock
+import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyrit.backend.models.targets import CreateTargetRequest
 from pyrit.backend.services.target_service import TargetService, get_target_service
 from pyrit.identifiers import ComponentIdentifier
-from pyrit.registry.instance_registries import TargetRegistry
+from pyrit.registry.object_registries import TargetRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +151,63 @@ class TestGetTarget:
         assert result.target_registry_name == "target-1"
         assert result.target_type == "MockTarget"
 
+    @pytest.mark.asyncio
+    async def test_list_targets_includes_extra_params_in_target_specific(self) -> None:
+        """Test that extra identifier params (reasoning_effort etc.) appear in target_specific_params."""
+        service = TargetService()
+
+        mock_target = MagicMock()
+        identifier = ComponentIdentifier(
+            class_name="OpenAIResponseTarget",
+            class_module="pyrit.prompt_target",
+            params={
+                "endpoint": "https://api.openai.com",
+                "model_name": "o3",
+                "temperature": 1.0,
+                "reasoning_effort": "high",
+                "reasoning_summary": "auto",
+                "max_output_tokens": 4096,
+            },
+        )
+        mock_target.get_identifier.return_value = identifier
+        service._registry.register_instance(mock_target, name="response-target")
+
+        result = await service.list_targets_async()
+
+        assert len(result.items) == 1
+        target = result.items[0]
+        assert target.temperature == 1.0
+        assert target.target_specific_params is not None
+        assert target.target_specific_params["reasoning_effort"] == "high"
+        assert target.target_specific_params["reasoning_summary"] == "auto"
+        assert target.target_specific_params["max_output_tokens"] == 4096
+
+    @pytest.mark.asyncio
+    async def test_get_target_includes_extra_params_in_target_specific(self) -> None:
+        """Test that get_target returns target_specific_params with extra identifier params."""
+        service = TargetService()
+
+        mock_target = MagicMock()
+        identifier = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target",
+            params={
+                "endpoint": "https://api.openai.com",
+                "model_name": "gpt-4",
+                "frequency_penalty": 0.5,
+                "seed": 42,
+            },
+        )
+        mock_target.get_identifier.return_value = identifier
+        service._registry.register_instance(mock_target, name="chat-target")
+
+        result = await service.get_target_async(target_registry_name="chat-target")
+
+        assert result is not None
+        assert result.target_specific_params is not None
+        assert result.target_specific_params["frequency_penalty"] == 0.5
+        assert result.target_specific_params["seed"] == 42
+
 
 class TestGetTargetObject:
     """Tests for TargetService.get_target_object method."""
@@ -219,6 +277,47 @@ class TestCreateTarget:
         # Object should be retrievable from registry
         target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
         assert target_obj is not None
+
+    @pytest.mark.asyncio
+    async def test_create_target_model_name_not_overridden_by_env_var(self, sqlite_instance) -> None:
+        """Test that explicit model_name is not overridden by underlying_model env var."""
+        with patch.dict(os.environ, {"OPENAI_CHAT_UNDERLYING_MODEL": "gpt-4o"}):
+            service = TargetService()
+
+            request = CreateTargetRequest(
+                type="OpenAIChatTarget",
+                params={
+                    "model_name": "claude-sonnet-4-6",
+                    "endpoint": "https://test.openai.azure.com/",
+                    "api_key": "test-key",
+                },
+            )
+
+            result = await service.create_target_async(request=request)
+
+            assert result.model_name == "claude-sonnet-4-6"
+            # underlying_model_name should be None since no underlying_model was passed
+            assert result.underlying_model_name is None
+
+    @pytest.mark.asyncio
+    async def test_create_target_with_different_underlying_model(self, sqlite_instance) -> None:
+        """Test that explicit underlying_model is used when it differs from model_name."""
+        service = TargetService()
+
+        request = CreateTargetRequest(
+            type="OpenAIChatTarget",
+            params={
+                "model_name": "my-gpt4o-deployment",
+                "endpoint": "https://test.openai.azure.com/",
+                "api_key": "test-key",
+                "underlying_model": "gpt-4o",
+            },
+        )
+
+        result = await service.create_target_async(request=request)
+
+        assert result.model_name == "my-gpt4o-deployment"
+        assert result.underlying_model_name == "gpt-4o"
 
 
 class TestTargetServiceSingleton:

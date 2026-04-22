@@ -50,6 +50,7 @@ from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.services.converter_service import get_converter_service
 from pyrit.backend.services.target_service import get_target_service
 from pyrit.identifiers import ComponentIdentifier
+from pyrit.identifiers.atomic_attack_identifier import build_atomic_attack_identifier
 from pyrit.memory import CentralMemory
 from pyrit.models import (
     AttackOutcome,
@@ -295,10 +296,12 @@ class AttackService:
         attack_result = AttackResult(
             conversation_id=conversation_id,
             objective=request.name or "Manual attack via GUI",
-            attack_identifier=ComponentIdentifier(
-                class_name=request.name or "ManualAttack",
-                class_module="pyrit.backend",
-                children={"objective_target": target_identifier} if target_identifier else {},
+            atomic_attack_identifier=build_atomic_attack_identifier(
+                attack_identifier=ComponentIdentifier(
+                    class_name=request.name or "ManualAttack",
+                    class_module="pyrit.backend",
+                    children={"objective_target": target_identifier} if target_identifier else {},
+                ),
             ),
             outcome=AttackOutcome.UNDETERMINED,
             metadata={
@@ -386,7 +389,10 @@ class AttackService:
         conversations: list[ConversationSummary] = []
         for conv_id in active_conv_ids:
             stats = stats_map.get(conv_id)
-            created_at = stats.created_at.isoformat() if stats and stats.created_at else None
+            created_at = stats.created_at if stats else None
+            # SQLite returns naive datetimes — normalize to UTC (same pattern as _ensure_utc)
+            if created_at is not None and created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
             conversations.append(
                 ConversationSummary(
                     conversation_id=conv_id,
@@ -396,8 +402,12 @@ class AttackService:
                 )
             )
 
-        # Sort all conversations by created_at (earliest first, None last)
-        conversations.sort(key=lambda c: (c.created_at is None, c.created_at or ""))
+        # Sort conversations by created_at (earliest first). In-flight conversations
+        # have no stored messages yet so created_at is None — treat them as the most
+        # recent (they were just created) so they sort after older conversations
+        # instead of jumping to an arbitrary position.
+        now = datetime.now(timezone.utc)
+        conversations.sort(key=lambda c: c.created_at or now)
 
         return AttackConversationsResponse(
             attack_result_id=attack_result_id,
@@ -724,6 +734,31 @@ class AttackService:
                     children=new_children,
                 )
                 update_fields["attack_identifier"] = new_aid.to_dict()
+                # Also update atomic_attack_identifier so get_attack_strategy_identifier() sees the change
+                if ar.atomic_attack_identifier:
+                    atomic = ComponentIdentifier.from_dict(ar.atomic_attack_identifier.to_dict())
+                    atomic_children = dict(atomic.children)
+                    # Navigate into attack_technique child to update the nested attack child.
+                    technique = atomic_children.get("attack_technique")
+                    if isinstance(technique, ComponentIdentifier):
+                        tech_children = dict(technique.children)
+                        tech_children["attack"] = new_aid
+                        atomic_children["attack_technique"] = ComponentIdentifier(
+                            class_name=technique.class_name,
+                            class_module=technique.class_module,
+                            params=dict(technique.params),
+                            children=tech_children,
+                        )
+                    else:
+                        # Fallback for pre-nesting rows with children["attack"] directly.
+                        atomic_children["attack"] = new_aid
+                    new_atomic = ComponentIdentifier(
+                        class_name=atomic.class_name,
+                        class_module=atomic.class_module,
+                        params=dict(atomic.params),
+                        children=atomic_children,
+                    )
+                    update_fields["atomic_attack_identifier"] = new_atomic.to_dict()
 
         self._memory.update_attack_result_by_id(
             attack_result_id=attack_result_id,
@@ -798,8 +833,8 @@ class AttackService:
         for piece in all_pieces:
             if labels_override is not None:
                 piece.labels = dict(labels_override)
-            if remap_assistant_to_simulated and piece.role == "assistant":
-                piece.role = "simulated_assistant"
+            if remap_assistant_to_simulated and piece.api_role == "assistant":
+                piece._role = "simulated_assistant"
 
         if all_pieces:
             self._memory.add_message_pieces_to_memory(message_pieces=list(all_pieces))
@@ -848,11 +883,14 @@ class AttackService:
                         piece.converted_value = file_path
                 continue
 
-            # Already an existing file on disk — keep as-is
-            if Path(piece.original_value).is_file():
-                if piece.converted_value is None:
-                    piece.converted_value = piece.original_value
-                continue
+            # Already an existing file on disk — keep as-is.
+            try:
+                if Path(piece.original_value).is_file():
+                    if piece.converted_value is None:
+                        piece.converted_value = piece.original_value
+                    continue
+            except (OSError, ValueError):
+                pass
 
             # Derive file extension from the MIME type sent by the frontend
             ext = None
@@ -915,6 +953,8 @@ class AttackService:
 
         await self._persist_base64_pieces_async(request)
 
+        self._resolve_video_remix_metadata(request)
+
         pyrit_message = request_to_pyrit_message(
             request=request,
             conversation_id=conversation_id,
@@ -953,6 +993,45 @@ class AttackService:
                 labels=labels,
             )
             self._memory.add_message_pieces_to_memory(message_pieces=[piece])
+
+    def _resolve_video_remix_metadata(self, request: AddMessageRequest) -> None:
+        """
+        Auto-resolve video_id metadata for remix mode.
+
+        When a video_path piece is carried over from a previous conversation
+        (via original_prompt_id) alongside a text piece, the video target
+        requires video_id in the text piece's prompt_metadata. This method
+        looks up the original piece's metadata and propagates the video_id.
+        """
+        video_pieces = [p for p in request.pieces if p.data_type == "video_path"]
+        if not video_pieces:
+            return
+
+        text_piece = next((p for p in request.pieces if p.data_type == "text"), None)
+        if not text_piece:
+            return
+
+        # Already has video_id — nothing to resolve
+        if text_piece.prompt_metadata and text_piece.prompt_metadata.get("video_id"):
+            return
+
+        # Try to resolve video_id from the original prompt piece
+        for vp in video_pieces:
+            if not vp.original_prompt_id:
+                continue
+            original_pieces = self._memory.get_message_pieces(prompt_ids=[vp.original_prompt_id])
+            if not original_pieces:
+                continue
+            video_id = (original_pieces[0].prompt_metadata or {}).get("video_id")
+            if video_id:
+                if text_piece.prompt_metadata is None:
+                    text_piece.prompt_metadata = {}
+                text_piece.prompt_metadata["video_id"] = video_id
+                # Also set video_id on the video piece itself
+                if vp.prompt_metadata is None:
+                    vp.prompt_metadata = {}
+                vp.prompt_metadata["video_id"] = video_id
+                return
 
     def _get_converter_configs(self, request: AddMessageRequest) -> list[PromptConverterConfiguration]:
         """

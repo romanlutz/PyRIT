@@ -25,6 +25,7 @@ from pyrit.backend.services.attack_service import (
     get_attack_service,
 )
 from pyrit.identifiers import ComponentIdentifier
+from pyrit.identifiers.atomic_attack_identifier import build_atomic_attack_identifier
 from pyrit.models import AttackOutcome, AttackResult
 from pyrit.models.conversation_stats import ConversationStats
 
@@ -81,10 +82,12 @@ def make_attack_result(
     return AttackResult(
         conversation_id=conversation_id,
         objective=objective,
-        attack_identifier=ComponentIdentifier(
-            class_name=name,
-            class_module="pyrit.backend",
-            children={"objective_target": target_identifier} if target_identifier else {},
+        atomic_attack_identifier=build_atomic_attack_identifier(
+            attack_identifier=ComponentIdentifier(
+                class_name=name,
+                class_module="pyrit.backend",
+                children={"objective_target": target_identifier} if target_identifier else {},
+            ),
         ),
         outcome=outcome,
         attack_result_id=effective_ar_id,
@@ -119,6 +122,7 @@ def make_mock_piece(
     piece.id = "piece-id"
     piece.conversation_id = conversation_id
     piece.role = role
+    piece.api_role = "assistant" if role in ("assistant", "simulated_assistant") else role
     piece.get_role_for_storage.return_value = role
     piece.sequence = sequence
     piece.original_value = original_value
@@ -232,29 +236,31 @@ class TestListAttacks:
     async def test_list_attacks_filters_by_converter_types_and_logic(self, attack_service, mock_memory) -> None:
         """Test that list_attacks passes converter_types to memory layer."""
         ar1 = make_attack_result(conversation_id="attack-1", name="Attack One")
-        ar1.attack_identifier = ComponentIdentifier(
-            class_name="Attack One",
-            class_module="pyrit.backend",
-            children={
-                "request_converters": [
-                    ComponentIdentifier(
-                        class_name="Base64Converter",
-                        class_module="pyrit.converters",
-                        params={
-                            "supported_input_types": ("text",),
-                            "supported_output_types": ("text",),
-                        },
-                    ),
-                    ComponentIdentifier(
-                        class_name="ROT13Converter",
-                        class_module="pyrit.converters",
-                        params={
-                            "supported_input_types": ("text",),
-                            "supported_output_types": ("text",),
-                        },
-                    ),
-                ],
-            },
+        ar1.atomic_attack_identifier = build_atomic_attack_identifier(
+            attack_identifier=ComponentIdentifier(
+                class_name="Attack One",
+                class_module="pyrit.backend",
+                children={
+                    "request_converters": [
+                        ComponentIdentifier(
+                            class_name="Base64Converter",
+                            class_module="pyrit.converters",
+                            params={
+                                "supported_input_types": ("text",),
+                                "supported_output_types": ("text",),
+                            },
+                        ),
+                        ComponentIdentifier(
+                            class_name="ROT13Converter",
+                            class_module="pyrit.converters",
+                            params={
+                                "supported_input_types": ("text",),
+                                "supported_output_types": ("text",),
+                            },
+                        ),
+                    ],
+                },
+            ),
         )
         mock_memory.get_attack_results.return_value = [ar1]
         mock_memory.get_message_pieces.return_value = []
@@ -1591,6 +1597,35 @@ class TestPersistBase64Pieces:
 
         assert request.pieces[0].original_value == "thinking step"
 
+    @pytest.mark.asyncio
+    async def test_long_base64_audio_does_not_crash(self, attack_service) -> None:
+        """Base64 audio data longer than OS path limits should be saved, not crash with OSError."""
+        # Simulate a base64-encoded WAV file (>4096 chars, exceeds Linux filename limit of 255)
+        long_b64 = "UklGRiQ" + "A" * 5000  # fake WAV header + padding
+        request = AddMessageRequest(
+            role="user",
+            pieces=[
+                MessagePieceRequest(
+                    data_type="audio_path",
+                    original_value=long_b64,
+                    mime_type="audio/wav",
+                )
+            ],
+            send=False,
+            target_conversation_id="test-id",
+        )
+
+        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as mock_factory:
+            mock_serializer = AsyncMock()
+            mock_serializer.value = "/tmp/saved_audio.wav"
+            mock_factory.return_value = mock_serializer
+
+            await AttackService._persist_base64_pieces_async(request)
+
+            mock_factory.assert_called_once()
+            mock_serializer.save_b64_image.assert_called_once_with(data=long_b64)
+            assert request.pieces[0].original_value == "/tmp/saved_audio.wav"
+
 
 # ============================================================================
 # Related Conversations Tests
@@ -2106,13 +2141,17 @@ class TestAttackServiceAdditionalCoverage:
         )
 
         ar = make_attack_result(conversation_id="attack-1")
-        ar.attack_identifier = ComponentIdentifier(
-            class_name="ManualAttack",
-            class_module="pyrit.backend",
-            children={
-                "objective_target": ar.attack_identifier.get_child("objective_target"),
-                "request_converters": [existing_converter],
-            },
+        # Rebuild the atomic_attack_identifier to include an existing converter child
+        strategy = ar.get_attack_strategy_identifier()
+        ar.atomic_attack_identifier = build_atomic_attack_identifier(
+            attack_identifier=ComponentIdentifier(
+                class_name="ManualAttack",
+                class_module="pyrit.backend",
+                children={
+                    "objective_target": strategy.get_child("objective_target") if strategy else None,
+                    "request_converters": [existing_converter],
+                },
+            ),
         )
 
         mock_memory.get_attack_results.return_value = [ar]
@@ -2193,6 +2232,19 @@ class TestAttackServiceAdditionalCoverage:
 
         assert new_id == "branch-empty"
         mock_memory.add_message_pieces_to_memory.assert_not_called()
+
+    def test_duplicate_conversation_remaps_assistant_to_simulated(self, attack_service, mock_memory):
+        """Should remap assistant pieces to simulated_assistant when flag is set."""
+        source = make_mock_piece(conversation_id="attack-1", role="assistant", sequence=0)
+        mock_memory.get_conversation.return_value = [source]
+        dup_piece = make_mock_piece(conversation_id="branch-1", role="assistant", sequence=0)
+        mock_memory.duplicate_messages.return_value = ("branch-1", [dup_piece])
+
+        attack_service._duplicate_conversation_up_to(
+            source_conversation_id="attack-1", cutoff_index=0, remap_assistant_to_simulated=True
+        )
+
+        assert dup_piece._role == "simulated_assistant"
 
 
 class TestAddMessageGuards:
@@ -2299,3 +2351,106 @@ class TestAddMessageGuards:
 
         result = await attack_service.add_message_async(attack_result_id="test-id", request=request)
         assert result.attack is not None
+
+
+class TestResolveVideoRemixMetadata:
+    """Tests for _resolve_video_remix_metadata."""
+
+    def test_resolves_video_id_from_original_piece(self, attack_service, mock_memory):
+        """When a video_path piece has original_prompt_id, resolve video_id onto text piece."""
+        original_piece = MagicMock()
+        original_piece.prompt_metadata = {"video_id": "vid-abc-123"}
+        mock_memory.get_message_pieces.return_value = [original_piece]
+
+        request = AddMessageRequest(
+            role="user",
+            target_conversation_id="conv-1",
+            pieces=[
+                MessagePieceRequest(original_value="remix this video", data_type="text"),
+                MessagePieceRequest(
+                    original_value="/path/to/video.mp4",
+                    data_type="video_path",
+                    original_prompt_id="piece-id-1",
+                ),
+            ],
+        )
+
+        attack_service._resolve_video_remix_metadata(request)
+
+        assert request.pieces[0].prompt_metadata == {"video_id": "vid-abc-123"}
+        assert request.pieces[1].prompt_metadata == {"video_id": "vid-abc-123"}
+
+    def test_no_op_without_video_pieces(self, attack_service):
+        """Should do nothing when there are no video_path pieces."""
+        request = AddMessageRequest(
+            role="user",
+            target_conversation_id="conv-1",
+            pieces=[MessagePieceRequest(original_value="just text", data_type="text")],
+        )
+
+        attack_service._resolve_video_remix_metadata(request)
+
+        assert request.pieces[0].prompt_metadata is None
+
+    def test_no_op_when_video_id_already_set(self, attack_service, mock_memory):
+        """Should not overwrite existing video_id on text piece."""
+        request = AddMessageRequest(
+            role="user",
+            target_conversation_id="conv-1",
+            pieces=[
+                MessagePieceRequest(
+                    original_value="remix",
+                    data_type="text",
+                    prompt_metadata={"video_id": "existing-id"},
+                ),
+                MessagePieceRequest(
+                    original_value="/path/to/video.mp4",
+                    data_type="video_path",
+                    original_prompt_id="piece-id-1",
+                ),
+            ],
+        )
+
+        attack_service._resolve_video_remix_metadata(request)
+
+        assert request.pieces[0].prompt_metadata == {"video_id": "existing-id"}
+        mock_memory.get_message_pieces.assert_not_called()
+
+    def test_no_op_without_original_prompt_id(self, attack_service, mock_memory):
+        """Should not crash when video_path piece has no original_prompt_id."""
+        request = AddMessageRequest(
+            role="user",
+            target_conversation_id="conv-1",
+            pieces=[
+                MessagePieceRequest(original_value="remix", data_type="text"),
+                MessagePieceRequest(original_value="/path/to/video.mp4", data_type="video_path"),
+            ],
+        )
+
+        attack_service._resolve_video_remix_metadata(request)
+
+        assert request.pieces[0].prompt_metadata is None
+        mock_memory.get_message_pieces.assert_not_called()
+
+    def test_no_op_when_original_piece_has_no_video_id(self, attack_service, mock_memory):
+        """Should not set metadata when original piece has no video_id."""
+        original_piece = MagicMock()
+        original_piece.prompt_metadata = {"other_key": "value"}
+        mock_memory.get_message_pieces.return_value = [original_piece]
+
+        request = AddMessageRequest(
+            role="user",
+            target_conversation_id="conv-1",
+            pieces=[
+                MessagePieceRequest(original_value="remix", data_type="text"),
+                MessagePieceRequest(
+                    original_value="/path/to/video.mp4",
+                    data_type="video_path",
+                    original_prompt_id="piece-id-1",
+                ),
+            ],
+        )
+
+        attack_service._resolve_video_remix_metadata(request)
+
+        assert request.pieces[0].prompt_metadata is None

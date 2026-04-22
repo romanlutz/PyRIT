@@ -908,6 +908,30 @@ class TestExecutionPhase:
         for node in nodes:
             node.send_prompt_async.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_perform_async_sets_atomic_attack_identifier(self, attack_builder, node_factory, helpers):
+        """Test that _perform_async sets atomic_attack_identifier in the correct AtomicAttack format."""
+        attack = (
+            attack_builder.with_default_mocks()
+            .with_tree_params(tree_depth=1, tree_width=1)
+            .with_prompt_normalizer()
+            .build()
+        )
+
+        context = helpers.create_basic_context()
+
+        success_node = node_factory.create_node(
+            NodeMockConfig(node_id="id_node", objective_score_value=0.9, objective_target_conversation_id="id_conv")
+        )
+
+        with patch.object(attack, "_create_attack_node", return_value=success_node):
+            with patch.object(attack._memory, "get_message_pieces", return_value=[]):
+                result = await attack._perform_async(context=context)
+
+        assert result.atomic_attack_identifier is not None
+        assert result.atomic_attack_identifier.class_name == "AtomicAttack"
+        assert result.get_attack_strategy_identifier() == attack.get_identifier()
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestHelperMethods:
@@ -1037,7 +1061,6 @@ class TestEndToEndExecution:
         mock_result = TAPAttackResult(
             conversation_id="test_conv_id",
             objective="Test objective",
-            attack_identifier=attack.get_identifier(),
             last_response=None,
             last_score=helpers.create_score(0.5),
             executed_turns=1,
@@ -1084,7 +1107,6 @@ class TestEndToEndExecution:
         mock_result = TAPAttackResult(
             conversation_id="success_conv_id",
             objective="Test objective",
-            attack_identifier=attack.get_identifier(),
             last_response=None,
             last_score=helpers.create_score(0.9),
             executed_turns=1,
@@ -1768,3 +1790,38 @@ class TestTreeOfAttacksConversationTracking:
             )
             in context.related_conversations
         )
+
+
+def test_tap_init_raises_when_objective_scorer_is_none():
+    """Test that TAP __init__ raises ValueError when AttackScoringConfig has objective_scorer=None."""
+    scoring_config = AttackScoringConfig(objective_scorer=None)
+    with pytest.raises(ValueError, match="objective_scorer is required"):
+        TreeOfAttacksWithPruningAttack(
+            objective_target=MagicMock(spec=PromptChatTarget),
+            attack_adversarial_config=MagicMock(
+                target=MagicMock(spec=PromptChatTarget),
+                system_prompt_path=None,
+            ),
+            attack_scoring_config=scoring_config,
+        )
+
+
+def test_tap_attack_result_tree_visualization_getter_returns_value():
+    """Test that TAPAttackResult.tree_visualization returns the stored tree."""
+    tree = Tree()
+    tree.create_node("root", "root")
+    result = TAPAttackResult(
+        conversation_id="conv1",
+        objective="test",
+    )
+    result.metadata["tree_visualization"] = tree
+    assert result.tree_visualization is tree
+
+
+def test_tap_attack_result_tree_visualization_getter_returns_none_when_missing():
+    """Test that TAPAttackResult.tree_visualization returns None when not set."""
+    result = TAPAttackResult(
+        conversation_id="conv1",
+        objective="test",
+    )
+    assert result.tree_visualization is None
