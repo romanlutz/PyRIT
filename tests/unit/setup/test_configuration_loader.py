@@ -239,6 +239,40 @@ class TestConfigurationLoaderResolvers:
         # Check path ends with expected components (works on both Unix and Windows)
         assert resolved[0].parts[-2:] == ("relative", "script.py")
 
+    @pytest.mark.parametrize(
+        ("field_name", "relative_path"),
+        [
+            ("initialization_scripts", "scripts/init.py"),
+            ("env_files", "env/local.env"),
+        ],
+    )
+    def test_from_yaml_file_resolves_relative_paths_from_config_directory(self, tmp_path, field_name, relative_path):
+        """Relative paths from YAML are resolved from the config file's directory."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        config_path = config_dir / "pyrit.yaml"
+        config_path.write_text(f"{field_name}:\n  - ./{relative_path}\n", encoding="utf-8")
+
+        config = ConfigurationLoader.from_yaml_file(config_path)
+
+        actual = getattr(config, field_name)
+        assert actual == [str(config_dir / relative_path)]
+
+    def test_from_yaml_file_preserves_absolute_paths(self, tmp_path):
+        """Absolute paths in YAML are not changed by from_yaml_file."""
+        abs_script = str(tmp_path / "absolute" / "script.py")
+        abs_env = str(tmp_path / "absolute" / ".env")
+        config_path = tmp_path / "pyrit.yaml"
+        config_path.write_text(
+            f"initialization_scripts:\n  - {abs_script}\nenv_files:\n  - {abs_env}\n",
+            encoding="utf-8",
+        )
+
+        config = ConfigurationLoader.from_yaml_file(config_path)
+
+        assert config.initialization_scripts == [abs_script]
+        assert config.env_files == [abs_env]
+
     def test_resolve_env_files_none_returns_none(self):
         """Test that None (default) returns None to signal 'use defaults'."""
         config = ConfigurationLoader()
@@ -430,6 +464,52 @@ class TestLoadWithOverrides:
         assert config.env_files == ["/path/to/.env"]
 
     @mock.patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH")
+    @pytest.mark.parametrize(
+        ("field_name", "relative_path"),
+        [
+            ("initialization_scripts", "scripts/init.py"),
+            ("env_files", "env/local.env"),
+        ],
+    )
+    def test_load_with_overrides_resolves_config_file_relative_paths_from_config_dir(
+        self, mock_default_path, tmp_path, field_name, relative_path
+    ):
+        """Config-file relative paths are resolved from the config file's directory."""
+        mock_default_path.exists.return_value = False
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        config_path = config_dir / "pyrit.yaml"
+        config_path.write_text(f"{field_name}:\n  - ./{relative_path}\n", encoding="utf-8")
+
+        config = ConfigurationLoader.load_with_overrides(config_file=config_path)
+
+        assert getattr(config, field_name) == [str(config_dir / relative_path)]
+
+    @mock.patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH")
+    @pytest.mark.parametrize(
+        ("field_name", "relative_path"),
+        [
+            ("initialization_scripts", "scripts/override.py"),
+            ("env_files", "env/override.env"),
+        ],
+    )
+    def test_load_with_overrides_cli_relative_paths_resolve_from_cwd(
+        self, mock_default_path, tmp_path, field_name, relative_path
+    ):
+        """CLI path overrides resolve relative paths from the current directory, not the config dir."""
+        mock_default_path.exists.return_value = False
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        config_path = config_dir / "pyrit.yaml"
+        config_path.write_text(f"{field_name}:\n  - ./from-config-placeholder\n", encoding="utf-8")
+
+        config = ConfigurationLoader.load_with_overrides(config_file=config_path, **{field_name: [relative_path]})
+        resolver = "_resolve_initialization_scripts" if "scripts" in field_name else "_resolve_env_files"
+        resolved = getattr(config, resolver)()
+
+        assert resolved == [pathlib.Path.cwd() / relative_path]
+
+    @mock.patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH")
     def test_load_with_overrides_converts_sequence_to_list(self, mock_default_path):
         """Test that Sequence inputs are converted to list for dataclass compatibility."""
         mock_default_path.exists.return_value = False
@@ -457,19 +537,21 @@ class TestLoadWithOverrides:
             ConfigurationLoader.load_with_overrides(config_file=non_existent_path)
 
     @mock.patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH")
-    def test_load_with_overrides_explicit_config_file_overrides_default(self, mock_default_path):
+    def test_load_with_overrides_explicit_config_file_overrides_default(self, mock_default_path, tmp_path):
         """Test explicit config file values override default config file."""
         mock_default_path.exists.return_value = False
 
-        # Create a temp config file
-        yaml_content = """
+        # Create a temp config file with absolute paths
+        abs_script = str(tmp_path / "explicit" / "script.py")
+        abs_env = str(tmp_path / "explicit" / ".env")
+        yaml_content = f"""
 memory_db_type: azure_sql
 initializers:
   - explicit_init
 initialization_scripts:
-  - /explicit/script.py
+  - {abs_script}
 env_files:
-  - /explicit/.env
+  - {abs_env}
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -480,8 +562,8 @@ env_files:
 
             assert config.memory_db_type == "azure_sql"
             assert config._initializer_configs[0].name == "explicit_init"
-            assert config.initialization_scripts == ["/explicit/script.py"]
-            assert config.env_files == ["/explicit/.env"]
+            assert config.initialization_scripts == [abs_script]
+            assert config.env_files == [abs_env]
         finally:
             config_path.unlink()
 

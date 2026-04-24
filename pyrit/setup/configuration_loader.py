@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from pyrit.common.path import DEFAULT_CONFIG_PATH
+from pyrit.common.utils import verify_and_resolve_path
 from pyrit.common.yaml_loadable import YamlLoadable
 from pyrit.identifiers.class_name_utils import class_name_to_snake_case
 from pyrit.setup.initialization import (
@@ -180,6 +181,35 @@ class ConfigurationLoader(YamlLoadable):
         # Filter out None values only - empty lists are meaningful ("load nothing")
         filtered_data = {k: v for k, v in data.items() if v is not None}
         return cls(**filtered_data)
+
+    @classmethod
+    def from_yaml_file(cls, file: pathlib.Path | str) -> "ConfigurationLoader":
+        """
+        Create a ConfigurationLoader from a YAML file.
+
+        Relative initialization_scripts and env_files paths are eagerly resolved
+        against the config file's directory so they don't depend on the caller's
+        working directory.
+
+        Args:
+            file (pathlib.Path | str): Path to the YAML configuration file.
+
+        Returns:
+            ConfigurationLoader: A new instance with relative paths resolved.
+        """
+        resolved_file = verify_and_resolve_path(file)
+        config: ConfigurationLoader = super().from_yaml_file(resolved_file)
+        config._make_relative_paths_absolute(base_dir=resolved_file.parent)
+        return config
+
+    def _make_relative_paths_absolute(self, *, base_dir: pathlib.Path) -> None:
+        """Resolve relative initialization_scripts and env_files against a base directory."""
+        if self.initialization_scripts:
+            self.initialization_scripts = [
+                str(base_dir / s) if not pathlib.Path(s).is_absolute() else s for s in self.initialization_scripts
+            ]
+        if self.env_files:
+            self.env_files = [str(base_dir / e) if not pathlib.Path(e).is_absolute() else e for e in self.env_files]
 
     @staticmethod
     def load_with_overrides(
