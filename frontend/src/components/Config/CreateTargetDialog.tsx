@@ -17,28 +17,20 @@ import {
   MessageBar,
   MessageBarBody,
 } from '@fluentui/react-components'
-import { targetsApi } from '../../services/api'
+import { targetsApi } from '@/services/api'
 import { useCreateTargetDialogStyles } from './CreateTargetDialog.styles'
 
-const SUPPORTED_TARGET_TYPES = [
-  'OpenAIChatTarget',
-  'OpenAICompletionTarget',
-  'OpenAIImageTarget',
-  'OpenAIVideoTarget',
-  'OpenAITTSTarget',
-  'OpenAIResponseTarget',
-  'AzureMLChatTarget',
-] as const
+const TARGET_TYPE_CONFIG: Record<string, 'openai' | 'azureml'> = {
+  OpenAIChatTarget: 'openai',
+  OpenAICompletionTarget: 'openai',
+  OpenAIImageTarget: 'openai',
+  OpenAIVideoTarget: 'openai',
+  OpenAITTSTarget: 'openai',
+  OpenAIResponseTarget: 'openai',
+  AzureMLChatTarget: 'azureml',
+}
 
-const AZURE_ML_TARGET_TYPES: ReadonlySet<string> = new Set(['AzureMLChatTarget'])
-const OPENAI_TARGET_TYPES: ReadonlySet<string> = new Set([
-  'OpenAIChatTarget',
-  'OpenAICompletionTarget',
-  'OpenAIImageTarget',
-  'OpenAIVideoTarget',
-  'OpenAITTSTarget',
-  'OpenAIResponseTarget',
-])
+const SUPPORTED_TARGET_TYPES = Object.keys(TARGET_TYPE_CONFIG)
 
 interface CreateTargetDialogProps {
   open: boolean
@@ -62,8 +54,8 @@ export default function CreateTargetDialog({ open, onClose, onCreated }: CreateT
   const [error, setError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<{ targetType?: string; endpoint?: string }>({})
 
-  const isAzureML = AZURE_ML_TARGET_TYPES.has(targetType)
-  const isOpenAI = OPENAI_TARGET_TYPES.has(targetType)
+  const isAzureML = TARGET_TYPE_CONFIG[targetType] === 'azureml'
+  const isOpenAI = TARGET_TYPE_CONFIG[targetType] === 'openai'
 
   const resetForm = () => {
     setTargetType('')
