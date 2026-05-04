@@ -61,7 +61,6 @@ def conv_template():
     return conv
 
 
-@pytest.mark.run_only_if_all_tests
 class TestTokenGradientsIntegration:
     """Integration tests for token_gradients with real GPT-2."""
 
@@ -94,7 +93,6 @@ class TestTokenGradientsIntegration:
         assert (grad != 0).any(), "Gradient is all zeros"
 
 
-@pytest.mark.run_only_if_all_tests
 class TestGCGAttackPromptIntegration:
     """Integration tests for GCGAttackPrompt with real GPT-2."""
 
@@ -161,7 +159,6 @@ class TestGCGAttackPromptIntegration:
         assert loss < 1e6
 
 
-@pytest.mark.run_only_if_all_tests
 class TestGCGSampleControlIntegration:
     """Integration tests for GCGPromptManager.sample_control with real tokenizer."""
 
@@ -196,7 +193,6 @@ class TestGCGSampleControlIntegration:
             assert len(decoded) > 0
 
 
-@pytest.mark.run_only_if_all_tests
 class TestEmbeddingHelpersIntegration:
     """Integration tests for embedding helper functions with real GPT-2."""
 
