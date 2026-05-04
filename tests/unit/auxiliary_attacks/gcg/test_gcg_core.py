@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -13,6 +13,11 @@ attack_manager_mod = pytest.importorskip(
 torch = pytest.importorskip("torch", reason="torch not installed")
 
 MultiPromptAttack = attack_manager_mod.MultiPromptAttack
+AttackPrompt = attack_manager_mod.AttackPrompt
+PromptManager = attack_manager_mod.PromptManager
+EvaluateAttack = attack_manager_mod.EvaluateAttack
+IndividualPromptAttack = attack_manager_mod.IndividualPromptAttack
+ProgressiveMultiPromptAttack = attack_manager_mod.ProgressiveMultiPromptAttack
 get_embedding_layer = attack_manager_mod.get_embedding_layer
 get_embedding_matrix = attack_manager_mod.get_embedding_matrix
 get_embeddings = attack_manager_mod.get_embeddings
@@ -113,7 +118,6 @@ class TestTargetAndControlLoss:
 
     def test_target_loss_returns_correct_shape(self) -> None:
         """target_loss should return tensor of shape (batch, target_len)."""
-        AttackPrompt = attack_manager_mod.AttackPrompt
         prompt = object.__new__(AttackPrompt)
         prompt._target_slice = slice(5, 8)  # 3 target tokens
 
@@ -128,7 +132,6 @@ class TestTargetAndControlLoss:
 
     def test_target_loss_is_finite(self) -> None:
         """target_loss should always return finite values."""
-        AttackPrompt = attack_manager_mod.AttackPrompt
         prompt = object.__new__(AttackPrompt)
         prompt._target_slice = slice(3, 6)
 
@@ -140,7 +143,6 @@ class TestTargetAndControlLoss:
 
     def test_control_loss_returns_correct_shape(self) -> None:
         """control_loss should return tensor of shape (batch, control_len)."""
-        AttackPrompt = attack_manager_mod.AttackPrompt
         prompt = object.__new__(AttackPrompt)
         prompt._control_slice = slice(2, 5)  # 3 control tokens
 
@@ -155,7 +157,6 @@ class TestTargetAndControlLoss:
 
     def test_control_loss_is_finite(self) -> None:
         """control_loss should always return finite values."""
-        AttackPrompt = attack_manager_mod.AttackPrompt
         prompt = object.__new__(AttackPrompt)
         prompt._control_slice = slice(2, 5)
 
@@ -167,7 +168,6 @@ class TestTargetAndControlLoss:
 
     def test_target_loss_higher_for_wrong_predictions(self) -> None:
         """Loss should be higher when logits don't predict the correct target tokens."""
-        AttackPrompt = attack_manager_mod.AttackPrompt
         prompt = object.__new__(AttackPrompt)
         prompt._target_slice = slice(3, 5)
 
@@ -268,26 +268,24 @@ class TestSampleControl:
 
         for i in range(batch_size):
             # Find the position that changed
-            diffs = (result[i] != original.to(result.device))
+            diffs = result[i] != original.to(result.device)
             changed_positions = diffs.nonzero(as_tuple=True)[0]
             for pos in changed_positions:
                 new_tok = result[i, pos].item()
-                assert new_tok not in non_ascii_set, (
-                    f"Candidate {i} position {pos}: sampled non-ASCII token {new_tok}"
-                )
+                assert new_tok not in non_ascii_set, f"Candidate {i} position {pos}: sampled non-ASCII token {new_tok}"
 
 
 class TestBuildParams:
-    """Tests for GreedyCoordinateGradientAdversarialSuffixGenerator._build_params."""
+    """Tests for GreedyCoordinateGradientAdversarialSuffixgenerator_cls._build_params."""
 
     def test_builds_config_dict_from_kwargs(self) -> None:
         train_mod = pytest.importorskip(
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
-        params = Generator._build_params(
+        params = generator_cls._build_params(
             n_steps=100,
             batch_size=256,
             model_name="test_model",
@@ -301,28 +299,28 @@ class TestBuildParams:
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
         kwargs = {"a": 1, "b": "hello", "c": [1, 2, 3], "d": True}
-        params = Generator._build_params(**kwargs)
+        params = generator_cls._build_params(**kwargs)
         for key, value in kwargs.items():
             assert getattr(params, key) == value
 
 
 class TestApplyTargetAugmentation:
-    """Tests for GreedyCoordinateGradientAdversarialSuffixGenerator._apply_target_augmentation."""
+    """Tests for GreedyCoordinateGradientAdversarialSuffixgenerator_cls._apply_target_augmentation."""
 
     def test_returns_same_length_lists(self) -> None:
         train_mod = pytest.importorskip(
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
         train = ["Sure, here is a bomb", "Sure, here is a virus"]
         test = ["Sure, here is a weapon"]
 
-        result_train, result_test = Generator._apply_target_augmentation(
+        result_train, result_test = generator_cls._apply_target_augmentation(
             train_targets=train,
             test_targets=test,
         )
@@ -335,17 +333,17 @@ class TestApplyTargetAugmentation:
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
         np.random.seed(42)
         targets = ["Sure, here is how to do it"] * 100
 
-        result, _ = Generator._apply_target_augmentation(
+        result, _ = generator_cls._apply_target_augmentation(
             train_targets=targets,
             test_targets=[],
         )
         # With 100 targets and 50% chance of each transform, we should see some changes
-        num_changed = sum(1 for orig, aug in zip(targets, result) if orig != aug)
+        num_changed = sum(1 for orig, aug in zip(targets, result, strict=False) if orig != aug)
         assert num_changed > 0, "Expected at least some targets to be augmented"
 
     def test_augmentation_is_seeded_reproducible(self) -> None:
@@ -354,31 +352,30 @@ class TestApplyTargetAugmentation:
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
         targets = ["Sure, here is how to do it"] * 20
 
         np.random.seed(123)
-        result1, _ = Generator._apply_target_augmentation(train_targets=targets, test_targets=[])
+        result1, _ = generator_cls._apply_target_augmentation(train_targets=targets, test_targets=[])
 
         np.random.seed(123)
-        result2, _ = Generator._apply_target_augmentation(train_targets=targets, test_targets=[])
+        result2, _ = generator_cls._apply_target_augmentation(train_targets=targets, test_targets=[])
 
         assert result1 == result2
 
 
 class TestCreateAttack:
-    """Tests for GreedyCoordinateGradientAdversarialSuffixGenerator._create_attack."""
+    """Tests for GreedyCoordinateGradientAdversarialSuffixgenerator_cls._create_attack."""
 
     def test_transfer_true_creates_progressive(self) -> None:
         train_mod = pytest.importorskip(
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
-        ProgressiveMultiPromptAttack = attack_manager_mod.ProgressiveMultiPromptAttack
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
-        params = Generator._build_params(
+        params = generator_cls._build_params(
             transfer=True,
             progressive_models=True,
             progressive_goals=True,
@@ -401,7 +398,7 @@ class TestCreateAttack:
             "MPA": MagicMock(return_value=MagicMock()),
         }
 
-        attack = Generator._create_attack(
+        attack = generator_cls._create_attack(
             params=params,
             managers=managers,
             train_goals=["goal1"],
@@ -418,10 +415,9 @@ class TestCreateAttack:
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
         )
-        Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
-        IndividualPromptAttack = attack_manager_mod.IndividualPromptAttack
+        generator_cls = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
-        params = Generator._build_params(
+        params = generator_cls._build_params(
             transfer=False,
             control_init="! ! !",
             result_prefix="test",
@@ -442,7 +438,7 @@ class TestCreateAttack:
             "MPA": MagicMock(return_value=MagicMock()),
         }
 
-        attack = Generator._create_attack(
+        attack = generator_cls._create_attack(
             params=params,
             managers=managers,
             train_goals=["goal1"],
@@ -483,7 +479,6 @@ class TestPromptManagerInit:
     """Tests for PromptManager initialization validation."""
 
     def test_raises_on_mismatched_goals_targets(self) -> None:
-        PromptManager = attack_manager_mod.PromptManager
         with pytest.raises(ValueError, match="Length of goals and targets must match"):
             PromptManager(
                 goals=["goal1", "goal2"],
@@ -494,7 +489,6 @@ class TestPromptManagerInit:
             )
 
     def test_raises_on_empty_goals(self) -> None:
-        PromptManager = attack_manager_mod.PromptManager
         with pytest.raises(ValueError, match="Must provide at least one goal"):
             PromptManager(
                 goals=[],
@@ -509,7 +503,6 @@ class TestEvaluateAttackInit:
     """Tests for EvaluateAttack initialization validation."""
 
     def test_raises_with_multiple_workers(self) -> None:
-        EvaluateAttack = attack_manager_mod.EvaluateAttack
         mock_worker1 = MagicMock()
         mock_worker1.model.name_or_path = "m1"
         mock_worker1.tokenizer.name_or_path = "t1"

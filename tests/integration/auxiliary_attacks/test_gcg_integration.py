@@ -8,7 +8,7 @@ These tests validate that the GCG attack pipeline works end-to-end with a real
 the llama-2 conversation template (which has explicit handling in _update_ids).
 
 Requires: torch, transformers, fastchat, mlflow (GCG optional deps).
-Skipped unless RUN_ALL_TESTS=true.
+Skipped via importorskip when deps are not installed.
 """
 
 import pytest
@@ -17,21 +17,18 @@ torch = pytest.importorskip("torch", reason="torch not installed")
 transformers = pytest.importorskip("transformers", reason="transformers not installed")
 pytest.importorskip("fastchat", reason="fastchat not installed")
 
-from unittest.mock import MagicMock, patch
 
-from fastchat.model import get_conversation_template
-from transformers import AutoTokenizer, GPT2LMHeadModel
+from fastchat.model import get_conversation_template  # noqa: E402
+from transformers import AutoTokenizer, GPT2LMHeadModel  # noqa: E402
 
-from pyrit.auxiliary_attacks.gcg.attack.base.attack_manager import (
-    MultiPromptAttack,
+from pyrit.auxiliary_attacks.gcg.attack.base.attack_manager import (  # noqa: E402
     get_embedding_layer,
     get_embedding_matrix,
     get_embeddings,
     get_nonascii_toks,
 )
-from pyrit.auxiliary_attacks.gcg.attack.gcg.gcg_attack import (
+from pyrit.auxiliary_attacks.gcg.attack.gcg.gcg_attack import (  # noqa: E402
     GCGAttackPrompt,
-    GCGMultiPromptAttack,
     GCGPromptManager,
     token_gradients,
 )
@@ -40,8 +37,7 @@ from pyrit.auxiliary_attacks.gcg.attack.gcg.gcg_attack import (
 @pytest.fixture(scope="module")
 def gpt2_model() -> GPT2LMHeadModel:
     """Load GPT-2 model once for all tests in this module."""
-    model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
-    return model
+    return GPT2LMHeadModel.from_pretrained("gpt2").eval()
 
 
 @pytest.fixture(scope="module")
@@ -214,9 +210,7 @@ class TestEmbeddingHelpersIntegration:
         assert embeddings.shape[0] == 1
         assert embeddings.shape[1] == input_ids.shape[1]
 
-    def test_get_nonascii_toks_returns_nonempty_tensor(
-        self, gpt2_tokenizer: transformers.PreTrainedTokenizer
-    ) -> None:
+    def test_get_nonascii_toks_returns_nonempty_tensor(self, gpt2_tokenizer: transformers.PreTrainedTokenizer) -> None:
         toks = get_nonascii_toks(gpt2_tokenizer, device="cpu")
         assert isinstance(toks, torch.Tensor)
         assert len(toks) > 0
