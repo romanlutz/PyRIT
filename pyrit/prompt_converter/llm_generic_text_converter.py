@@ -27,6 +27,7 @@ class LLMGenericTextConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
     TARGET_REQUIREMENTS = CHAT_CONSUMER_REQUIREMENTS
 
     @apply_defaults

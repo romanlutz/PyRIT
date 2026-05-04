@@ -46,6 +46,7 @@ class ImageCompressionConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("image_path", "url")
     SUPPORTED_OUTPUT_TYPES = ("image_path",)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     def __init__(
         self,

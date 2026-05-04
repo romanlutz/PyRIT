@@ -7,7 +7,7 @@ from typing import Literal
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
 
 
 class Base64Converter(PromptConverter):
@@ -21,6 +21,13 @@ class Base64Converter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
 
     EncodingFunc = Literal[
         "b64encode",

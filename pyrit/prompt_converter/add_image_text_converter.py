@@ -34,6 +34,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("image_path",)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     _DEFAULT_MARGIN = 5
 

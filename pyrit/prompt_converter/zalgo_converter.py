@@ -8,6 +8,7 @@ from typing import Optional
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.text_selection_strategy import WordSelectionStrategy
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
+from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
 
 # Unicode combining characters for Zalgo effect (U+0300–U+036F)
 ZALGO_MARKS = [chr(code) for code in range(0x0300, 0x036F + 1)]
@@ -20,6 +21,13 @@ class ZalgoConverter(WordLevelConverter):
     """
     Converts text into cursed Zalgo text using combining Unicode marks.
     """
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Unicode / Bidi / Zero-Width",
+        ),
+    )
 
     def __init__(
         self,

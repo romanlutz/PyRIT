@@ -7,6 +7,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
+from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
 
 if TYPE_CHECKING:
     from pyrit.identifiers import ComponentIdentifier
@@ -17,6 +18,13 @@ class BinaryConverter(WordLevelConverter):
     """
     Transforms input text into its binary representation with configurable bits per character (8, 16, or 32).
     """
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
 
     class BitsPerChar(Enum):
         """The number of bits per character for binary conversion."""

@@ -8,7 +8,7 @@ from typing import Optional
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
 
 
 class InsertPunctuationConverter(PromptConverter):
@@ -22,6 +22,13 @@ class InsertPunctuationConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Perturbation",
+            category="Plain Perturbations",
+            leaf="Character-Level Micro-Edits",
+        ),
+    )
 
     #: Common punctuation characters. Used if no punctuation list is provided.
     default_punctuation_list = [",", ".", "!", "?", ":", ";", "-"]

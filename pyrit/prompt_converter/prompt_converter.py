@@ -17,6 +17,21 @@ if TYPE_CHECKING:
     from pyrit.prompt_target import PromptTarget
 
 
+@dataclass(frozen=True)
+class MLCommonsTaxonomyClassification:
+    """Classification of a converter within the MLCommons Jailbreak Attack Taxonomy.
+
+    The taxonomy provides a mechanism-first classification of single-turn, inference-time
+    prompt attacks on LLMs, organized into families, categories, and leaves.
+
+    See https://github.com/mlcommons/jailbreak-taxonomy
+    """
+
+    family: str
+    category: str
+    leaf: str
+
+
 @dataclass
 class ConverterResult:
     """The result of a prompt conversion, containing the converted output and its type."""
@@ -51,6 +66,10 @@ class PromptConverter(Identifiable):
     SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ()
     #: Tuple of output modalities supported by this converter. Subclasses must override this.
     SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ()
+    #: MLCommons Jailbreak Attack Taxonomy classification(s) for this converter.
+    #: Subclasses should override with one or more ``MLCommonsTaxonomyClassification`` entries.
+    #: Empty tuple means the converter is not yet classified (utility, multimodal, or pending).
+    MLCOMMONS_TAXONOMY: tuple[MLCommonsTaxonomyClassification, ...] = ()
 
     #: Capability requirements placed on the converter's target (if any).
     #: Subclasses that use a target should override this and pass the target to
@@ -284,3 +303,28 @@ def get_converter_modalities() -> list[tuple[str, list[PromptDataType], list[Pro
     converter_modalities.sort(key=lambda x: (x[1][0] if x[1] else "", x[2][0] if x[2] else "", x[0]))
 
     return converter_modalities
+
+
+def get_taxonomy_classification() -> dict[str, tuple[MLCommonsTaxonomyClassification, ...]]:
+    """
+    Retrieve the MLCommons Jailbreak Attack Taxonomy classification for all converters.
+
+    Returns:
+        dict[str, tuple[MLCommonsTaxonomyClassification, ...]]: A mapping from converter
+            class name to its taxonomy classification(s). Converters with no classification
+            map to an empty tuple.
+    """
+    result: dict[str, tuple[MLCommonsTaxonomyClassification, ...]] = {}
+
+    for name in prompt_converter.__all__:
+        if name in ("ConverterResult", "PromptConverter") or "Strategy" in name:
+            continue
+
+        converter_class = getattr(prompt_converter, name)
+
+        if not isinstance(converter_class, type) or not issubclass(converter_class, PromptConverter):
+            continue
+
+        result[name] = converter_class.MLCOMMONS_TAXONOMY
+
+    return result

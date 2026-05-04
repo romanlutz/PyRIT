@@ -23,6 +23,7 @@ class AudioFrequencyConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("audio_path",)
     SUPPORTED_OUTPUT_TYPES = ("audio_path",)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     #: Accepted audio formats for conversion.
     AcceptedAudioFormats = Literal["wav"]

@@ -4,12 +4,20 @@
 import codecs
 
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
+from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
 
 
 class ROT13Converter(WordLevelConverter):
     """
     Encodes prompts using the ROT13 cipher.
     """
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
 
     async def convert_word_async(self, word: str) -> str:
         """

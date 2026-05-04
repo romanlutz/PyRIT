@@ -6,6 +6,7 @@ from typing import Optional
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.text_selection_strategy import WordSelectionStrategy
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
+from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
 
 
 class FirstLetterConverter(WordLevelConverter):
@@ -13,6 +14,13 @@ class FirstLetterConverter(WordLevelConverter):
     Replaces each word of the prompt with its first letter (or digit).
     Whitespace and words that do not contain any letter or digit are ignored.
     """
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
 
     def __init__(
         self,

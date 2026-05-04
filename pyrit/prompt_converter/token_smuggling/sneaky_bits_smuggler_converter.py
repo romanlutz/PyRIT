@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.token_smuggling.base import SmugglerConverter
+from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,13 @@ class SneakyBitsSmugglerConverter(SmugglerConverter):
     Replicates functionality detailed in:
         - [@embracethered2025sneakybits]
     """
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Unicode / Bidi / Zero-Width",
+        ),
+    )
 
     def __init__(
         self,

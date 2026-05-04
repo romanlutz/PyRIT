@@ -27,6 +27,7 @@ class _AdamOptimizer:
         The code is inspired by the implementation found at:
         https://github.com/xbeat/Machine-Learning/blob/main/Adam%20Optimizer%20in%20Python.md
     """
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     def __init__(
         self, *, learning_rate: float = 0.001, beta_1: float = 0.9, beta_2: float = 0.999, epsilon: float = 1e-8

@@ -16,6 +16,7 @@ class SearchReplaceConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     def __init__(self, pattern: str, replace: str | list[str], regex_flags: int = 0) -> None:
         """

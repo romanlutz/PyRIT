@@ -10,7 +10,7 @@ from typing import Optional
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType, SeedPrompt
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,13 @@ class TemplateSegmentConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Composition & Ordering",
+            category="Fragment Assembly",
+            leaf="Token/Phrase Shuffling",
+        ),
+    )
 
     def __init__(
         self,

@@ -3,7 +3,7 @@
 
 
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
 
 
 class NatoConverter(PromptConverter):
@@ -29,6 +29,13 @@ class NatoConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
 
     _NATO_MAP = {
         "A": "Alfa",

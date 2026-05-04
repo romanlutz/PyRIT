@@ -35,6 +35,7 @@ from pyrit.prompt_converter import (
     LLMGenericTextConverter,
     MaliciousQuestionGeneratorConverter,
     MathPromptConverter,
+    MLCommonsTaxonomyClassification,
     MorseConverter,
     PDFConverter,
     PersuasionConverter,
@@ -52,6 +53,7 @@ from pyrit.prompt_converter import (
     UnicodeSubstitutionConverter,
     UrlConverter,
     VariationConverter,
+    get_taxonomy_classification,
 )
 
 
@@ -84,6 +86,26 @@ def test_prompt_converter_requires_both_modality_attributes() -> None:
         class InvalidConverter(PromptConverter):
             async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
                 return ConverterResult(output_text=prompt, output_type="text")
+
+
+def test_get_taxonomy_classification() -> None:
+    taxonomy = get_taxonomy_classification()
+
+    assert taxonomy["AddImageTextConverter"] == ()
+    assert taxonomy["Base64Converter"] == (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Encoding & Unicode Tricks",
+            leaf="Base64 / URL / Obfuscation",
+        ),
+    )
+    assert taxonomy["TextJailbreakConverter"] == (
+        MLCommonsTaxonomyClassification(
+            family="Overt Carriers",
+            category="Direct Override Patterns",
+            leaf="DAN-Style Composites",
+        ),
+    )
 
 
 async def test_convert_tokens_two_tokens_async() -> None:

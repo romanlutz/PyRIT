@@ -21,27 +21,45 @@
 # - **Text-to-Text**: Encoding, obfuscation, translation, and semantic transformations
 # - **Multimodal**: Converting between text, images, audio, video, and files
 #
-# ## Converter Modality Reference Table
+# ## Converter Reference Table
 #
-# The following table shows all available converters organized by their input and output modalities:
+# The following table shows all available converters organized by their input/output modalities
+# and classified according to the
+# [MLCommons Jailbreak Attack Taxonomy](https://github.com/mlcommons/jailbreak-taxonomy)
+# {cite}`maple2026jailbreakmethodology`.
+# The taxonomy provides a mechanism-first classification of single-turn, inference-time prompt
+# attacks on LLMs, organized into 4 families, 8 categories, and 18 leaves. For the full taxonomy
+# specification and methodology, see the MLCommons AI Safety Benchmark papers
+# {cite}`vidgen2024ailuminate` {cite}`ghosh2025ailuminatev1`.
+#
+# The **Taxonomy** column shows the family and leaf for each converter. Some converters span
+# multiple taxonomy leaves; the primary classification is shown.
 
 # %%
 import pandas as pd
 
-from pyrit.prompt_converter import get_converter_modalities
+from pyrit.prompt_converter import get_converter_modalities, get_taxonomy_classification
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
 await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
 
-# Get all converters with their modalities
+# Get all converters with their modalities and taxonomy classifications
 converter_list = get_converter_modalities()
+taxonomy_map = get_taxonomy_classification()
 
-# Create a list of rows for the DataFrame
+# Build a single table with modalities and taxonomy classification
 rows = []
 for name, inputs, outputs in converter_list:
     input_str = ", ".join(inputs) if inputs else "any"
     output_str = ", ".join(outputs) if outputs else "any"
-    rows.append({"Input Modality": input_str, "Output Modality": output_str, "Converter": name})
+    classifications = taxonomy_map.get(name, ())
+    taxonomy_str = "; ".join(f"{c.family}: {c.leaf}" for c in classifications) if classifications else ""
+    rows.append({
+        "Converter": name,
+        "Input Modality": input_str,
+        "Output Modality": output_str,
+        "Taxonomy": taxonomy_str,
+    })
 
 # Create DataFrame and sort
 df = pd.DataFrame(rows)
@@ -49,7 +67,8 @@ df = df.sort_values(by=["Input Modality", "Output Modality", "Converter"]).reset
 
 # Display all rows
 pd.set_option("display.max_rows", None)
-print(df)
+pd.set_option("display.max_colwidth", 50)
+print(df.to_string())
 
 # %% [markdown]
 # ## Converter Categories

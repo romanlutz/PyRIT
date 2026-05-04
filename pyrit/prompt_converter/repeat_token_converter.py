@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
 
 
 class RepeatTokenConverter(PromptConverter):
@@ -30,6 +30,13 @@ class RepeatTokenConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
+    MLCOMMONS_TAXONOMY = (
+        MLCommonsTaxonomyClassification(
+            family="Encoding Abuse",
+            category="Wrappers & Schemas",
+            leaf="Length / Prefix-Suffix Wrappers",
+        ),
+    )
 
     def __init__(
         self,

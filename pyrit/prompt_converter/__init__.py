@@ -56,7 +56,13 @@ from pyrit.prompt_converter.negation_trap_converter import NegationTrapConverter
 from pyrit.prompt_converter.noise_converter import NoiseConverter
 from pyrit.prompt_converter.pdf_converter import PDFConverter
 from pyrit.prompt_converter.persuasion_converter import PersuasionConverter
-from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter, get_converter_modalities
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    MLCommonsTaxonomyClassification,
+    PromptConverter,
+    get_converter_modalities,
+    get_taxonomy_classification,
+)
 from pyrit.prompt_converter.qr_code_converter import QRCodeConverter
 from pyrit.prompt_converter.random_capital_letters_converter import RandomCapitalLettersConverter
 from pyrit.prompt_converter.random_translation_converter import RandomTranslationConverter
@@ -182,6 +188,7 @@ __all__ = [
     "MaliciousQuestionGeneratorConverter",
     "MathObfuscationConverter",
     "MathPromptConverter",
+    "MLCommonsTaxonomyClassification",
     "MorseConverter",
     "NatoConverter",
     "NegationTrapConverter",
@@ -230,4 +237,5 @@ __all__ = [
     "ZalgoConverter",
     "ZeroWidthConverter",
     "get_converter_modalities",
+    "get_taxonomy_classification",
 ]

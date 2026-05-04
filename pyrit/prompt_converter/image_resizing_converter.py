@@ -23,6 +23,7 @@ class ImageResizingConverter(BaseImageToImageConverter):
     References:
         https://pillow.readthedocs.io/en/stable/reference/Image.html#PIL.Image.Image.resize
     """
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     def __init__(
         self,

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @dataclass
 class _WordDocInjectionConfig:
     """Configuration for how to inject content into a Word document."""
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     existing_docx: Optional[Path]
     placeholder: str
