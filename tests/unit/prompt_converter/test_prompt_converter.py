@@ -30,13 +30,14 @@ from pyrit.prompt_converter import (
     ConverterResult,
     DiacriticConverter,
     EmojiConverter,
+    ENCODING_BASE64,
     FlipConverter,
     LeetspeakConverter,
     LLMGenericTextConverter,
     MaliciousQuestionGeneratorConverter,
     MathPromptConverter,
-    MLCommonsTaxonomyClassification,
     MorseConverter,
+    OVERT_DAN_COMPOSITES,
     PDFConverter,
     PersuasionConverter,
     PromptConverter,
@@ -92,20 +93,8 @@ def test_get_taxonomy_classification() -> None:
     taxonomy = get_taxonomy_classification()
 
     assert taxonomy["AddImageTextConverter"] == ()
-    assert taxonomy["Base64Converter"] == (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Base64 / URL / Obfuscation",
-        ),
-    )
-    assert taxonomy["TextJailbreakConverter"] == (
-        MLCommonsTaxonomyClassification(
-            family="Overt Carriers",
-            category="Direct Override Patterns",
-            leaf="DAN-Style Composites",
-        ),
-    )
+    assert taxonomy["Base64Converter"] == (ENCODING_BASE64,)
+    assert taxonomy["TextJailbreakConverter"] == (OVERT_DAN_COMPOSITES,)
 
 
 async def test_convert_tokens_two_tokens_async() -> None:

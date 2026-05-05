@@ -6,7 +6,11 @@ from art import text2art
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_ASCII,
+    PromptConverter,
+)
 
 
 class AsciiArtConverter(PromptConverter):
@@ -16,13 +20,7 @@ class AsciiArtConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="ASCII Encoding",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_ASCII,)
 
     def __init__(self, font: str = "rand") -> None:
         """

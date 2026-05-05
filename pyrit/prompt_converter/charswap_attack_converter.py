@@ -11,20 +11,16 @@ from pyrit.prompt_converter.text_selection_strategy import (
     WordSelectionStrategy,
 )
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    PERTURBATION_CHAR_EDITS,
+)
 
 
 class CharSwapConverter(WordLevelConverter):
     """
     Applies character swapping to words in the prompt to test adversarial textual robustness.
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Perturbation",
-            category="Plain Perturbations",
-            leaf="Character-Level Micro-Edits",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (PERTURBATION_CHAR_EDITS,)
 
     def __init__(
         self,

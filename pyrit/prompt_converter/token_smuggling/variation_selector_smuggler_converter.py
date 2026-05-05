@@ -6,7 +6,9 @@ from typing import Literal, Optional
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.token_smuggling.base import SmugglerConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ENCODING_UNICODE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +31,7 @@ class VariationSelectorSmugglerConverter(SmugglerConverter):
     appending invisible variation selectors directly to visible text—enabling mixed
     visible and hidden content within a single string.
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     def __init__(
         self,

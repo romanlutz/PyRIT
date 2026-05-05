@@ -6,7 +6,11 @@ import random
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    PERTURBATION_CHAR_EDITS,
+    PromptConverter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +20,7 @@ class RandomCapitalLettersConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Perturbation",
-            category="Plain Perturbations",
-            leaf="Character-Level Micro-Edits",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (PERTURBATION_CHAR_EDITS,)
 
     def __init__(self, percentage: float = 100.0) -> None:
         """

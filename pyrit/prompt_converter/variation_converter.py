@@ -22,7 +22,11 @@ from pyrit.models import (
     PromptDataType,
     SeedPrompt,
 )
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    PERTURBATION_TRANSFER,
+    PromptConverter,
+)
 from pyrit.prompt_target import CHAT_CONSUMER_REQUIREMENTS, PromptTarget
 
 logger = logging.getLogger(__name__)
@@ -35,13 +39,7 @@ class VariationConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Perturbation",
-            category="Transfer Text Perturbations",
-            leaf="Paraphrase-Based Transfer",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (PERTURBATION_TRANSFER,)
     TARGET_REQUIREMENTS = CHAT_CONSUMER_REQUIREMENTS
 
     @apply_defaults

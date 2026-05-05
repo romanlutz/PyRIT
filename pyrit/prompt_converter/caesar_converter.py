@@ -7,7 +7,11 @@ import string
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType, SeedPrompt
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_BASE64,
+    PromptConverter,
+)
 
 
 class CaesarConverter(PromptConverter):
@@ -21,13 +25,7 @@ class CaesarConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Base64 / URL / Obfuscation",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
 
     def __init__(self, *, caesar_offset: int, append_description: bool = False) -> None:
         """

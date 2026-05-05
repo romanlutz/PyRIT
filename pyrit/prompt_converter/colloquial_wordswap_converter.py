@@ -11,7 +11,11 @@ import yaml
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    PERTURBATION_PARAPHRASE,
+    PromptConverter,
+)
 
 
 class ColloquialWordswapConverter(PromptConverter):
@@ -24,13 +28,7 @@ class ColloquialWordswapConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Perturbation",
-            category="Plain Perturbations",
-            leaf="Local Paraphrase & Rewording",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (PERTURBATION_PARAPHRASE,)
 
     def __init__(
         self,

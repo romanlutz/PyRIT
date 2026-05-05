@@ -4,7 +4,9 @@
 import random
 
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ENCODING_UNICODE,
+)
 
 
 class EmojiConverter(WordLevelConverter):
@@ -13,13 +15,7 @@ class EmojiConverter(WordLevelConverter):
 
     Inspired by https://github.com/BASI-LABS/parseltongue/blob/main/src/utils.ts
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     #: Dictionary mapping letters to their corresponding emojis.
     emoji_dict = {

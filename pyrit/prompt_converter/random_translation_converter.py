@@ -10,7 +10,10 @@ from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH, DATASETS_PATH
 from pyrit.models import PromptDataType, SeedDataset, SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_BASE64,
+)
 from pyrit.prompt_converter.text_selection_strategy import WordSelectionStrategy
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
 from pyrit.prompt_target import PromptTarget
@@ -27,13 +30,7 @@ class RandomTranslationConverter(LLMGenericTextConverter, WordLevelConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Base64 / URL / Obfuscation",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
 
     # Default language list
     _DEFAULT_LANGUAGES_SEED_PROMPT_PATH = Path(DATASETS_PATH) / "lexicons" / "languages_most_spoken.yaml"

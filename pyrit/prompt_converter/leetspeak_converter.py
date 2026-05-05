@@ -7,20 +7,16 @@ from typing import Optional
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.text_selection_strategy import WordSelectionStrategy
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ENCODING_BASE64,
+)
 
 
 class LeetspeakConverter(WordLevelConverter):
     """
     Converts a string to a leetspeak version.
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Base64 / URL / Obfuscation",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
 
     def __init__(
         self,

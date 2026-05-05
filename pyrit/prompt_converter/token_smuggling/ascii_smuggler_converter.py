@@ -6,7 +6,9 @@ from typing import Literal
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.prompt_converter.token_smuggling.base import SmugglerConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ENCODING_UNICODE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +24,7 @@ class AsciiSmugglerConverter(SmugglerConverter):
     Replicates the functionality detailed in the following blog post:
     [@embracethered2024unicode]
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     def __init__(self, action: Literal["encode", "decode"] = "encode", unicode_tags: bool = False) -> None:
         """

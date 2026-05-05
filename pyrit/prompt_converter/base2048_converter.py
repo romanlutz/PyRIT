@@ -6,7 +6,11 @@ import logging
 import base2048
 
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_BASE64,
+    PromptConverter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +27,7 @@ class Base2048Converter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Base64 / URL / Obfuscation",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
 
     def __init__(self) -> None:
         """Initialize the Base2048Converter."""

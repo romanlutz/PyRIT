@@ -5,7 +5,11 @@
 from pyrit.datasets import TextJailBreak
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    OVERT_DAN_COMPOSITES,
+    PromptConverter,
+)
 
 
 class TextJailbreakConverter(PromptConverter):
@@ -15,13 +19,7 @@ class TextJailbreakConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Overt Carriers",
-            category="Direct Override Patterns",
-            leaf="DAN-Style Composites",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (OVERT_DAN_COMPOSITES,)
 
     def __init__(self, *, jailbreak_template: TextJailBreak) -> None:
         """

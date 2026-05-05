@@ -2,7 +2,11 @@
 # Licensed under the MIT license.
 
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_UNICODE,
+    PromptConverter,
+)
 
 
 class ZeroWidthConverter(PromptConverter):
@@ -12,13 +16,7 @@ class ZeroWidthConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     #: Constant for zero-width space character.
     ZERO_WIDTH_SPACE = "\u200b"

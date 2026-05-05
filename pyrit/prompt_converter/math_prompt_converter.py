@@ -9,7 +9,10 @@ from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
 from pyrit.models import PromptDataType, SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_ASCII,
+)
 from pyrit.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
@@ -21,13 +24,7 @@ class MathPromptConverter(LLMGenericTextConverter):
 
     An existing ``PromptTarget`` is used to perform the conversion (like Azure OpenAI).
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="ASCII Encoding",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_ASCII,)
 
     @apply_defaults
     def __init__(

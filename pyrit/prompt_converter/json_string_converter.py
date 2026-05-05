@@ -4,7 +4,11 @@
 import json
 
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_JSON,
+    PromptConverter,
+)
 
 
 class JsonStringConverter(PromptConverter):
@@ -22,13 +26,7 @@ class JsonStringConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Wrappers & Schemas",
-            leaf="JSON / Markdown / Code-Blocks",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_JSON,)
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         """

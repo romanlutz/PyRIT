@@ -9,7 +9,10 @@ from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
 from pyrit.models import PromptDataType, SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    COMPOSITION_BENIGN_WRAPPER,
+    ConverterResult,
+)
 from pyrit.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
@@ -21,13 +24,7 @@ class MaliciousQuestionGeneratorConverter(LLMGenericTextConverter):
 
     An existing ``PromptTarget`` is used to perform the conversion (like Azure OpenAI).
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Composition & Ordering",
-            category="Context Framing & Deception",
-            leaf="Benign Wrapper + Harmful Core",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (COMPOSITION_BENIGN_WRAPPER,)
 
     @apply_defaults
     def __init__(

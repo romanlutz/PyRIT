@@ -2,7 +2,9 @@
 # Licensed under the MIT license.
 
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    ENCODING_UNICODE,
+)
 
 
 class SuperscriptConverter(WordLevelConverter):
@@ -11,13 +13,7 @@ class SuperscriptConverter(WordLevelConverter):
 
     This converter leaves characters that do not have a superscript equivalent unchanged.
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     _superscript_map = {
         "0": "\u2070",

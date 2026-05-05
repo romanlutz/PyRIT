@@ -11,7 +11,9 @@ from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
 from pyrit.prompt_target import PromptTarget
-from pyrit.prompt_converter.prompt_converter import MLCommonsTaxonomyClassification
+from pyrit.prompt_converter.prompt_converter import (
+    PERTURBATION_PARAPHRASE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +43,7 @@ class ScientificTranslationConverter(LLMGenericTextConverter):
     whether safety filters can be bypassed through scientific translation.
 
     """
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Perturbation",
-            category="Plain Perturbations",
-            leaf="Local Paraphrase & Rewording",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (PERTURBATION_PARAPHRASE,)
 
     @apply_defaults
     def __init__(

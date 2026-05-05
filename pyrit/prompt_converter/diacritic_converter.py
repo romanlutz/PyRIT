@@ -6,7 +6,11 @@ import unicodedata
 
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import PromptDataType
-from pyrit.prompt_converter.prompt_converter import ConverterResult, MLCommonsTaxonomyClassification, PromptConverter
+from pyrit.prompt_converter.prompt_converter import (
+    ConverterResult,
+    ENCODING_UNICODE,
+    PromptConverter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +22,7 @@ class DiacriticConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (
-        MLCommonsTaxonomyClassification(
-            family="Encoding Abuse",
-            category="Encoding & Unicode Tricks",
-            leaf="Unicode / Bidi / Zero-Width",
-        ),
-    )
+    MLCOMMONS_TAXONOMY = (ENCODING_UNICODE,)
 
     def __init__(self, target_chars: str = "aeiou", accent: str = "acute") -> None:
         """

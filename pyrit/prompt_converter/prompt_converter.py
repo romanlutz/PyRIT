@@ -32,6 +32,83 @@ class MLCommonsTaxonomyClassification:
     leaf: str
 
 
+# Pre-built MLCommons Jailbreak Taxonomy classifications.
+# One constant per taxonomy leaf, for use in converter MLCOMMONS_TAXONOMY attributes.
+
+# Composition & Ordering
+COMPOSITION_BENIGN_WRAPPER = MLCommonsTaxonomyClassification(
+    family="Composition & Ordering",
+    category="Context Framing & Deception",
+    leaf="Benign Wrapper + Harmful Core",
+)
+COMPOSITION_SCENARIO_ASSEMBLY = MLCommonsTaxonomyClassification(
+    family="Composition & Ordering",
+    category="Context Framing & Deception",
+    leaf="Scenario-Based Assembly",
+)
+COMPOSITION_TOKEN_SHUFFLING = MLCommonsTaxonomyClassification(
+    family="Composition & Ordering",
+    category="Fragment Assembly",
+    leaf="Token/Phrase Shuffling",
+)
+
+# Encoding Abuse
+ENCODING_ASCII = MLCommonsTaxonomyClassification(
+    family="Encoding Abuse",
+    category="Encoding & Unicode Tricks",
+    leaf="ASCII Encoding",
+)
+ENCODING_BASE64 = MLCommonsTaxonomyClassification(
+    family="Encoding Abuse",
+    category="Encoding & Unicode Tricks",
+    leaf="Base64 / URL / Obfuscation",
+)
+ENCODING_UNICODE = MLCommonsTaxonomyClassification(
+    family="Encoding Abuse",
+    category="Encoding & Unicode Tricks",
+    leaf="Unicode / Bidi / Zero-Width",
+)
+ENCODING_JSON = MLCommonsTaxonomyClassification(
+    family="Encoding Abuse",
+    category="Wrappers & Schemas",
+    leaf="JSON / Markdown / Code-Blocks",
+)
+ENCODING_PREFIX_SUFFIX = MLCommonsTaxonomyClassification(
+    family="Encoding Abuse",
+    category="Wrappers & Schemas",
+    leaf="Length / Prefix-Suffix Wrappers",
+)
+
+# Overt Carriers
+OVERT_DAN_COMPOSITES = MLCommonsTaxonomyClassification(
+    family="Overt Carriers",
+    category="Direct Override Patterns",
+    leaf="DAN-Style Composites",
+)
+OVERT_BENIGN_PRETEXT = MLCommonsTaxonomyClassification(
+    family="Overt Carriers",
+    category="Role-Play & Template Jailbreaks",
+    leaf="Benign Pretext / Safety Reframing",
+)
+
+# Perturbation
+PERTURBATION_CHAR_EDITS = MLCommonsTaxonomyClassification(
+    family="Perturbation",
+    category="Plain Perturbations",
+    leaf="Character-Level Micro-Edits",
+)
+PERTURBATION_PARAPHRASE = MLCommonsTaxonomyClassification(
+    family="Perturbation",
+    category="Plain Perturbations",
+    leaf="Local Paraphrase & Rewording",
+)
+PERTURBATION_TRANSFER = MLCommonsTaxonomyClassification(
+    family="Perturbation",
+    category="Transfer Text Perturbations",
+    leaf="Paraphrase-Based Transfer",
+)
+
+
 @dataclass
 class ConverterResult:
     """The result of a prompt conversion, containing the converted output and its type."""
