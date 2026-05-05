@@ -285,7 +285,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   }
 
   const handleSend = () => {
-    if ((input || attachments.length > 0) && !disabled) {
+    if ((input || attachments.length > 0) && !disabled && unsupportedTypes.length === 0) {
       onSend(input, convertedValue ?? undefined, attachments)
       setInput('')
       setAttachments([])
@@ -457,7 +457,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 <div className={styles.unsupportedWarning} data-testid="unsupported-modality-warning">
                   <WarningRegular fontSize={14} />
                   <Caption1>
-                    This target may not support {unsupportedTypes.join(', ')} files
+                    This target does not support {unsupportedTypes.join(', ')} files. Remove the attachment to send.
                   </Caption1>
                 </div>
               )}
@@ -489,7 +489,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 appearance="primary"
                 icon={<SendRegular />}
                 onClick={handleSend}
-                disabled={disabled || (!input && attachments.length === 0)}
+                disabled={disabled || (!input && attachments.length === 0) || unsupportedTypes.length > 0}
                 title="Send message"
                 data-testid="send-message-btn"
               />

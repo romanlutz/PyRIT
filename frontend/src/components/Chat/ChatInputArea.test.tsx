@@ -674,7 +674,7 @@ describe("ChatInputArea", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
-      expect(screen.getByText(/may not support image files/)).toBeInTheDocument();
+      expect(screen.getByText(/does not support image files/)).toBeInTheDocument();
     });
   });
 
@@ -745,7 +745,7 @@ describe("ChatInputArea", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
-      expect(screen.getByText(/may not support audio files/)).toBeInTheDocument();
+      expect(screen.getByText(/does not support audio files/)).toBeInTheDocument();
     });
   });
 
@@ -774,11 +774,11 @@ describe("ChatInputArea", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
-      expect(screen.getByText(/may not support image, audio files/)).toBeInTheDocument();
+      expect(screen.getByText(/does not support image, audio files/)).toBeInTheDocument();
     });
   });
 
-  it("should still allow sending with unsupported attachment type", async () => {
+  it("should disable send button with unsupported attachment type", async () => {
     const user = userEvent.setup();
     const onSend = jest.fn();
 
@@ -804,10 +804,8 @@ describe("ChatInputArea", () => {
       expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
     });
 
-    // Send should still be enabled (warning is non-blocking)
-    expect(getSendButton()).toBeEnabled();
-    await user.click(getSendButton());
-    expect(onSend).toHaveBeenCalled();
+    // Send should be disabled (warning is blocking)
+    expect(getSendButton()).toBeDisabled();
   });
 
   it("should show warning for file attachment to text-only target", async () => {
@@ -832,7 +830,7 @@ describe("ChatInputArea", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
-      expect(screen.getByText(/may not support file files/)).toBeInTheDocument();
+      expect(screen.getByText(/does not support file files/)).toBeInTheDocument();
     });
   });
 });
