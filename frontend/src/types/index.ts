@@ -63,6 +63,7 @@ export interface TargetInstance {
   top_p?: number | null
   max_requests_per_minute?: number | null
   supports_multi_turn?: boolean
+  supported_input_data_types?: string[]
   target_specific_params?: Record<string, unknown> | null
 }
 

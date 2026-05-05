@@ -1257,6 +1257,55 @@ class TestTargetObjectToInstance:
         assert result.target_specific_params["seed"] == 42
         assert result.target_specific_params["max_completion_tokens"] == 2048
 
+    def test_supported_input_data_types_text_only_default(self) -> None:
+        """Test that a target with default capabilities reports only 'text'."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities()
+        mock_identifier = ComponentIdentifier(class_name="TextTarget", class_module="pyrit.prompt_target")
+        target_obj.get_identifier.return_value = mock_identifier
+
+        result = target_object_to_instance("t-1", target_obj)
+
+        assert result.supported_input_data_types == ["text"]
+
+    def test_supported_input_data_types_multimodal(self) -> None:
+        """Test that a multimodal target reports all individual input types."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities(
+            input_modalities=frozenset({
+                frozenset({"text"}),
+                frozenset({"image_path"}),
+                frozenset({"text", "image_path"}),
+            }),
+        )
+        mock_identifier = ComponentIdentifier(
+            class_name="OpenAIChatTarget",
+            class_module="pyrit.prompt_target",
+        )
+        target_obj.get_identifier.return_value = mock_identifier
+
+        result = target_object_to_instance("t-1", target_obj)
+
+        assert result.supported_input_data_types == ["image_path", "text"]
+
+    def test_supported_input_data_types_audio_video(self) -> None:
+        """Test that a target supporting audio and video reports those types."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities(
+            input_modalities=frozenset({
+                frozenset({"text"}),
+                frozenset({"audio_path"}),
+                frozenset({"image_path"}),
+                frozenset({"text", "audio_path", "image_path"}),
+            }),
+        )
+        mock_identifier = ComponentIdentifier(class_name="RealtimeTarget", class_module="pyrit.prompt_target")
+        target_obj.get_identifier.return_value = mock_identifier
+
+        result = target_object_to_instance("t-1", target_obj)
+
+        assert result.supported_input_data_types == ["audio_path", "image_path", "text"]
+
 
 # ============================================================================
 # Converter Mapper Tests

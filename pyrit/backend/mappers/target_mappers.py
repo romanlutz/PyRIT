@@ -53,5 +53,8 @@ def target_object_to_instance(target_registry_name: str, target_obj: PromptTarge
         top_p=params.get("top_p"),
         max_requests_per_minute=params.get("max_requests_per_minute"),
         supports_multi_turn=target_obj.capabilities.supports_multi_turn,
+        supported_input_data_types=sorted(
+            {str(t) for combo in target_obj.capabilities.input_modalities for t in combo}
+        ),
         target_specific_params=combined_specific,
     )

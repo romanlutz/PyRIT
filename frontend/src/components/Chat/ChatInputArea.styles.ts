@@ -228,6 +228,13 @@ export const useChatInputAreaStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground2,
   },
+  unsupportedWarning: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalXXS,
+    color: tokens.colorPaletteYellowForeground2,
+    fontSize: tokens.fontSizeBase200,
+  },
   originalBadge: {
     display: 'inline-block',
     padding: `0 ${tokens.spacingHorizontalXS}`,

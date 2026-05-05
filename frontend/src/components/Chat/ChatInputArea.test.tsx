@@ -647,4 +647,192 @@ describe("ChatInputArea", () => {
     expect(onSend).toHaveBeenCalledWith("hello", "convertedHello", []);
     expect(onClearConversion).toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------------
+  // Unsupported modality warnings
+  // ---------------------------------------------------------------------------
+
+  it("should show warning when attaching image to text-only target", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "TextTarget",
+            supported_input_data_types: ["text"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const file = new File(["img"], "photo.png", { type: "image/png" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+      expect(screen.getByText(/may not support image files/)).toBeInTheDocument();
+    });
+  });
+
+  it("should not show warning when attaching image to image-capable target", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "OpenAIChatTarget",
+            supported_input_data_types: ["text", "image_path"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const file = new File(["img"], "photo.png", { type: "image/png" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByText(/photo\.png/)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("unsupported-modality-warning")).not.toBeInTheDocument();
+  });
+
+  it("should not show warning when no target is selected", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea {...defaultProps} activeTarget={null} />
+      </TestWrapper>
+    );
+
+    const file = new File(["img"], "photo.png", { type: "image/png" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByText(/photo\.png/)).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("unsupported-modality-warning")).not.toBeInTheDocument();
+  });
+
+  it("should show warning for audio attachment on text+image target", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "OpenAIChatTarget",
+            supported_input_data_types: ["text", "image_path"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const file = new File(["audio"], "sound.mp3", { type: "audio/mpeg" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+      expect(screen.getByText(/may not support audio files/)).toBeInTheDocument();
+    });
+  });
+
+  it("should show warning listing multiple unsupported types", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "TextTarget",
+            supported_input_data_types: ["text"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const files = [
+      new File(["img"], "photo.png", { type: "image/png" }),
+      new File(["audio"], "sound.mp3", { type: "audio/mpeg" }),
+    ];
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, files);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+      expect(screen.getByText(/may not support image, audio files/)).toBeInTheDocument();
+    });
+  });
+
+  it("should still allow sending with unsupported attachment type", async () => {
+    const user = userEvent.setup();
+    const onSend = jest.fn();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          onSend={onSend}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "TextTarget",
+            supported_input_data_types: ["text"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const file = new File(["img"], "photo.png", { type: "image/png" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+    });
+
+    // Send should still be enabled (warning is non-blocking)
+    expect(getSendButton()).toBeEnabled();
+    await user.click(getSendButton());
+    expect(onSend).toHaveBeenCalled();
+  });
+
+  it("should show warning for file attachment to text-only target", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "TextTarget",
+            supported_input_data_types: ["text"],
+          }}
+        />
+      </TestWrapper>
+    );
+
+    const file = new File(["pdf content"], "document.pdf", { type: "application/pdf" });
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, file);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+      expect(screen.getByText(/may not support file files/)).toBeInTheDocument();
+    });
+  });
 });

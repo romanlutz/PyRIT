@@ -9,6 +9,7 @@ import {
 import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular } from '@fluentui/react-icons'
 import { MessageAttachment, TargetInstance } from '../../types'
 import { useChatInputAreaStyles } from './ChatInputArea.styles'
+import { PIECE_TYPE_TO_DATA_TYPE } from './converterTypes'
 
 // ---------------------------------------------------------------------------
 // Reusable status banner
@@ -171,6 +172,29 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
 }
 
 // ---------------------------------------------------------------------------
+// Unsupported modality helper
+// ---------------------------------------------------------------------------
+
+function getUnsupportedAttachmentTypes(
+  attachments: MessageAttachment[],
+  activeTarget: TargetInstance | null | undefined,
+): string[] {
+  if (!activeTarget?.supported_input_data_types || attachments.length === 0) return []
+  const supported = new Set(activeTarget.supported_input_data_types)
+  const unsupported: string[] = []
+  const seen = new Set<string>()
+  for (const att of attachments) {
+    if (seen.has(att.type)) continue
+    seen.add(att.type)
+    const dataType = PIECE_TYPE_TO_DATA_TYPE[att.type]
+    if (dataType && !supported.has(dataType)) {
+      unsupported.push(att.type)
+    }
+  }
+  return unsupported
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
@@ -209,6 +233,9 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Derive unsupported attachment types (no useEffect — pure render computation)
+  const unsupportedTypes = getUnsupportedAttachmentTypes(attachments, activeTarget)
 
   useImperativeHandle(ref, () => ({
     addAttachment: (att: MessageAttachment) => {
@@ -426,6 +453,14 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 formatFileSize={formatFileSize}
                 styles={styles}
               />
+              {unsupportedTypes.length > 0 && (
+                <div className={styles.unsupportedWarning} data-testid="unsupported-modality-warning">
+                  <WarningRegular fontSize={14} />
+                  <Caption1>
+                    This target may not support {unsupportedTypes.join(', ')} files
+                  </Caption1>
+                </div>
+              )}
               <TextInputRows
                 input={input}
                 convertedValue={convertedValue}
