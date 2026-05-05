@@ -12,7 +12,6 @@ import time
 from copy import deepcopy
 from typing import Any, Optional
 
-import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -902,14 +901,13 @@ class MultiPromptAttack:
                 f"====================================================\n"
             )
 
-        # Log to mlflow
+        # Log loss and GPU memory
         log_loss(step=step_num, loss=loss)
         log_gpu_memory(step=step_num)
 
-        # Log results table to mlflow
+        # Log results table at end of training
         if step_num == n_steps:
             log_table_summary(losses=log["losses"], controls=log["controls"], n_steps=n_steps)
-            mlflow.end_run()
 
 
 class ProgressiveMultiPromptAttack:

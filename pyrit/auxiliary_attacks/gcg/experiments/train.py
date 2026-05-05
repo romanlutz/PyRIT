@@ -5,7 +5,6 @@ import logging
 import time
 from typing import Any, Optional, Union
 
-import mlflow
 import numpy as np
 import torch.multiprocessing as mp
 from ml_collections import config_dict
@@ -166,8 +165,6 @@ class GreedyCoordinateGradientAdversarialSuffixGenerator:
         )
         logger.info(f"Parameters: {params}")
 
-        # Start mlflow logging
-        mlflow.start_run()
         log_gpu_memory(step=0)
         log_params(params=params)
 
