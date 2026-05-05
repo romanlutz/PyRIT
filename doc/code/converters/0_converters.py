@@ -32,8 +32,8 @@
 # specification and methodology, see the MLCommons AI Safety Benchmark papers
 # {cite}`vidgen2024ailuminate` {cite}`ghosh2025ailuminatev1`.
 #
-# The **Taxonomy** column shows the family and leaf for each converter. Some converters span
-# multiple taxonomy leaves; the primary classification is shown.
+# The **Taxonomy Family**, **Taxonomy Category**, and **Taxonomy Leaf** columns classify each
+# converter. Some converters span multiple taxonomy leaves; the primary classification is shown.
 
 # %%
 import pandas as pd
@@ -53,12 +53,14 @@ for name, inputs, outputs in converter_list:
     input_str = ", ".join(inputs) if inputs else "any"
     output_str = ", ".join(outputs) if outputs else "any"
     classifications = taxonomy_map.get(name, ())
-    taxonomy_str = "; ".join(f"{c.family}: {c.leaf}" for c in classifications) if classifications else ""
+    primary = classifications[0] if classifications else None
     rows.append({
         "Converter": name,
         "Input Modality": input_str,
         "Output Modality": output_str,
-        "Taxonomy": taxonomy_str,
+        "Taxonomy Family": primary.family if primary else "",
+        "Taxonomy Category": primary.category if primary else "",
+        "Taxonomy Leaf": primary.leaf if primary else "",
     })
 
 # Create DataFrame and sort
