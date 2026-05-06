@@ -327,7 +327,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   useLayoutEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 96) + 'px'
+      textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px'
     }
     onInputChange(input)
   }, [input, onInputChange])

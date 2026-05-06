@@ -89,13 +89,17 @@ export const useChatInputAreaStyles = makeStyles({
   },
   textRow: {
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: tokens.spacingHorizontalXXS,
+    flex: 1,
+    minHeight: 0,
   },
   convertedRow: {
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: tokens.spacingHorizontalXXS,
+    flex: 1,
+    minHeight: 0,
   },
   textInput: {
     flex: 1,
@@ -107,7 +111,7 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '24px',
-    maxHeight: '96px',
+    maxHeight: '30vh',
     overflowY: 'auto',
     '::placeholder': {
       color: tokens.colorNeutralForeground4,
@@ -204,11 +208,21 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '20px',
-    maxHeight: '80px',
+    maxHeight: '30vh',
     overflowY: 'auto',
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
     padding: 0,
+    '::-webkit-scrollbar': {
+      width: '8px',
+    },
+    '::-webkit-scrollbar-track': {
+      backgroundColor: 'transparent',
+    },
+    '::-webkit-scrollbar-thumb': {
+      backgroundColor: tokens.colorNeutralStroke1,
+      borderRadius: '4px',
+    },
   },
   convertedMediaPreview: {
     maxHeight: '60px',
