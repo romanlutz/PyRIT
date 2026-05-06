@@ -16,7 +16,7 @@ ENV VIRTUAL_ENV="/opt/venv"
 
 WORKDIR /app
 
-# Copy and install PyRIT with GCG extras
+# Install PyRIT with GCG extras to get all dependencies
 COPY pyproject.toml MANIFEST.in README.md LICENSE /app/
 COPY pyrit/ /app/pyrit/
 RUN uv pip install -e ".[gcg]" && \
