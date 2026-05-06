@@ -1111,7 +1111,6 @@ class ProgressiveMultiPromptAttack:
                 self.test_goals,
                 self.test_targets,
                 self.test_workers,
-                **self.mpa_kwargs,
             )
             if num_goals == len(self.goals) and num_workers == len(self.workers):
                 stop_inner_on_success = False
@@ -1349,7 +1348,6 @@ class IndividualPromptAttack:
                 self.test_goals,
                 self.test_targets,
                 self.test_workers,
-                **self.mpa_kwargs,
             )
             attack.run(
                 n_steps=n_steps,
@@ -1521,7 +1519,6 @@ class EvaluateAttack:
                         self.test_prefixes,
                         self.logfile,
                         self.managers,
-                        **self.mpa_kwargs,
                     )
                     all_inputs = [p.eval_str for p in attack.prompts[0]._prompts]
                     max_new_tokens = [p.test_new_toks for p in attack.prompts[0]._prompts]
