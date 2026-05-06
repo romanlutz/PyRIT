@@ -5,6 +5,7 @@ import {
   Tooltip,
   Text,
   tokens,
+  mergeClasses,
 } from '@fluentui/react-components'
 import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular } from '@fluentui/react-icons'
 import { MessageAttachment, TargetInstance } from '../../types'
@@ -121,22 +122,24 @@ interface TextInputRowsProps {
   convertedValue?: string | null
   disabled: boolean
   textareaRef: Ref<HTMLTextAreaElement>
+  convertedRef: Ref<HTMLTextAreaElement>
   onInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
   onKeyDown: (e: KeyboardEvent<HTMLTextAreaElement>) => void
   onConvertedValueChange: (value: string) => void
   styles: ReturnType<typeof useChatInputAreaStyles>
+  textInputClassName: string
 }
 
-function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, onKeyDown, onConvertedValueChange, styles }: TextInputRowsProps) {
+function TextInputRows({ input, convertedValue, disabled, textareaRef, convertedRef, onInput, onKeyDown, onConvertedValueChange, styles, textInputClassName }: TextInputRowsProps) {
   return (
-    <div className={styles.textScrollArea}>
+    <>
       <div className={styles.textRow}>
         {convertedValue && (
           <span className={styles.originalBadge} data-testid="original-banner">Original</span>
         )}
         <textarea
           ref={textareaRef}
-          className={styles.textInput}
+          className={textInputClassName}
           placeholder="Type prompt here"
           value={input}
           onChange={onInput}
@@ -150,6 +153,7 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
         <div className={styles.convertedRow} data-testid="converted-indicator">
           <span className={styles.convertedBadge}>Converted</span>
           <textarea
+            ref={convertedRef}
             className={styles.convertedTextarea}
             value={convertedValue}
             onChange={(e) => onConvertedValueChange(e.target.value)}
@@ -158,7 +162,7 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
           />
         </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -236,9 +240,15 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const convertedRef = useRef<HTMLTextAreaElement>(null)
 
   // Derive unsupported types from attachments AND converter outputs
   const unsupportedTypes = getUnsupportedDataTypes(attachments, converterOutputDataTypes, activeTarget)
+
+  const hasConversion = convertedValue != null && convertedValue !== ''
+  const textInputClassName = hasConversion
+    ? mergeClasses(styles.textInput, styles.textInputShared)
+    : styles.textInput
 
   useImperativeHandle(ref, () => ({
     addAttachment: (att: MessageAttachment) => {
@@ -313,8 +323,9 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     }
   }
 
-  // Auto-resize textarea whenever input changes (covers paste, setText, etc.)
+  // Auto-resize textareas whenever content changes.
   // useLayoutEffect fires before paint, avoiding visible flicker on resize.
+  // CSS max-height (60vh solo / 30vh shared) caps the growth; overflowY: auto scrolls beyond.
   useLayoutEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -322,6 +333,13 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     }
     onInputChange(input)
   }, [input, onInputChange])
+
+  useLayoutEffect(() => {
+    if (convertedRef.current) {
+      convertedRef.current.style.height = 'auto'
+      convertedRef.current.style.height = convertedRef.current.scrollHeight + 'px'
+    }
+  }, [convertedValue])
 
   useEffect(() => {
     const types = [...new Set(attachments.map((a) => a.type))]
@@ -469,10 +487,12 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 convertedValue={convertedValue}
                 disabled={disabled}
                 textareaRef={textareaRef}
+                convertedRef={convertedRef}
                 onInput={handleInput}
                 onKeyDown={handleKeyDown}
                 onConvertedValueChange={onConvertedValueChange}
                 styles={styles}
+                textInputClassName={textInputClassName}
               />
             </div>
             <div className={styles.columnRight}>

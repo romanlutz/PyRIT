@@ -49,6 +49,7 @@ export const useChatInputAreaStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground3,
     borderRadius: '28px',
     border: `1px solid ${tokens.colorNeutralStroke1}`,
+    overflow: 'hidden',
     transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
     ':focus-within': {
       borderTopColor: tokens.colorBrandStroke1,
@@ -66,7 +67,7 @@ export const useChatInputAreaStyles = makeStyles({
   columnLeft: {
     display: 'flex',
     flexDirection: 'column',
-    gap: tokens.spacingVerticalXXS,
+    gap: tokens.spacingVerticalS,
     alignItems: 'center',
     marginRight: tokens.spacingHorizontalS,
     alignSelf: 'center',
@@ -76,7 +77,7 @@ export const useChatInputAreaStyles = makeStyles({
     flexDirection: 'column',
     flex: 1,
     minWidth: 0,
-    gap: tokens.spacingVerticalXXS,
+    gap: tokens.spacingVerticalXS,
   },
   columnRight: {
     display: 'flex',
@@ -85,25 +86,6 @@ export const useChatInputAreaStyles = makeStyles({
     alignItems: 'center',
     marginLeft: tokens.spacingHorizontalS,
     alignSelf: 'center',
-  },
-  textScrollArea: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXS,
-    maxHeight: '60vh',
-    overflowY: 'auto',
-    resize: 'vertical' as const,
-    minHeight: '24px',
-    '::-webkit-scrollbar': {
-      width: '8px',
-    },
-    '::-webkit-scrollbar-track': {
-      backgroundColor: 'transparent',
-    },
-    '::-webkit-scrollbar-thumb': {
-      backgroundColor: tokens.colorNeutralStroke1,
-      borderRadius: '4px',
-    },
   },
   textRow: {
     display: 'flex',
@@ -125,10 +107,24 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '24px',
-    overflowY: 'hidden',
+    maxHeight: '60vh',
+    overflowY: 'auto',
     '::placeholder': {
       color: tokens.colorNeutralForeground4,
     },
+    '::-webkit-scrollbar': {
+      width: '8px',
+    },
+    '::-webkit-scrollbar-track': {
+      backgroundColor: 'transparent',
+    },
+    '::-webkit-scrollbar-thumb': {
+      backgroundColor: tokens.colorNeutralStroke1,
+      borderRadius: '4px',
+    },
+  },
+  textInputShared: {
+    maxHeight: '30vh',
   },
   iconButton: {
     minWidth: '32px',
@@ -136,6 +132,7 @@ export const useChatInputAreaStyles = makeStyles({
     height: '32px',
     padding: 0,
     borderRadius: '50%',
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
   },
   dismissBtn: {
     minWidth: '24px',
@@ -225,10 +222,21 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '20px',
-    overflowY: 'hidden',
+    maxHeight: '30vh',
+    overflowY: 'auto',
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
     padding: 0,
+    '::-webkit-scrollbar': {
+      width: '8px',
+    },
+    '::-webkit-scrollbar-track': {
+      backgroundColor: 'transparent',
+    },
+    '::-webkit-scrollbar-thumb': {
+      backgroundColor: tokens.colorNeutralStroke1,
+      borderRadius: '4px',
+    },
   },
   convertedMediaPreview: {
     maxHeight: '60px',
