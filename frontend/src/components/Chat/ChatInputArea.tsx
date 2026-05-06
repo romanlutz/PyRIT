@@ -129,6 +129,8 @@ interface TextInputRowsProps {
 }
 
 function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, onKeyDown, onConvertedValueChange, onClearConversion, styles }: TextInputRowsProps) {
+  const hasConversion = convertedValue != null && convertedValue !== ''
+  const sharedMaxHeight = hasConversion ? '15vh' : undefined
   return (
     <>
       <div className={styles.textRow}>
@@ -138,6 +140,7 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
         <textarea
           ref={textareaRef}
           className={styles.textInput}
+          style={sharedMaxHeight ? { maxHeight: sharedMaxHeight } : undefined}
           placeholder="Type prompt here"
           value={input}
           onChange={onInput}
@@ -152,6 +155,7 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
           <span className={styles.convertedBadge}>Converted</span>
           <textarea
             className={styles.convertedTextarea}
+            style={{ maxHeight: sharedMaxHeight }}
             value={convertedValue}
             onChange={(e) => onConvertedValueChange(e.target.value)}
             rows={1}
