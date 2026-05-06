@@ -498,9 +498,8 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
               {convertedValue && (
                 <Tooltip content="Clear conversion" relationship="label">
                   <Button
-                    appearance="transparent"
-                    size="small"
-                    className={styles.iconButton}
+                    appearance="subtle"
+                    className={styles.clearConversionButton}
                     icon={<DismissRegular />}
                     onClick={onClearConversion}
                     data-testid="clear-conversion-btn"
