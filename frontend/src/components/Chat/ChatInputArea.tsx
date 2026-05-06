@@ -124,15 +124,12 @@ interface TextInputRowsProps {
   onInput: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
   onKeyDown: (e: KeyboardEvent<HTMLTextAreaElement>) => void
   onConvertedValueChange: (value: string) => void
-  onClearConversion: () => void
   styles: ReturnType<typeof useChatInputAreaStyles>
 }
 
-function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, onKeyDown, onConvertedValueChange, onClearConversion, styles }: TextInputRowsProps) {
-  const hasConversion = convertedValue != null && convertedValue !== ''
-  const sharedMaxHeight = hasConversion ? '15vh' : undefined
+function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, onKeyDown, onConvertedValueChange, styles }: TextInputRowsProps) {
   return (
-    <>
+    <div className={styles.textScrollArea}>
       <div className={styles.textRow}>
         {convertedValue && (
           <span className={styles.originalBadge} data-testid="original-banner">Original</span>
@@ -140,7 +137,6 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
         <textarea
           ref={textareaRef}
           className={styles.textInput}
-          style={sharedMaxHeight ? { maxHeight: sharedMaxHeight } : undefined}
           placeholder="Type prompt here"
           value={input}
           onChange={onInput}
@@ -155,23 +151,14 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
           <span className={styles.convertedBadge}>Converted</span>
           <textarea
             className={styles.convertedTextarea}
-            style={{ maxHeight: sharedMaxHeight }}
             value={convertedValue}
             onChange={(e) => onConvertedValueChange(e.target.value)}
             rows={1}
             data-testid="converted-value-input"
           />
-          <Button
-            appearance="transparent"
-            size="small"
-            className={styles.dismissBtn}
-            icon={<DismissRegular />}
-            onClick={onClearConversion}
-            data-testid="clear-conversion-btn"
-          />
         </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -485,7 +472,6 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 onInput={handleInput}
                 onKeyDown={handleKeyDown}
                 onConvertedValueChange={onConvertedValueChange}
-                onClearConversion={onClearConversion}
                 styles={styles}
               />
             </div>
@@ -509,6 +495,18 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                 title="Send message"
                 data-testid="send-message-btn"
               />
+              {convertedValue && (
+                <Tooltip content="Clear conversion" relationship="label">
+                  <Button
+                    appearance="transparent"
+                    size="small"
+                    className={styles.iconButton}
+                    icon={<DismissRegular />}
+                    onClick={onClearConversion}
+                    data-testid="clear-conversion-btn"
+                  />
+                </Tooltip>
+              )}
             </div>
           </div>
         </div>

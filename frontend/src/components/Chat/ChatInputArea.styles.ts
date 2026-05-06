@@ -87,19 +87,34 @@ export const useChatInputAreaStyles = makeStyles({
     marginLeft: tokens.spacingHorizontalS,
     alignSelf: 'center',
   },
+  textScrollArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    maxHeight: '60vh',
+    overflowY: 'auto',
+    resize: 'vertical' as const,
+    minHeight: '24px',
+    '::-webkit-scrollbar': {
+      width: '8px',
+    },
+    '::-webkit-scrollbar-track': {
+      backgroundColor: 'transparent',
+    },
+    '::-webkit-scrollbar-thumb': {
+      backgroundColor: tokens.colorNeutralStroke1,
+      borderRadius: '4px',
+    },
+  },
   textRow: {
     display: 'flex',
     alignItems: 'flex-start',
     gap: tokens.spacingHorizontalXXS,
-    flex: 1,
-    minHeight: 0,
   },
   convertedRow: {
     display: 'flex',
     alignItems: 'flex-start',
     gap: tokens.spacingHorizontalXXS,
-    flex: 1,
-    minHeight: 0,
   },
   textInput: {
     flex: 1,
@@ -111,20 +126,9 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '24px',
-    maxHeight: '30vh',
-    overflowY: 'auto',
+    overflowY: 'hidden',
     '::placeholder': {
       color: tokens.colorNeutralForeground4,
-    },
-    '::-webkit-scrollbar': {
-      width: '8px',
-    },
-    '::-webkit-scrollbar-track': {
-      backgroundColor: 'transparent',
-    },
-    '::-webkit-scrollbar-thumb': {
-      backgroundColor: tokens.colorNeutralStroke1,
-      borderRadius: '4px',
     },
   },
   iconButton: {
@@ -208,21 +212,10 @@ export const useChatInputAreaStyles = makeStyles({
     color: tokens.colorNeutralForeground1,
     resize: 'none',
     minHeight: '20px',
-    maxHeight: '30vh',
-    overflowY: 'auto',
+    overflowY: 'hidden',
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
     padding: 0,
-    '::-webkit-scrollbar': {
-      width: '8px',
-    },
-    '::-webkit-scrollbar-track': {
-      backgroundColor: 'transparent',
-    },
-    '::-webkit-scrollbar-thumb': {
-      backgroundColor: tokens.colorNeutralStroke1,
-      borderRadius: '4px',
-    },
   },
   convertedMediaPreview: {
     maxHeight: '60px',
