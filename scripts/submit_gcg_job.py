@@ -37,7 +37,7 @@ def main() -> None:
         code=Path(HOME_PATH),
         command=(
             "python scripts/run_gcg_aml.py"
-            " --model_name phi_3_mini"
+            " --model_name llama_2"
             " --setup single"
             " --n_train_data 5"
             " --n_test_data 0"
@@ -48,8 +48,8 @@ def main() -> None:
         environment="pyrit-gcg:6",
         environment_variables={"HUGGINGFACE_TOKEN": hf_token},
         compute="gcg-gpu-a100",
-        display_name="gcg_baseline",
-        description="GCG baseline: phi-3-mini, 5 steps, 5 train data",
+        display_name="gcg_baseline_llama2",
+        description="GCG baseline: llama-2, 5 steps, 5 train data",
         tags={"Owner": "romanlutz"},
     )
 
