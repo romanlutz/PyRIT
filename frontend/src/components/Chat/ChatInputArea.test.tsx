@@ -833,4 +833,47 @@ describe("ChatInputArea", () => {
       expect(screen.getByText(/does not support file files/)).toBeInTheDocument();
     });
   });
+
+  it("should block sending when converter output type is unsupported by target", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "TextTarget",
+            supported_input_data_types: ["text"],
+          }}
+          converterOutputDataTypes={["image_path"]}
+        />
+      </TestWrapper>
+    );
+
+    const input = screen.getByRole("textbox");
+    await user.type(input, "convert this to image");
+
+    expect(screen.getByTestId("unsupported-modality-warning")).toBeInTheDocument();
+    expect(screen.getByText(/does not support image_path/)).toBeInTheDocument();
+    expect(getSendButton()).toBeDisabled();
+  });
+
+  it("should not block when converter output type is supported by target", () => {
+    render(
+      <TestWrapper>
+        <ChatInputArea
+          {...defaultProps}
+          activeTarget={{
+            target_registry_name: "t",
+            target_type: "OpenAIChatTarget",
+            supported_input_data_types: ["text", "image_path"],
+          }}
+          converterOutputDataTypes={["image_path"]}
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.queryByTestId("unsupported-modality-warning")).not.toBeInTheDocument();
+  });
 });

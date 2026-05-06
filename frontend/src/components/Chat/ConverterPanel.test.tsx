@@ -416,6 +416,7 @@ describe('ConverterPanel use converted value', () => {
       converterInstanceId: 'conv-1',
       convertedValue: 'aGVsbG8=',
       originalValue: 'hello',
+      outputDataType: 'text',
     })
   })
 })

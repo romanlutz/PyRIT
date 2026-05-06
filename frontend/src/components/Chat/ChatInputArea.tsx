@@ -175,22 +175,33 @@ function TextInputRows({ input, convertedValue, disabled, textareaRef, onInput, 
 // Unsupported modality helper
 // ---------------------------------------------------------------------------
 
-function getUnsupportedAttachmentTypes(
+function getUnsupportedDataTypes(
   attachments: MessageAttachment[],
+  converterOutputDataTypes: string[],
   activeTarget: TargetInstance | null | undefined,
 ): string[] {
-  if (!activeTarget?.supported_input_data_types || attachments.length === 0) return []
+  if (!activeTarget?.supported_input_data_types) return []
   const supported = new Set(activeTarget.supported_input_data_types)
   const unsupported: string[] = []
   const seen = new Set<string>()
+
+  // Check attachment types
   for (const att of attachments) {
-    if (seen.has(att.type)) continue
-    seen.add(att.type)
     const dataType = PIECE_TYPE_TO_DATA_TYPE[att.type]
-    if (dataType && !supported.has(dataType)) {
+    if (dataType && !seen.has(dataType) && !supported.has(dataType)) {
+      seen.add(dataType)
       unsupported.push(att.type)
     }
   }
+
+  // Check converter output types (e.g., text-to-image converter producing image_path)
+  for (const dataType of converterOutputDataTypes) {
+    if (!seen.has(dataType) && !supported.has(dataType)) {
+      seen.add(dataType)
+      unsupported.push(dataType)
+    }
+  }
+
   return unsupported
 }
 
@@ -223,19 +234,20 @@ interface ChatInputAreaProps {
   originalValue?: string | null
   onClearConversion: () => void
   onConvertedValueChange: (value: string) => void
+  converterOutputDataTypes?: string[]
   mediaConversions?: Array<{ pieceType: string; convertedValue: string }>
   onClearMediaConversion: (pieceType: string) => void
 }
 
-const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget, onToggleConverterPanel, isConverterPanelOpen = false, onInputChange, onAttachmentsChange, convertedValue, originalValue: _originalValue, onClearConversion, onConvertedValueChange, mediaConversions = [], onClearMediaConversion }, ref) {
+const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(function ChatInputArea({ onSend, disabled = false, activeTarget, singleTurnLimitReached = false, onNewConversation, operatorLocked = false, crossTargetLocked = false, onUseAsTemplate, attackOperator, noTargetSelected = false, onConfigureTarget, onToggleConverterPanel, isConverterPanelOpen = false, onInputChange, onAttachmentsChange, convertedValue, originalValue: _originalValue, onClearConversion, onConvertedValueChange, converterOutputDataTypes = [], mediaConversions = [], onClearMediaConversion }, ref) {
   const styles = useChatInputAreaStyles()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Derive unsupported attachment types (no useEffect — pure render computation)
-  const unsupportedTypes = getUnsupportedAttachmentTypes(attachments, activeTarget)
+  // Derive unsupported types from attachments AND converter outputs
+  const unsupportedTypes = getUnsupportedDataTypes(attachments, converterOutputDataTypes, activeTarget)
 
   useImperativeHandle(ref, () => ({
     addAttachment: (att: MessageAttachment) => {

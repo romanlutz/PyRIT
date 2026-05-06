@@ -11,4 +11,5 @@ export interface PieceConversion {
   convertedValue: string
   originalValue: string
   pieceType: string
+  outputDataType: string
 }

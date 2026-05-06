@@ -403,6 +403,7 @@ export default function ConverterPanel({ onClose, previewText = '', attachmentDa
               previewConverterInstanceId={previewConverterInstanceId}
               onPreview={handlePreview}
               onUseConvertedValue={onUseConvertedValue}
+              outputDataType={(selectedConverter?.supported_output_types ?? [])[0] ?? 'text'}
             />
           </div>
         )}
