@@ -77,9 +77,10 @@ ml_client.environments.create_or_update(env_docker_context)
 # ## Submit Training Job to AML
 
 # %% [markdown]
-# Finally, we configure the command to run the GCG algorithm. We use a launcher script
-# (`scripts/run_gcg_aml.py`) that ensures the uploaded code snapshot takes priority over
-# the Docker-installed package.
+# Finally, we configure the command to run the GCG algorithm. The entry point is
+# [`pyrit.auxiliary_attacks.gcg.experiments.run`](../../../pyrit/auxiliary_attacks/gcg/experiments/run.py),
+# invoked as a module so the uploaded code snapshot takes priority over the
+# Docker-installed package (Python's `-m` flag puts the cwd at the front of `sys.path`).
 #
 # We also have to specify a GPU compute target. In our experience, a GPU instance with
 # at least 24GB of vRAM is required (e.g., Standard_NC24ads_A100_v4).
@@ -93,7 +94,7 @@ from azure.ai.ml import command
 job = command(
     code=Path(HOME_PATH),
     command=(
-        "python scripts/run_gcg_aml.py"
+        "python -m pyrit.auxiliary_attacks.gcg.experiments.run"
         " --model_name llama_2"
         " --setup single"
         " --n_train_data 5"

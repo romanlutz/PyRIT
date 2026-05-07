@@ -3,6 +3,7 @@
 
 import argparse
 import os
+from pathlib import Path
 from typing import Any, Union
 
 import yaml
@@ -105,6 +106,11 @@ def _parse_arguments() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    # Resolve relative paths (configs/, results/) against this file's directory
+    # so the script works regardless of where it is invoked from -- including
+    # `python -m pyrit.auxiliary_attacks.gcg.experiments.run` from any cwd.
+    os.chdir(Path(__file__).resolve().parent)
+
     args = _parse_arguments()
     run_trainer(
         model_name=args.model_name,

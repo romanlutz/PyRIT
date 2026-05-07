@@ -109,7 +109,7 @@ def test_gcg_aml_baseline_job_completes(ml_client: MLClient, gcg_environment: En
     job_def = command(
         code=Path(HOME_PATH),
         command=(
-            "python scripts/run_gcg_aml.py"
+            "python -m pyrit.auxiliary_attacks.gcg.experiments.run"
             " --model_name llama_2"
             " --setup single"
             " --n_train_data 5"
