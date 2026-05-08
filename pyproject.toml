@@ -42,7 +42,6 @@ dependencies = [
     "confusable-homoglyphs>=3.3.1",
     "ecoji>=0.1.1",
     "datasets>=3.6.0",
-    "pyarrow>=22.0.0; python_version >= '3.14'",
     "fastapi>=0.115.0",
     "httpx[http2]>=0.27.2",
     "jinja2>=3.1.6",
@@ -115,6 +114,10 @@ gcg = [
     "accelerate>=1.7.0",
     "azure-ai-ml>=1.27.1",
     "ml-collections>=1.1.0",
+    # pyarrow is a transitive dep of `datasets`. With the gcg extra installed,
+    # the resolver picks a pyarrow version that lacks cp314 wheels and fails
+    # to build from source on Python 3.14; pin to a version that ships them.
+    "pyarrow>=22.0.0; python_version >= '3.14'",
     "sentencepiece>=0.2.0",
     "torch>=2.7.0",
 ]
