@@ -200,51 +200,28 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
     [targets],
   )
 
-  const filteredTargets = useMemo(
-    () => typeFilter ? targets.filter(t => t.target_type === typeFilter) : targets,
-    [targets, typeFilter],
-  )
-
   const isActive = (target: TargetInstance): boolean =>
     activeTarget?.target_registry_name === target.target_registry_name
 
+  // Filter by type, then sort the active target to the top so it appears
+  // exactly once and remains visually prominent without a separate table.
+  const filteredTargets = useMemo(() => {
+    const filtered = typeFilter
+      ? targets.filter(t => t.target_type === typeFilter)
+      : targets
+    if (!activeTarget) return filtered
+    const activeIdx = filtered.findIndex(
+      t => t.target_registry_name === activeTarget.target_registry_name,
+    )
+    if (activeIdx <= 0) return filtered
+    const reordered = [...filtered]
+    const [active] = reordered.splice(activeIdx, 1)
+    reordered.unshift(active)
+    return reordered
+  }, [targets, typeFilter, activeTarget])
+
   return (
     <div className={styles.tableContainer}>
-      {activeTarget && (
-        <Table aria-label="Active target" className={styles.table} style={{ marginBottom: '12px' }}>
-          <TableBody>
-            <TableRow className={styles.activeRow}>
-              <TableCell style={{ width: '120px' }}>
-                <Badge appearance="filled" color="brand" icon={<CheckmarkRegular />}>Active</Badge>
-              </TableCell>
-              <TableCell style={{ width: '140px' }}>
-                <Text size={200}>{activeTarget.target_type}</Text>
-              </TableCell>
-              <TableCell style={{ width: '160px' }}>
-                <ModelCell target={activeTarget} />
-              </TableCell>
-              <TableCell style={{ width: '450px' }}>
-                <Text size={200} className={styles.endpointCell} title={activeTarget.endpoint || undefined}>
-                  {activeTarget.endpoint || '—'}
-                </Text>
-              </TableCell>
-              <TableCell className={styles.inputsModalityCell}>
-                <ModalityCell modalities={activeTarget.capabilities?.supported_input_modalities} />
-              </TableCell>
-              <TableCell className={styles.modalityCell}>
-                <ModalityCell modalities={activeTarget.capabilities?.supported_output_modalities} />
-              </TableCell>
-              <CapabilityCells target={activeTarget} />
-              <TableCell style={{ width: '160px' }}>
-                <Text size={200} className={styles.paramsCell}>
-                  {formatParams(activeTarget.target_specific_params) || '—'}
-                </Text>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      )}
-
       {targetTypes.length > 1 && (
         <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Text size={200}>Filter by type:</Text>

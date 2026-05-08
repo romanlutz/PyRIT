@@ -110,29 +110,47 @@ describe('TargetTable', () => {
     expect(setActiveButtons).toHaveLength(3)
   })
 
-  it('should show "Active" badge for the active target', () => {
+  it('should show "Active" badge for the active target exactly once', () => {
     render(
       <TestWrapper>
         <TargetTable {...defaultProps} activeTarget={sampleTargets[0]} />
       </TestWrapper>
     )
 
-    // Active badge appears in both the indicator and the table row
-    expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(2)
+    // Active target is now rendered exactly once (pinned to the top of the
+    // main table) instead of being duplicated in a separate active-target table.
+    expect(screen.getAllByText('Active')).toHaveLength(1)
     const setActiveButtons = screen.getAllByText('Set Active')
     expect(setActiveButtons).toHaveLength(2)
   })
 
-  it('should show active target indicator above the table', () => {
+  it('should pin the active target to the first row', () => {
+    render(
+      <TestWrapper>
+        <TargetTable {...defaultProps} activeTarget={sampleTargets[2]} />
+      </TestWrapper>
+    )
+
+    // sampleTargets[2] is the third target by input order, but as the active
+    // target it should be the first body row.
+    const bodyRows = screen.getAllByRole('row').slice(1) // drop the header row
+    const firstRowText = bodyRows[0].textContent ?? ''
+    expect(firstRowText).toContain('TextTarget')
+    expect(firstRowText).toContain('Active')
+  })
+
+  it('should render only one table (no duplicate active-target table)', () => {
     render(
       <TestWrapper>
         <TargetTable {...defaultProps} activeTarget={sampleTargets[0]} />
       </TestWrapper>
     )
 
-    // Active indicator shows type and model above the table
-    const badges = screen.getAllByText('Active')
-    expect(badges.length).toBeGreaterThanOrEqual(2) // one above table + one in row
+    // Previously two tables were rendered (a dedicated unheaded "Active target"
+    // table plus the main "Target instances" table). Now there's just one.
+    expect(screen.getAllByRole('table')).toHaveLength(1)
+    // The main table must still expose its column headers.
+    expect(screen.getByRole('table')).toHaveAccessibleName('Target instances')
   })
 
   it('should not show active target indicator when no target is active', () => {
