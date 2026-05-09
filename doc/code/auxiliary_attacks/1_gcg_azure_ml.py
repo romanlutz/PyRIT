@@ -38,6 +38,22 @@ resource_group = os.environ.get("AZURE_ML_RESOURCE_GROUP")
 workspace = os.environ.get("AZURE_ML_WORKSPACE_NAME")
 print(workspace)
 
+# %% [markdown]
+# The Azure ML SDK emits a fair amount of telemetry to stderr that looks
+# alarming but is benign: every operation logs an `ActivityCompleted: ...
+# HowEnded=Failure` line for any expected `UserError` (such as
+# `create_or_update` finding the environment already at the latest version),
+# and every preview / experimental class prints a one-line warning. Quiet
+# all of it so the rest of the notebook output stays focused on what
+# actually matters.
+
+# %%
+import logging
+import warnings
+
+logging.getLogger("azure.ai.ml").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", module=r"azure\.ai\.ml.*")
+
 # %%
 from azure.ai.ml import MLClient
 from azure.identity import AzureCliCredential
@@ -89,7 +105,7 @@ ml_client.environments.create_or_update(env_docker_context)
 # In this case, we recommend training on a smaller model or lowering `n_train_data` or `batch_size`.
 
 # %%
-from azure.ai.ml import command
+from azure.ai.ml import Output, command
 
 job = command(
     code=Path(HOME_PATH),
@@ -101,8 +117,10 @@ job = command(
         " --n_test_data 0"
         " --n_steps 5"
         " --batch_size 64"
+        " --output_dir ${{outputs.results}}"
     ),
     inputs={},
+    outputs={"results": Output(type="uri_folder")},
     environment=f"{env_docker_context.name}:{env_docker_context.version}",
     environment_variables={"HUGGINGFACE_TOKEN": os.environ["HUGGINGFACE_TOKEN"]},
     compute="gcg-gpu-a100",
@@ -116,3 +134,59 @@ returned_job = ml_client.create_or_update(job)
 print(f"Job: {returned_job.name}")
 print(f"Status: {returned_job.status}")
 print(f"Studio URL: {returned_job.studio_url}")
+
+# %% [markdown]
+# ## Wait for the Job to Complete and Inspect the Generated Suffix
+#
+# The next cell polls the job until it reaches a terminal state (~20-30
+# minutes for the small 5-step baseline above), then downloads the named
+# `results` output and prints the final suffix. The runner writes its
+# result file as `individual_behaviors_<model>_gcg_<timestamp>.json` into
+# the directory Azure ML mounted for the `results` output, so it ends up
+# under `<download_dir>/named-outputs/results/` once we download. The
+# `controls` array in that file contains one entry per training step, and
+# the last entry is the final adversarial suffix that, appended to the user
+# prompt, was optimized to elicit the target response.
+
+# %%
+import json
+import tempfile
+import time
+from pathlib import Path
+
+_TERMINAL_STATES = {"Completed", "Failed", "Canceled", "CancelRequested"}
+
+last_status = None
+while True:
+    current_status = ml_client.jobs.get(returned_job.name).status
+    if current_status != last_status:
+        print(f"Job status: {current_status}", flush=True)
+        last_status = current_status
+    if current_status in _TERMINAL_STATES:
+        break
+    time.sleep(60)
+
+assert current_status == "Completed", f"Job did not complete successfully: {current_status}"
+
+download_dir = Path(tempfile.mkdtemp(prefix="gcg-aml-"))
+ml_client.jobs.download(name=returned_job.name, download_path=str(download_dir), all=True)
+
+result_files = list(download_dir.rglob("individual_behaviors_*_gcg_*.json"))
+if not result_files:
+    print(f"No GCG result file found under {download_dir}. Files captured:")
+    for p in sorted(download_dir.rglob("*")):
+        if p.is_file():
+            print(f"  {p.relative_to(download_dir)}")
+    raise FileNotFoundError("Result JSON not in downloaded artifacts")
+
+result_file = result_files[0]
+with open(result_file) as f:
+    log = json.load(f)
+
+final_suffix = log["controls"][-1] if log["controls"] else None
+final_loss = log["losses"][-1] if log["losses"] else None
+
+print(f"Result file: {result_file.name}")
+print(f"Steps run: {len(log['controls'])}")
+print(f"Final loss: {final_loss}")
+print(f"Generated suffix: {final_suffix!r}")
