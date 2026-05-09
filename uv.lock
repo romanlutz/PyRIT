@@ -444,7 +444,7 @@ wheels = [
 
 [[package]]
 name = "azure-ai-ml"
-version = "1.31.0"
+version = "1.32.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "azure-common" },
@@ -465,9 +465,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/74/472494706149d6b63dd22b1389d6b3756f586d98b1c074f120d971e2180f/azure_ai_ml-1.31.0.tar.gz", hash = "sha256:ba3f00df768292e197c47a03eb8eeb36d70bc865fca3fcf67738e0f124cc0d1c", size = 9456188, upload-time = "2025-12-30T18:31:00.529Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/2c/3087f02752886fea59c5f0453a0647b6f7970db8571d581a45a746b21df2/azure_ai_ml-1.32.0.tar.gz", hash = "sha256:edb90219520412132fac100a31a40264a2145150dc4a60fb884acdacc8ded7d5", size = 9442010, upload-time = "2026-03-16T17:04:34.915Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/bf/5b3df818fc6993f9b54bf88c21a462076e8c11ca7052556181e804de8e2e/azure_ai_ml-1.31.0-py3-none-any.whl", hash = "sha256:e2eb928660b10245349dfd1b8e92a598bd0df8af492d48edfcaf0b2bd621702d", size = 13186666, upload-time = "2025-12-30T18:31:03.833Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/cd/89930cb0ee2101ca67c250eaf302b61a86a0e6dd90fa8d7e89ed6cb5644d/azure_ai_ml-1.32.0-py3-none-any.whl", hash = "sha256:710cce6f706b64a65860218edc757ef1b9699ba9b284defe42926a9dc6116e15", size = 13169553, upload-time = "2026-03-16T17:04:38.897Z" },
 ]
 
 [[package]]
@@ -5296,8 +5296,8 @@ requires-dist = [
     { name = "av", specifier = ">=14.0.0" },
     { name = "av", marker = "extra == 'all'", specifier = ">=14.0.0" },
     { name = "azure-ai-contentsafety", specifier = ">=1.0.0" },
-    { name = "azure-ai-ml", marker = "extra == 'all'", specifier = ">=1.27.1" },
-    { name = "azure-ai-ml", marker = "extra == 'gcg'", specifier = ">=1.27.1" },
+    { name = "azure-ai-ml", marker = "extra == 'all'", specifier = ">=1.32.0" },
+    { name = "azure-ai-ml", marker = "extra == 'gcg'", specifier = ">=1.32.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'all'", specifier = ">=1.44.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'speech'", specifier = ">=1.46.0" },
     { name = "azure-core", specifier = ">=1.38.0" },
