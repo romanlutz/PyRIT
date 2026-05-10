@@ -1,7 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from unittest.mock import MagicMock
+import subprocess
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -9,6 +10,8 @@ log_mod = pytest.importorskip(
     "pyrit.auxiliary_attacks.gcg.experiments.log",
     reason="GCG optional dependencies not installed",
 )
+get_gpu_memory = log_mod.get_gpu_memory
+log_gpu_memory = log_mod.log_gpu_memory
 log_loss = log_mod.log_loss
 log_params = log_mod.log_params
 log_table_summary = log_mod.log_table_summary
@@ -76,3 +79,54 @@ class TestLogTableSummary:
     def test_logs_empty_summary(self) -> None:
         """Should handle empty losses and controls."""
         log_table_summary(losses=[], controls=[], n_steps=0)
+
+
+class TestGpuMemoryLogging:
+    """Tests for GPU memory query and logging.
+
+    Lives here (not test_lifecycle.py) so the tests don't transitively
+    depend on the GCG `train` module (which requires `ml_collections`,
+    only installed with the `gcg` extra). The log module itself only
+    uses stdlib imports, so these tests run in any CI environment.
+    """
+
+    @patch("pyrit.auxiliary_attacks.gcg.experiments.log.sp")
+    def test_get_gpu_memory_parses_nvidia_smi(self, mock_sp: MagicMock) -> None:
+        """Should parse nvidia-smi output into a dict of GPU -> free memory."""
+        mock_sp.check_output.return_value = b"memory.free [MiB]\n8000 MiB\n16000 MiB\n"
+        result = get_gpu_memory()
+        assert result == {"gpu1_free_memory": 8000, "gpu2_free_memory": 16000}
+
+    @patch("pyrit.auxiliary_attacks.gcg.experiments.log.sp")
+    def test_get_gpu_memory_single_gpu(self, mock_sp: MagicMock) -> None:
+        """Should handle single GPU output."""
+        mock_sp.check_output.return_value = b"memory.free [MiB]\n24000 MiB\n"
+        result = get_gpu_memory()
+        assert result == {"gpu1_free_memory": 24000}
+
+    @patch("pyrit.auxiliary_attacks.gcg.experiments.log.sp")
+    def test_log_gpu_memory_logs_via_logging(self, mock_sp: MagicMock) -> None:
+        """Should log GPU memory info without error on the success path."""
+        mock_sp.check_output.return_value = b"memory.free [MiB]\n8000 MiB\n16000 MiB\n"
+        # Should not raise
+        log_gpu_memory(step=5)
+
+    @patch("pyrit.auxiliary_attacks.gcg.experiments.log.sp")
+    def test_log_gpu_memory_swallows_nvidia_smi_failure(self, mock_sp: MagicMock) -> None:
+        """Should swallow exceptions when nvidia-smi is not available.
+
+        Covers the except branch of `log_gpu_memory` -- callers (like the
+        train loop) should never crash because the runtime happens not to
+        have nvidia-smi.
+        """
+        mock_sp.check_output.side_effect = subprocess.CalledProcessError(1, "nvidia-smi")
+        # Must not raise
+        log_gpu_memory(step=5)
+
+    @patch("pyrit.auxiliary_attacks.gcg.experiments.log.sp")
+    def test_get_gpu_memory_handles_nvidia_smi_failure(self, mock_sp: MagicMock) -> None:
+        """`get_gpu_memory` itself should propagate the exception (only
+        `log_gpu_memory` is expected to swallow it)."""
+        mock_sp.check_output.side_effect = subprocess.CalledProcessError(1, "nvidia-smi")
+        with pytest.raises(subprocess.CalledProcessError):
+            get_gpu_memory()
