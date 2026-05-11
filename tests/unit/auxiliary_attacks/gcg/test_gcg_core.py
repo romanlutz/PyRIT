@@ -390,7 +390,7 @@ class TestCreateAttack:
         mock_worker = MagicMock()
         mock_worker.model.name_or_path = "test-model"
         mock_worker.tokenizer.name_or_path = "test-tokenizer"
-        mock_worker.conv_template.name = "test-template"
+        mock_worker.tokenizer.chat_template = "{{ messages[0]['content'] }}"
 
         managers = {
             "AP": MagicMock(),
@@ -430,7 +430,7 @@ class TestCreateAttack:
         mock_worker = MagicMock()
         mock_worker.model.name_or_path = "test-model"
         mock_worker.tokenizer.name_or_path = "test-tokenizer"
-        mock_worker.conv_template.name = "test-template"
+        mock_worker.tokenizer.chat_template = "{{ messages[0]['content'] }}"
 
         managers = {
             "AP": MagicMock(),
@@ -484,7 +484,6 @@ class TestPromptManagerInit:
                 goals=["goal1", "goal2"],
                 targets=["target1"],
                 tokenizer=MagicMock(),
-                conv_template=MagicMock(),
                 managers={"AP": MagicMock()},
             )
 
@@ -494,7 +493,6 @@ class TestPromptManagerInit:
                 goals=[],
                 targets=[],
                 tokenizer=MagicMock(),
-                conv_template=MagicMock(),
                 managers={"AP": MagicMock()},
             )
 
@@ -506,11 +504,11 @@ class TestEvaluateAttackInit:
         mock_worker1 = MagicMock()
         mock_worker1.model.name_or_path = "m1"
         mock_worker1.tokenizer.name_or_path = "t1"
-        mock_worker1.conv_template.name = "c1"
+        mock_worker1.tokenizer.chat_template = "{{ messages[0]['content'] }}"
         mock_worker2 = MagicMock()
         mock_worker2.model.name_or_path = "m2"
         mock_worker2.tokenizer.name_or_path = "t2"
-        mock_worker2.conv_template.name = "c2"
+        mock_worker2.tokenizer.chat_template = "{{ messages[0]['content'] }}"
 
         with pytest.raises(ValueError, match="exactly 1 worker"):
             EvaluateAttack(

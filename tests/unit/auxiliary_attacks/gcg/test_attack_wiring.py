@@ -43,11 +43,32 @@ MANAGERS = {
 
 
 def _make_mock_worker() -> MagicMock:
-    """Create a mock worker with required attributes for attack construction."""
+    """Create a mock worker whose tokenizer can stand in for a real chat tokenizer.
+
+    The wiring tests construct real ``GCGAttackPrompt`` instances which call
+    ``tokenizer.apply_chat_template`` and then walk character positions in the
+    rendered prompt. We need a real string + a tokenizer that can answer
+    ``char_to_token`` queries on it, so we back the mock with a real
+    distilgpt2 tokenizer (the smallest available transformers tokenizer that
+    ships with all the methods we touch).
+    """
+    from transformers import AutoTokenizer
+
+    real_tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    real_tokenizer.pad_token = real_tokenizer.eos_token
+    real_tokenizer.chat_template = (
+        "{%- for m in messages -%}"
+        "{%- if m['role'] == 'user' -%}"
+        "[INST] {{ m['content'] }} [/INST] "
+        "{%- elif m['role'] == 'assistant' -%}"
+        "{{ m['content'] }}"
+        "{%- endif -%}"
+        "{%- endfor -%}"
+    )
+
     worker = MagicMock()
     worker.model.name_or_path = "test-model"
-    worker.tokenizer.name_or_path = "test-tokenizer"
-    worker.conv_template.name = "test-template"
+    worker.tokenizer = real_tokenizer
     return worker
 
 
