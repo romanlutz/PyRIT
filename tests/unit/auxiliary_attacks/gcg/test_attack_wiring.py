@@ -7,6 +7,7 @@ These tests catch kwarg mismatches between IndividualPromptAttack/ProgressiveMul
 and MultiPromptAttack.__init__(), and template compatibility issues in _update_ids().
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -152,7 +153,7 @@ class TestAttackClassWiring:
                 filter_cand=True,
             )
 
-    def test_create_attack_individual_wires_correctly(self) -> None:
+    def test_create_attack_individual_wires_correctly(self, tmp_path: Path) -> None:
         """_create_attack with transfer=False should produce an IndividualPromptAttack
         that can create internal MPA instances without error."""
         worker = _make_mock_worker()
@@ -160,7 +161,7 @@ class TestAttackClassWiring:
         params = Generator._build_params(
             transfer=False,
             control_init="! ! !",
-            result_prefix="test",
+            result_prefix=str(tmp_path / "test"),
             learning_rate=0.01,
             batch_size=64,
             n_steps=5,

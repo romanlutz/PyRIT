@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -368,7 +369,7 @@ class TestApplyTargetAugmentation:
 class TestCreateAttack:
     """Tests for GreedyCoordinateGradientAdversarialSuffixgenerator_cls._create_attack."""
 
-    def test_transfer_true_creates_progressive(self) -> None:
+    def test_transfer_true_creates_progressive(self, tmp_path: Path) -> None:
         train_mod = pytest.importorskip(
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
@@ -380,7 +381,7 @@ class TestCreateAttack:
             progressive_models=True,
             progressive_goals=True,
             control_init="! ! !",
-            result_prefix="test",
+            result_prefix=str(tmp_path / "test"),
             gbda_deterministic=True,
             learning_rate=0.01,
             batch_size=512,
@@ -410,7 +411,7 @@ class TestCreateAttack:
         )
         assert isinstance(attack, ProgressiveMultiPromptAttack)
 
-    def test_transfer_false_creates_individual(self) -> None:
+    def test_transfer_false_creates_individual(self, tmp_path: Path) -> None:
         train_mod = pytest.importorskip(
             "pyrit.auxiliary_attacks.gcg.experiments.train",
             reason="GCG train module not available",
@@ -420,7 +421,7 @@ class TestCreateAttack:
         params = generator_cls._build_params(
             transfer=False,
             control_init="! ! !",
-            result_prefix="test",
+            result_prefix=str(tmp_path / "test"),
             gbda_deterministic=True,
             learning_rate=0.01,
             batch_size=512,
