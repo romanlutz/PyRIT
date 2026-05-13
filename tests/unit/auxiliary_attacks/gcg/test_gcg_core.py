@@ -227,8 +227,14 @@ class TestSampleControl:
         assert (result >= 0).all()
         assert (result < vocab_size).all()
 
-    def test_each_candidate_differs_in_one_position(self) -> None:
-        """Each candidate should differ from the original in exactly one position."""
+    def test_each_candidate_differs_in_at_most_one_position(self) -> None:
+        """Each candidate replaces exactly one position with a token sampled from top-k.
+
+        The replacement token is drawn uniformly from top-k, so it may equal the
+        original token at that position (giving diffs == 0). The function only
+        guarantees that *at most* one position differs from the original; asserting
+        exactly one would make the test flaky against the underlying randomness.
+        """
         n_control = 10
         vocab_size = 50
         batch_size = 8
@@ -240,8 +246,7 @@ class TestSampleControl:
 
         for i in range(batch_size):
             diffs = (result[i] != original_toks.to(result.device)).sum().item()
-            # Each candidate changes exactly 1 position
-            assert diffs == 1, f"Candidate {i} differs in {diffs} positions, expected 1"
+            assert diffs <= 1, f"Candidate {i} differs in {diffs} positions, expected at most 1"
 
     def test_non_ascii_filtering(self) -> None:
         """When allow_non_ascii=False, the newly sampled token should not be non-ASCII.
