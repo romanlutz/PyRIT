@@ -37,6 +37,7 @@
 
 # %%
 import pandas as pd
+from IPython.display import display
 
 from pyrit.prompt_converter import get_converter_modalities, get_taxonomy_classification
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
@@ -54,23 +55,24 @@ for name, inputs, outputs in converter_list:
     output_str = ", ".join(outputs) if outputs else "any"
     classifications = taxonomy_map.get(name, ())
     primary = classifications[0] if classifications else None
-    rows.append({
-        "Converter": name,
-        "Input Modality": input_str,
-        "Output Modality": output_str,
-        "Taxonomy Family": primary.family if primary else "",
-        "Taxonomy Category": primary.category if primary else "",
-        "Taxonomy Leaf": primary.leaf if primary else "",
-    })
+    rows.append(
+        {
+            "Converter": name,
+            "Input Modality": input_str,
+            "Output Modality": output_str,
+            "Taxonomy Family": primary.family if primary else "",
+            "Taxonomy Category": primary.category if primary else "",
+            "Taxonomy Leaf": primary.leaf if primary else "",
+        }
+    )
 
 # Create DataFrame and sort
 df = pd.DataFrame(rows)
 df = df.sort_values(by=["Input Modality", "Output Modality", "Converter"]).reset_index(drop=True)
 
-# Display all rows
+# Display all rows as a rendered table (HTML in notebooks, text otherwise)
 pd.set_option("display.max_rows", None)
-pd.set_option("display.max_colwidth", 50)
-print(df.to_string())
+display(df)
 
 # %% [markdown]
 # ## Converter Categories
