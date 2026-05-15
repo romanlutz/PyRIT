@@ -1,18 +1,19 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from unittest.mock import MagicMock, patch
+"""Tests for the deprecated ``generate_suffix`` shim.
+
+The new lifecycle behaviour (worker spawning, teardown on success and failure)
+is exercised in detail in ``test_generator.py``. These tests just verify that
+the shim still translates its kwargs correctly into a ``GCGGenerator`` +
+``execute_async`` call and emits the deprecation warning.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-# Note: GPU-memory tests live in test_log.py since they only need the log
-# module (stdlib imports). Anything that touches the train module needs
-# the gcg extra installed (ml_collections, torch, etc.) so we skip the
-# whole module when those imports fail.
-log_mod = pytest.importorskip(
-    "pyrit.auxiliary_attacks.gcg.experiments.log",
-    reason="GCG optional dependencies (mlflow, etc.) not installed",
-)
 
 train_mod = pytest.importorskip(
     "pyrit.auxiliary_attacks.gcg.experiments.train",
@@ -21,95 +22,52 @@ train_mod = pytest.importorskip(
 Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
 
 
-class TestGenerateSuffixLifecycle:
-    """Tests for generate_suffix worker lifecycle management."""
+@patch("pyrit.auxiliary_attacks.gcg.experiments.train.load_goals_and_targets")
+def test_generate_suffix_emits_deprecation_warning(mock_loader: MagicMock) -> None:
+    mock_loader.return_value = (["goal"], ["target"], [], [])
 
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.get_workers")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.get_goals_and_targets")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_gpu_memory")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_params")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_train_goals")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.attack_lib")
-    def test_workers_stopped_after_training(
-        self,
-        mock_attack_lib: MagicMock,
-        mock_log_train_goals: MagicMock,
-        mock_log_params: MagicMock,
-        mock_log_gpu_memory: MagicMock,
-        mock_get_goals: MagicMock,
-        mock_get_workers: MagicMock,
-    ) -> None:
-        """All workers should be stopped after training completes."""
-        mock_get_goals.return_value = (["goal1"], ["target1"], [], [])
-        mock_worker1 = MagicMock()
-        mock_worker1.model.name_or_path = "test-model-1"
-        mock_worker1.tokenizer.name_or_path = "test-tokenizer-1"
-        mock_worker1.tokenizer.chat_template = "{{ messages[0]['content'] }}"
-        mock_worker2 = MagicMock()
-        mock_worker2.model.name_or_path = "test-model-2"
-        mock_worker2.tokenizer.name_or_path = "test-tokenizer-2"
-        mock_worker2.tokenizer.chat_template = "{{ messages[0]['content'] }}"
-        mock_get_workers.return_value = ([mock_worker1], [mock_worker2])
-
-        mock_attack_instance = MagicMock()
-        mock_attack_lib.GCGAttackPrompt = MagicMock
-        mock_attack_lib.GCGPromptManager = MagicMock
-        mock_attack_lib.GCGMultiPromptAttack = MagicMock
-
-        with patch.object(Generator, "_create_attack", return_value=mock_attack_instance):
-            generator = Generator.__new__(Generator)
-            generator.generate_suffix(
+    with patch.object(train_mod.GCGGenerator, "execute_async", new_callable=AsyncMock) as mock_execute:
+        mock_execute.return_value = MagicMock()
+        with pytest.warns(DeprecationWarning, match="generate_suffix"):
+            Generator().generate_suffix(
                 tokenizer_paths=["test/path"],
                 model_paths=["test/path"],
                 train_data="",
                 n_steps=1,
             )
 
-        mock_worker1.stop.assert_called_once()
-        mock_worker2.stop.assert_called_once()
+    mock_execute.assert_awaited_once()
 
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.get_workers")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.get_goals_and_targets")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_gpu_memory")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_params")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.log_train_goals")
-    @patch("pyrit.auxiliary_attacks.gcg.experiments.train.attack_lib")
-    def test_workers_not_stopped_on_training_failure(
-        self,
-        mock_attack_lib: MagicMock,
-        mock_log_train_goals: MagicMock,
-        mock_log_params: MagicMock,
-        mock_log_gpu_memory: MagicMock,
-        mock_get_goals: MagicMock,
-        mock_get_workers: MagicMock,
-    ) -> None:
-        """BUG CHARACTERIZATION: Workers are NOT stopped when attack.run() raises.
 
-        This documents the current (buggy) behavior — workers leak on failure.
-        A future fix should ensure workers are cleaned up even on exceptions.
-        """
-        mock_get_goals.return_value = (["goal1"], ["target1"], [], [])
-        mock_worker = MagicMock()
-        mock_worker.model.name_or_path = "test-model"
-        mock_worker.tokenizer.name_or_path = "test-tokenizer"
-        mock_worker.tokenizer.chat_template = "{{ messages[0]['content'] }}"
-        mock_get_workers.return_value = ([mock_worker], [])
+@patch("pyrit.auxiliary_attacks.gcg.experiments.train.load_goals_and_targets")
+def test_generate_suffix_passes_loaded_goals_to_execute_async(mock_loader: MagicMock) -> None:
+    mock_loader.return_value = (["g1", "g2"], ["t1", "t2"], ["tg"], ["tt"])
 
-        mock_attack_instance = MagicMock()
-        mock_attack_instance.run.side_effect = RuntimeError("Simulated failure")
-        mock_attack_lib.GCGAttackPrompt = MagicMock
-        mock_attack_lib.GCGPromptManager = MagicMock
-        mock_attack_lib.GCGMultiPromptAttack = MagicMock
+    with patch.object(train_mod.GCGGenerator, "execute_async", new_callable=AsyncMock) as mock_execute:
+        mock_execute.return_value = MagicMock()
+        with pytest.warns(DeprecationWarning):
+            Generator().generate_suffix(
+                tokenizer_paths=["test/path"],
+                model_paths=["test/path"],
+                train_data="some-csv-path",
+                n_train_data=2,
+                n_test_data=1,
+                n_steps=1,
+            )
 
-        with patch.object(Generator, "_create_attack", return_value=mock_attack_instance):
-            generator = Generator.__new__(Generator)
-            with pytest.raises(RuntimeError, match="Simulated failure"):
-                generator.generate_suffix(
-                    tokenizer_paths=["test/path"],
-                    model_paths=["test/path"],
-                    train_data="",
-                    n_steps=1,
-                )
+    call_kwargs = mock_execute.await_args.kwargs
+    assert call_kwargs["goals"] == ["g1", "g2"]
+    assert call_kwargs["targets"] == ["t1", "t2"]
+    assert call_kwargs["test_goals"] == ["tg"]
+    assert call_kwargs["test_targets"] == ["tt"]
 
-        # Workers are NOT stopped on failure — this is a bug we'll fix later
-        mock_worker.stop.assert_not_called()
+
+def test_generate_suffix_requires_model_paths() -> None:
+    with pytest.warns(DeprecationWarning):
+        with pytest.raises(ValueError, match="model_paths must be a non-empty"):
+            Generator().generate_suffix(
+                tokenizer_paths=["test/path"],
+                model_paths=None,
+                train_data="",
+                n_steps=1,
+            )

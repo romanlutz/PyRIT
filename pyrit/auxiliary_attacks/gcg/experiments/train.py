@@ -1,38 +1,44 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+"""Backwards-compatibility shim for the legacy ``generate_suffix`` entry point.
+
+New code should use :class:`pyrit.auxiliary_attacks.gcg.GCGGenerator` directly:
+
+    generator = GCGGenerator(
+        models=[GCGModelConfig(name="meta-llama/Llama-2-7b-chat-hf")],
+    )
+    result = await generator.execute_async(goals=[...], targets=[...])
+
+This module remains so existing scripts that call
+``GreedyCoordinateGradientAdversarialSuffixGenerator().generate_suffix(...)``
+keep working for one release. Every call now emits a ``DeprecationWarning``.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
-import time
-from typing import Any, Optional, Union
+import warnings
+from typing import Any, Optional
 
-import numpy as np
-import torch.multiprocessing as mp
-from ml_collections import config_dict
-
-import pyrit.auxiliary_attacks.gcg.attack.gcg.gcg_attack as attack_lib
-from pyrit.auxiliary_attacks.gcg.attack.base.attack_manager import (
-    IndividualPromptAttack,
-    ProgressiveMultiPromptAttack,
-    get_goals_and_targets,
-    get_workers,
+from pyrit.auxiliary_attacks.gcg.config import (
+    GCGAlgorithmConfig,
+    GCGDataConfig,
+    GCGModelConfig,
+    GCGOutputConfig,
+    GCGStrategyConfig,
 )
-from pyrit.auxiliary_attacks.gcg.experiments.log import (
-    log_gpu_memory,
-    log_params,
-    log_train_goals,
-)
+from pyrit.auxiliary_attacks.gcg.data import load_goals_and_targets
+from pyrit.auxiliary_attacks.gcg.generator import GCGGenerator
 
 logger = logging.getLogger(__name__)
 
 
 class GreedyCoordinateGradientAdversarialSuffixGenerator:
-    """Generates adversarial suffixes using the Greedy Coordinate Gradient (GCG) algorithm."""
+    """Deprecated. Use :class:`pyrit.auxiliary_attacks.gcg.GCGGenerator` instead."""
 
     _DEFAULT_CONTROL_INIT: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !"
-
-    def __init__(self) -> None:
-        if mp.get_start_method(allow_none=True) != "spawn":
-            mp.set_start_method("spawn")
 
     def generate_suffix(
         self,
@@ -73,59 +79,24 @@ class GreedyCoordinateGradientAdversarialSuffixGenerator:
         random_seed: int = 42,
     ) -> None:
         """
-        Generate an adversarial suffix using the GCG algorithm.
+        Deprecated. Use :meth:`GCGGenerator.execute_async`.
 
-        Args:
-            token (str): HuggingFace authentication token.
-            tokenizer_paths (Optional[list[str]]): Paths to tokenizer models.
-            model_name (str): Name identifier for the model.
-            model_paths (Optional[list[str]]): Paths to model weights.
-            result_prefix (str): Prefix for result file paths.
-            train_data (str): URL or path to training data CSV.
-            control_init (str): Initial control string for optimization.
-            n_train_data (int): Number of training examples. Defaults to 50.
-            n_steps (int): Number of optimization steps. Defaults to 500.
-            test_steps (int): Steps between test evaluations. Defaults to 50.
-            batch_size (int): Batch size for candidate generation. Defaults to 512.
-            transfer (bool): Whether to use transfer attack mode. Defaults to False.
-            target_weight (float): Weight for target loss. Defaults to 1.0.
-            control_weight (float): Weight for control loss. Defaults to 0.0.
-            progressive_goals (bool): Whether to progressively add goals. Defaults to False.
-            progressive_models (bool): Whether to progressively add models. Defaults to False.
-            anneal (bool): Whether to use simulated annealing. Defaults to False.
-            incr_control (bool): Whether to incrementally increase control weight. Defaults to False.
-            stop_on_success (bool): Whether to stop on first success. Defaults to False.
-            verbose (bool): Whether to print verbose output. Defaults to True.
-            allow_non_ascii (bool): Whether to allow non-ASCII tokens. Defaults to False.
-            num_train_models (int): Number of models to use for training. Defaults to 1.
-            devices (Optional[list[str]]): CUDA devices to use.
-            model_kwargs (Optional[list[dict[str, Any]]]): Additional kwargs per model.
-            tokenizer_kwargs (Optional[list[dict[str, Any]]]): Additional kwargs per tokenizer.
-            n_test_data (int): Number of test examples. Defaults to 0.
-            test_data (str): URL or path to test data CSV. Defaults to "".
-            learning_rate (float): Learning rate. Defaults to 0.01.
-            topk (int): Number of top candidates to consider. Defaults to 256.
-            temp (int): Temperature for sampling. Defaults to 1.
-            filter_cand (bool): Whether to filter invalid candidates. Defaults to True.
-            gbda_deterministic (bool): Unused, kept for config compatibility. Defaults to True.
-            logfile (str): Path to log file. Defaults to "".
-            random_seed (int): Random seed for reproducibility. Defaults to 42.
+        ``model_name``, ``num_train_models``, and ``gbda_deterministic`` are accepted
+        for backwards compatibility but no longer affect behaviour: ``model_name``
+        was a free-form identifier used only in log lines; training-vs-test split
+        is now expressed via ``GCGGenerator(test_models=[...])``; and
+        ``gbda_deterministic`` was already dead.
         """
-        if tokenizer_paths is None:
-            tokenizer_paths = []
-        if model_paths is None:
-            model_paths = []
-        if devices is None:
-            devices = ["cuda:0"]
-        if model_kwargs is None:
-            model_kwargs = [{"low_cpu_mem_usage": True, "use_cache": False}]
-        if tokenizer_kwargs is None:
-            tokenizer_kwargs = [{"use_fast": False}]
-
-        params = self._build_params(
+        warnings.warn(
+            "GreedyCoordinateGradientAdversarialSuffixGenerator.generate_suffix() is deprecated; "
+            "use pyrit.auxiliary_attacks.gcg.GCGGenerator.execute_async() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        del gbda_deterministic, model_name  # accepted for backcompat, ignored
+        generator, data_config = self._build_generator_and_data(
             token=token,
             tokenizer_paths=tokenizer_paths,
-            model_name=model_name,
             model_paths=model_paths,
             result_prefix=result_prefix,
             train_data=train_data,
@@ -154,159 +125,123 @@ class GreedyCoordinateGradientAdversarialSuffixGenerator:
             topk=topk,
             temp=temp,
             filter_cand=filter_cand,
-            gbda_deterministic=gbda_deterministic,
             logfile=logfile,
             random_seed=random_seed,
         )
-        logger.info(f"Parameters: {params}")
-
-        log_gpu_memory(step=0)
-        log_params(params=params)
-
-        train_goals, train_targets, test_goals, test_targets = get_goals_and_targets(params)
-        log_train_goals(train_goals=train_goals)
-
-        train_targets, test_targets = self._apply_target_augmentation(
-            train_targets=train_targets,
-            test_targets=test_targets,
+        train_goals, train_targets, test_goals, test_targets = load_goals_and_targets(
+            data=data_config, random_seed=random_seed
         )
-
-        workers, test_workers = get_workers(params)
-        managers = {
-            "AP": attack_lib.GCGAttackPrompt,
-            "PM": attack_lib.GCGPromptManager,
-            "MPA": attack_lib.GCGMultiPromptAttack,
-        }
-
-        attack = self._create_attack(
-            params=params,
-            managers=managers,
-            train_goals=train_goals,
-            train_targets=train_targets,
-            test_goals=test_goals,
-            test_targets=test_targets,
-            workers=workers,
-            test_workers=test_workers,
-        )
-        attack.run(
-            n_steps=params.n_steps,
-            batch_size=params.batch_size,
-            topk=params.topk,
-            temp=params.temp,
-            target_weight=params.target_weight,
-            control_weight=params.control_weight,
-            test_steps=getattr(params, "test_steps", 1),
-            anneal=params.anneal,
-            incr_control=params.incr_control,
-            stop_on_success=params.stop_on_success,
-            verbose=params.verbose,
-            filter_cand=params.filter_cand,
-            allow_non_ascii=params.allow_non_ascii,
-        )
-
-        for worker in workers + test_workers:
-            worker.stop()
-
-    @staticmethod
-    def _build_params(**kwargs: Any) -> config_dict.ConfigDict:
-        """
-        Build a ConfigDict from keyword arguments.
-
-        Returns:
-            config_dict.ConfigDict: The populated configuration object.
-        """
-        params = config_dict.ConfigDict()
-        for key, value in kwargs.items():
-            setattr(params, key, value)
-        return params
-
-    @staticmethod
-    def _apply_target_augmentation(
-        *,
-        train_targets: list[str],
-        test_targets: list[str],
-    ) -> tuple[list[str], list[str]]:
-        """
-        Apply random augmentation to target strings.
-
-        Randomly replaces "Sure, h" with "H" or "Sure, here is" with "Sure, here's"
-        for each target string. This adds diversity to the optimization targets.
-
-        Args:
-            train_targets (list[str]): Training target strings.
-            test_targets (list[str]): Test target strings.
-
-        Returns:
-            tuple[list[str], list[str]]: Augmented training and test targets.
-        """
-
-        def process_fn(s: str) -> str:
-            return s.replace("Sure, h", "H")
-
-        def process_fn2(s: str) -> str:
-            return s.replace("Sure, here is", "Sure, here's")
-
-        train_targets = [process_fn(t) if np.random.random() < 0.5 else process_fn2(t) for t in train_targets]
-        test_targets = [process_fn(t) if np.random.random() < 0.5 else process_fn2(t) for t in test_targets]
-        return train_targets, test_targets
-
-    @staticmethod
-    def _create_attack(
-        *,
-        params: config_dict.ConfigDict,
-        managers: dict[str, Any],
-        train_goals: list[str],
-        train_targets: list[str],
-        test_goals: list[str],
-        test_targets: list[str],
-        workers: list[Any],
-        test_workers: list[Any],
-    ) -> Union[ProgressiveMultiPromptAttack, IndividualPromptAttack]:
-        """
-        Create the appropriate attack object based on configuration.
-
-        Args:
-            params (config_dict.ConfigDict): Training configuration.
-            managers (dict[str, Any]): Dictionary mapping manager keys to GCG classes.
-            train_goals (list[str]): Training goal strings.
-            train_targets (list[str]): Training target strings.
-            test_goals (list[str]): Test goal strings.
-            test_targets (list[str]): Test target strings.
-            workers (list[Any]): Training model workers.
-            test_workers (list[Any]): Test model workers.
-
-        Returns:
-            Union[ProgressiveMultiPromptAttack, IndividualPromptAttack]: The configured attack.
-        """
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        if params.transfer:
-            return ProgressiveMultiPromptAttack(
-                train_goals,
-                train_targets,
-                workers,
-                progressive_models=params.progressive_models,
-                progressive_goals=params.progressive_goals,
-                control_init=params.control_init,
-                logfile=f"{params.result_prefix}_{timestamp}.json",
-                managers=managers,
+        asyncio.run(
+            generator.execute_async(
+                goals=train_goals,
+                targets=train_targets,
                 test_goals=test_goals,
                 test_targets=test_targets,
-                test_workers=test_workers,
-                mpa_lr=params.learning_rate,
-                mpa_batch_size=params.batch_size,
-                mpa_n_steps=params.n_steps,
             )
-        return IndividualPromptAttack(
-            train_goals,
-            train_targets,
-            workers,
-            control_init=params.control_init,
-            logfile=f"{params.result_prefix}_{timestamp}.json",
-            managers=managers,
-            test_goals=getattr(params, "test_goals", []),
-            test_targets=getattr(params, "test_targets", []),
-            test_workers=test_workers,
-            mpa_lr=params.learning_rate,
-            mpa_batch_size=params.batch_size,
-            mpa_n_steps=params.n_steps,
         )
+
+    @staticmethod
+    def _build_generator_and_data(
+        *,
+        token: str,
+        tokenizer_paths: Optional[list[str]],
+        model_paths: Optional[list[str]],
+        result_prefix: str,
+        train_data: str,
+        control_init: str,
+        n_train_data: int,
+        n_steps: int,
+        test_steps: int,
+        batch_size: int,
+        transfer: bool,
+        target_weight: float,
+        control_weight: float,
+        progressive_goals: bool,
+        progressive_models: bool,
+        anneal: bool,
+        incr_control: bool,
+        stop_on_success: bool,
+        verbose: bool,
+        allow_non_ascii: bool,
+        num_train_models: int,
+        devices: Optional[list[str]],
+        model_kwargs: Optional[list[dict[str, Any]]],
+        tokenizer_kwargs: Optional[list[dict[str, Any]]],
+        n_test_data: int,
+        test_data: str,
+        learning_rate: float,
+        topk: int,
+        temp: int,
+        filter_cand: bool,
+        logfile: str,
+        random_seed: int,
+    ) -> tuple[GCGGenerator, GCGDataConfig]:
+        """Translate the legacy generate_suffix kwargs into a GCGGenerator + data config."""
+        if not model_paths:
+            raise ValueError("generate_suffix(): model_paths must be a non-empty list of model identifiers.")
+        if tokenizer_paths is None:
+            tokenizer_paths = list(model_paths)
+        if devices is None:
+            devices = ["cuda:0"] * len(model_paths)
+        if model_kwargs is None:
+            model_kwargs = [{"low_cpu_mem_usage": True, "use_cache": False}] * len(model_paths)
+        if tokenizer_kwargs is None:
+            tokenizer_kwargs = [{"use_fast": False}] * len(model_paths)
+
+        if not (len(tokenizer_paths) == len(model_paths) == len(devices) == len(model_kwargs) == len(tokenizer_kwargs)):
+            raise ValueError(
+                "generate_suffix(): tokenizer_paths, model_paths, devices, model_kwargs and tokenizer_kwargs "
+                "must all have the same length."
+            )
+
+        all_models = [
+            GCGModelConfig(
+                name=model_paths[i],
+                device=devices[i],
+                model_kwargs=dict(model_kwargs[i]),
+                tokenizer_kwargs=dict(tokenizer_kwargs[i]),
+            )
+            for i in range(len(model_paths))
+        ]
+        train_models = all_models[:num_train_models]
+        test_models = all_models[num_train_models:]
+
+        generator = GCGGenerator(
+            models=train_models,
+            test_models=test_models,
+            algorithm=GCGAlgorithmConfig(
+                n_steps=n_steps,
+                test_steps=test_steps,
+                batch_size=batch_size,
+                topk=topk,
+                temp=temp,
+                target_weight=target_weight,
+                control_weight=control_weight,
+                learning_rate=learning_rate,
+                allow_non_ascii=allow_non_ascii,
+                filter_cand=filter_cand,
+                random_seed=random_seed,
+                control_init=control_init,
+            ),
+            strategy=GCGStrategyConfig(
+                transfer=transfer,
+                progressive_goals=progressive_goals,
+                progressive_models=progressive_models,
+                anneal=anneal,
+                incr_control=incr_control,
+                stop_on_success=stop_on_success,
+            ),
+            output=GCGOutputConfig(
+                result_prefix=result_prefix,
+                logfile=logfile,
+                verbose=verbose,
+            ),
+            hf_token=token or None,
+        )
+        data_config = GCGDataConfig(
+            train_data=train_data,
+            test_data=test_data,
+            n_train_data=n_train_data,
+            n_test_data=n_test_data,
+        )
+        return generator, data_config
