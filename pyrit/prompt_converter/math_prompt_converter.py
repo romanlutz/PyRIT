@@ -11,7 +11,6 @@ from pyrit.models import PromptDataType, SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
 from pyrit.prompt_converter.prompt_converter import (
     ConverterResult,
-    ENCODING_ASCII,
 )
 from pyrit.prompt_target import PromptTarget
 
@@ -24,7 +23,8 @@ class MathPromptConverter(LLMGenericTextConverter):
 
     An existing ``PromptTarget`` is used to perform the conversion (like Azure OpenAI).
     """
-    MLCOMMONS_TAXONOMY = (ENCODING_ASCII,)
+
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     @apply_defaults
     def __init__(

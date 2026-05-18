@@ -25,7 +25,6 @@ from pyrit.models import (
 )
 from pyrit.prompt_converter.prompt_converter import (
     ConverterResult,
-    ENCODING_BASE64,
     PromptConverter,
 )
 from pyrit.prompt_target import CHAT_CONSUMER_REQUIREMENTS, PromptTarget
@@ -40,7 +39,7 @@ class TranslationConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
     TARGET_REQUIREMENTS = CHAT_CONSUMER_REQUIREMENTS
 
     @apply_defaults

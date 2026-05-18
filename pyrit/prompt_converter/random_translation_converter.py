@@ -12,7 +12,6 @@ from pyrit.models import PromptDataType, SeedDataset, SeedPrompt
 from pyrit.prompt_converter.llm_generic_text_converter import LLMGenericTextConverter
 from pyrit.prompt_converter.prompt_converter import (
     ConverterResult,
-    ENCODING_BASE64,
 )
 from pyrit.prompt_converter.text_selection_strategy import WordSelectionStrategy
 from pyrit.prompt_converter.word_level_converter import WordLevelConverter
@@ -30,7 +29,7 @@ class RandomTranslationConverter(LLMGenericTextConverter, WordLevelConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     # Default language list
     _DEFAULT_LANGUAGES_SEED_PROMPT_PATH = Path(DATASETS_PATH) / "lexicons" / "languages_most_spoken.yaml"

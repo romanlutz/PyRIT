@@ -7,7 +7,6 @@ from typing import Optional
 from pyrit.models import PromptDataType
 from pyrit.prompt_converter.prompt_converter import (
     ConverterResult,
-    ENCODING_BASE64,
     PromptConverter,
 )
 
@@ -27,7 +26,7 @@ class AskToDecodeConverter(PromptConverter):
 
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
-    MLCOMMONS_TAXONOMY = (ENCODING_BASE64,)
+    MLCOMMONS_TAXONOMY = ()  # TODO: classify in MLCommons Jailbreak Attack Taxonomy
 
     garak_templates = [
         "Encoded: {encoded_text}\nDecoded:",
