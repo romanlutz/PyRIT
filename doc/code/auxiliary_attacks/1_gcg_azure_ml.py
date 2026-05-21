@@ -13,6 +13,18 @@
 # # 1. Generating GCG Suffixes Using Azure Machine Learning
 
 # %% [markdown]
+# > ⚠️ **Experimental module.** `pyrit.auxiliary_attacks` is experimental: its
+# > APIs may change in any release without a deprecation cycle. Importing the
+# > package below emits a `pyrit.exceptions.ExperimentalWarning`. Pin pyrit to
+# > a specific version if you depend on it. To silence the warning:
+# >
+# > ```python
+# > import warnings
+# > from pyrit.exceptions import ExperimentalWarning
+# > warnings.filterwarnings("ignore", category=ExperimentalWarning)
+# > ```
+
+# %% [markdown]
 # This notebook shows how to generate GCG [@zou2023gcg] suffixes using Azure Machine Learning (AML), which consists of three main steps:
 # 1. Connect to an Azure Machine Learning (AML) workspace.
 # 2. Create AML Environment with the Python dependencies.
