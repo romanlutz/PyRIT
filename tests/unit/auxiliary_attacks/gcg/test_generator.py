@@ -194,7 +194,7 @@ class TestCreateAttackWiring:
         gen = _make_generator(output_dir=tmp_path, n_steps=5, batch_size=64, control_init="! ! !")
         worker = _make_mock_worker_with_real_tokenizer()
         context = GCGContext(goals=["g"], targets=["t"])
-        params = gen._to_legacy_params(context=context)
+        params = gen._to_attack_params(context=context)
 
         attack = gen._create_attack(
             params=params,
@@ -220,7 +220,7 @@ class TestCreateAttackWiring:
         )
         worker = _make_mock_worker_with_real_tokenizer()
         context = GCGContext(goals=["g"], targets=["t"])
-        params = gen._to_legacy_params(context=context)
+        params = gen._to_attack_params(context=context)
 
         attack = gen._create_attack(
             params=params,

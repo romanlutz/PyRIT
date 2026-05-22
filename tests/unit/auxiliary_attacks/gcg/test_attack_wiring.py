@@ -29,12 +29,6 @@ GCGAttackPrompt = gcg_attack_mod.GCGAttackPrompt
 GCGPromptManager = gcg_attack_mod.GCGPromptManager
 GCGMultiPromptAttack = gcg_attack_mod.GCGMultiPromptAttack
 
-train_mod = pytest.importorskip(
-    "pyrit.auxiliary_attacks.gcg.experiments.train",
-    reason="GCG train module not available",
-)
-Generator = train_mod.GreedyCoordinateGradientAdversarialSuffixGenerator
-
 MANAGERS = {
     "AP": GCGAttackPrompt,
     "PM": GCGPromptManager,

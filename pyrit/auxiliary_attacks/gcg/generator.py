@@ -4,9 +4,8 @@
 """GCGGenerator — typed PromptGeneratorStrategy implementation of the
 Greedy Coordinate Gradient adversarial-suffix attack.
 
-Replaces the legacy :meth:`GreedyCoordinateGradientAdversarialSuffixGenerator.generate_suffix`
-entry point. Follows the same lifecycle/identity pattern as ``FuzzerGenerator``
-and ``AnecdoctorGenerator``:
+Follows the same lifecycle/identity pattern as ``FuzzerGenerator`` and
+``AnecdoctorGenerator``:
 
 - Strategy configuration goes in ``__init__`` (model identity, hyper-parameters,
   strategy flags, output paths).
@@ -227,12 +226,12 @@ class GCGGenerator(
         log_gpu_memory(step=0)
         log_train_goals(train_goals=context.goals)
 
-        params = self._to_legacy_params(context=context)
+        params = self._to_attack_params(context=context)
         context.workers, context.test_workers = await asyncio.to_thread(get_workers, params)
 
     async def _perform_async(self, *, context: GCGContext) -> GCGResult:
         """Build the attack, run the optimization loop, and read the result back."""
-        params = self._to_legacy_params(context=context)
+        params = self._to_attack_params(context=context)
         context.logfile_path = self._build_logfile_path()
 
         managers = {
@@ -343,7 +342,7 @@ class GCGGenerator(
         test_targets = [_shorten(t) if np.random.random() < 0.5 else _contract(t) for t in test_targets]
         return train_targets, test_targets
 
-    def _to_legacy_params(self, *, context: GCGContext) -> Any:
+    def _to_attack_params(self, *, context: GCGContext) -> Any:
         """Build the dotted-attribute namespace the internal helpers expect."""
         from types import SimpleNamespace
 

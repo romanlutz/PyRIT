@@ -3,25 +3,17 @@
 
 """Typed configuration objects for the Greedy Coordinate Gradient (GCG) attack.
 
-The legacy entry point ``GreedyCoordinateGradientAdversarialSuffixGenerator.generate_suffix``
-takes 30+ keyword arguments and converts them into a loose ``ml_collections.ConfigDict``.
-That signature mixes per-model identity, training data, algorithm hyper-parameters,
-strategy flags, and output paths into a single flat surface with no static typing.
-
-This module replaces that with a small set of nested dataclasses. The new public entry
-point ``GreedyCoordinateGradientAdversarialSuffixGenerator.run_async`` accepts a
-single ``GCGConfig`` instance.
-
 A minimal call is::
 
     config = GCGConfig(
         models=[GCGModelConfig(name="meta-llama/Llama-2-7b-chat-hf")],
     )
-    await generator.run_async(config)
+    await GCG().execute_async(goals=[...], targets=[...])
 
-Every sub-config has defaults that match the historical YAML configs, so most
-callers only need to set the model name plus whichever algorithm hyper-parameters
-they actually want to override.
+Each sub-config (``GCGModelConfig``, ``GCGDataConfig``, ``GCGAlgorithmConfig``,
+``GCGStrategyConfig``, ``GCGOutputConfig``) ships with defaults that match the
+historical YAML configs, so most callers only need to set the model name plus
+whichever algorithm hyper-parameters they actually want to override.
 """
 
 from __future__ import annotations
