@@ -5,32 +5,29 @@ Gradient (GCG) attack](https://arxiv.org/abs/2307.15043).
 
 ### Public API
 
-The primary entry point is `GreedyCoordinateGradientAdversarialSuffixGenerator.run_async`,
-which takes a typed `GCGConfig`:
+The primary entry point is `GCG.execute_async` (`GCG` is an alias for
+`GCGGenerator`):
 
 ```python
 import asyncio
 
-from pyrit.auxiliary_attacks.gcg.config import GCGConfig, GCGModelConfig
-from pyrit.auxiliary_attacks.gcg.experiments.train import (
-    GreedyCoordinateGradientAdversarialSuffixGenerator,
-)
+from pyrit.auxiliary_attacks.gcg import GCG, GCGModelConfig
 
-config = GCGConfig(
+generator = GCG(
     models=[GCGModelConfig(name="meta-llama/Llama-2-7b-chat-hf")],
 )
-generator = GreedyCoordinateGradientAdversarialSuffixGenerator()
-asyncio.run(generator.run_async(config))
+result = asyncio.run(generator.execute_async(goals=[...], targets=[...]))
 ```
 
 `GCGConfig` is composed of nested sub-configs (`GCGModelConfig`, `GCGDataConfig`,
-`GCGAlgorithmConfig`, `GCGStrategyConfig`, `GCGOutputConfig`); see
-`pyrit/auxiliary_attacks/gcg/config.py` for the full surface and defaults.
+`GCGAlgorithmConfig`, `GCGStrategyConfig`, `GCGOutputConfig`); all are re-exported
+from `pyrit.auxiliary_attacks.gcg`. See `pyrit/auxiliary_attacks/gcg/config.py`
+for the full surface and defaults.
 
 ### Running on Azure ML
 
-`run.py` is a thin CLI wrapper around `run_async`. It takes a single `--config`
-flag pointing at a JSON file produced by `GCGConfig.to_json_file`:
+`run.py` is a thin CLI wrapper around `GCG.execute_async`. It takes a single
+`--config` flag pointing at a JSON file produced by `GCGConfig.to_json_file`:
 
 ```python
 config.to_json_file("inputs/config.json")

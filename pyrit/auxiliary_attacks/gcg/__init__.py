@@ -3,19 +3,19 @@
 
 """Public API for the Greedy Coordinate Gradient (GCG) auxiliary attack.
 
-The primary entry point is :class:`GCGGenerator`, a
+The primary entry point is :class:`GCG` (alias for :class:`GCGGenerator`), a
 :class:`pyrit.executor.promptgen.core.PromptGeneratorStrategy` that produces
 adversarial suffixes via the GCG algorithm.
 
 Example:
 
     from pyrit.auxiliary_attacks.gcg import (
+        GCG,
         GCGAlgorithmConfig,
-        GCGGenerator,
         GCGModelConfig,
     )
 
-    generator = GCGGenerator(
+    generator = GCG(
         models=[GCGModelConfig(name="meta-llama/Llama-2-7b-chat-hf")],
         algorithm=GCGAlgorithmConfig(n_steps=500, batch_size=512),
     )
@@ -36,7 +36,10 @@ from pyrit.auxiliary_attacks.gcg.config import (
 from pyrit.auxiliary_attacks.gcg.data import load_goals_and_targets
 from pyrit.auxiliary_attacks.gcg.generator import GCGContext, GCGGenerator, GCGResult
 
+GCG = GCGGenerator
+
 __all__ = [
+    "GCG",
     "GCGAlgorithmConfig",
     "GCGConfig",
     "GCGContext",

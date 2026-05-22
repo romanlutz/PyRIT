@@ -127,7 +127,7 @@ ml_client.environments.create_or_update(env_docker_context)
 # %%
 import tempfile
 
-from pyrit.auxiliary_attacks.gcg.config import (
+from pyrit.auxiliary_attacks.gcg import (
     GCGAlgorithmConfig,
     GCGConfig,
     GCGDataConfig,
