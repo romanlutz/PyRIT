@@ -5,7 +5,16 @@ from unittest.mock import patch
 
 import pytest
 
-from pyrit.datasets.seed_datasets.remote.aya_redteaming_dataset import _AyaRedteamingDataset
+from pyrit.datasets.seed_datasets.remote.aya_redteaming_dataset import (
+    _AyaRedteamingArabicDataset,
+    _AyaRedteamingDataset,
+    _AyaRedteamingFrenchDataset,
+    _AyaRedteamingHindiDataset,
+    _AyaRedteamingRussianDataset,
+    _AyaRedteamingSerbianDataset,
+    _AyaRedteamingSpanishDataset,
+    _AyaRedteamingTagalogDataset,
+)
 from pyrit.models import SeedDataset, SeedPrompt
 
 
@@ -66,3 +75,41 @@ def test_dataset_name():
 def test_language_code_mapping():
     loader = _AyaRedteamingDataset(language="French")
     assert "fra" in loader.source
+
+
+# Sibling-subclass variants (one registered provider per non-English language).
+_AYA_LANGUAGE_VARIANTS = [
+    (_AyaRedteamingHindiDataset, "aya_redteaming_hindi", "hin"),
+    (_AyaRedteamingFrenchDataset, "aya_redteaming_french", "fra"),
+    (_AyaRedteamingSpanishDataset, "aya_redteaming_spanish", "spa"),
+    (_AyaRedteamingArabicDataset, "aya_redteaming_arabic", "arb"),
+    (_AyaRedteamingRussianDataset, "aya_redteaming_russian", "rus"),
+    (_AyaRedteamingSerbianDataset, "aya_redteaming_serbian", "srp"),
+    (_AyaRedteamingTagalogDataset, "aya_redteaming_tagalog", "tgl"),
+]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang_code", _AYA_LANGUAGE_VARIANTS)
+def test_language_variant_dataset_name_and_source(cls, expected_name, expected_lang_code):
+    loader = cls()
+    assert loader.dataset_name == expected_name
+    assert f"aya_{expected_lang_code}.jsonl" in loader.source
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang_code", _AYA_LANGUAGE_VARIANTS)
+async def test_language_variant_fetch_dataset(cls, expected_name, expected_lang_code, mock_aya_data):
+    loader = cls()
+    with patch.object(loader, "_fetch_from_url", return_value=mock_aya_data):
+        dataset = await loader.fetch_dataset_async()
+    assert dataset.dataset_name == expected_name
+    assert len(dataset.seeds) == 2
+    for seed in dataset.seeds:
+        assert isinstance(seed, SeedPrompt)
+        assert seed.dataset_name == expected_name
+
+
+@pytest.mark.parametrize("cls,expected_name,_lang_code", _AYA_LANGUAGE_VARIANTS)
+def test_language_variant_filters_forward(cls, expected_name, _lang_code, mock_aya_data):
+    loader = cls(harm_categories=["Hate Speech"], harm_scope="global")
+    assert loader.harm_categories_filter == ["Hate Speech"]
+    assert loader.harm_scope == "global"

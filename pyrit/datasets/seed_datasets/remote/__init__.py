@@ -11,16 +11,28 @@ from pyrit.datasets.seed_datasets.remote.aegis_ai_content_safety_dataset import 
     _AegisContentSafetyDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.aya_redteaming_dataset import (
+    AyaHarmCategory,
+    AyaLanguage,
+    _AyaRedteamingArabicDataset,
     _AyaRedteamingDataset,
+    _AyaRedteamingFrenchDataset,
+    _AyaRedteamingHindiDataset,
+    _AyaRedteamingRussianDataset,
+    _AyaRedteamingSerbianDataset,
+    _AyaRedteamingSpanishDataset,
+    _AyaRedteamingTagalogDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.babelscape_alert_dataset import (
     _BabelscapeAlertDataset,
+    _BabelscapeAlertOriginalDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.beaver_tails_dataset import (
     _BeaverTailsDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.categorical_harmful_qa_dataset import (
+    _CategoricalHarmfulQAChineseDataset,
     _CategoricalHarmfulQADataset,
+    _CategoricalHarmfulQAVietnameseDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.cbt_bench_dataset import (
     _CBTBenchDataset,
@@ -57,6 +69,7 @@ from pyrit.datasets.seed_datasets.remote.harmful_qa_dataset import (
 from pyrit.datasets.seed_datasets.remote.hixstest_dataset import (
     HiXSTestLanguage,
     _HiXSTestDataset,
+    _HiXSTestEnglishDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.jbb_behaviors_dataset import (
     _JBBBehaviorsDataset,
@@ -74,7 +87,17 @@ from pyrit.datasets.seed_datasets.remote.mlcommons_ailuminate_dataset import (
     _MLCommonsAILuminateDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.msts_dataset import (
+    _MSTSArabicDataset,
+    _MSTSChineseDataset,
     _MSTSDataset,
+    _MSTSFarsiDataset,
+    _MSTSFrenchDataset,
+    _MSTSGermanDataset,
+    _MSTSHindiDataset,
+    _MSTSItalianDataset,
+    _MSTSKoreanDataset,
+    _MSTSRussianDataset,
+    _MSTSSpanishDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.multilingual_vulnerability_dataset import (  # noqa: F401
     _MultilingualVulnerabilityDataset,
@@ -99,7 +122,9 @@ from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
 from pyrit.datasets.seed_datasets.remote.salad_bench_dataset import (
+    _SaladBenchAttackEnhancedDataset,
     _SaladBenchDataset,
+    _SaladBenchDefenseEnhancedDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.sgxstest_dataset import (
     SGXSTestLabel,
@@ -133,6 +158,8 @@ from pyrit.datasets.seed_datasets.remote.vlguard_dataset import (
     VLGuardSubcategory,
     VLGuardSubset,
     _VLGuardDataset,
+    _VLGuardSafeSafesDataset,
+    _VLGuardSafeUnsafesDataset,
 )  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.vlsu_multimodal_dataset import (
     _VLSUMultimodalDataset,
@@ -142,6 +169,8 @@ from pyrit.datasets.seed_datasets.remote.xstest_dataset import (
 )  # noqa: F401
 
 __all__ = [
+    "AyaHarmCategory",
+    "AyaLanguage",
     "HiXSTestLanguage",
     "PromptIntelCategory",
     "PromptIntelSeverity",
@@ -150,12 +179,22 @@ __all__ = [
     "VLGuardSubcategory",
     "VLGuardSubset",
     "_AegisContentSafetyDataset",
+    "_AyaRedteamingArabicDataset",
     "_AyaRedteamingDataset",
+    "_AyaRedteamingFrenchDataset",
+    "_AyaRedteamingHindiDataset",
+    "_AyaRedteamingRussianDataset",
+    "_AyaRedteamingSerbianDataset",
+    "_AyaRedteamingSpanishDataset",
+    "_AyaRedteamingTagalogDataset",
     "_BabelscapeAlertDataset",
+    "_BabelscapeAlertOriginalDataset",
     "_BeaverTailsDataset",
     "_CBTBenchDataset",
     "_CCPSensitivePromptsDataset",
+    "_CategoricalHarmfulQAChineseDataset",
     "_CategoricalHarmfulQADataset",
+    "_CategoricalHarmfulQAVietnameseDataset",
     "_ComicJailbreakDataset",
     "COMIC_JAILBREAK_TEMPLATES",
     "ComicJailbreakTemplateConfig",
@@ -167,12 +206,23 @@ __all__ = [
     "_HarmBenchMultimodalDataset",
     "_HarmfulQADataset",
     "_HiXSTestDataset",
+    "_HiXSTestEnglishDataset",
     "_JBBBehaviorsDataset",
     "_LibrAIDoNotAnswerDataset",
     "_LLMLatentAdversarialTrainingDataset",
     "_MedSafetyBenchDataset",
     "_MLCommonsAILuminateDataset",
+    "_MSTSArabicDataset",
+    "_MSTSChineseDataset",
     "_MSTSDataset",
+    "_MSTSFarsiDataset",
+    "_MSTSFrenchDataset",
+    "_MSTSGermanDataset",
+    "_MSTSHindiDataset",
+    "_MSTSItalianDataset",
+    "_MSTSKoreanDataset",
+    "_MSTSRussianDataset",
+    "_MSTSSpanishDataset",
     "_MultilingualVulnerabilityDataset",
     "_ORBench80KDataset",
     "_ORBenchHardDataset",
@@ -182,7 +232,9 @@ __all__ = [
     "_RedTeamSocialBiasDataset",
     "_RemoteDatasetLoader",
     "_SGXSTestDataset",
+    "_SaladBenchAttackEnhancedDataset",
     "_SaladBenchDataset",
+    "_SaladBenchDefenseEnhancedDataset",
     "_SimpleSafetyTestsDataset",
     "_SOSBenchDataset",
     "_SorryBenchDataset",
@@ -190,6 +242,8 @@ __all__ = [
     "_ToxicChatDataset",
     "_TransphobiaAwarenessDataset",
     "_VLGuardDataset",
+    "_VLGuardSafeSafesDataset",
+    "_VLGuardSafeUnsafesDataset",
     "_VLSUMultimodalDataset",
     "_VisualLeakBenchDataset",
     "VisualLeakBenchCategory",

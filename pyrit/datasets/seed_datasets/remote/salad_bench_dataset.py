@@ -129,3 +129,47 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_prompts)} prompts from SALAD-Bench dataset")
 
         return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)
+
+
+class _SaladBenchAttackEnhancedDataset(_SaladBenchDataset):
+    """
+    Sibling loader pinned to the SALAD-Bench attack-enhanced split.
+
+    Same as :class:`_SaladBenchDataset` but defaults to ``split="attackEnhanced"``
+    so daily e2e tests exercise the attack-enhanced variant in addition to the
+    base split covered by the parent.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: str = "prompts",
+    ) -> None:
+        super().__init__(config=config, split="attackEnhanced")
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "salad_bench_attack_enhanced"
+
+
+class _SaladBenchDefenseEnhancedDataset(_SaladBenchDataset):
+    """
+    Sibling loader pinned to the SALAD-Bench defense-enhanced split.
+
+    Same as :class:`_SaladBenchDataset` but defaults to ``split="defenseEnhanced"``
+    so daily e2e tests exercise the defense-enhanced variant in addition to the
+    base split covered by the parent.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: str = "prompts",
+    ) -> None:
+        super().__init__(config=config, split="defenseEnhanced")
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "salad_bench_defense_enhanced"

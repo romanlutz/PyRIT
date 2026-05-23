@@ -7,7 +7,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.datasets.seed_datasets.remote.msts_dataset import _MSTSDataset
+from pyrit.datasets.seed_datasets.remote.msts_dataset import (
+    _LANGUAGE_TO_SPLIT,
+    _MSTSArabicDataset,
+    _MSTSChineseDataset,
+    _MSTSDataset,
+    _MSTSFarsiDataset,
+    _MSTSFrenchDataset,
+    _MSTSGermanDataset,
+    _MSTSHindiDataset,
+    _MSTSItalianDataset,
+    _MSTSKoreanDataset,
+    _MSTSRussianDataset,
+    _MSTSSpanishDataset,
+)
 from pyrit.models import SeedDataset
 
 
@@ -541,3 +554,59 @@ async def test_fetch_and_save_image_continues_when_path_exists_raises(tmp_path):
 
     mock_serializer.save_data.assert_awaited_once_with(data=b"recovered-bytes", output_filename="msts_img_0003")
     assert result == str(Path(str(tmp_path) + "/images", "msts_img_0003.jpg"))
+
+
+# Sibling-subclass variants (one registered provider per non-English language).
+_MSTS_LANGUAGE_VARIANTS = [
+    (_MSTSGermanDataset, "msts_german", "de"),
+    (_MSTSRussianDataset, "msts_russian", "ru"),
+    (_MSTSChineseDataset, "msts_chinese", "zh"),
+    (_MSTSHindiDataset, "msts_hindi", "hi"),
+    (_MSTSSpanishDataset, "msts_spanish", "es"),
+    (_MSTSItalianDataset, "msts_italian", "it"),
+    (_MSTSFrenchDataset, "msts_french", "fr"),
+    (_MSTSKoreanDataset, "msts_korean", "ko"),
+    (_MSTSArabicDataset, "msts_arabic", "ar"),
+    (_MSTSFarsiDataset, "msts_farsi", "fa"),
+]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _MSTS_LANGUAGE_VARIANTS)
+def test_language_variant_dataset_name_and_pinned_language(cls, expected_name, expected_lang):
+    loader = cls()
+    assert loader.dataset_name == expected_name
+    assert loader.languages == [expected_lang]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _MSTS_LANGUAGE_VARIANTS)
+def test_language_variant_max_examples_forwarded(cls, expected_name, expected_lang):
+    loader = cls(max_examples=4)
+    assert loader.max_examples == 4
+    assert loader.dataset_name == expected_name
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _MSTS_LANGUAGE_VARIANTS)
+def test_language_variant_text_modifiers_forwarded(cls, expected_name, expected_lang):
+    loader = cls(text_modifiers=["assistance"])
+    assert loader.text_modifiers == ["assistance"]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _MSTS_LANGUAGE_VARIANTS)
+async def test_language_variant_fetch_passes_pinned_language(cls, expected_name, expected_lang, english_rows):
+    loader = cls()
+    with (
+        patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=english_rows)) as mock_fetch,
+        patch.object(
+            loader,
+            "_fetch_and_save_image_async",
+            new=AsyncMock(return_value="/tmp/msts.jpg"),
+        ),
+    ):
+        dataset = await loader.fetch_dataset_async()
+
+    assert isinstance(dataset, SeedDataset)
+    assert dataset.dataset_name == expected_name
+    # _fetch_from_huggingface is called once per language; for the sibling subclasses
+    # that means exactly one call with the pinned split.
+    assert mock_fetch.await_count == 1
+    assert mock_fetch.await_args.kwargs["split"] == _LANGUAGE_TO_SPLIT[expected_lang]

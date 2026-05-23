@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pyrit.datasets.seed_datasets.remote.salad_bench_dataset import _SaladBenchDataset
+from pyrit.datasets.seed_datasets.remote.salad_bench_dataset import (
+    _SaladBenchAttackEnhancedDataset,
+    _SaladBenchDataset,
+    _SaladBenchDefenseEnhancedDataset,
+)
 from pyrit.models import SeedDataset, SeedPrompt
 
 
@@ -76,3 +80,31 @@ class TestSaladBenchDataset:
             assert call_kwargs["dataset_name"] == "walledai/SaladBench"
             assert call_kwargs["config"] == "prompts"
             assert call_kwargs["split"] == "attackEnhanced"
+
+
+_SALAD_SPLIT_VARIANTS = [
+    (_SaladBenchAttackEnhancedDataset, "salad_bench_attack_enhanced", "attackEnhanced"),
+    (_SaladBenchDefenseEnhancedDataset, "salad_bench_defense_enhanced", "defenseEnhanced"),
+]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_split", _SALAD_SPLIT_VARIANTS)
+def test_split_variant_dataset_name_and_pinned_split(cls, expected_name, expected_split):
+    loader = cls()
+    assert loader.dataset_name == expected_name
+    assert loader.split == expected_split
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_split", _SALAD_SPLIT_VARIANTS)
+async def test_split_variant_fetch_passes_pinned_split(cls, expected_name, expected_split, mock_salad_bench_data):
+    loader = cls()
+    with patch.object(
+        loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_salad_bench_data)
+    ) as mock_fetch:
+        dataset = await loader.fetch_dataset_async()
+
+    assert isinstance(dataset, SeedDataset)
+    assert dataset.dataset_name == expected_name
+    call_kwargs = mock_fetch.call_args.kwargs
+    assert call_kwargs["split"] == expected_split
+    assert call_kwargs["dataset_name"] == "walledai/SaladBench"

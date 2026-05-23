@@ -129,3 +129,37 @@ class _CategoricalHarmfulQADataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_objectives)} objectives from CategoricalHarmfulQA dataset")
 
         return SeedDataset(seeds=seed_objectives, dataset_name=self.dataset_name)
+
+
+class _CategoricalHarmfulQAChineseDataset(_CategoricalHarmfulQADataset):
+    """
+    Sibling loader pinned to the Chinese split of CategoricalHarmfulQA.
+
+    Same as :class:`_CategoricalHarmfulQADataset` but defaults to ``language="zh"``
+    so daily e2e tests exercise the Chinese split as well as the English default.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(language="zh")
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "categorical_harmful_qa_chinese"
+
+
+class _CategoricalHarmfulQAVietnameseDataset(_CategoricalHarmfulQADataset):
+    """
+    Sibling loader pinned to the Vietnamese split of CategoricalHarmfulQA.
+
+    Same as :class:`_CategoricalHarmfulQADataset` but defaults to ``language="vi"``
+    so daily e2e tests exercise the Vietnamese split as well as the English default.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(language="vi")
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "categorical_harmful_qa_vietnamese"

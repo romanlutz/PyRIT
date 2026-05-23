@@ -95,3 +95,31 @@ class _BabelscapeAlertDataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_prompts)} prompts from Babelscape Alert dataset")
 
         return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)
+
+
+class _BabelscapeAlertOriginalDataset(_BabelscapeAlertDataset):
+    """
+    Sibling loader pinned to the original (non-adversarial) ALERT split.
+
+    Same as :class:`_BabelscapeAlertDataset` but defaults to ``category="alert"``
+    so daily e2e tests exercise the 15k base ALERT config in addition to the
+    adversarial config covered by the parent.
+    """
+
+    def __init__(
+        self,
+        *,
+        source: str = "Babelscape/ALERT",
+    ) -> None:
+        """
+        Initialize the Babelscape ALERT (original) dataset loader.
+
+        Args:
+            source: HuggingFace dataset identifier. Defaults to "Babelscape/ALERT".
+        """
+        super().__init__(source=source, category="alert")
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "babelscape_alert_original"

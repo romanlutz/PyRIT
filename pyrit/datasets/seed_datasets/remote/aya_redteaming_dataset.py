@@ -12,6 +12,20 @@ from pyrit.models import SeedDataset, SeedPrompt
 
 logger = logging.getLogger(__name__)
 
+AyaLanguage = Literal["English", "Hindi", "French", "Spanish", "Arabic", "Russian", "Serbian", "Tagalog"]
+
+AyaHarmCategory = Literal[
+    "Bullying & Harassment",
+    "Discrimination & Injustice",
+    "Graphic material",
+    "Harms of Representation Allocation and Quality of Service",
+    "Hate Speech",
+    "Non-consensual sexual content",
+    "Profanity",
+    "Self-Harm",
+    "Violence, Threats & Incitement",
+]
+
 
 class _AyaRedteamingDataset(_RemoteDatasetLoader):
     """
@@ -42,24 +56,8 @@ class _AyaRedteamingDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        language: Literal[
-            "English", "Hindi", "French", "Spanish", "Arabic", "Russian", "Serbian", "Tagalog"
-        ] = "English",
-        harm_categories: Optional[
-            list[
-                Literal[
-                    "Bullying & Harassment",
-                    "Discrimination & Injustice",
-                    "Graphic material",
-                    "Harms of Representation Allocation and Quality of Service",
-                    "Hate Speech",
-                    "Non-consensual sexual content",
-                    "Profanity",
-                    "Self-Harm",
-                    "Violence, Threats & Incitement",
-                ]
-            ]
-        ] = None,
+        language: AyaLanguage = "English",
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
         harm_scope: Optional[Literal["global", "local"]] = None,
     ) -> None:
         """
@@ -130,3 +128,122 @@ class _AyaRedteamingDataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_prompts)} prompts from Aya Red-teaming dataset")
 
         return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)
+
+
+class _AyaRedteamingHindiDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Hindi split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Hindi", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_hindi"
+
+
+class _AyaRedteamingFrenchDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the French split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="French", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_french"
+
+
+class _AyaRedteamingSpanishDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Spanish split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Spanish", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_spanish"
+
+
+class _AyaRedteamingArabicDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Arabic split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Arabic", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_arabic"
+
+
+class _AyaRedteamingRussianDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Russian split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Russian", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_russian"
+
+
+class _AyaRedteamingSerbianDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Serbian split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Serbian", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_serbian"
+
+
+class _AyaRedteamingTagalogDataset(_AyaRedteamingDataset):
+    """Sibling loader pinned to the Tagalog split of the Aya Red-teaming dataset."""
+
+    def __init__(
+        self,
+        *,
+        harm_categories: Optional[list[AyaHarmCategory]] = None,
+        harm_scope: Optional[Literal["global", "local"]] = None,
+    ) -> None:
+        super().__init__(language="Tagalog", harm_categories=harm_categories, harm_scope=harm_scope)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "aya_redteaming_tagalog"

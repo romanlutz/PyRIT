@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pyrit.datasets.seed_datasets.remote.babelscape_alert_dataset import _BabelscapeAlertDataset
+from pyrit.datasets.seed_datasets.remote.babelscape_alert_dataset import (
+    _BabelscapeAlertDataset,
+    _BabelscapeAlertOriginalDataset,
+)
 from pyrit.models import SeedDataset, SeedPrompt
 
 
@@ -71,3 +74,25 @@ class TestBabelscapeAlertDataset:
         """Test that invalid category raises ValueError."""
         with pytest.raises(ValueError):
             _BabelscapeAlertDataset(category="invalid_category")
+
+
+class TestBabelscapeAlertOriginalDataset:
+    """Sibling loader pinned to the original (smaller) 'alert' config."""
+
+    def test_dataset_name(self):
+        loader = _BabelscapeAlertOriginalDataset()
+        assert loader.dataset_name == "babelscape_alert_original"
+
+    def test_pins_alert_category(self):
+        loader = _BabelscapeAlertOriginalDataset()
+        assert loader.category == "alert"
+
+    async def test_fetch_dataset_passes_alert_config(self, mock_alert_data):
+        loader = _BabelscapeAlertOriginalDataset()
+        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_alert_data)) as mock_fetch:
+            dataset = await loader.fetch_dataset_async()
+
+        assert isinstance(dataset, SeedDataset)
+        assert dataset.dataset_name == "babelscape_alert_original"
+        assert mock_fetch.await_count == 1
+        assert mock_fetch.await_args.kwargs["config"] == "alert"

@@ -317,3 +317,73 @@ class _VLGuardDataset(_RemoteDatasetLoader):
             metadata = json.load(f)
 
         return metadata, image_dir
+
+
+class _VLGuardSafeUnsafesDataset(_VLGuardDataset):
+    """
+    Sibling loader pinned to the VLGuard ``safe_unsafes`` subset.
+
+    Same as :class:`_VLGuardDataset` but defaults to
+    ``subset=VLGuardSubset.SAFE_UNSAFES`` so daily e2e tests exercise the
+    safe-images-with-unsafe-instructions evaluation regime (and the
+    ``unsafe_instruction`` field read) in addition to the ``UNSAFES`` default
+    covered by the parent.
+
+    Note: This is the same gated HuggingFace dataset as :class:`_VLGuardDataset` —
+    requires a token (``HUGGINGFACE_TOKEN`` env var or explicit kwarg) and accepting
+    the dataset terms on HuggingFace.
+    """
+
+    def __init__(
+        self,
+        *,
+        categories: list[VLGuardCategory] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(
+            subset=VLGuardSubset.SAFE_UNSAFES,
+            categories=categories,
+            max_examples=max_examples,
+            token=token,
+        )
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "vlguard_safe_unsafes"
+
+
+class _VLGuardSafeSafesDataset(_VLGuardDataset):
+    """
+    Sibling loader pinned to the VLGuard ``safe_safes`` subset.
+
+    Same as :class:`_VLGuardDataset` but defaults to
+    ``subset=VLGuardSubset.SAFE_SAFES`` so daily e2e tests exercise the
+    safe-images-with-safe-instructions helpfulness regime (and the
+    ``safe_instruction`` field read) in addition to the ``UNSAFES`` default
+    covered by the parent.
+
+    Note: This is the same gated HuggingFace dataset as :class:`_VLGuardDataset` —
+    requires a token (``HUGGINGFACE_TOKEN`` env var or explicit kwarg) and accepting
+    the dataset terms on HuggingFace.
+    """
+
+    def __init__(
+        self,
+        *,
+        categories: list[VLGuardCategory] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(
+            subset=VLGuardSubset.SAFE_SAFES,
+            categories=categories,
+            max_examples=max_examples,
+            token=token,
+        )
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "vlguard_safe_safes"

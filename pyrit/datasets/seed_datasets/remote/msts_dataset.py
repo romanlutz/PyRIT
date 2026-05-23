@@ -494,3 +494,203 @@ class _MSTSDataset(_RemoteDatasetLoader):
         except Exception as e:
             logger.warning(f"[MSTS] Failed to encode PIL image as {pil_format}: {e}. Will fall back to URL fetch.")
             return None
+
+
+class _MSTSGermanDataset(_MSTSDataset):
+    """Sibling loader pinned to the German split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["de"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_german"
+
+
+class _MSTSRussianDataset(_MSTSDataset):
+    """Sibling loader pinned to the Russian split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["ru"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_russian"
+
+
+class _MSTSChineseDataset(_MSTSDataset):
+    """Sibling loader pinned to the Chinese split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["zh"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_chinese"
+
+
+class _MSTSHindiDataset(_MSTSDataset):
+    """Sibling loader pinned to the Hindi split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["hi"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_hindi"
+
+
+class _MSTSSpanishDataset(_MSTSDataset):
+    """Sibling loader pinned to the Spanish split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["es"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_spanish"
+
+
+class _MSTSItalianDataset(_MSTSDataset):
+    """Sibling loader pinned to the Italian split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["it"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_italian"
+
+
+class _MSTSFrenchDataset(_MSTSDataset):
+    """Sibling loader pinned to the French split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["fr"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_french"
+
+
+class _MSTSKoreanDataset(_MSTSDataset):
+    """Sibling loader pinned to the Korean split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["ko"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_korean"
+
+
+class _MSTSArabicDataset(_MSTSDataset):
+    """Sibling loader pinned to the Arabic split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["ar"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_arabic"
+
+
+class _MSTSFarsiDataset(_MSTSDataset):
+    """Sibling loader pinned to the Farsi split of MSTS."""
+
+    size: str = "medium"
+
+    def __init__(
+        self,
+        *,
+        text_modifiers: list[str] | None = None,
+        max_examples: int | None = None,
+        token: str | None = None,
+    ) -> None:
+        super().__init__(languages=["fa"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "msts_farsi"

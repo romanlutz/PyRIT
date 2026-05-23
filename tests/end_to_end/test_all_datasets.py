@@ -22,7 +22,21 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from pyrit.datasets import SeedDatasetProvider
 from pyrit.datasets.seed_datasets.remote import (
     _HarmBenchMultimodalDataset,
+    _MSTSArabicDataset,
+    _MSTSChineseDataset,
+    _MSTSDataset,
+    _MSTSFarsiDataset,
+    _MSTSFrenchDataset,
+    _MSTSGermanDataset,
+    _MSTSHindiDataset,
+    _MSTSItalianDataset,
+    _MSTSKoreanDataset,
+    _MSTSRussianDataset,
+    _MSTSSpanishDataset,
     _PromptIntelDataset,
+    _VLGuardDataset,
+    _VLGuardSafeSafesDataset,
+    _VLGuardSafeUnsafesDataset,
     _VLSUMultimodalDataset,
 )
 from pyrit.models import SeedDataset
@@ -40,11 +54,40 @@ _RETRYABLE_ERRORS = (OSError, ConnectionError, TimeoutError)
 # due to rate-limiting, so an empty result is expected in some environments.
 _IMAGE_FETCHING_PROVIDERS: set[type] = {_HarmBenchMultimodalDataset, _VLSUMultimodalDataset}
 
+# Image-heavy providers where we cap rows in e2e to keep CI bounded.  Production
+# defaults are unchanged; this is a test-only override applied only when
+# instantiating the provider for the daily e2e sweep.
+_CAPPED_PROVIDERS: set[type] = {
+    _VLSUMultimodalDataset,
+    _MSTSDataset,
+    _MSTSGermanDataset,
+    _MSTSRussianDataset,
+    _MSTSChineseDataset,
+    _MSTSHindiDataset,
+    _MSTSSpanishDataset,
+    _MSTSItalianDataset,
+    _MSTSFrenchDataset,
+    _MSTSKoreanDataset,
+    _MSTSArabicDataset,
+    _MSTSFarsiDataset,
+    _VLGuardDataset,
+    _VLGuardSafeUnsafesDataset,
+    _VLGuardSafeSafesDataset,
+}
+_CAPPED_MAX_EXAMPLES = 6
+
 
 def get_dataset_providers():
     """Helper to get all registered providers for parameterization."""
     providers = SeedDatasetProvider.get_all_providers()
     return [(name, cls) for name, cls in providers.items()]
+
+
+def _instantiate_provider(provider_cls):
+    """Instantiate a provider for e2e, applying CI-only row caps to image-heavy variants."""
+    if provider_cls in _CAPPED_PROVIDERS:
+        return provider_cls(max_examples=_CAPPED_MAX_EXAMPLES)
+    return provider_cls()
 
 
 @retry(
@@ -88,8 +131,7 @@ class TestAllDatasets:
         logger.info(f"Testing provider: {name}")
 
         try:
-            # Limit examples for slow multimodal providers that fetch many remote images
-            provider = provider_cls(max_examples=6) if provider_cls == _VLSUMultimodalDataset else provider_cls()
+            provider = _instantiate_provider(provider_cls)
 
             dataset = await _fetch_with_retry(provider)
         except Exception as e:

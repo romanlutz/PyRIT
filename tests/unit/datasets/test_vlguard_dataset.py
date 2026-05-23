@@ -12,6 +12,8 @@ from pyrit.datasets.seed_datasets.remote.vlguard_dataset import (
     VLGuardCategory,
     VLGuardSubset,
     _VLGuardDataset,
+    _VLGuardSafeSafesDataset,
+    _VLGuardSafeUnsafesDataset,
 )
 from pyrit.models import SeedDataset, SeedPrompt
 
@@ -399,3 +401,45 @@ class TestVLGuardDataset:
 
         assert metadata == test_metadata
         assert result_dir == cache_dir / "test"
+
+
+_VLGUARD_SUBSET_VARIANTS = [
+    (_VLGuardSafeUnsafesDataset, "vlguard_safe_unsafes", VLGuardSubset.SAFE_UNSAFES),
+    (_VLGuardSafeSafesDataset, "vlguard_safe_safes", VLGuardSubset.SAFE_SAFES),
+]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_subset", _VLGUARD_SUBSET_VARIANTS)
+def test_subset_variant_dataset_name_and_pinned_subset(cls, expected_name, expected_subset):
+    loader = cls()
+    assert loader.dataset_name == expected_name
+    assert loader.subset == expected_subset
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_subset", _VLGUARD_SUBSET_VARIANTS)
+def test_subset_variant_max_examples_and_token_forwarded(cls, expected_name, expected_subset):
+    loader = cls(max_examples=4, token="explicit-token")
+    assert loader.max_examples == 4
+    assert loader.token == "explicit-token"
+    assert loader.dataset_name == expected_name
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_subset", _VLGUARD_SUBSET_VARIANTS)
+async def test_subset_variant_fetch(cls, expected_name, expected_subset, mock_vlguard_metadata, tmp_path):
+    image_dir = tmp_path / "test"
+    image_dir.mkdir()
+    (image_dir / "safe_001.jpg").write_bytes(b"fake image")
+
+    loader = cls()
+    with patch.object(
+        loader,
+        "_download_dataset_files_async",
+        new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
+    ):
+        dataset = await loader.fetch_dataset_async()
+
+    assert isinstance(dataset, SeedDataset)
+    assert dataset.dataset_name == expected_name
+    text_prompts = [p for p in dataset.seeds if p.data_type == "text"]
+    assert len(text_prompts) >= 1
+    assert text_prompts[0].metadata["subset"] == expected_subset.value

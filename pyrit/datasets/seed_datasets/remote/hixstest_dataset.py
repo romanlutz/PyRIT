@@ -187,3 +187,38 @@ class _HiXSTestDataset(_RemoteDatasetLoader):
                 f"HiXSTest row is missing required field '{key}' for language={self.language.value}: {item!r}"
             )
         return value
+
+
+class _HiXSTestEnglishDataset(_HiXSTestDataset):
+    """
+    Sibling loader pinned to the English-translation column of HiXSTest.
+
+    Same as :class:`_HiXSTestDataset` but defaults to ``language=HiXSTestLanguage.ENGLISH``
+    so daily e2e tests exercise the ``english_prompt`` column in addition to the
+    Hindi ``prompt`` column read by the parent.
+
+    Note: This is the same gated HuggingFace dataset as :class:`_HiXSTestDataset` —
+    requires a token (``HUGGINGFACE_TOKEN`` env var or explicit kwarg) and accepting
+    the dataset terms on HuggingFace.
+    """
+
+    def __init__(
+        self,
+        *,
+        split: str = "train",
+        token: str | None = None,
+    ) -> None:
+        """
+        Initialize the HiXSTest dataset loader pinned to the English column.
+
+        Args:
+            split: Dataset split to load. Defaults to "train" (the only split).
+            token: Hugging Face authentication token. If not provided, reads from the
+                ``HUGGINGFACE_TOKEN`` environment variable.
+        """
+        super().__init__(language=HiXSTestLanguage.ENGLISH, split=split, token=token)
+
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "hixstest_english"

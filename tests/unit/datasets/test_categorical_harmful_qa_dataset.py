@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from pyrit.datasets.seed_datasets.remote.categorical_harmful_qa_dataset import (
+    _CategoricalHarmfulQAChineseDataset,
     _CategoricalHarmfulQADataset,
+    _CategoricalHarmfulQAVietnameseDataset,
 )
 from pyrit.models import SeedDataset, SeedObjective
 
@@ -91,3 +93,30 @@ class TestCategoricalHarmfulQADataset:
     def test_dataset_name(self):
         loader = _CategoricalHarmfulQADataset()
         assert loader.dataset_name == "categorical_harmful_qa"
+
+
+_CATQA_LANGUAGE_VARIANTS = [
+    (_CategoricalHarmfulQAChineseDataset, "categorical_harmful_qa_chinese", "zh"),
+    (_CategoricalHarmfulQAVietnameseDataset, "categorical_harmful_qa_vietnamese", "vi"),
+]
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _CATQA_LANGUAGE_VARIANTS)
+def test_language_variant_dataset_name_and_pinned_split(cls, expected_name, expected_lang):
+    loader = cls()
+    assert loader.dataset_name == expected_name
+    assert loader.language == expected_lang
+
+
+@pytest.mark.parametrize("cls,expected_name,expected_lang", _CATQA_LANGUAGE_VARIANTS)
+async def test_language_variant_fetch_passes_pinned_split(cls, expected_name, expected_lang, mock_catqa_data):
+    loader = cls()
+    with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_catqa_data)) as mock_fetch:
+        dataset = await loader.fetch_dataset_async()
+
+    assert isinstance(dataset, SeedDataset)
+    assert dataset.dataset_name == expected_name
+    assert mock_fetch.await_args.kwargs["split"] == expected_lang
+    for seed in dataset.seeds:
+        assert seed.metadata["language"] == expected_lang
+        assert seed.dataset_name == expected_name
