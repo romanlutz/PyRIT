@@ -68,7 +68,7 @@ class TestBabelscapeAlertDataset:
     def test_dataset_name(self):
         """Test dataset_name property."""
         loader = _BabelscapeAlertDataset()
-        assert loader.dataset_name == "babelscape_alert"
+        assert loader.dataset_name == "babelscape_alert_adversarial"
 
     def test_invalid_category_raises_error(self):
         """Test that invalid category raises ValueError."""

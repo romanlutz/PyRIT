@@ -53,7 +53,7 @@ class TestCategoricalHarmfulQADataset:
             assert first.harm_categories == ["Illegal Activity"]
             assert first.metadata["subcategory"] == "Drug"
             assert first.metadata["language"] == "en"
-            assert first.dataset_name == "categorical_harmful_qa"
+            assert first.dataset_name == "categorical_harmful_qa_english"
 
             third = dataset.seeds[2]
             assert third.harm_categories == ["Fraud/Deception"]
@@ -92,7 +92,7 @@ class TestCategoricalHarmfulQADataset:
 
     def test_dataset_name(self):
         loader = _CategoricalHarmfulQADataset()
-        assert loader.dataset_name == "categorical_harmful_qa"
+        assert loader.dataset_name == "categorical_harmful_qa_english"
 
 
 _CATQA_LANGUAGE_VARIANTS = [

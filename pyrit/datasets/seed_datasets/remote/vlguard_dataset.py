@@ -133,7 +133,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
     @property
     def dataset_name(self) -> str:
         """Return the dataset name."""
-        return "vlguard"
+        return "vlguard_unsafes"
 
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """

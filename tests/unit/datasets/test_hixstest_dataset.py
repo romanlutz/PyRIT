@@ -38,7 +38,7 @@ class TestHiXSTestDataset:
     def test_dataset_name(self):
         """Test dataset_name property."""
         loader = _HiXSTestDataset()
-        assert loader.dataset_name == "hixstest"
+        assert loader.dataset_name == "hixstest_hindi"
 
     def test_init_defaults_to_hindi(self):
         """Default language is Hindi."""

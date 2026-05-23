@@ -52,7 +52,7 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
     @property
     def dataset_name(self) -> str:
         """Return the dataset name."""
-        return "salad_bench"
+        return "salad_bench_base"
 
     @staticmethod
     def _parse_category(category: str) -> str:

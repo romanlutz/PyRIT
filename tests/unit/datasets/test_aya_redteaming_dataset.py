@@ -69,7 +69,7 @@ async def test_fetch_dataset_filters_by_harm_scope(mock_aya_data):
 
 def test_dataset_name():
     loader = _AyaRedteamingDataset()
-    assert loader.dataset_name == "aya_redteaming"
+    assert loader.dataset_name == "aya_redteaming_english"
 
 
 def test_language_code_mapping():

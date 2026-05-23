@@ -74,7 +74,7 @@ class TestVLGuardDataset:
     def test_dataset_name(self):
         """Test dataset_name property."""
         loader = _VLGuardDataset()
-        assert loader.dataset_name == "vlguard"
+        assert loader.dataset_name == "vlguard_unsafes"
 
     def test_default_subset_is_unsafes(self):
         """Test default subset is UNSAFES."""

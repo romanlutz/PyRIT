@@ -80,7 +80,7 @@ class _AyaRedteamingDataset(_RemoteDatasetLoader):
     @property
     def dataset_name(self) -> str:
         """Return the dataset name."""
-        return "aya_redteaming"
+        return "aya_redteaming_english"
 
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
