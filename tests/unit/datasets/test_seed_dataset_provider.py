@@ -242,6 +242,82 @@ class TestFetchDatasetDeprecation:
             await provider.fetch_dataset_async()
 
 
+class TestLegacyDatasetNameAliases:
+    """Tests for the legacy dataset_name -> canonical name deprecation aliasing."""
+
+    @pytest.fixture
+    def mocked_registry(self):
+        mock_english = MagicMock(__name__="AyaEnglish")
+        mock_english.return_value.dataset_name = "aya_redteaming_english"
+        mock_english.return_value._parse_metadata = AsyncMock(return_value=None)
+        mock_english.return_value.fetch_dataset_async = AsyncMock(
+            return_value=SeedDataset(
+                seeds=[SeedPrompt(value="x", data_type="text")],
+                dataset_name="aya_redteaming_english",
+            )
+        )
+
+        mock_other = MagicMock(__name__="OtherDataset")
+        mock_other.return_value.dataset_name = "other_dataset"
+        mock_other.return_value._parse_metadata = AsyncMock(return_value=None)
+        mock_other.return_value.fetch_dataset_async = AsyncMock(
+            return_value=SeedDataset(
+                seeds=[SeedPrompt(value="y", data_type="text")],
+                dataset_name="other_dataset",
+            )
+        )
+
+        with patch.dict(
+            SeedDatasetProvider._registry,
+            {"AyaEnglish": mock_english, "OtherDataset": mock_other},
+            clear=True,
+        ):
+            yield
+
+    async def test_legacy_name_resolves_with_warning(self, mocked_registry):
+        """Legacy 'aya_redteaming' resolves to 'aya_redteaming_english' with a DeprecationWarning."""
+        with pytest.warns(DeprecationWarning, match="'aya_redteaming' is deprecated"):
+            datasets = await SeedDatasetProvider.fetch_datasets_async(dataset_names=["aya_redteaming"])
+        assert len(datasets) == 1
+        assert datasets[0].dataset_name == "aya_redteaming_english"
+
+    async def test_canonical_name_does_not_warn(self, mocked_registry):
+        """Canonical 'aya_redteaming_english' fetches without any DeprecationWarning."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            datasets = await SeedDatasetProvider.fetch_datasets_async(dataset_names=["aya_redteaming_english"])
+        assert len(datasets) == 1
+
+    async def test_mixed_legacy_and_canonical_resolves(self, mocked_registry):
+        """Mixing legacy and current names resolves only the legacy one."""
+        with pytest.warns(DeprecationWarning, match="'aya_redteaming' is deprecated"):
+            datasets = await SeedDatasetProvider.fetch_datasets_async(dataset_names=["aya_redteaming", "other_dataset"])
+        names = {d.dataset_name for d in datasets}
+        assert names == {"aya_redteaming_english", "other_dataset"}
+
+    async def test_unknown_name_still_raises_value_error(self, mocked_registry):
+        """Names that are neither legacy nor current still raise ValueError."""
+        with pytest.raises(ValueError, match=r"Dataset\(s\) not found: \['nonexistent'\]"):
+            await SeedDatasetProvider.fetch_datasets_async(dataset_names=["nonexistent"])
+
+    @pytest.mark.parametrize(
+        "legacy,canonical",
+        [
+            ("aya_redteaming", "aya_redteaming_english"),
+            ("babelscape_alert", "babelscape_alert_adversarial"),
+            ("categorical_harmful_qa", "categorical_harmful_qa_english"),
+            ("hixstest", "hixstest_hindi"),
+            ("salad_bench", "salad_bench_base"),
+            ("vlguard", "vlguard_unsafes"),
+        ],
+    )
+    def test_alias_map_entries(self, legacy, canonical):
+        """The alias map covers every renamed dataset and resolves to the canonical name."""
+        from pyrit.datasets.seed_datasets.seed_dataset_provider import _LEGACY_DATASET_NAME_ALIASES
+
+        assert _LEGACY_DATASET_NAME_ALIASES[legacy] == canonical
+
+
 class TestHarmBenchDataset:
     """Test the HarmBench dataset loader."""
 

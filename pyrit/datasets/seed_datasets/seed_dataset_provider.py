@@ -16,6 +16,20 @@ from pyrit.models.seeds import SeedDataset
 
 logger = logging.getLogger(__name__)
 
+# Maps legacy dataset_name strings (from before each loader's variant was made
+# explicit in the name) to the new explicit dataset_name. Callers passing a
+# legacy name to fetch_datasets_async() get the variant the loader was
+# defaulting to plus a DeprecationWarning. Remove the corresponding entry in
+# v0.16.0; the entire map can go once all entries have been removed.
+_LEGACY_DATASET_NAME_ALIASES: dict[str, str] = {
+    "aya_redteaming": "aya_redteaming_english",
+    "babelscape_alert": "babelscape_alert_adversarial",
+    "categorical_harmful_qa": "categorical_harmful_qa_english",
+    "hixstest": "hixstest_hindi",
+    "salad_bench": "salad_bench_base",
+    "vlguard": "vlguard_unsafes",
+}
+
 
 class SeedDatasetProvider(ABC):
     """
@@ -274,6 +288,34 @@ class SeedDatasetProvider(ABC):
         return True
 
     @classmethod
+    def _resolve_legacy_dataset_names(cls, dataset_names: list[str]) -> list[str]:
+        """
+        Resolve any legacy dataset names to their current canonical names.
+
+        Emits a ``DeprecationWarning`` for each legacy name encountered.
+
+        Args:
+            dataset_names: Requested dataset names (may include legacy names).
+
+        Returns:
+            list[str]: The same list with any legacy names replaced by their
+                current canonical equivalents.
+        """
+        resolved: list[str] = []
+        for name in dataset_names:
+            new_name = _LEGACY_DATASET_NAME_ALIASES.get(name)
+            if new_name is not None:
+                warnings.warn(
+                    f"Dataset name '{name}' is deprecated; use '{new_name}' instead. Will be removed in v0.16.0.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                resolved.append(new_name)
+            else:
+                resolved.append(name)
+        return resolved
+
+    @classmethod
     async def fetch_datasets_async(
         cls,
         *,
@@ -312,6 +354,7 @@ class SeedDatasetProvider(ABC):
         """
         # Validate dataset names if specified
         if dataset_names is not None:
+            dataset_names = cls._resolve_legacy_dataset_names(dataset_names)
             available_names = await cls.get_all_dataset_names_async()
             invalid_names = [name for name in dataset_names if name not in available_names]
             if invalid_names:
