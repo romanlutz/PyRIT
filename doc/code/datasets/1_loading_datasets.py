@@ -31,6 +31,7 @@
 # HarmfulQA [@bhardwaj2023harmfulqa],
 # JailbreakBench [@chao2024jailbreakbench],
 # LLM-LAT [@sheshadri2024lat],
+# MASK [@ren2025maskbenchmarkdisentanglinghonesty],
 # MedSafetyBench [@han2024medsafetybench],
 # Multilingual Alignment Prism [@aakanksha2024multilingual],
 # Multilingual Vulnerabilities [@tang2025multilingual],

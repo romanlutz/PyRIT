@@ -67,6 +67,15 @@ from pyrit.datasets.seed_datasets.remote.librai_do_not_answer_dataset import (
 from pyrit.datasets.seed_datasets.remote.llm_latent_adversarial_training_dataset import (  # noqa: F401
     _LLMLatentAdversarialTrainingDataset,
 )
+from pyrit.datasets.seed_datasets.remote.mask_dataset import (
+    MaskQuestionArchetype,
+    _MaskContinuationsDataset,
+    _MaskDisinformationDataset,
+    _MaskDoublingDownKnownFactsDataset,
+    _MaskKnownFactsDataset,
+    _MaskProvidedFactsDataset,
+    _MaskStatisticsDataset,
+)  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.medsafetybench_dataset import (
     _MedSafetyBenchDataset,
 )  # noqa: F401
@@ -143,6 +152,7 @@ from pyrit.datasets.seed_datasets.remote.xstest_dataset import (
 
 __all__ = [
     "HiXSTestLanguage",
+    "MaskQuestionArchetype",
     "PromptIntelCategory",
     "PromptIntelSeverity",
     "SGXSTestLabel",
@@ -170,6 +180,12 @@ __all__ = [
     "_JBBBehaviorsDataset",
     "_LibrAIDoNotAnswerDataset",
     "_LLMLatentAdversarialTrainingDataset",
+    "_MaskContinuationsDataset",
+    "_MaskDisinformationDataset",
+    "_MaskDoublingDownKnownFactsDataset",
+    "_MaskKnownFactsDataset",
+    "_MaskProvidedFactsDataset",
+    "_MaskStatisticsDataset",
     "_MedSafetyBenchDataset",
     "_MLCommonsAILuminateDataset",
     "_MSTSDataset",
