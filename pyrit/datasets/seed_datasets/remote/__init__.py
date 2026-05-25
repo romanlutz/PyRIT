@@ -45,6 +45,13 @@ from pyrit.datasets.seed_datasets.remote.equitymedqa_dataset import (
 from pyrit.datasets.seed_datasets.remote.forbidden_questions_dataset import (
     _ForbiddenQuestionsDataset,
 )  # noqa: F401
+from pyrit.datasets.seed_datasets.remote.fortress_dataset import (
+    FortressRiskDomain,
+    FortressRiskSubdomain,
+    _FortressAdversarialDataset,
+    _FortressBenignDataset,
+    _FortressPairedDataset,
+)  # noqa: F401
 from pyrit.datasets.seed_datasets.remote.harmbench_dataset import (
     _HarmBenchDataset,
 )  # noqa: F401
@@ -142,6 +149,8 @@ from pyrit.datasets.seed_datasets.remote.xstest_dataset import (
 )  # noqa: F401
 
 __all__ = [
+    "FortressRiskDomain",
+    "FortressRiskSubdomain",
     "HiXSTestLanguage",
     "PromptIntelCategory",
     "PromptIntelSeverity",
@@ -163,6 +172,9 @@ __all__ = [
     "_DarkBenchDataset",
     "_EquityMedQADataset",
     "_ForbiddenQuestionsDataset",
+    "_FortressAdversarialDataset",
+    "_FortressBenignDataset",
+    "_FortressPairedDataset",
     "_HarmBenchDataset",
     "_HarmBenchMultimodalDataset",
     "_HarmfulQADataset",

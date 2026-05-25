@@ -20,6 +20,7 @@ from pyrit.score.float_scale.float_scale_score_aggregator import (
     FloatScaleScorerByCategory,
 )
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
+from pyrit.score.float_scale.fortress_rubric_scorer import FortressRubricScorer
 from pyrit.score.float_scale.insecure_code_scorer import InsecureCodeScorer
 from pyrit.score.float_scale.plagiarism_scorer import PlagiarismMetric, PlagiarismScorer
 from pyrit.score.float_scale.self_ask_general_float_scale_scorer import SelfAskGeneralFloatScaleScorer
@@ -124,6 +125,7 @@ __all__ = [
     "FloatScaleScorerByCategory",
     "FloatScaleScorer",
     "FloatScaleThresholdScorer",
+    "FortressRubricScorer",
     "GandalfScorer",
     "HarmHumanLabeledEntry",
     "HarmScorerEvaluator",
