@@ -4,58 +4,102 @@
 import io
 import json
 import logging
+import os
 import zipfile
+from typing import Optional
 
 import requests
 
+from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
+    _RemoteDatasetLoader,
+)
 from pyrit.models import SeedDataset, SeedPrompt
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_moral_integrity_corpus_dataset(
-    *,
-    cache: bool = True,
-) -> SeedDataset:
+class _MICDataset(_RemoteDatasetLoader):
     """
-    Fetch the SALT-NLP Moral Integrity Corpus (MIC) dataset.
+    Loader for the SALT-NLP Moral Integrity Corpus (MIC) dataset.
 
-    This dataset contains prompts used to capture moral assumptions in LLMs.
-    It contains 113,000+ examples across various moral categories.
+    This dataset contains 113,817 conversations between humans and
+    chatbots labeled with moral categories like loyalty, care,
+    fairness, authority and sanctity.
 
-    Reference: https://aclanthology.org/2022.acl-long.261/
+    Reference: [@ziems2022mic]
     HuggingFace: https://huggingface.co/datasets/SALT-NLP/MIC
 
-    Warning: Due to the nature of these prompts, consult your legal department
-    before testing them with LLMs.
+    Warning: Due to the nature of these prompts, consult your legal
+    department before testing them with LLMs.
     """
 
-    source = "https://huggingface.co/datasets/SALT-NLP/MIC/resolve/main/MIC.zip"
+    HF_DATASET_NAME = "SALT-NLP/MIC"
+    VALID_SPLITS = ["train", "dev", "test"]
+    harm_categories = {"care", "fairness", "loyalty", "authority", "sanctity"}
+    modalities = ["text"]
+    size = "huge"
+    tags = ["moral", "ethics", "dialogue"]
 
-    logger.info("Downloading SALT-NLP MIC dataset...")
+    def __init__(
+        self,
+        *,
+        token: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize the MIC dataset loader.
 
-    response = requests.get(source)
-    response.raise_for_status()
+        Args:
+            token: HuggingFace authentication token. If not provided,
+                   reads from HUGGINGFACE_TOKEN env var.
+        """
+        self.source = "https://huggingface.co/datasets/SALT-NLP/MIC/resolve/main/MIC.zip"
+        self.token = token if token is not None else os.environ.get("HUGGINGFACE_TOKEN")
 
-    seed_prompts = []
+    @property
+    def dataset_name(self) -> str:
+        """Return the dataset name."""
+        return "moral_integrity_corpus"
 
-    with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
-        for split in ["train", "dev", "test"]:
-            filename = f"MIC/{split}.jsonl"
-            with zip_file.open(filename) as f:
-                for line in f:
-                    row = json.loads(line)
-                    question = row.get("Q", "").strip()
-                    if question:
-                        seed_prompts.append(
-                            SeedPrompt(
-                                value=question,
-                                data_type="text",
-                                dataset_name="SALT-NLP/MIC",
-                                source="https://huggingface.co/datasets/SALT-NLP/MIC",
+    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+        """
+        Fetch the MIC dataset and return as SeedDataset.
+
+        Args:
+            cache: Whether to cache the fetched dataset. Defaults to True.
+
+        Returns:
+            SeedDataset: A SeedDataset containing MIC prompts.
+
+        Raises:
+            ValueError: If the dataset is empty after loading.
+        """
+        logger.info("Downloading SALT-NLP MIC dataset...")
+
+        response = requests.get(self.source)
+        response.raise_for_status()
+
+        seed_prompts = []
+
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+            for split in self.VALID_SPLITS:
+                filename = f"MIC/{split}.jsonl"
+                with zip_file.open(filename) as f:
+                    for line in f:
+                        row = json.loads(line)
+                        question = row.get("Q", "").strip()
+                        if question:
+                            seed_prompts.append(
+                                SeedPrompt(
+                                    value=question,
+                                    data_type="text",
+                                    dataset_name=self.dataset_name,
+                                    source=self.source,
+                                )
                             )
-                        )
 
-    logger.info(f"Successfully loaded {len(seed_prompts)} prompts from MIC dataset")
+        if not seed_prompts:
+            raise ValueError("SeedDataset cannot be empty.")
 
-    return SeedDataset(seeds=seed_prompts, dataset_name="SALT-NLP/MIC")
+        logger.info(f"Successfully loaded {len(seed_prompts)} prompts from MIC dataset")
+
+        return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)

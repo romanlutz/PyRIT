@@ -40,6 +40,9 @@ from pyrit.datasets.seed_datasets.remote.coconot_dataset import (
     _CoCoNotContrastDataset,
     _CoCoNotRefusalDataset,
 )  # noqa: F401
+from pyrit.datasets.seed_datasets.remote.fetch_moral_integrity_corpus_dataset import (
+    _MICDataset,
+) # noqa: F401
 from pyrit.datasets.seed_datasets.remote.comic_jailbreak_dataset import (
     COMIC_JAILBREAK_TEMPLATES,
     ComicJailbreakTemplateConfig,
