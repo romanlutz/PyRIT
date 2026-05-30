@@ -16,10 +16,14 @@ build:
       - python build_scripts/gen_api_md.py
     build:
       html:
-        - cd doc && jupyter-book build --all
-      commands:
+        # --all builds frontmatter exports (PDF, per doc/myst.yml); --html is
+        # required to produce the static HTML site (_build/html/index.html)
+        # that RTD serves. The 3 commands previously sat in a separate
+        # `commands:` block, which is not a valid `build.jobs.build` key in
+        # RTD and caused config validation to fail before any commands ran.
+        - cd doc && jupyter-book build --all --html
         - mkdir -p $READTHEDOCS_OUTPUT/html
-        - cp -r doc/_build/site/* $READTHEDOCS_OUTPUT/html/
+        - cp -r doc/_build/html/* $READTHEDOCS_OUTPUT/html/
 
 python:
    install:
