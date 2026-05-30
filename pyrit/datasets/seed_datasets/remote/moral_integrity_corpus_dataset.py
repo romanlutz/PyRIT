@@ -111,3 +111,4 @@ class _MICDataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_prompts)} prompts from MIC dataset")
 
         return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)
+    
