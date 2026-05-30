@@ -3,6 +3,9 @@
 
 """Identifiers module for PyRIT components."""
 
+from typing import Any
+
+from pyrit.common.deprecation import print_deprecation_message
 from pyrit.identifiers.atomic_attack_identifier import (
     build_atomic_attack_identifier,
     build_seed_identifier,
@@ -45,3 +48,23 @@ __all__ = [
     "IdentifierFilter",
     "IdentifierType",
 ]
+
+
+# Deprecated aliases for names removed in #1387 (ScorerIdentifier et al. were collapsed into
+# ComponentIdentifier). Kept temporarily so external partners that depend on the old import path
+# (e.g. azure-ai-evaluation) keep working until they migrate. Will be removed in 0.16.0.
+_DEPRECATED_ALIASES: dict[str, Any] = {
+    "ScorerIdentifier": ComponentIdentifier,
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _DEPRECATED_ALIASES:
+        target = _DEPRECATED_ALIASES[name]
+        print_deprecation_message(
+            old_item=f"pyrit.identifiers.{name}",
+            new_item=target,
+            removed_in="0.16.0",
+        )
+        return target
+    raise AttributeError(f"module 'pyrit.identifiers' has no attribute {name!r}")
