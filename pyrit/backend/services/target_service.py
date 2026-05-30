@@ -10,10 +10,12 @@ Uses TargetRegistry as the source of truth for instances.
 Targets can be:
 - Created via API request (instantiated from request params, then registered)
 - Retrieved from registry (pre-registered at startup or created earlier)
+- Restored from the runtime targets file at startup (replay of API-created targets)
 """
 
 import logging
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
@@ -24,8 +26,15 @@ from pyrit.backend.mappers.target_mappers import target_object_to_instance
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.targets import (
     CreateTargetRequest,
+    TargetCapabilitiesInfo,
     TargetInstance,
     TargetListResponse,
+)
+from pyrit.backend.persistence.runtime_targets import (
+    RuntimeTargetEntry,
+    RuntimeTargetStore,
+    get_runtime_target_store,
+    sanitize_params,
 )
 from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_target.azure_ml_chat_target import AzureMLChatTarget
@@ -51,6 +60,28 @@ _AZURE_OPENAI_HOSTNAME_SUFFIXES = (
 # Used for the same strict endpoint validation when issuing Entra ID tokens
 # against an AML scope.
 _AZURE_ML_HOSTNAME_SUFFIXES = (".inference.ml.azure.com",)
+
+
+@dataclass
+class _RuntimeTargetMetadata:
+    """
+    Per-target metadata for runtime-created targets.
+
+    Attributes:
+        entry: The persisted ``RuntimeTargetEntry`` (used both as the source of
+            truth for delete-permission and for rendering broken targets in
+            list views without a real target object).
+        is_broken: True when the target could not be reconstructed on restart
+            (e.g., missing api_key env var). Broken targets are not added to
+            ``TargetRegistry`` but still appear in ``list_targets_async`` so
+            the user can see and delete them.
+        reconfiguration_hint: Human-readable hint for the broken case
+            (e.g., the missing env var name).
+    """
+
+    entry: RuntimeTargetEntry
+    is_broken: bool = False
+    reconfiguration_hint: str | None = None
 
 
 def _is_azure_openai_endpoint(endpoint: str) -> bool:
@@ -134,13 +165,28 @@ class TargetService:
     """
     Service for managing target instances.
 
-    Uses TargetRegistry as the sole source of truth.
+    Uses TargetRegistry as the sole source of truth for live target objects.
     API metadata is derived from the target objects' identifiers.
+
+    For targets created via the API at runtime, also persists a sanitized
+    metadata record to a ``RuntimeTargetStore`` so they can be replayed on the
+    next backend start. The persisted record never contains ``api_key`` values
+    — credentials are re-resolved at restart via the target class's documented
+    environment variable or Entra ID.
     """
 
-    def __init__(self) -> None:
-        """Initialize the target service."""
+    def __init__(self, *, runtime_store: RuntimeTargetStore | None = None) -> None:
+        """
+        Args:
+            runtime_store: Override the runtime targets store. Defaults to the
+                process-wide singleton from ``get_runtime_target_store``.
+        """
         self._registry = TargetRegistry.get_registry_singleton()
+        self._runtime_store = runtime_store or get_runtime_target_store()
+        # Per-target side table for runtime-created targets. Keyed by registry name.
+        # Includes both healthy (registered in TargetRegistry) and broken (registered
+        # only here, surfaced as needs_reconfiguration ghosts in list views) targets.
+        self._runtime_target_metadata: dict[str, _RuntimeTargetMetadata] = {}
 
     def _get_target_class(self, *, target_type: str) -> type:
         """
@@ -166,12 +212,54 @@ class TargetService:
 
     def _build_instance_from_object(self, *, target_registry_name: str, target_obj: Any) -> TargetInstance:
         """
-        Build a TargetInstance from a registry object.
+        Build a ``TargetInstance`` from a live registry object, layering on
+        any runtime-target metadata we have for that name.
 
         Returns:
-            TargetInstance with metadata derived from the object.
+            TargetInstance with metadata derived from the object plus
+            ``is_runtime`` / ``needs_reconfiguration`` flags from the side table.
         """
-        return target_object_to_instance(target_registry_name, target_obj)
+        meta = self._runtime_target_metadata.get(target_registry_name)
+        return target_object_to_instance(
+            target_registry_name,
+            target_obj,
+            is_runtime=meta is not None,
+            needs_reconfiguration=meta.is_broken if meta else False,
+            reconfiguration_hint=meta.reconfiguration_hint if meta else None,
+        )
+
+    def _build_broken_instance(self, meta: _RuntimeTargetMetadata) -> TargetInstance:
+        """
+        Build a ``TargetInstance`` for a runtime target that failed to restore.
+
+        Pulls the displayable fields straight from the persisted entry's params
+        rather than from a live target object (we don't have one) so the user
+        still sees the type / endpoint / model and can choose to re-create or
+        delete it.
+
+        Args:
+            meta: The runtime-target metadata for a broken entry.
+
+        Returns:
+            TargetInstance flagged with ``needs_reconfiguration=True`` and the
+            stored hint, with capabilities defaulted to a minimal record.
+        """
+        params = meta.entry.params
+        return TargetInstance(
+            target_registry_name=meta.entry.target_registry_name,
+            target_type=meta.entry.type,
+            endpoint=params.get("endpoint") or None,
+            model_name=params.get("model_name") or None,
+            underlying_model_name=None,
+            temperature=params.get("temperature"),
+            top_p=params.get("top_p"),
+            max_requests_per_minute=params.get("max_requests_per_minute"),
+            capabilities=TargetCapabilitiesInfo(),
+            target_specific_params=None,
+            is_runtime=True,
+            needs_reconfiguration=True,
+            reconfiguration_hint=meta.reconfiguration_hint,
+        )
 
     async def list_targets_async(
         self,
@@ -182,6 +270,10 @@ class TargetService:
         """
         List all target instances with pagination.
 
+        Combines live registry targets (initializer- or runtime-created) with
+        broken runtime targets (those that failed to restore on startup but
+        remain in the runtime targets file). Sorted by ``target_registry_name``.
+
         Args:
             limit: Maximum items to return.
             cursor: Pagination cursor (target_registry_name to start after).
@@ -189,10 +281,17 @@ class TargetService:
         Returns:
             TargetListResponse containing paginated targets.
         """
-        items = [
+        live_items = [
             self._build_instance_from_object(target_registry_name=entry.name, target_obj=entry.instance)
             for entry in self._registry.get_all_instances()
         ]
+        registered_names = {item.target_registry_name for item in live_items}
+        broken_items = [
+            self._build_broken_instance(meta)
+            for name, meta in self._runtime_target_metadata.items()
+            if meta.is_broken and name not in registered_names
+        ]
+        items = sorted(live_items + broken_items, key=lambda t: t.target_registry_name)
         page, has_more = self._paginate(items=items, cursor=cursor, limit=limit)
         next_cursor = page[-1].target_registry_name if has_more and page else None
         return TargetListResponse(
@@ -223,13 +322,19 @@ class TargetService:
         """
         Get a target instance by registry name.
 
+        Returns a ``needs_reconfiguration`` placeholder if the name belongs to a
+        runtime target that failed to restore on startup.
+
         Returns:
             TargetInstance if found, None otherwise.
         """
         obj = self._registry.get_instance_by_name(target_registry_name)
-        if obj is None:
-            return None
-        return self._build_instance_from_object(target_registry_name=target_registry_name, target_obj=obj)
+        if obj is not None:
+            return self._build_instance_from_object(target_registry_name=target_registry_name, target_obj=obj)
+        meta = self._runtime_target_metadata.get(target_registry_name)
+        if meta is not None and meta.is_broken:
+            return self._build_broken_instance(meta)
+        return None
 
     def get_target_object(self, *, target_registry_name: str) -> Any | None:
         """
@@ -242,10 +347,12 @@ class TargetService:
 
     async def create_target_async(self, *, request: CreateTargetRequest) -> TargetInstance:
         """
-        Create a new target instance from API request.
+        Create a new target instance from an API request.
 
-        Instantiates the target with the given type and params,
-        then registers it in the registry under its registry name.
+        Instantiates the target with the given type and params, registers it in
+        the registry under its registry name, and persists a sanitized record
+        (with ``api_key`` stripped) so the target can be replayed on the next
+        backend start.
 
         Args:
             request: The create target request with type, params, and auth_mode.
@@ -261,6 +368,31 @@ class TargetService:
                     but the endpoint is not valid (not managed by correct hosts);
                 - If auth_mode='api_key' is set for a target but no key is supplied
         """
+        target_obj, target_registry_name = self._instantiate_and_register(request=request)
+
+        entry = RuntimeTargetEntry(
+            target_registry_name=target_registry_name,
+            type=request.type,
+            auth_mode=request.auth_mode,
+            params=sanitize_params(request.params),
+        )
+        await self._runtime_store.append_async(entry)
+        self._runtime_target_metadata[target_registry_name] = _RuntimeTargetMetadata(entry=entry)
+
+        return self._build_instance_from_object(target_registry_name=target_registry_name, target_obj=target_obj)
+
+    def _instantiate_and_register(
+        self,
+        *,
+        request: CreateTargetRequest,
+    ) -> tuple[Any, str]:
+        """
+        Apply auth handling, construct the target, register it, and return the
+        (object, registry name) pair. Shared by the create and restore paths.
+
+        Returns:
+            tuple[Any, str]: The instantiated PromptTarget and its registry name.
+        """
         target_class = self._get_target_class(target_type=request.type)
 
         # Copy params so we can modify values (eg api_key) without changing request.params.
@@ -273,9 +405,109 @@ class TargetService:
 
         target_obj = target_class(**params)
         self._registry.register_instance(target_obj)
+        return target_obj, target_obj.get_identifier().unique_name
 
-        target_registry_name = target_obj.get_identifier().unique_name
-        return self._build_instance_from_object(target_registry_name=target_registry_name, target_obj=target_obj)
+    async def delete_target_async(self, *, target_registry_name: str) -> None:
+        """
+        Remove a runtime-created target from the registry and the runtime store.
+
+        Args:
+            target_registry_name: The registry name of the target to remove.
+
+        Raises:
+            LookupError: If no target with that name is currently registered
+                and there is no broken runtime entry under that name.
+            PermissionError: If the target is registered but was not created at
+                runtime (i.e., it belongs to an initializer; remove it from
+                ``.pyrit_conf`` instead).
+        """
+        meta = self._runtime_target_metadata.get(target_registry_name)
+        live = self._registry.get_instance_by_name(target_registry_name)
+
+        if meta is None:
+            if live is None:
+                raise LookupError(f"Target '{target_registry_name}' not found.")
+            raise PermissionError(
+                f"Target '{target_registry_name}' was registered by an initializer and "
+                "cannot be deleted via the API. Remove it from ~/.pyrit/.pyrit_conf instead."
+            )
+
+        if live is not None:
+            self._registry.unregister(target_registry_name)
+        self._runtime_target_metadata.pop(target_registry_name, None)
+        await self._runtime_store.remove_async(target_registry_name)
+
+    async def restore_runtime_targets_async(self) -> None:
+        """
+        Replay persisted runtime targets after initializers have seeded the registry.
+
+        For each persisted entry:
+        - If the registry already contains an instance with that name (e.g., an
+          initializer registered one first), the runtime entry is skipped with
+          a warning.
+        - Otherwise the entry is reconstructed via the same code path as
+          ``create_target_async``. Failures (typically a missing api_key env
+          var) are recorded as ``needs_reconfiguration`` placeholders rather
+          than aborting startup.
+        """
+        entries = await self._runtime_store.load_async()
+        for entry in entries:
+            if entry.target_registry_name in self._registry:
+                logger.warning(
+                    "Skipping runtime target %r: an initializer already registered a target with that name.",
+                    entry.target_registry_name,
+                )
+                continue
+
+            request = CreateTargetRequest(
+                type=entry.type,
+                params=dict(entry.params),
+                auth_mode=entry.auth_mode,  # type: ignore[arg-type]
+            )
+            try:
+                _, registry_name = self._instantiate_and_register(request=request)
+            except Exception as exc:  # noqa: BLE001 — we deliberately catch all to keep startup resilient
+                hint = self._build_reconfiguration_hint(entry=entry, exc=exc)
+                logger.warning(
+                    "Could not restore runtime target %r (%s): %s. "
+                    "It will appear as 'needs reconfiguration' in the UI.",
+                    entry.target_registry_name,
+                    entry.type,
+                    exc,
+                )
+                self._runtime_target_metadata[entry.target_registry_name] = _RuntimeTargetMetadata(
+                    entry=entry,
+                    is_broken=True,
+                    reconfiguration_hint=hint,
+                )
+                continue
+
+            if registry_name != entry.target_registry_name:
+                # The identifier-derived name changed (e.g., params evolved); track under both
+                # so DELETE on the persisted name still works.
+                logger.info(
+                    "Runtime target restored under registry name %r (persisted as %r).",
+                    registry_name,
+                    entry.target_registry_name,
+                )
+            self._runtime_target_metadata[registry_name] = _RuntimeTargetMetadata(entry=entry)
+
+    @staticmethod
+    def _build_reconfiguration_hint(*, entry: RuntimeTargetEntry, exc: BaseException) -> str:
+        """
+        Build a short user-facing hint for a target that failed to restore.
+
+        Tries to surface the missing env var name when the failure is the
+        standard ``_validate_api_key_auth`` ValueError. Falls back to the
+        exception message for anything else.
+
+        Returns:
+            str: Human-readable hint to display next to the broken target.
+        """
+        message = str(exc).strip()
+        if isinstance(exc, ValueError) and "environment variable" in message:
+            return message
+        return message or f"{type(exc).__name__} raised while restoring target {entry.target_registry_name!r}."
 
     @staticmethod
     def _apply_entra_auth(*, target_class: type, target_type: str, params: dict[str, Any]) -> dict[str, Any]:

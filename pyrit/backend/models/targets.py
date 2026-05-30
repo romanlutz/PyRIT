@@ -66,6 +66,29 @@ class TargetInstance(BaseModel):
     max_requests_per_minute: Optional[int] = Field(None, description="Maximum requests per minute")
     capabilities: TargetCapabilitiesInfo = Field(..., description="Structured snapshot of target capabilities")
     target_specific_params: Optional[dict[str, Any]] = Field(None, description="Additional target-specific parameters")
+    is_runtime: bool = Field(
+        False,
+        description=(
+            "True for targets created at runtime via the API and persisted to the runtime "
+            "targets file. False for targets registered by an initializer at startup. Only "
+            "runtime targets can be deleted via DELETE /api/targets/{name}."
+        ),
+    )
+    needs_reconfiguration: bool = Field(
+        False,
+        description=(
+            "True if the target was restored from disk on startup but could not be "
+            "fully reconstructed (e.g., a required api_key environment variable is missing). "
+            "The frontend should surface a re-configure affordance for such targets."
+        ),
+    )
+    reconfiguration_hint: Optional[str] = Field(
+        None,
+        description=(
+            "Human-readable hint explaining why needs_reconfiguration is True "
+            "(e.g., the name of the missing api_key environment variable)."
+        ),
+    )
 
 
 class TargetListResponse(BaseModel):

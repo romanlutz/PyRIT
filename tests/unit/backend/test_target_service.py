@@ -6,11 +6,16 @@ Tests for backend target service.
 """
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyrit.backend.models.targets import CreateTargetRequest
+from pyrit.backend.persistence.runtime_targets import (
+    RuntimeTargetEntry,
+    RuntimeTargetStore,
+)
 from pyrit.backend.services.target_service import TargetService, get_target_service
 from pyrit.identifiers import ComponentIdentifier
 from pyrit.registry.object_registries import TargetRegistry
@@ -22,6 +27,12 @@ def reset_registry():
     TargetRegistry.reset_instance()
     yield
     TargetRegistry.reset_instance()
+
+
+@pytest.fixture
+def runtime_store(tmp_path: Path) -> RuntimeTargetStore:
+    """A per-test runtime targets store backed by a fresh file."""
+    return RuntimeTargetStore(path=tmp_path / "runtime_targets.json")
 
 
 def _mock_target_identifier(*, class_name: str = "MockTarget", **kwargs) -> ComponentIdentifier:
@@ -615,3 +626,266 @@ class TestTargetServiceSingleton:
         service1 = get_target_service()
         service2 = get_target_service()
         assert service1 is service2
+
+
+class TestCreateTargetPersistence:
+    """Persistence side-effects of create_target_async."""
+
+    async def test_create_target_writes_sanitized_entry_to_store(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        request = CreateTargetRequest(
+            type="OpenAIChatTarget",
+            params={
+                "model_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com/",
+                "api_key": "should-not-persist",
+            },
+            auth_mode="api_key",
+        )
+
+        result = await service.create_target_async(request=request)
+
+        entries = await runtime_store.load_async()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.target_registry_name == result.target_registry_name
+        assert entry.type == "OpenAIChatTarget"
+        assert entry.auth_mode == "api_key"
+        assert "api_key" not in entry.params
+        assert "should-not-persist" not in runtime_store.path.read_text(encoding="utf-8")
+
+    async def test_create_target_marks_instance_as_runtime(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        request = CreateTargetRequest(type="TextTarget", params={}, auth_mode="api_key")
+        result = await service.create_target_async(request=request)
+
+        assert result.is_runtime is True
+        assert result.needs_reconfiguration is False
+
+    async def test_initializer_registered_targets_are_not_marked_runtime(
+        self,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        mock_target = MagicMock()
+        mock_target.get_identifier.return_value = ComponentIdentifier(
+            class_name="TextTarget",
+            class_module="pyrit.prompt_target",
+        )
+        service._registry.register_instance(mock_target, name="initializer-target")
+
+        result = await service.get_target_async(target_registry_name="initializer-target")
+
+        assert result is not None
+        assert result.is_runtime is False
+
+
+class TestDeleteTarget:
+    """delete_target_async behaviour."""
+
+    async def test_delete_runtime_target_removes_from_registry_and_store(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+        created = await service.create_target_async(
+            request=CreateTargetRequest(type="TextTarget", params={}, auth_mode="api_key")
+        )
+
+        await service.delete_target_async(target_registry_name=created.target_registry_name)
+
+        assert service.get_target_object(target_registry_name=created.target_registry_name) is None
+        assert await runtime_store.load_async() == []
+
+    async def test_delete_unknown_raises_lookup_error(
+        self,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        with pytest.raises(LookupError):
+            await service.delete_target_async(target_registry_name="never-existed")
+
+    async def test_delete_initializer_target_raises_permission_error(
+        self,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        mock_target = MagicMock()
+        mock_target.get_identifier.return_value = ComponentIdentifier(
+            class_name="TextTarget",
+            class_module="pyrit.prompt_target",
+        )
+        service._registry.register_instance(mock_target, name="initializer-target")
+
+        with pytest.raises(PermissionError, match="initializer"):
+            await service.delete_target_async(target_registry_name="initializer-target")
+
+        # Target must remain registered after a refused delete.
+        assert service.get_target_object(target_registry_name="initializer-target") is mock_target
+
+    async def test_delete_broken_runtime_entry_removes_from_store(
+        self,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        broken_entry = RuntimeTargetEntry(
+            target_registry_name="broken-target",
+            type="OpenAIChatTarget",
+            auth_mode="api_key",
+            params={"endpoint": "https://x", "model_name": "gpt-4o"},
+        )
+        await runtime_store.append_async(broken_entry)
+        service._runtime_target_metadata["broken-target"] = __import__(
+            "pyrit.backend.services.target_service", fromlist=["_RuntimeTargetMetadata"]
+        )._RuntimeTargetMetadata(entry=broken_entry, is_broken=True, reconfiguration_hint="missing OPENAI_CHAT_KEY")
+
+        await service.delete_target_async(target_registry_name="broken-target")
+
+        assert await runtime_store.load_async() == []
+        assert "broken-target" not in service._runtime_target_metadata
+
+
+class TestRestoreRuntimeTargets:
+    """restore_runtime_targets_async replay behaviour."""
+
+    async def test_restore_empty_store_is_noop(self, runtime_store: RuntimeTargetStore) -> None:
+        service = TargetService(runtime_store=runtime_store)
+
+        await service.restore_runtime_targets_async()
+
+        result = await service.list_targets_async()
+        assert result.items == []
+
+    async def test_restore_replays_persisted_target_into_registry(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        await runtime_store.append_async(
+            RuntimeTargetEntry(
+                target_registry_name="text-target-1",
+                type="TextTarget",
+                auth_mode="api_key",
+                params={},
+            )
+        )
+        service = TargetService(runtime_store=runtime_store)
+
+        await service.restore_runtime_targets_async()
+
+        result = await service.list_targets_async()
+        assert len(result.items) == 1
+        assert result.items[0].target_type == "TextTarget"
+        assert result.items[0].is_runtime is True
+        assert result.items[0].needs_reconfiguration is False
+
+    async def test_restore_marks_target_needs_reconfiguration_on_missing_env_var(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        await runtime_store.append_async(
+            RuntimeTargetEntry(
+                target_registry_name="openai-needs-reconfig",
+                type="OpenAIChatTarget",
+                auth_mode="api_key",
+                params={
+                    "model_name": "gpt-4o",
+                    "endpoint": "https://test.openai.azure.com/",
+                },
+            )
+        )
+        service = TargetService(runtime_store=runtime_store)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_CHAT_KEY", None)
+            await service.restore_runtime_targets_async()
+
+        result = await service.get_target_async(target_registry_name="openai-needs-reconfig")
+        assert result is not None
+        assert result.is_runtime is True
+        assert result.needs_reconfiguration is True
+        assert result.reconfiguration_hint
+        # The broken entry must remain in the store so the user can delete it.
+        assert any(e.target_registry_name == "openai-needs-reconfig" for e in await runtime_store.load_async())
+
+    async def test_restore_skips_target_when_initializer_has_same_name(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        await runtime_store.append_async(
+            RuntimeTargetEntry(
+                target_registry_name="text_target",
+                type="TextTarget",
+                auth_mode="api_key",
+                params={},
+            )
+        )
+        service = TargetService(runtime_store=runtime_store)
+
+        initializer_target = MagicMock()
+        initializer_target.get_identifier.return_value = ComponentIdentifier(
+            class_name="TextTarget",
+            class_module="pyrit.prompt_target",
+        )
+        service._registry.register_instance(initializer_target, name="text_target")
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            await service.restore_runtime_targets_async()
+
+        # The pre-existing (initializer) instance must still be the one in the registry.
+        assert service.get_target_object(target_registry_name="text_target") is initializer_target
+        # The runtime metadata must not have been populated for the conflicting name.
+        assert "text_target" not in service._runtime_target_metadata
+        assert any("initializer already registered" in r.getMessage() for r in caplog.records)
+
+    async def test_broken_target_shows_up_in_list_targets(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        await runtime_store.append_async(
+            RuntimeTargetEntry(
+                target_registry_name="broken-openai",
+                type="OpenAIChatTarget",
+                auth_mode="api_key",
+                params={
+                    "model_name": "gpt-4o",
+                    "endpoint": "https://test.openai.azure.com/",
+                },
+            )
+        )
+        service = TargetService(runtime_store=runtime_store)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_CHAT_KEY", None)
+            await service.restore_runtime_targets_async()
+
+        result = await service.list_targets_async()
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.target_registry_name == "broken-openai"
+        assert item.needs_reconfiguration is True
+        assert item.is_runtime is True
+        assert item.target_type == "OpenAIChatTarget"
+        assert item.endpoint == "https://test.openai.azure.com/"
+        assert item.model_name == "gpt-4o"

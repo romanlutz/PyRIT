@@ -10,7 +10,7 @@ Target types are set at app startup via initializers - you cannot add new types 
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from pyrit.backend.models.common import ProblemDetail
 from pyrit.backend.models.targets import (
@@ -106,3 +106,41 @@ async def get_target(target_registry_name: str) -> TargetInstance:
         )
 
     return target
+
+
+@router.delete(
+    "/{target_registry_name}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        404: {"model": ProblemDetail, "description": "Target not found"},
+        409: {
+            "model": ProblemDetail,
+            "description": "Target was registered by an initializer and cannot be deleted via the API",
+        },
+    },
+)
+async def delete_target(target_registry_name: str) -> Response:
+    """
+    Delete a runtime-created target instance.
+
+    Only targets created via ``POST /targets`` are deletable. Targets registered
+    by initializers at startup (e.g., via ``.pyrit_conf``) return 409 — to
+    remove those, edit the configuration file and restart the backend.
+
+    Returns:
+        Response: 204 No Content on success.
+    """
+    service = get_target_service()
+    try:
+        await service.delete_target_async(target_registry_name=target_registry_name)
+    except LookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        ) from e
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        ) from e
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

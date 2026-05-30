@@ -152,6 +152,22 @@ class BaseInstanceRegistry(ABC, RegistryProtocol[ComponentIdentifier], Generic[T
         )
         self._metadata_cache = None
 
+    def unregister(self, name: str) -> bool:
+        """
+        Remove a registered item by name.
+
+        Args:
+            name: The registry name to remove.
+
+        Returns:
+            True if an entry was removed, False if no entry with that name existed.
+        """
+        if name not in self._registry_items:
+            return False
+        del self._registry_items[name]
+        self._metadata_cache = None
+        return True
+
     def get_names(self) -> list[str]:
         """
         Get a sorted list of all registered names.

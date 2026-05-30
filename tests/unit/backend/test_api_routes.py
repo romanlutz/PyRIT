@@ -954,6 +954,72 @@ class TestTargetRoutes:
             assert data["target_specific_params"]["presence_penalty"] == 0.3
             assert data["target_specific_params"]["seed"] == 42
 
+    def test_delete_target_returns_204_on_success(self, client: TestClient) -> None:
+        """A successful delete returns 204 No Content."""
+        with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.delete_target_async = AsyncMock(return_value=None)
+            mock_get_service.return_value = mock_service
+
+            response = client.delete("/api/targets/target-1")
+
+            assert response.status_code == status.HTTP_204_NO_CONTENT
+            assert response.content == b""
+            mock_service.delete_target_async.assert_awaited_once_with(target_registry_name="target-1")
+
+    def test_delete_target_returns_404_when_unknown(self, client: TestClient) -> None:
+        """An unknown target returns 404."""
+        with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.delete_target_async = AsyncMock(side_effect=LookupError("Target 'nope' not found."))
+            mock_get_service.return_value = mock_service
+
+            response = client.delete("/api/targets/nope")
+
+            assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_delete_target_returns_409_for_initializer_target(self, client: TestClient) -> None:
+        """An initializer-registered target cannot be deleted via the API."""
+        with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.delete_target_async = AsyncMock(
+                side_effect=PermissionError("Target 'init-target' was registered by an initializer ...")
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.delete("/api/targets/init-target")
+
+            assert response.status_code == status.HTTP_409_CONFLICT
+
+    def test_list_targets_exposes_runtime_and_reconfiguration_flags(self, client: TestClient) -> None:
+        """is_runtime and needs_reconfiguration round-trip through the list response."""
+        with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.list_targets_async = AsyncMock(
+                return_value=TargetListResponse(
+                    items=[
+                        TargetInstance(
+                            target_registry_name="runtime-broken",
+                            target_type="OpenAIChatTarget",
+                            capabilities=TargetCapabilitiesInfo(),
+                            is_runtime=True,
+                            needs_reconfiguration=True,
+                            reconfiguration_hint="missing OPENAI_CHAT_KEY",
+                        )
+                    ],
+                    pagination=PaginationInfo(limit=50, has_more=False, next_cursor=None, prev_cursor=None),
+                )
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.get("/api/targets")
+
+            assert response.status_code == status.HTTP_200_OK
+            item = response.json()["items"][0]
+            assert item["is_runtime"] is True
+            assert item["needs_reconfiguration"] is True
+            assert item["reconfiguration_hint"] == "missing OPENAI_CHAT_KEY"
+
 
 # ============================================================================
 # Converter Routes Tests

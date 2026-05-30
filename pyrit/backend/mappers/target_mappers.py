@@ -40,7 +40,14 @@ def _target_capabilities_to_info(capabilities: TargetCapabilities) -> TargetCapa
     )
 
 
-def target_object_to_instance(target_registry_name: str, target_obj: PromptTarget) -> TargetInstance:
+def target_object_to_instance(
+    target_registry_name: str,
+    target_obj: PromptTarget,
+    *,
+    is_runtime: bool = False,
+    needs_reconfiguration: bool = False,
+    reconfiguration_hint: str | None = None,
+) -> TargetInstance:
     """
     Build a TargetInstance DTO from a registry target object.
 
@@ -50,6 +57,13 @@ def target_object_to_instance(target_registry_name: str, target_obj: PromptTarge
     Args:
         target_registry_name: The human-friendly target registry name.
         target_obj: The domain PromptTarget object from the registry.
+        is_runtime: True if this target was created at runtime via the API and
+            persisted to the runtime targets file (and is therefore deletable).
+        needs_reconfiguration: True if the target was restored from disk on
+            startup but could not be fully reconstructed (e.g., the required
+            api_key environment variable is missing).
+        reconfiguration_hint: Optional human-readable hint for the
+            ``needs_reconfiguration`` case (e.g., the missing env var name).
 
     Returns:
         TargetInstance DTO with metadata derived from the object.
@@ -88,4 +102,7 @@ def target_object_to_instance(target_registry_name: str, target_obj: PromptTarge
         max_requests_per_minute=params.get("max_requests_per_minute"),
         capabilities=_target_capabilities_to_info(target_obj.capabilities),
         target_specific_params=combined_specific,
+        is_runtime=is_runtime,
+        needs_reconfiguration=needs_reconfiguration,
+        reconfiguration_hint=reconfiguration_hint,
     )

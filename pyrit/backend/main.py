@@ -30,6 +30,7 @@ from pyrit.backend.routes import (
     targets,
     version,
 )
+from pyrit.backend.services.target_service import get_target_service
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 # Check for development mode from environment variable
@@ -53,6 +54,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     config = ConfigurationLoader.load_with_overrides(config_file=config_file)
     await config.initialize_pyrit_async()
+
+    # Replay API-created targets persisted to disk so they survive backend restarts.
+    # Must run after initializers so initializer-registered targets win on name collisions.
+    await get_target_service().restore_runtime_targets_async()
 
     # Expose config values to route handlers via app.state
     default_labels: dict[str, str] = {}

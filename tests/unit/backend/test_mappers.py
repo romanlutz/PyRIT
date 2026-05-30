@@ -1362,6 +1362,53 @@ class TestTargetObjectToInstance:
 
         assert result.capabilities.supported_input_modalities == ["text"]
 
+    def test_runtime_and_reconfiguration_flags_default_to_false_and_none(self) -> None:
+        """Without explicit kwargs, mapper returns is_runtime=False, needs_reconfiguration=False, hint=None."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities()
+        target_obj.get_identifier.return_value = ComponentIdentifier(
+            class_name="TextTarget", class_module="pyrit.prompt_target"
+        )
+
+        result = target_object_to_instance("t-1", target_obj)
+
+        assert result.is_runtime is False
+        assert result.needs_reconfiguration is False
+        assert result.reconfiguration_hint is None
+
+    def test_runtime_flag_propagates(self) -> None:
+        """is_runtime=True is preserved on the returned TargetInstance."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities()
+        target_obj.get_identifier.return_value = ComponentIdentifier(
+            class_name="TextTarget", class_module="pyrit.prompt_target"
+        )
+
+        result = target_object_to_instance("t-1", target_obj, is_runtime=True)
+
+        assert result.is_runtime is True
+        assert result.needs_reconfiguration is False
+
+    def test_needs_reconfiguration_and_hint_propagate(self) -> None:
+        """needs_reconfiguration=True and the hint are preserved."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities()
+        target_obj.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget", class_module="pyrit.prompt_target"
+        )
+
+        result = target_object_to_instance(
+            "t-1",
+            target_obj,
+            is_runtime=True,
+            needs_reconfiguration=True,
+            reconfiguration_hint="env var OPENAI_CHAT_KEY is not set",
+        )
+
+        assert result.is_runtime is True
+        assert result.needs_reconfiguration is True
+        assert result.reconfiguration_hint == "env var OPENAI_CHAT_KEY is not set"
+
     def test_supported_input_modalities_multimodal(self) -> None:
         """Test that a multimodal target reports all individual input types."""
         target_obj = MagicMock(spec=PromptTarget)
