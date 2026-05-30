@@ -7,6 +7,8 @@ import json
 import logging
 import zipfile
 
+import requests
+
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
@@ -21,7 +23,9 @@ class _MICDataset(_RemoteDatasetLoader):
 
     This dataset contains conversations between humans and chatbots
     labeled with moral categories like loyalty, care, fairness,
-    authority and sanctity.
+    authority, sanctity and liberty. After deduplication on the
+    question field, the dataset yields tens of thousands of unique
+    moral integrity prompts.
 
     Reference: [@ziems2022mic]
     HuggingFace: https://huggingface.co/datasets/SALT-NLP/MIC
@@ -31,7 +35,7 @@ class _MICDataset(_RemoteDatasetLoader):
     """
 
     HF_DATASET_NAME = "SALT-NLP/MIC"
-    harm_categories = {"care", "fairness", "loyalty", "authority", "sanctity"}
+    harm_categories = {"care", "fairness", "loyalty", "authority", "sanctity", "liberty"}
     modalities = ["text"]
     size = "huge"
     tags = ["moral", "ethics", "dialogue"]
@@ -58,8 +62,7 @@ class _MICDataset(_RemoteDatasetLoader):
         """
         logger.info("Downloading SALT-NLP MIC dataset...")
 
-        def _download_and_parse() -> list:
-            import requests
+        def _download_and_parse() -> list[SeedPrompt]:
             response = requests.get(self.source)
             response.raise_for_status()
 
@@ -81,8 +84,11 @@ class _MICDataset(_RemoteDatasetLoader):
                                 continue
                             seen_questions.add(question)
 
-                            moral = row.get("moral", "")
-                            categories = [m.strip() for m in moral.split("|") if m.strip()]
+                            moral = row.get("moral")
+                            if isinstance(moral, str):
+                                categories = [m.strip() for m in moral.split("|") if m.strip()]
+                            else:
+                                categories = []
 
                             seed_prompts.append(
                                 SeedPrompt(

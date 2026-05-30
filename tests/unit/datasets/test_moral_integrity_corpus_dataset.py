@@ -5,6 +5,7 @@ import io
 import json
 import zipfile
 from unittest.mock import MagicMock, patch
+import pytest
 
 from pyrit.datasets.seed_datasets.remote.moral_integrity_corpus_dataset import _MICDataset
 
@@ -101,8 +102,22 @@ class TestMICDataset:
 
         with patch("requests.get", return_value=mock_response):
             dataset = _MICDataset()
-            try:
+            with pytest.raises(ValueError, match="empty"):
                 await dataset.fetch_dataset_async()
-                assert False, "Should have raised ValueError"
-            except ValueError as e:
-                assert "empty" in str(e).lower()
+
+    async def test_fetch_dataset_nan_moral(self):
+        """Test that NaN moral values are handled correctly."""
+        fake_rows = [
+            {"Q": "Valid question?", "moral": float("nan")},
+        ]
+
+        mock_response = MagicMock()
+        mock_response.content = self._make_zip(fake_rows)
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.get", return_value=mock_response):
+            dataset = _MICDataset()
+            result = await dataset.fetch_dataset_async()
+
+        assert len(result.seeds) == 1
+        assert result.seeds[0].harm_categories == []
