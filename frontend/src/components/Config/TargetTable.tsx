@@ -11,6 +11,15 @@ import {
   Text,
   Tooltip,
   Select,
+  Dialog,
+  DialogSurface,
+  DialogTitle,
+  DialogBody,
+  DialogContent,
+  DialogActions,
+  Spinner,
+  MessageBar,
+  MessageBarBody,
 } from '@fluentui/react-components'
 import {
   CheckmarkRegular,
@@ -26,6 +35,8 @@ import {
   MathFormulaRegular,
   WrenchRegular,
   ArrowHookUpLeftRegular,
+  DeleteRegular,
+  WarningRegular,
 } from '@fluentui/react-icons'
 import type { TargetInstance } from '../../types'
 import { useTargetTableStyles } from './TargetTable.styles'
@@ -34,6 +45,8 @@ interface TargetTableProps {
   targets: TargetInstance[]
   activeTarget: TargetInstance | null
   onSetActiveTarget: (target: TargetInstance) => void
+  /** Called after a runtime target is successfully deleted, with the target's registry name. */
+  onTargetDeleted?: (targetRegistryName: string) => void | Promise<void>
 }
 
 /** Format target_specific_params into a short human-readable string. */
@@ -191,9 +204,12 @@ function CapabilityCells({ target }: { target: TargetInstance }) {
   )
 }
 
-export default function TargetTable({ targets, activeTarget, onSetActiveTarget }: TargetTableProps) {
+export default function TargetTable({ targets, activeTarget, onSetActiveTarget, onTargetDeleted }: TargetTableProps) {
   const styles = useTargetTableStyles()
   const [typeFilter, setTypeFilter] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<TargetInstance | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const targetTypes = useMemo(
     () => Array.from(new Set(targets.map(t => t.target_type))).sort(),
@@ -207,6 +223,27 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
 
   const isActive = (target: TargetInstance): boolean =>
     activeTarget?.target_registry_name === target.target_registry_name
+
+  const closeDeleteDialog = () => {
+    if (isDeleting) return
+    setPendingDelete(null)
+    setDeleteError(null)
+  }
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || !onTargetDeleted) return
+    setIsDeleting(true)
+    setDeleteError(null)
+    try {
+      await onTargetDeleted(pendingDelete.target_registry_name)
+      setPendingDelete(null)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete target.'
+      setDeleteError(message)
+    } finally {
+      setIsDeleting(false)
+    }
+  }
 
   return (
     <div className={styles.tableContainer}>
@@ -240,6 +277,7 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
                   {formatParams(activeTarget.target_specific_params) || '—'}
                 </Text>
               </TableCell>
+              <TableCell style={{ width: '80px' }} />
             </TableRow>
           </TableBody>
         </Table>
@@ -302,6 +340,7 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
                 <span className={styles.helpHeader}>Parameters</span>
               </Tooltip>
             </TableHeaderCell>
+            <TableHeaderCell style={{ width: '80px' }} aria-label="Actions" />
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -315,6 +354,15 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
                   <Badge appearance="filled" color="brand" icon={<CheckmarkRegular />}>
                     Active
                   </Badge>
+                ) : target.needs_reconfiguration ? (
+                  <Tooltip
+                    content={target.reconfiguration_hint || 'This target needs to be re-created before it can be used.'}
+                    relationship="description"
+                  >
+                    <Badge appearance="filled" color="warning" icon={<WarningRegular />}>
+                      Needs reconfig
+                    </Badge>
+                  </Tooltip>
                 ) : (
                   <Button
                     appearance="primary"
@@ -348,10 +396,67 @@ export default function TargetTable({ targets, activeTarget, onSetActiveTarget }
                   {formatParams(target.target_specific_params) || '—'}
                 </Text>
               </TableCell>
+              <TableCell>
+                {target.is_runtime && onTargetDeleted ? (
+                  <Tooltip content="Delete this target" relationship="label">
+                    <Button
+                      appearance="subtle"
+                      size="small"
+                      icon={<DeleteRegular />}
+                      aria-label={`Delete target ${target.target_registry_name}`}
+                      onClick={() => {
+                        setDeleteError(null)
+                        setPendingDelete(target)
+                      }}
+                    />
+                  </Tooltip>
+                ) : null}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
+
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(_, data) => { if (!data.open) closeDeleteDialog() }}
+        modalType="modal"
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Delete target?</DialogTitle>
+            <DialogContent>
+              {pendingDelete && (
+                <Text>
+                  This will permanently remove <strong>{pendingDelete.target_registry_name}</strong>{' '}
+                  ({pendingDelete.target_type}) from the registry and from the persisted runtime targets file.
+                  Any browser tab still using this target as its active selection will fall back to no active target.
+                </Text>
+              )}
+              {deleteError && (
+                <div style={{ marginTop: '12px' }}>
+                  <MessageBar intent="error">
+                    <MessageBarBody>{deleteError}</MessageBarBody>
+                  </MessageBar>
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={closeDeleteDialog} disabled={isDeleting}>
+                Cancel
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={confirmDelete}
+                disabled={isDeleting}
+                icon={isDeleting ? <Spinner size="tiny" /> : <DeleteRegular />}
+              >
+                Delete
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   )
 }

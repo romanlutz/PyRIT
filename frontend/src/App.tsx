@@ -14,7 +14,12 @@ import { ConnectionHealthProvider, useConnectionHealth } from './hooks/useConnec
 import { DEFAULT_GLOBAL_LABELS } from './components/Labels/labelDefaults'
 import type { ViewName } from './components/Sidebar/Navigation'
 import type { TargetInstance, TargetInfo } from './types'
-import { attacksApi, versionApi } from './services/api'
+import { attacksApi, targetsApi, versionApi } from './services/api'
+import {
+  clearActiveTargetName,
+  readActiveTargetName,
+  writeActiveTargetName,
+} from './utils/activeTargetStorage'
 
 const AUTO_DISMISS_MS = 5_000
 
@@ -82,6 +87,13 @@ function App() {
   }, [instance])
 
   const handleSetActiveTarget = useCallback((target: TargetInstance) => {
+    // Don't allow selecting a target that needs reconfiguration — it can't
+    // service prompts. The Config table disables Set Active for these rows,
+    // but we guard here too in case a stale handler reaches us.
+    if (target.needs_reconfiguration) {
+      return
+    }
+    writeActiveTargetName(target.target_registry_name)
     setActiveTarget(prev => {
       const isSame = prev &&
         prev.target_registry_name === target.target_registry_name &&
@@ -96,6 +108,37 @@ function App() {
       // would wipe the conversation the user was trying to continue.
       return target
     })
+  }, [])
+
+  const handleClearActiveTarget = useCallback(() => {
+    clearActiveTargetName()
+    setActiveTarget(null)
+  }, [])
+
+  // Rehydrate the active target from localStorage on mount. If the stored
+  // name no longer corresponds to a registered target (e.g. the backend was
+  // restarted and the runtime entry was deleted), drop the stored value.
+  useEffect(() => {
+    let ignore = false
+    const storedName = readActiveTargetName()
+    if (!storedName) return
+
+    async function rehydrate(name: string) {
+      try {
+        const target = await targetsApi.getTarget(name)
+        if (ignore) return
+        if (target.needs_reconfiguration) {
+          clearActiveTargetName()
+          return
+        }
+        setActiveTarget(target)
+      } catch {
+        // Most commonly 404: the target was deleted or never restored.
+        if (!ignore) clearActiveTargetName()
+      }
+    }
+    rehydrate(storedName)
+    return () => { ignore = true }
   }, [])
   /** The AttackResult's primary key (set on first message). */
   const [attackResultId, setAttackResultId] = useState<string | null>(null)
@@ -207,6 +250,7 @@ function App() {
               <TargetConfig
                 activeTarget={activeTarget}
                 onSetActiveTarget={handleSetActiveTarget}
+                onClearActiveTarget={handleClearActiveTarget}
               />
             )}
             {currentView === 'history' && (

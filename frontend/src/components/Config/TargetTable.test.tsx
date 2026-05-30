@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import TargetTable from './TargetTable'
 import type { TargetInstance } from '../../types'
@@ -343,5 +343,206 @@ describe('TargetTable', () => {
     )
 
     expect(screen.queryByText('Filter by type:')).not.toBeInTheDocument()
+  })
+
+  describe('runtime target deletion', () => {
+    const runtimeTarget: TargetInstance = {
+      target_registry_name: 'runtime_openai',
+      target_type: 'OpenAIChatTarget',
+      endpoint: 'https://api.example.com',
+      model_name: 'gpt-4',
+      is_runtime: true,
+    }
+
+    const initializerTarget: TargetInstance = {
+      target_registry_name: 'initializer_openai',
+      target_type: 'OpenAIChatTarget',
+      endpoint: 'https://api.example.com',
+      model_name: 'gpt-4-turbo',
+      is_runtime: false,
+    }
+
+    it('shows a Delete button on runtime rows when onTargetDeleted is provided', () => {
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[runtimeTarget]}
+            onTargetDeleted={jest.fn()}
+          />
+        </TestWrapper>
+      )
+
+      expect(
+        screen.getByRole('button', { name: /delete target runtime_openai/i })
+      ).toBeInTheDocument()
+    })
+
+    it('does not show a Delete button on initializer-owned rows', () => {
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[initializerTarget]}
+            onTargetDeleted={jest.fn()}
+          />
+        </TestWrapper>
+      )
+
+      expect(
+        screen.queryByRole('button', { name: /delete target/i })
+      ).not.toBeInTheDocument()
+    })
+
+    it('does not show any Delete button when onTargetDeleted callback is omitted', () => {
+      render(
+        <TestWrapper>
+          <TargetTable {...defaultProps} targets={[runtimeTarget]} />
+        </TestWrapper>
+      )
+
+      expect(
+        screen.queryByRole('button', { name: /delete target/i })
+      ).not.toBeInTheDocument()
+    })
+
+    it('opens a confirmation dialog and invokes the callback with the registry name', async () => {
+      const onTargetDeleted = jest.fn().mockResolvedValue(undefined)
+
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[runtimeTarget]}
+            onTargetDeleted={onTargetDeleted}
+          />
+        </TestWrapper>
+      )
+
+      fireEvent.click(
+        screen.getByRole('button', { name: /delete target runtime_openai/i })
+      )
+
+      await screen.findByRole('heading', { name: /delete target\?/i })
+      expect(
+        screen.getAllByText('runtime_openai').length
+      ).toBeGreaterThanOrEqual(1)
+
+      // Fluent v9 wraps the modal in tabster, which may flag the surface
+      // aria-hidden during the focus-trap setup. `hidden: true` keeps the
+      // query resilient under heavy parallel jest load.
+      fireEvent.click(screen.getByRole('button', { name: 'Delete', hidden: true }))
+
+      await waitFor(() => {
+        expect(onTargetDeleted).toHaveBeenCalledTimes(1)
+        expect(onTargetDeleted).toHaveBeenCalledWith('runtime_openai')
+      })
+      await waitFor(() => {
+        expect(
+          screen.queryByRole('heading', { name: /delete target\?/i })
+        ).not.toBeInTheDocument()
+      })
+    })
+
+    it('keeps the dialog open and displays an error message when deletion fails', async () => {
+      const onTargetDeleted = jest
+        .fn()
+        .mockRejectedValue(new Error('Server exploded'))
+
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[runtimeTarget]}
+            onTargetDeleted={onTargetDeleted}
+          />
+        </TestWrapper>
+      )
+
+      fireEvent.click(
+        screen.getByRole('button', { name: /delete target runtime_openai/i })
+      )
+
+      await screen.findByRole('heading', { name: /delete target\?/i })
+      fireEvent.click(screen.getByRole('button', { name: 'Delete', hidden: true }))
+
+      await waitFor(() => {
+        expect(onTargetDeleted).toHaveBeenCalledTimes(1)
+      })
+      // Dialog stays open and the error surfaces
+      expect(await screen.findByText(/server exploded/i)).toBeInTheDocument()
+      expect(
+        screen.getByRole('heading', { name: /delete target\?/i })
+      ).toBeInTheDocument()
+    })
+
+    it('dismisses the dialog without calling the callback when Cancel is clicked', async () => {
+      const onTargetDeleted = jest.fn()
+
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[runtimeTarget]}
+            onTargetDeleted={onTargetDeleted}
+          />
+        </TestWrapper>
+      )
+
+      fireEvent.click(
+        screen.getByRole('button', { name: /delete target runtime_openai/i })
+      )
+
+      await screen.findByRole('heading', { name: /delete target\?/i })
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i, hidden: true }))
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole('heading', { name: /delete target\?/i })
+        ).not.toBeInTheDocument()
+      })
+      expect(onTargetDeleted).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('needs_reconfiguration rows', () => {
+    const brokenTarget: TargetInstance = {
+      target_registry_name: 'broken_target',
+      target_type: 'OpenAIChatTarget',
+      endpoint: 'https://api.example.com',
+      model_name: 'gpt-4',
+      is_runtime: true,
+      needs_reconfiguration: true,
+      reconfiguration_hint: 'Missing env var: OPENAI_API_KEY',
+    }
+
+    it('renders a "Needs reconfig" badge instead of the Set Active button', () => {
+      render(
+        <TestWrapper>
+          <TargetTable {...defaultProps} targets={[brokenTarget]} />
+        </TestWrapper>
+      )
+
+      expect(screen.getByText(/needs reconfig/i)).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /set active/i })
+      ).not.toBeInTheDocument()
+    })
+
+    it('still shows the Delete button for a broken runtime target', () => {
+      render(
+        <TestWrapper>
+          <TargetTable
+            {...defaultProps}
+            targets={[brokenTarget]}
+            onTargetDeleted={jest.fn()}
+          />
+        </TestWrapper>
+      )
+
+      expect(
+        screen.getByRole('button', { name: /delete target broken_target/i })
+      ).toBeInTheDocument()
+    })
   })
 })

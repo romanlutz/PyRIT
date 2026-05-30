@@ -75,6 +75,12 @@ export interface TargetInstance {
   max_requests_per_minute?: number | null
   capabilities?: TargetCapabilitiesInfo | null
   target_specific_params?: Record<string, unknown> | null
+  /** True if the target was created at runtime via POST /api/targets (and is therefore deletable). */
+  is_runtime?: boolean
+  /** True if the target was restored from disk but couldn't be fully reconstructed (e.g. missing api_key env var). */
+  needs_reconfiguration?: boolean
+  /** Human-readable hint for the needs_reconfiguration case (e.g. the missing env var name). */
+  reconfiguration_hint?: string | null
 }
 
 export interface TargetListResponse {

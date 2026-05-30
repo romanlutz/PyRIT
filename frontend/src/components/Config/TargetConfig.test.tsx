@@ -9,6 +9,7 @@ jest.mock("../../services/api", () => ({
   targetsApi: {
     listTargets: jest.fn(),
     createTarget: jest.fn(),
+    deleteTarget: jest.fn(),
   },
 }));
 
@@ -388,5 +389,175 @@ describe("TargetConfig", () => {
     // Close via Cancel
     await userEvent.click(screen.getByTestId("dialog-close"));
     expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument();
+  });
+
+  describe("target deletion", () => {
+    const runtimeTarget: TargetInstance = {
+      target_registry_name: "runtime_openai",
+      target_type: "OpenAIChatTarget",
+      endpoint: "https://api.example.com",
+      model_name: "gpt-4",
+      is_runtime: true,
+    };
+
+    // Dialog/MessageBar rendering is slow under parallel jest load; explicit
+    // timeouts and `mockReset()` for queued mocks keep these flows reliable.
+    const ASYNC_WAIT = { timeout: 15000 } as const;
+
+    beforeEach(() => {
+      // `jest.clearAllMocks()` does not drain `mockResolvedValueOnce` queues.
+      // Reset them explicitly so each deletion test starts with a clean
+      // listTargets implementation queue.
+      mockedTargetsApi.listTargets.mockReset();
+      mockedTargetsApi.deleteTarget.mockReset();
+    });
+
+    /** Confirm the Delete dialog using a query that tolerates Fluent v9's
+     *  tabster modalizer wrapping the surface with aria-hidden under load. */
+    async function confirmDeletion() {
+      await screen.findByRole("heading", { name: /delete target\?/i }, ASYNC_WAIT);
+      const confirmBtn = screen.getByRole(
+        "button",
+        { name: "Delete", hidden: true }
+      );
+      await userEvent.click(confirmBtn);
+    }
+
+    it(
+      "calls deleteTarget and refetches the list after confirming deletion",
+      async () => {
+        mockedTargetsApi.listTargets
+          .mockResolvedValueOnce({
+            items: [runtimeTarget],
+            pagination: { limit: 200, has_more: false },
+          })
+          .mockResolvedValueOnce({
+            items: [],
+            pagination: { limit: 200, has_more: false },
+          });
+        mockedTargetsApi.deleteTarget.mockResolvedValue(undefined);
+
+        render(
+          <TestWrapper>
+            <TargetConfig {...defaultProps} />
+          </TestWrapper>
+        );
+
+        const deleteButton = await screen.findByRole(
+          "button",
+          { name: /delete target runtime_openai/i },
+          ASYNC_WAIT
+        );
+        await userEvent.click(deleteButton);
+        await confirmDeletion();
+
+        await waitFor(() => {
+          expect(mockedTargetsApi.deleteTarget).toHaveBeenCalledWith(
+            "runtime_openai"
+          );
+        }, ASYNC_WAIT);
+        await waitFor(() => {
+          expect(mockedTargetsApi.listTargets).toHaveBeenCalledTimes(2);
+        }, ASYNC_WAIT);
+        await waitFor(() => {
+          expect(screen.getByText("No Targets Configured")).toBeInTheDocument();
+        }, ASYNC_WAIT);
+      },
+      30000
+    );
+
+    it(
+      "invokes onClearActiveTarget when the deleted target is the active one",
+      async () => {
+        const onClearActiveTarget = jest.fn();
+        mockedTargetsApi.listTargets
+          .mockResolvedValueOnce({
+            items: [runtimeTarget],
+            pagination: { limit: 200, has_more: false },
+          })
+          .mockResolvedValueOnce({
+            items: [],
+            pagination: { limit: 200, has_more: false },
+          });
+        mockedTargetsApi.deleteTarget.mockResolvedValue(undefined);
+
+        render(
+          <TestWrapper>
+            <TargetConfig
+              {...defaultProps}
+              activeTarget={runtimeTarget}
+              onClearActiveTarget={onClearActiveTarget}
+            />
+          </TestWrapper>
+        );
+
+        const deleteButton = await screen.findByRole(
+          "button",
+          { name: /delete target runtime_openai/i },
+          ASYNC_WAIT
+        );
+        await userEvent.click(deleteButton);
+        await confirmDeletion();
+
+        await waitFor(() => {
+          expect(mockedTargetsApi.deleteTarget).toHaveBeenCalledWith(
+            "runtime_openai"
+          );
+        }, ASYNC_WAIT);
+        await waitFor(() => {
+          expect(onClearActiveTarget).toHaveBeenCalledTimes(1);
+        }, ASYNC_WAIT);
+      },
+      30000
+    );
+
+    it(
+      "does not invoke onClearActiveTarget when a non-active target is deleted",
+      async () => {
+        const onClearActiveTarget = jest.fn();
+        const otherRuntimeTarget: TargetInstance = {
+          ...runtimeTarget,
+          target_registry_name: "other_runtime",
+        };
+        mockedTargetsApi.listTargets
+          .mockResolvedValueOnce({
+            items: [runtimeTarget, otherRuntimeTarget],
+            pagination: { limit: 200, has_more: false },
+          })
+          .mockResolvedValueOnce({
+            items: [runtimeTarget],
+            pagination: { limit: 200, has_more: false },
+          });
+        mockedTargetsApi.deleteTarget.mockResolvedValue(undefined);
+
+        render(
+          <TestWrapper>
+            <TargetConfig
+              {...defaultProps}
+              activeTarget={runtimeTarget}
+              onClearActiveTarget={onClearActiveTarget}
+            />
+          </TestWrapper>
+        );
+
+        const deleteButton = await screen.findByRole(
+          "button",
+          { name: /delete target other_runtime/i },
+          ASYNC_WAIT
+        );
+        await userEvent.click(deleteButton);
+        await confirmDeletion();
+
+        await waitFor(() => {
+          expect(mockedTargetsApi.deleteTarget).toHaveBeenCalledWith(
+            "other_runtime"
+          );
+        }, ASYNC_WAIT);
+        // Only the unrelated runtime row was deleted — the active selection
+        // remains valid, so the App-level clear must NOT be called.
+        expect(onClearActiveTarget).not.toHaveBeenCalled();
+      },
+      30000
+    );
   });
 });

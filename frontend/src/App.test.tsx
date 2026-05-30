@@ -5,7 +5,8 @@
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import App from "./App";
-import { attacksApi } from "./services/api";
+import { attacksApi, targetsApi } from "./services/api";
+import { ACTIVE_TARGET_STORAGE_KEY } from "./utils/activeTargetStorage";
 
 const mockGetActiveAccount = jest.fn();
 
@@ -21,6 +22,12 @@ jest.mock("./services/api", () => ({
     createAttack: jest.fn(),
     deleteAttack: jest.fn(),
   },
+  targetsApi: {
+    listTargets: jest.fn(),
+    getTarget: jest.fn(),
+    createTarget: jest.fn(),
+    deleteTarget: jest.fn(),
+  },
   versionApi: {
     getVersion: jest.fn().mockResolvedValue({ version: "1.0.0" }),
   },
@@ -30,6 +37,7 @@ jest.mock("./services/api", () => ({
 const mockedVersionApi = jest.requireMock("./services/api").versionApi;
 
 const mockGetAttack = attacksApi.getAttack as jest.Mock;
+const mockGetTarget = targetsApi.getTarget as jest.Mock;
 
 // Mock the child components to isolate App logic
 jest.mock("./components/Labels/LabelsBar", () => {
@@ -135,9 +143,11 @@ jest.mock("./components/Config/TargetConfig", () => {
   const MockTargetConfig = ({
     activeTarget,
     onSetActiveTarget,
+    onClearActiveTarget,
   }: {
     activeTarget: unknown;
     onSetActiveTarget: (t: unknown) => void;
+    onClearActiveTarget?: () => void;
   }) => {
     return (
       <div data-testid="target-config">
@@ -156,6 +166,12 @@ jest.mock("./components/Config/TargetConfig", () => {
           data-testid="set-target"
         >
           Set Target
+        </button>
+        <button
+          onClick={() => onClearActiveTarget?.()}
+          data-testid="clear-target"
+        >
+          Clear Target
         </button>
       </div>
     );
@@ -230,6 +246,7 @@ describe("App", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockGetActiveAccount.mockReturnValue(null);
+    window.localStorage.clear();
   });
 
   it("renders with FluentProvider and MainLayout", () => {
@@ -500,5 +517,131 @@ describe("App", () => {
     // Now select a different conversation
     fireEvent.click(screen.getByTestId("select-conversation"));
     // The component re-renders with the new conversation ID
+  });
+
+  describe("active target persistence", () => {
+    it("persists the active target name to localStorage when one is selected", () => {
+      render(<App />);
+
+      fireEvent.click(screen.getByTestId("nav-config"));
+      fireEvent.click(screen.getByTestId("set-target"));
+
+      expect(window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY)).toBe(
+        "test_target"
+      );
+    });
+
+    it("rehydrates the active target from localStorage on mount", async () => {
+      window.localStorage.setItem(ACTIVE_TARGET_STORAGE_KEY, "stored_target");
+      mockGetTarget.mockResolvedValue({
+        target_registry_name: "stored_target",
+        target_type: "OpenAIChatTarget",
+        endpoint: "https://api.example.com",
+        model_name: "gpt-4",
+      });
+
+      render(<App />);
+
+      // Switch to chat to inspect activeTarget propagation
+      fireEvent.click(screen.getByTestId("nav-chat"));
+
+      await waitFor(() => {
+        expect(mockGetTarget).toHaveBeenCalledWith("stored_target");
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("has-target")).toHaveTextContent("yes");
+      });
+    });
+
+    it("does not call getTarget when localStorage is empty", async () => {
+      render(<App />);
+
+      // Give any pending effects a tick
+      await waitFor(() => {
+        expect(mockedVersionApi.getVersion).toHaveBeenCalled();
+      });
+
+      expect(mockGetTarget).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("nav-chat"));
+      expect(screen.getByTestId("has-target")).toHaveTextContent("no");
+    });
+
+    it("clears the stored selection and stays empty when the target no longer exists", async () => {
+      window.localStorage.setItem(ACTIVE_TARGET_STORAGE_KEY, "gone_target");
+      mockGetTarget.mockRejectedValue(new Error("404 Not Found"));
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(mockGetTarget).toHaveBeenCalledWith("gone_target");
+      });
+      await waitFor(() => {
+        expect(
+          window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY)
+        ).toBeNull();
+      });
+
+      fireEvent.click(screen.getByTestId("nav-chat"));
+      expect(screen.getByTestId("has-target")).toHaveTextContent("no");
+    });
+
+    it("drops the stored selection when the rehydrated target needs reconfiguration", async () => {
+      window.localStorage.setItem(ACTIVE_TARGET_STORAGE_KEY, "broken_target");
+      mockGetTarget.mockResolvedValue({
+        target_registry_name: "broken_target",
+        target_type: "OpenAIChatTarget",
+        endpoint: "https://api.example.com",
+        model_name: "gpt-4",
+        is_runtime: true,
+        needs_reconfiguration: true,
+        reconfiguration_hint: "Set OPENAI_API_KEY env var.",
+      });
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(mockGetTarget).toHaveBeenCalledWith("broken_target");
+      });
+      await waitFor(() => {
+        expect(
+          window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY)
+        ).toBeNull();
+      });
+
+      fireEvent.click(screen.getByTestId("nav-chat"));
+      expect(screen.getByTestId("has-target")).toHaveTextContent("no");
+    });
+
+    it("clears both state and localStorage when onClearActiveTarget is invoked", async () => {
+      render(<App />);
+
+      // Select a target first
+      fireEvent.click(screen.getByTestId("nav-config"));
+      fireEvent.click(screen.getByTestId("set-target"));
+      expect(window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY)).toBe(
+        "test_target"
+      );
+
+      // Simulate Config deleting the active target
+      fireEvent.click(screen.getByTestId("clear-target"));
+
+      await waitFor(() => {
+        expect(
+          window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY)
+        ).toBeNull();
+      });
+
+      fireEvent.click(screen.getByTestId("nav-chat"));
+      expect(screen.getByTestId("has-target")).toHaveTextContent("no");
+    });
+
+    it("tolerates a localStorage read failure on mount without crashing", () => {
+      jest.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("storage disabled");
+      });
+
+      expect(() => render(<App />)).not.toThrow();
+      expect(mockGetTarget).not.toHaveBeenCalled();
+    });
   });
 });

@@ -16,9 +16,10 @@ import { useTargetConfigStyles } from './TargetConfig.styles'
 interface TargetConfigProps {
   activeTarget: TargetInstance | null
   onSetActiveTarget: (target: TargetInstance) => void
+  onClearActiveTarget?: () => void
 }
 
-export default function TargetConfig({ activeTarget, onSetActiveTarget }: TargetConfigProps) {
+export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearActiveTarget }: TargetConfigProps) {
   const styles = useTargetConfigStyles()
   const [targets, setTargets] = useState<TargetInstance[]>([])
   const [loading, setLoading] = useState(true)
@@ -58,6 +59,14 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget }: Target
     setDialogOpen(false)
     await fetchTargets()
   }
+
+  const handleTargetDeleted = useCallback(async (targetRegistryName: string) => {
+    await targetsApi.deleteTarget(targetRegistryName)
+    if (activeTarget?.target_registry_name === targetRegistryName) {
+      onClearActiveTarget?.()
+    }
+    await fetchTargets()
+  }, [activeTarget, fetchTargets, onClearActiveTarget])
 
   return (
     <div className={styles.root}>
@@ -127,6 +136,7 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget }: Target
           targets={targets}
           activeTarget={activeTarget}
           onSetActiveTarget={onSetActiveTarget}
+          onTargetDeleted={handleTargetDeleted}
         />
       )}
 
