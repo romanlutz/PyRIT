@@ -89,6 +89,21 @@ class TargetInstance(BaseModel):
             "(e.g., the name of the missing api_key environment variable)."
         ),
     )
+    session_only: bool = Field(
+        False,
+        description=(
+            "True for runtime targets that were created with an inline api_key and are "
+            "therefore not persisted to disk. They will not survive a backend restart. "
+            "The frontend should surface a one-time hint to the user after creation."
+        ),
+    )
+    persist_hint: Optional[str] = Field(
+        None,
+        description=(
+            "Human-readable hint explaining why session_only is True and how the user "
+            "can persist the target across restarts (e.g., set OPENAI_CHAT_KEY env var)."
+        ),
+    )
 
 
 class TargetListResponse(BaseModel):

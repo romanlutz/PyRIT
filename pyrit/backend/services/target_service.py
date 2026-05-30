@@ -77,11 +77,18 @@ class _RuntimeTargetMetadata:
             the user can see and delete them.
         reconfiguration_hint: Human-readable hint for the broken case
             (e.g., the missing env var name).
+        session_only: True when the target was created with an inline api_key
+            and therefore deliberately not persisted to disk. Mutually
+            exclusive with ``is_broken``.
+        persist_hint: Human-readable hint for the ``session_only`` case
+            (e.g., the env var to set so the target can be persisted).
     """
 
     entry: RuntimeTargetEntry
     is_broken: bool = False
     reconfiguration_hint: str | None = None
+    session_only: bool = False
+    persist_hint: str | None = None
 
 
 def _is_azure_openai_endpoint(endpoint: str) -> bool:
@@ -217,7 +224,8 @@ class TargetService:
 
         Returns:
             TargetInstance with metadata derived from the object plus
-            ``is_runtime`` / ``needs_reconfiguration`` flags from the side table.
+            ``is_runtime`` / ``needs_reconfiguration`` / ``session_only`` flags
+            from the side table.
         """
         meta = self._runtime_target_metadata.get(target_registry_name)
         return target_object_to_instance(
@@ -226,6 +234,8 @@ class TargetService:
             is_runtime=meta is not None,
             needs_reconfiguration=meta.is_broken if meta else False,
             reconfiguration_hint=meta.reconfiguration_hint if meta else None,
+            session_only=meta.session_only if meta else False,
+            persist_hint=meta.persist_hint if meta else None,
         )
 
     def _build_broken_instance(self, meta: _RuntimeTargetMetadata) -> TargetInstance:
@@ -349,10 +359,22 @@ class TargetService:
         """
         Create a new target instance from an API request.
 
-        Instantiates the target with the given type and params, registers it in
-        the registry under its registry name, and persists a sanitized record
-        (with ``api_key`` stripped) so the target can be replayed on the next
-        backend start.
+        Instantiates the target with the given type and params and registers it
+        in the registry under its registry name.
+
+        Persistence policy:
+            - If the request supplies an inline ``api_key`` in ``params``, the
+              target is treated as **session-only**: it lives for the current
+              backend process but is NOT written to the runtime targets file
+              (we deliberately never persist secrets to disk in plain text).
+              The returned ``TargetInstance`` is flagged ``session_only=True``
+              with a ``persist_hint`` describing how the user can promote it
+              to a persisted target (typically by setting the relevant api_key
+              environment variable and recreating the target).
+            - In all other cases (env-var-backed api_key, ``entra`` auth, or
+              targets without an api_key concept like ``TextTarget``) a
+              sanitized metadata record is persisted so the target can be
+              replayed on the next backend start.
 
         Args:
             request: The create target request with type, params, and auth_mode.
@@ -368,6 +390,8 @@ class TargetService:
                     but the endpoint is not valid (not managed by correct hosts);
                 - If auth_mode='api_key' is set for a target but no key is supplied
         """
+        had_inline_api_key = request.auth_mode == "api_key" and bool(request.params.get("api_key"))
+
         target_obj, target_registry_name = self._instantiate_and_register(request=request)
 
         entry = RuntimeTargetEntry(
@@ -376,10 +400,47 @@ class TargetService:
             auth_mode=request.auth_mode,
             params=sanitize_params(request.params),
         )
-        await self._runtime_store.append_async(entry)
-        self._runtime_target_metadata[target_registry_name] = _RuntimeTargetMetadata(entry=entry)
+
+        if had_inline_api_key:
+            target_class = self._get_target_class(target_type=request.type)
+            persist_hint = self._build_persist_hint(target_class=target_class)
+            self._runtime_target_metadata[target_registry_name] = _RuntimeTargetMetadata(
+                entry=entry,
+                session_only=True,
+                persist_hint=persist_hint,
+            )
+        else:
+            await self._runtime_store.append_async(entry)
+            self._runtime_target_metadata[target_registry_name] = _RuntimeTargetMetadata(entry=entry)
 
         return self._build_instance_from_object(target_registry_name=target_registry_name, target_obj=target_obj)
+
+    @staticmethod
+    def _build_persist_hint(*, target_class: type) -> str:
+        """
+        Build a user-facing hint explaining why an inline-api-key target is
+        session-only and how to make it persist across restarts.
+
+        Args:
+            target_class: The target class being instantiated, used to look
+                up the canonical api_key environment variable name when one
+                is declared.
+
+        Returns:
+            A human-readable hint string suitable for display in the UI.
+        """
+        env_var = _resolve_api_key_env_var(target_class)
+        base = (
+            "This target was created with an inline API key and will not survive a backend restart "
+            "(API keys are never written to disk for security)."
+        )
+        if env_var:
+            return (
+                f"{base} To persist it across restarts, set the {env_var} environment variable "
+                "in your shell or in ~/.pyrit/.env and recreate the target without the inline key. "
+                "For Azure endpoints you can also use Microsoft Entra authentication."
+            )
+        return base
 
     def _instantiate_and_register(
         self,

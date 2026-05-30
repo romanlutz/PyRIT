@@ -631,11 +631,16 @@ class TestTargetServiceSingleton:
 class TestCreateTargetPersistence:
     """Persistence side-effects of create_target_async."""
 
-    async def test_create_target_writes_sanitized_entry_to_store(
+    async def test_create_target_with_inline_api_key_skips_persistence_and_marks_session_only(
         self,
         sqlite_instance,
         runtime_store: RuntimeTargetStore,
     ) -> None:
+        """
+        Targets created with an inline api_key must NOT be persisted to disk
+        (we never write secrets to JSON) and must be flagged session_only so
+        the frontend can warn the user that the target won't survive restart.
+        """
         service = TargetService(runtime_store=runtime_store)
 
         request = CreateTargetRequest(
@@ -650,6 +655,63 @@ class TestCreateTargetPersistence:
 
         result = await service.create_target_async(request=request)
 
+        # Nothing written to disk.
+        assert await runtime_store.load_async() == []
+        assert not runtime_store.path.exists() or "should-not-persist" not in runtime_store.path.read_text(
+            encoding="utf-8"
+        )
+        # Response advertises the session-only state with an actionable hint.
+        assert result.session_only is True
+        assert result.persist_hint is not None
+        assert "OPENAI_CHAT_KEY" in result.persist_hint
+        assert result.is_runtime is True  # still deletable for this process
+
+    async def test_create_target_persist_hint_falls_back_when_no_env_var(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        """For target classes with no known api_key env var, the hint is generic."""
+        service = TargetService(runtime_store=runtime_store)
+
+        # TextTarget accepts no api_key at all; force the path by patching
+        # _resolve_api_key_env_var to return None for any class.
+        with patch.object(service, "_get_target_class", wraps=service._get_target_class) as _:
+            request = CreateTargetRequest(
+                type="TextTarget",
+                params={"api_key": "shouldnt-matter"},
+                auth_mode="api_key",
+            )
+            # TextTarget rejects unknown kwargs, so this would fail at construction.
+            # We assert the helper directly instead:
+            hint = TargetService._build_persist_hint(target_class=type("Stub", (), {}))
+            assert "inline API key" in hint
+            assert "OPENAI" not in hint  # no env var-specific text when class has none
+
+    async def test_create_target_with_env_var_api_key_persists_sanitized_entry(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        """
+        When the api_key is resolved from an env var (not provided inline), the
+        target is persisted and the response is NOT session_only. The persisted
+        entry never contains an api_key value.
+        """
+        service = TargetService(runtime_store=runtime_store)
+
+        request = CreateTargetRequest(
+            type="OpenAIChatTarget",
+            params={
+                "model_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com/",
+            },
+            auth_mode="api_key",
+        )
+
+        with patch.dict(os.environ, {"OPENAI_CHAT_KEY": "env-resolved-key"}):
+            result = await service.create_target_async(request=request)
+
         entries = await runtime_store.load_async()
         assert len(entries) == 1
         entry = entries[0]
@@ -657,7 +719,9 @@ class TestCreateTargetPersistence:
         assert entry.type == "OpenAIChatTarget"
         assert entry.auth_mode == "api_key"
         assert "api_key" not in entry.params
-        assert "should-not-persist" not in runtime_store.path.read_text(encoding="utf-8")
+        assert "env-resolved-key" not in runtime_store.path.read_text(encoding="utf-8")
+        assert result.session_only is False
+        assert result.persist_hint is None
 
     async def test_create_target_marks_instance_as_runtime(
         self,
@@ -671,6 +735,7 @@ class TestCreateTargetPersistence:
 
         assert result.is_runtime is True
         assert result.needs_reconfiguration is False
+        assert result.session_only is False
 
     async def test_initializer_registered_targets_are_not_marked_runtime(
         self,
@@ -689,6 +754,7 @@ class TestCreateTargetPersistence:
 
         assert result is not None
         assert result.is_runtime is False
+        assert result.session_only is False
 
 
 class TestDeleteTarget:

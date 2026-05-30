@@ -20,6 +20,7 @@ import {
   MessageBarBody,
 } from '@fluentui/react-components'
 import { targetsApi } from '@/services/api'
+import type { TargetInstance } from '@/types'
 import { useCreateTargetDialogStyles } from './CreateTargetDialog.styles'
 
 interface TargetTypeConfig {
@@ -76,7 +77,7 @@ function isAzureMlEndpoint(endpoint: string): boolean {
 interface CreateTargetDialogProps {
   open: boolean
   onClose: () => void
-  onCreated: () => void
+  onCreated: (created: TargetInstance) => void
 }
 
 export default function CreateTargetDialog({ open, onClose, onCreated }: CreateTargetDialogProps) {
@@ -168,13 +169,13 @@ export default function CreateTargetDialog({ open, onClose, onCreated }: CreateT
         if (!isNaN(parsedRepetitionPenalty)) params.repetition_penalty = parsedRepetitionPenalty
       }
 
-      await targetsApi.createTarget({
+      const created = await targetsApi.createTarget({
         type: targetType,
         params,
         ...(isEntra ? { auth_mode: 'entra' as const } : {}),
       })
       resetForm()
-      onCreated()
+      onCreated(created)
     } catch (err) {
       if (err instanceof Error) {
         setError(err.message)

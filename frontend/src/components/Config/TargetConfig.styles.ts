@@ -43,4 +43,7 @@ export const useTargetConfigStyles = makeStyles({
     color: tokens.colorPaletteRedForeground1,
     textAlign: 'center',
   },
+  persistHint: {
+    marginBottom: tokens.spacingVerticalL,
+  },
 })

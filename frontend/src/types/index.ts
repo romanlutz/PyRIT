@@ -81,6 +81,10 @@ export interface TargetInstance {
   needs_reconfiguration?: boolean
   /** Human-readable hint for the needs_reconfiguration case (e.g. the missing env var name). */
   reconfiguration_hint?: string | null
+  /** True if the target was created with an inline api_key and therefore won't survive a backend restart. */
+  session_only?: boolean
+  /** Human-readable hint for the session_only case (e.g. which env var to set to persist the target). */
+  persist_hint?: string | null
 }
 
 export interface TargetListResponse {

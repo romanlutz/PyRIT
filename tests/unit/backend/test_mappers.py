@@ -1409,6 +1409,28 @@ class TestTargetObjectToInstance:
         assert result.needs_reconfiguration is True
         assert result.reconfiguration_hint == "env var OPENAI_CHAT_KEY is not set"
 
+    def test_session_only_and_persist_hint_propagate(self) -> None:
+        """session_only=True and the persist_hint are preserved."""
+        target_obj = MagicMock(spec=PromptTarget)
+        target_obj.capabilities = TargetCapabilities()
+        target_obj.get_identifier.return_value = ComponentIdentifier(
+            class_name="OpenAIChatTarget", class_module="pyrit.prompt_target"
+        )
+
+        result = target_object_to_instance(
+            "t-1",
+            target_obj,
+            is_runtime=True,
+            session_only=True,
+            persist_hint="Set OPENAI_CHAT_KEY to persist this target.",
+        )
+
+        assert result.is_runtime is True
+        assert result.session_only is True
+        assert result.persist_hint == "Set OPENAI_CHAT_KEY to persist this target."
+        # session_only does not imply needs_reconfiguration.
+        assert result.needs_reconfiguration is False
+
     def test_supported_input_modalities_multimodal(self) -> None:
         """Test that a multimodal target reports all individual input types."""
         target_obj = MagicMock(spec=PromptTarget)

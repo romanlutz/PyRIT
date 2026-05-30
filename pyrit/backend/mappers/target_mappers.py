@@ -47,6 +47,8 @@ def target_object_to_instance(
     is_runtime: bool = False,
     needs_reconfiguration: bool = False,
     reconfiguration_hint: str | None = None,
+    session_only: bool = False,
+    persist_hint: str | None = None,
 ) -> TargetInstance:
     """
     Build a TargetInstance DTO from a registry target object.
@@ -58,12 +60,17 @@ def target_object_to_instance(
         target_registry_name: The human-friendly target registry name.
         target_obj: The domain PromptTarget object from the registry.
         is_runtime: True if this target was created at runtime via the API and
-            persisted to the runtime targets file (and is therefore deletable).
+            (when ``session_only`` is False) persisted to the runtime targets file.
+            Runtime targets are deletable via DELETE /api/targets/{name}.
         needs_reconfiguration: True if the target was restored from disk on
             startup but could not be fully reconstructed (e.g., the required
             api_key environment variable is missing).
         reconfiguration_hint: Optional human-readable hint for the
             ``needs_reconfiguration`` case (e.g., the missing env var name).
+        session_only: True for runtime targets created with an inline api_key
+            and therefore intentionally not persisted to disk.
+        persist_hint: Optional human-readable hint explaining how the user can
+            promote a session-only target to a persistent one.
 
     Returns:
         TargetInstance DTO with metadata derived from the object.
@@ -105,4 +112,6 @@ def target_object_to_instance(
         is_runtime=is_runtime,
         needs_reconfiguration=needs_reconfiguration,
         reconfiguration_hint=reconfiguration_hint,
+        session_only=session_only,
+        persist_hint=persist_hint,
     )

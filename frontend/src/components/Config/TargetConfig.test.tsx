@@ -14,6 +14,12 @@ jest.mock("../../services/api", () => ({
 }));
 
 jest.mock("./CreateTargetDialog", () => {
+  type MockTargetInstance = {
+    target_registry_name: string;
+    target_type: string;
+    session_only?: boolean;
+    persist_hint?: string | null;
+  };
   const MockDialog = ({
     open,
     onClose,
@@ -21,7 +27,7 @@ jest.mock("./CreateTargetDialog", () => {
   }: {
     open: boolean;
     onClose: () => void;
-    onCreated: () => void;
+    onCreated: (created: MockTargetInstance) => void;
   }) => {
     if (!open) return null;
     return (
@@ -29,8 +35,30 @@ jest.mock("./CreateTargetDialog", () => {
         <button onClick={onClose} data-testid="dialog-close">
           Cancel
         </button>
-        <button onClick={onCreated} data-testid="dialog-create">
+        <button
+          onClick={() =>
+            onCreated({
+              target_registry_name: "created-target",
+              target_type: "TextTarget",
+            })
+          }
+          data-testid="dialog-create"
+        >
           Create
+        </button>
+        <button
+          onClick={() =>
+            onCreated({
+              target_registry_name: "session-only-target",
+              target_type: "OpenAIChatTarget",
+              session_only: true,
+              persist_hint:
+                "This target was created with an inline API key and will not survive a backend restart. To persist it, set the OPENAI_CHAT_KEY environment variable.",
+            })
+          }
+          data-testid="dialog-create-session-only"
+        >
+          Create session-only
         </button>
       </div>
     );
@@ -389,6 +417,112 @@ describe("TargetConfig", () => {
     // Close via Cancel
     await userEvent.click(screen.getByTestId("dialog-close"));
     expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument();
+  });
+
+  describe("session-only persist hint", () => {
+    it("renders a warning MessageBar with the persist hint when a session-only target is created", async () => {
+      mockedTargetsApi.listTargets
+        .mockResolvedValueOnce({ items: [], pagination: { limit: 200, has_more: false } })
+        .mockResolvedValueOnce({
+          items: [
+            {
+              target_registry_name: "session-only-target",
+              target_type: "OpenAIChatTarget",
+              is_runtime: true,
+              session_only: true,
+              persist_hint:
+                "This target was created with an inline API key and will not survive a backend restart. To persist it, set the OPENAI_CHAT_KEY environment variable.",
+            },
+          ],
+          pagination: { limit: 200, has_more: false },
+        });
+
+      render(
+        <TestWrapper>
+          <TargetConfig {...defaultProps} />
+        </TestWrapper>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("No Targets Configured")).toBeInTheDocument();
+      });
+
+      await userEvent.click(screen.getByText("New Target"));
+      await userEvent.click(screen.getByTestId("dialog-create-session-only"));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/won.t survive a restart/i)
+        ).toBeInTheDocument();
+      });
+      expect(screen.getByText(/OPENAI_CHAT_KEY/)).toBeInTheDocument();
+    });
+
+    it("does NOT render the persist-hint MessageBar for a normally persisted target", async () => {
+      mockedTargetsApi.listTargets
+        .mockResolvedValueOnce({ items: [], pagination: { limit: 200, has_more: false } })
+        .mockResolvedValueOnce({
+          items: [
+            {
+              target_registry_name: "persistent-target",
+              target_type: "TextTarget",
+              is_runtime: true,
+            },
+          ],
+          pagination: { limit: 200, has_more: false },
+        });
+
+      render(
+        <TestWrapper>
+          <TargetConfig {...defaultProps} />
+        </TestWrapper>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("No Targets Configured")).toBeInTheDocument();
+      });
+
+      await userEvent.click(screen.getByText("New Target"));
+      await userEvent.click(screen.getByTestId("dialog-create"));
+
+      await waitFor(() => {
+        expect(screen.getByText("TextTarget")).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/won.t survive a restart/i)).not.toBeInTheDocument();
+    });
+
+    it("dismisses the persist-hint MessageBar when the dismiss button is clicked", async () => {
+      mockedTargetsApi.listTargets
+        .mockResolvedValueOnce({ items: [], pagination: { limit: 200, has_more: false } })
+        .mockResolvedValueOnce({
+          items: [],
+          pagination: { limit: 200, has_more: false },
+        });
+
+      render(
+        <TestWrapper>
+          <TargetConfig {...defaultProps} />
+        </TestWrapper>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("No Targets Configured")).toBeInTheDocument();
+      });
+
+      await userEvent.click(screen.getByText("New Target"));
+      await userEvent.click(screen.getByTestId("dialog-create-session-only"));
+
+      const notice = await screen.findByText(/won.t survive a restart/i);
+      expect(notice).toBeInTheDocument();
+
+      await userEvent.click(
+        screen.getByRole("button", { name: /dismiss session-only notice/i })
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByText(/won.t survive a restart/i)).not.toBeInTheDocument();
+      });
+    });
   });
 
   describe("target deletion", () => {

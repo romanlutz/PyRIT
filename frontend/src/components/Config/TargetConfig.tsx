@@ -4,8 +4,12 @@ import {
   Text,
   Button,
   Spinner,
+  MessageBar,
+  MessageBarBody,
+  MessageBarTitle,
+  MessageBarActions,
 } from '@fluentui/react-components'
-import { AddRegular, ArrowSyncRegular } from '@fluentui/react-icons'
+import { AddRegular, ArrowSyncRegular, DismissRegular } from '@fluentui/react-icons'
 import { targetsApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
 import type { TargetInstance } from '../../types'
@@ -25,6 +29,10 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [sessionOnlyNotice, setSessionOnlyNotice] = useState<{
+    targetName: string
+    hint: string
+  } | null>(null)
 
   // Retry fetching targets a few times with backoff. The Vite dev proxy
   // returns 502 while the backend is still starting, so a single failed
@@ -55,8 +63,11 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
     fetchTargets()
   }, [fetchTargets])
 
-  const handleTargetCreated = async () => {
+  const handleTargetCreated = async (created: TargetInstance) => {
     setDialogOpen(false)
+    if (created.session_only && created.persist_hint) {
+      setSessionOnlyNotice({ targetName: created.target_registry_name, hint: created.persist_hint })
+    }
     await fetchTargets()
   }
 
@@ -100,6 +111,30 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
         <div className={styles.loadingState}>
           <Spinner label="Loading targets..." />
         </div>
+      )}
+
+      {sessionOnlyNotice && (
+        <MessageBar
+          intent="warning"
+          className={styles.persistHint}
+          role="status"
+          aria-label="Session-only target notice"
+        >
+          <MessageBarBody>
+            <MessageBarTitle>Created &lsquo;{sessionOnlyNotice.targetName}&rsquo; — won&rsquo;t survive a restart</MessageBarTitle>
+            {sessionOnlyNotice.hint}
+          </MessageBarBody>
+          <MessageBarActions
+            containerAction={
+              <Button
+                appearance="transparent"
+                icon={<DismissRegular />}
+                aria-label="Dismiss session-only notice"
+                onClick={() => setSessionOnlyNotice(null)}
+              />
+            }
+          />
+        </MessageBar>
       )}
 
       {error && (
