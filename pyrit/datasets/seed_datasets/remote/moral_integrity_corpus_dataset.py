@@ -62,14 +62,11 @@ class _MICDataset(_RemoteDatasetLoader):
         """
         logger.info("Downloading SALT-NLP MIC dataset...")
 
-        def _download_and_parse() -> list[SeedPrompt]:
-            response = requests.get(self.source)
-            response.raise_for_status()
-
+        def _parse(zip_file: zipfile.ZipFile) -> list[SeedPrompt]:
             seed_prompts = []
             seen_questions: set = set()
 
-            with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+            with zip_file:
                 for split in self.VALID_SPLITS:
                     filename = f"MIC/{split}.jsonl"
                     with zip_file.open(filename) as f:
@@ -103,7 +100,8 @@ class _MICDataset(_RemoteDatasetLoader):
 
             return seed_prompts
 
-        seed_prompts = await asyncio.to_thread(_download_and_parse)
+        zip_file = await self._fetch_zip_from_url(self.source)
+        seed_prompts = await asyncio.to_thread(_parse, zip_file)
 
         if not seed_prompts:
             raise ValueError("SeedDataset cannot be empty.")

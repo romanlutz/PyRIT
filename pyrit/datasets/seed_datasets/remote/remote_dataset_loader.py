@@ -383,3 +383,29 @@ class _RemoteDatasetLoader(SeedDatasetProvider, ABC):
         result = SeedDatasetMetadata(**coerced)
         SeedDatasetMetadata._validate_singular_fields(metadata=result)
         return result
+
+    async def _fetch_zip_from_url(self, url: str) -> zipfile.ZipFile:
+        """
+        Download a ZIP file from a URL and return it as a ZipFile object.
+
+        This reusable helper offloads the blocking network I/O to a
+        thread so the event loop is never blocked.
+
+        Args:
+            url: The URL to download the ZIP file from.
+
+        Returns:
+            zipfile.ZipFile: The downloaded ZIP file object.
+
+        Raises:
+            requests.HTTPError: If the download fails.
+            zipfile.BadZipFile: If the content is not a valid ZIP.
+        """
+
+        def _download() -> zipfile.ZipFile:
+            response = requests.get(url)
+            response.raise_for_status()
+            return zipfile.ZipFile(io.BytesIO(response.content))
+
+        return await asyncio.to_thread(_download)
+
