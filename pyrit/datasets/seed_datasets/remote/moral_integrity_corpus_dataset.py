@@ -1,13 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import asyncio
-import io
-import json
 import logging
-import zipfile
-
-import requests
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -40,6 +34,7 @@ class _MICDataset(_RemoteDatasetLoader):
     size = "huge"
     tags = ["moral", "ethics", "dialogue"]
     VALID_SPLITS = ["train", "dev", "test"]
+    AUTHORS = ["Caleb Ziems", "Jane Yu", "Yi-Chia Wang", "Alon Halevy", "Diyi Yang"]
 
     def __init__(self) -> None:
         """Initialize the MIC dataset loader."""
@@ -50,9 +45,12 @@ class _MICDataset(_RemoteDatasetLoader):
         """Return the dataset name."""
         return "moral_integrity_corpus"
 
-    async def fetch_dataset_async(self) -> SeedDataset:
+    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch the MIC dataset and return as SeedDataset.
+
+        Args:
+            cache: Whether to cache the downloaded archive on disk. Defaults to True.
 
         Returns:
             SeedDataset: A SeedDataset containing MIC prompts.
@@ -62,46 +60,39 @@ class _MICDataset(_RemoteDatasetLoader):
         """
         logger.info("Downloading SALT-NLP MIC dataset...")
 
-        def _parse(zip_file: zipfile.ZipFile) -> list[SeedPrompt]:
-            seed_prompts = []
-            seen_questions: set = set()
+        inner_files = [f"MIC/{split}.jsonl" for split in self.VALID_SPLITS]
+        split_rows = await self._fetch_zip_from_url(
+            source=self.source,
+            inner_files=inner_files,
+            cache=cache,
+        )
 
-            with zip_file:
-                for split in self.VALID_SPLITS:
-                    filename = f"MIC/{split}.jsonl"
-                    with zip_file.open(filename) as f:
-                        for line in f:
-                            row = json.loads(line)
-                            question = row.get("Q", "").strip()
+        seed_prompts: list[SeedPrompt] = []
+        seen_questions: set[str] = set()
 
-                            if not question:
-                                continue
+        for inner in inner_files:
+            for row in split_rows[inner]:
+                question_raw = row.get("Q")
+                if not isinstance(question_raw, str):
+                    continue
+                question = question_raw.strip()
+                if not question or question in seen_questions:
+                    continue
+                seen_questions.add(question)
 
-                            if question in seen_questions:
-                                continue
-                            seen_questions.add(question)
+                moral = row.get("moral")
+                categories = [m.strip() for m in moral.split("|") if m.strip()] if isinstance(moral, str) else []
 
-                            moral = row.get("moral")
-                            if isinstance(moral, str):
-                                categories = [m.strip() for m in moral.split("|") if m.strip()]
-                            else:
-                                categories = []
-
-                            seed_prompts.append(
-                                SeedPrompt(
-                                    value=question,
-                                    data_type="text",
-                                    dataset_name=self.dataset_name,
-                                    source=self.source,
-                                    harm_categories=categories,
-                                    authors=["Caleb Ziems", "Jane Yu", "Yi-Chia Wang", "Alon Halevy", "Diyi Yang"],
-                                )
-                            )
-
-            return seed_prompts
-
-        zip_file = await self._fetch_zip_from_url(self.source)
-        seed_prompts = await asyncio.to_thread(_parse, zip_file)
+                seed_prompts.append(
+                    SeedPrompt(
+                        value=question,
+                        data_type="text",
+                        dataset_name=self.dataset_name,
+                        source=self.source,
+                        harm_categories=categories,
+                        authors=self.AUTHORS,
+                    )
+                )
 
         if not seed_prompts:
             raise ValueError("SeedDataset cannot be empty.")
@@ -109,4 +100,3 @@ class _MICDataset(_RemoteDatasetLoader):
         logger.info(f"Successfully loaded {len(seed_prompts)} prompts from MIC dataset")
 
         return SeedDataset(seeds=seed_prompts, dataset_name=self.dataset_name)
-    
