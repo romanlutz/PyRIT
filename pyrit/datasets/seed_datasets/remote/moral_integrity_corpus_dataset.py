@@ -1,14 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import io
 import json
 import logging
-import os
 import zipfile
-from typing import Optional
-
-import requests
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -22,9 +19,9 @@ class _MICDataset(_RemoteDatasetLoader):
     """
     Loader for the SALT-NLP Moral Integrity Corpus (MIC) dataset.
 
-    This dataset contains 113,817 conversations between humans and
-    chatbots labeled with moral categories like loyalty, care,
-    fairness, authority and sanctity.
+    This dataset contains conversations between humans and chatbots
+    labeled with moral categories like loyalty, care, fairness,
+    authority and sanctity.
 
     Reference: [@ziems2022mic]
     HuggingFace: https://huggingface.co/datasets/SALT-NLP/MIC
@@ -34,38 +31,24 @@ class _MICDataset(_RemoteDatasetLoader):
     """
 
     HF_DATASET_NAME = "SALT-NLP/MIC"
-    VALID_SPLITS = ["train", "dev", "test"]
     harm_categories = {"care", "fairness", "loyalty", "authority", "sanctity"}
     modalities = ["text"]
     size = "huge"
     tags = ["moral", "ethics", "dialogue"]
+    VALID_SPLITS = ["train", "dev", "test"]
 
-    def __init__(
-        self,
-        *,
-        token: Optional[str] = None,
-    ) -> None:
-        """
-        Initialize the MIC dataset loader.
-
-        Args:
-            token: HuggingFace authentication token. If not provided,
-                   reads from HUGGINGFACE_TOKEN env var.
-        """
+    def __init__(self) -> None:
+        """Initialize the MIC dataset loader."""
         self.source = "https://huggingface.co/datasets/SALT-NLP/MIC/resolve/main/MIC.zip"
-        self.token = token if token is not None else os.environ.get("HUGGINGFACE_TOKEN")
 
     @property
     def dataset_name(self) -> str:
         """Return the dataset name."""
         return "moral_integrity_corpus"
 
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
+    async def fetch_dataset_async(self) -> SeedDataset:
         """
         Fetch the MIC dataset and return as SeedDataset.
-
-        Args:
-            cache: Whether to cache the fetched dataset. Defaults to True.
 
         Returns:
             SeedDataset: A SeedDataset containing MIC prompts.
@@ -75,27 +58,46 @@ class _MICDataset(_RemoteDatasetLoader):
         """
         logger.info("Downloading SALT-NLP MIC dataset...")
 
-        response = requests.get(self.source)
-        response.raise_for_status()
+        def _download_and_parse() -> list:
+            import requests
+            response = requests.get(self.source)
+            response.raise_for_status()
 
-        seed_prompts = []
+            seed_prompts = []
+            seen_questions: set = set()
 
-        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
-            for split in self.VALID_SPLITS:
-                filename = f"MIC/{split}.jsonl"
-                with zip_file.open(filename) as f:
-                    for line in f:
-                        row = json.loads(line)
-                        question = row.get("Q", "").strip()
-                        if question:
+            with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+                for split in self.VALID_SPLITS:
+                    filename = f"MIC/{split}.jsonl"
+                    with zip_file.open(filename) as f:
+                        for line in f:
+                            row = json.loads(line)
+                            question = row.get("Q", "").strip()
+
+                            if not question:
+                                continue
+
+                            if question in seen_questions:
+                                continue
+                            seen_questions.add(question)
+
+                            moral = row.get("moral", "")
+                            categories = [m.strip() for m in moral.split("|") if m.strip()]
+
                             seed_prompts.append(
                                 SeedPrompt(
                                     value=question,
                                     data_type="text",
                                     dataset_name=self.dataset_name,
                                     source=self.source,
+                                    harm_categories=categories,
+                                    authors=["Caleb Ziems", "Jane Yu", "Yi-Chia Wang", "Alon Halevy", "Diyi Yang"],
                                 )
                             )
+
+            return seed_prompts
+
+        seed_prompts = await asyncio.to_thread(_download_and_parse)
 
         if not seed_prompts:
             raise ValueError("SeedDataset cannot be empty.")
