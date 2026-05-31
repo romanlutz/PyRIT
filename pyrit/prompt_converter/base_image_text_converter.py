@@ -24,6 +24,11 @@ class _BaseImageTextConverter(PromptConverter):
         """
         Word-wrap text to fit within max_width pixels.
 
+        Embedded ``\\n`` characters in ``text`` are preserved as hard line breaks.
+        Each newline-separated segment is wrapped independently so callers can
+        pass multi-line layouts (e.g. numbered lists, code, multi-paragraph text)
+        without losing the breaks.
+
         Args:
             text (str): The text to wrap.
             font (FreeTypeFont): The font used for measuring text width.
@@ -37,8 +42,16 @@ class _BaseImageTextConverter(PromptConverter):
         bbox = draw.textbbox((0, 0), string.ascii_letters, font=font)
         avg_char_width = (bbox[2] - bbox[0]) / len(string.ascii_letters)
         max_chars = max(1, int(max_width / avg_char_width))
-        wrapped = textwrap.fill(text, width=max_chars)
-        return wrapped.split("\n")
+        # ``textwrap.fill`` collapses all whitespace (including embedded ``\n``) into single
+        # spaces by default, which would flatten multi-line layouts onto a single line.
+        # Split on ``\n`` first, wrap each segment, then re-emit the hard breaks.
+        lines: list[str] = []
+        for segment in text.split("\n"):
+            if not segment:
+                lines.append("")
+            else:
+                lines.extend(textwrap.fill(segment, width=max_chars).split("\n"))
+        return lines
 
     def _get_line_height(self, *, font: FreeTypeFont) -> int:
         """
@@ -64,6 +77,7 @@ class _BaseImageTextConverter(PromptConverter):
         box_width: int,
         box_height: int,
         center_text: bool = False,
+        line_spacing: int = 0,
     ) -> Image.Image:
         """
         Draw text lines onto a transparent RGBA overlay image.
@@ -75,6 +89,8 @@ class _BaseImageTextConverter(PromptConverter):
             box_width (int): The overlay width.
             box_height (int): The overlay height.
             center_text (bool): Whether to center text horizontally and vertically. Defaults to False.
+            line_spacing (int): Extra pixel gap inserted between consecutive lines on top of
+                the font's natural line height. Defaults to 0 (no extra gap).
 
         Returns:
             Image.Image: The RGBA overlay with rendered text.
@@ -84,11 +100,12 @@ class _BaseImageTextConverter(PromptConverter):
         fill_color = color + (255,)
 
         line_height = self._get_line_height(font=font)
-        total_height = len(lines) * line_height
+        line_pitch = line_height + line_spacing
+        total_height = len(lines) * line_pitch - line_spacing if lines else 0
         y_start = (box_height - total_height) // 2 if center_text else 0
 
         for i, line in enumerate(lines):
-            line_y = y_start + i * line_height
+            line_y = y_start + i * line_pitch
             if center_text:
                 line_bbox = draw.textbbox((0, 0), line, font=font)
                 line_x = (box_width - (line_bbox[2] - line_bbox[0])) // 2
@@ -143,6 +160,7 @@ class _BaseImageTextConverter(PromptConverter):
         bounding_box: tuple[int, int, int, int],
         center_text: bool = False,
         rotation: float = 0.0,
+        line_spacing: int = 0,
     ) -> Image.Image:
         """
         Render text within a bounding box on an image.
@@ -158,6 +176,8 @@ class _BaseImageTextConverter(PromptConverter):
             bounding_box (tuple[int, int, int, int]): The (x1, y1, x2, y2) region.
             center_text (bool): Whether to center text in the bounding box. Defaults to False.
             rotation (float): Rotation angle in degrees. Defaults to 0.0.
+            line_spacing (int): Extra pixel gap between consecutive lines, on top of
+                the font's natural line height. Defaults to 0.
 
         Returns:
             Image.Image: The image with text rendered in the bounding box.
@@ -168,6 +188,12 @@ class _BaseImageTextConverter(PromptConverter):
 
         lines = self._wrap_text(text=text, font=font, max_width=box_width)
         overlay = self._draw_text_overlay(
-            lines=lines, font=font, color=color, box_width=box_width, box_height=box_height, center_text=center_text
+            lines=lines,
+            font=font,
+            color=color,
+            box_width=box_width,
+            box_height=box_height,
+            center_text=center_text,
+            line_spacing=line_spacing,
         )
         return self._composite_overlay(image=image, overlay=overlay, bounding_box=bounding_box, rotation=rotation)

@@ -49,6 +49,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
         bounding_box: tuple[int, int, int, int] | None = None,
         rotation: float = 0.0,
         center_text: bool = False,
+        line_spacing: int = 0,
     ) -> None:
         """
         Initialize the converter with the image file path and text properties.
@@ -70,13 +71,16 @@ class AddImageTextConverter(_BaseImageTextConverter):
             rotation (float): Rotation angle in degrees for the text. Defaults to 0.0.
             center_text (bool): Whether to center text horizontally and vertically within the bounding box.
                 Defaults to False.
+            line_spacing (int): Extra pixel gap inserted between consecutive lines on top of the font's
+                natural line height. Useful for typographic-image layouts (e.g. FigStep) that need visible
+                gaps between numbered list items. Defaults to 0.
 
         Raises:
             TypeError: If more than one positional argument is passed, or if img_to_add
                 is passed as both positional and keyword argument.
             ValueError: If img_to_add is empty, font_name doesn't end with ".ttf",
                 font_size tuple is invalid, bounding_box coordinates are invalid,
-                or x_pos/y_pos are used together with bounding_box.
+                ``line_spacing`` is negative, or x_pos/y_pos are used together with bounding_box.
         """
         if args:
             if len(args) > 1:
@@ -116,6 +120,8 @@ class AddImageTextConverter(_BaseImageTextConverter):
             x1, y1, x2, y2 = bounding_box
             if x2 <= x1 or y2 <= y1:
                 raise ValueError("bounding_box must have x2 > x1 and y2 > y1")
+        if line_spacing < 0:
+            raise ValueError("line_spacing must be non-negative")
         self._img_to_add = img_to_add
         self._font_name = font_name
         self._font_size = self._font_size_max
@@ -127,6 +133,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
         self._bounding_box = bounding_box
         self._rotation = rotation
         self._center_text = center_text
+        self._line_spacing = line_spacing
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -146,6 +153,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
             params["bounding_box"] = self._bounding_box
         params["rotation"] = self._rotation
         params["center_text"] = self._center_text
+        params["line_spacing"] = self._line_spacing
         return self._create_identifier(params=params)
 
     def _extract_font_size(self, font_size: int | tuple[int, int]) -> None:
@@ -201,6 +209,10 @@ class AddImageTextConverter(_BaseImageTextConverter):
         """
         Auto-size font from font_size_max down to font_size_min until text fits in the box.
 
+        Accounts for ``self._line_spacing`` when computing whether the rendered lines fit
+        vertically, so callers that mix auto-sizing with a non-zero line gap get a
+        consistent answer.
+
         Args:
             text (str): The text to fit.
             box_width (int): The box width in pixels.
@@ -216,7 +228,10 @@ class AddImageTextConverter(_BaseImageTextConverter):
             font = self._load_font_at_size(size)
             lines = self._wrap_text(text=text, font=font, max_width=usable_width)
             line_height = self._get_line_height(font=font)
-            if len(lines) * line_height <= usable_height:
+            if not lines:
+                return font, lines
+            total_height = len(lines) * (line_height + self._line_spacing) - self._line_spacing
+            if total_height <= usable_height:
                 return font, lines
 
         min_font = self._load_font_at_size(self._font_size_min)
@@ -262,6 +277,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
                 box_width=x2 - x1,
                 box_height=y2 - y1,
                 center_text=self._center_text,
+                line_spacing=self._line_spacing,
             )
             return self._composite_overlay(
                 image=image, overlay=overlay, bounding_box=bounding_box, rotation=self._rotation
@@ -275,6 +291,7 @@ class AddImageTextConverter(_BaseImageTextConverter):
             bounding_box=bounding_box,
             center_text=self._center_text,
             rotation=self._rotation,
+            line_spacing=self._line_spacing,
         )
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:

@@ -6,7 +6,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 from unit.mocks import get_mock_scorer_identifier, get_mock_target_identifier
 
 from pyrit.datasets.seed_datasets.remote.figstep_dataset import _FigStepDataset
@@ -19,6 +19,7 @@ from pyrit.executor.attack import (
     SingleTurnAttackContext,
 )
 from pyrit.models import Message
+from pyrit.prompt_converter import AddImageTextConverter
 from pyrit.prompt_target import PromptTarget
 from pyrit.score import Scorer, TrueFalseScorer
 
@@ -192,20 +193,24 @@ class TestGetStemAsync:
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestRenderFigStepImage:
-    async def test_renders_via_pillow_image_draw(self, figstep_attack):
-        """The render path calls ImageDraw.text directly so embedded newlines survive."""
-        captured: dict = {}
+    async def test_blank_canvas_is_cached_across_invocations(self, figstep_attack):
+        """The blank canvas is created once and reused on subsequent renders."""
+        first_path = await figstep_attack._ensure_blank_canvas_async()
+        second_path = await figstep_attack._ensure_blank_canvas_async()
+        assert first_path == second_path
+        assert os.path.exists(first_path)
+        with Image.open(first_path) as img:
+            assert img.size == FigStepAttack._DEFAULT_CANVAS_SIZE
+            assert img.mode == "RGB"
+            # Centre pixel of an unmarked canvas should be the configured background.
+            assert img.getpixel((img.width // 2, img.height // 2)) == FigStepAttack._DEFAULT_BG_COLOR
 
-        original_text = ImageDraw.ImageDraw.text
-
-        def capture_text(self, xy, text, font=None, fill=None, **kwargs):
-            captured["xy"] = xy
-            captured["text"] = text
-            captured["fill"] = fill
-            captured["spacing"] = kwargs.get("spacing")
-            return original_text(self, xy, text, font=font, fill=fill, **kwargs)
-
-        with patch.object(ImageDraw.ImageDraw, "text", capture_text):
+    async def test_renders_via_add_image_text_converter(self, figstep_attack):
+        """The render path delegates to AddImageTextConverter with paper-faithful parameters."""
+        with patch(
+            "pyrit.executor.attack.single_turn.figstep.AddImageTextConverter",
+            wraps=AddImageTextConverter,
+        ) as converter_cls:
             result_path = await figstep_attack._render_figstep_image_async(text="Steps to bake.\n1. \n2. \n3. ")
 
         assert os.path.exists(result_path)
@@ -213,19 +218,22 @@ class TestRenderFigStepImage:
             assert img.size == FigStepAttack._DEFAULT_CANVAS_SIZE
             assert img.mode == "RGB"
 
-        assert captured["xy"] == FigStepAttack._DEFAULT_TEXT_ORIGIN
-        assert captured["fill"] == FigStepAttack._DEFAULT_TEXT_COLOR
-        assert captured["spacing"] == FigStepAttack._DEFAULT_LINE_SPACING
-        # Critical regression guard: the multi-line text is passed through verbatim
-        # so PIL renders each numbered item on its own line (the FigStep paper layout).
-        assert captured["text"] == "Steps to bake.\n1. \n2. \n3. "
+        converter_cls.assert_called_once()
+        kwargs = converter_cls.call_args.kwargs
+        assert kwargs["font_name"] is None
+        assert kwargs["font_size"] == FigStepAttack._DEFAULT_FONT_SIZE
+        assert kwargs["color"] == FigStepAttack._DEFAULT_TEXT_COLOR
+        assert kwargs["line_spacing"] == FigStepAttack._DEFAULT_LINE_SPACING
+        x_origin, y_origin = FigStepAttack._DEFAULT_TEXT_ORIGIN
+        canvas_w, canvas_h = FigStepAttack._DEFAULT_CANVAS_SIZE
+        assert kwargs["bounding_box"] == (x_origin, y_origin, canvas_w, canvas_h)
 
     async def test_rendered_image_preserves_embedded_newlines(self, figstep_attack):
-        """Regression guard: comparing single-line vs multi-line text must produce different pixels.
+        """Regression guard: single-line vs multi-line text must render to different pixels.
 
-        With the previous implementation (``AddImageTextConverter``), ``textwrap.fill`` collapsed
-        embedded ``\\n`` to spaces and both inputs rendered identically. The direct
-        ``ImageDraw.text`` path keeps the newlines, so the two outputs must differ.
+        Before the AddImageTextConverter fix (``textwrap.fill`` collapsed embedded ``\\n`` to
+        spaces) both inputs rendered identically. With the fix in place, each numbered list
+        item lands on its own line and the pixel buffers diverge.
         """
         single_line_path = await figstep_attack._render_figstep_image_async(text="Steps to bake. 1. 2. 3.")
         multi_line_path = await figstep_attack._render_figstep_image_async(text="Steps to bake.\n1. \n2. \n3. ")
@@ -244,24 +252,8 @@ class TestRenderFigStepImage:
         with Image.open(rendered_path) as img:
             assert img.size == (200, 120)
             assert img.mode == "RGB"
-            # Bottom-right pixel is past the rendered text, so should still be the background colour.
+            # Bottom-right pixel is past the rendered text, so it should still be the background colour.
             assert img.getpixel((199, 119)) == (10, 20, 30)
-
-
-@pytest.mark.usefixtures("patch_central_database")
-class TestLoadFont:
-    def test_load_font_returns_default_when_font_name_is_none(self, figstep_attack):
-        font = figstep_attack._load_font()
-        assert font is not None
-        # Pillow's load_default returns an ImageFont (FreeType-backed on modern Pillow,
-        # bitmap on older); either way it's truthy and renderable.
-        assert hasattr(font, "getbbox") or hasattr(font, "getmask")
-
-    def test_load_font_falls_back_when_truetype_missing(self, mock_objective_target):
-        attack = FigStepAttack(objective_target=mock_objective_target, font_name="NonExistent.ttf")
-        font = attack._load_font()
-        # Should not raise; falls back to default font.
-        assert font is not None
 
 
 @pytest.mark.usefixtures("patch_central_database")

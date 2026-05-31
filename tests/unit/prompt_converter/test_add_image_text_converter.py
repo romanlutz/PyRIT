@@ -290,3 +290,60 @@ def test_add_image_text_converter_auto_font_size_no_bounding_box(large_sample_im
     )
     updated_image = converter._add_text_to_image("Auto-sized text on full image")
     assert updated_image is not None
+
+
+# --- Embedded newline preservation tests ---
+
+
+def test_add_image_text_converter_preserves_embedded_newlines(large_sample_image):
+    """Regression guard for AddImageTextConverter: embedded ``\\n`` must produce distinct line layouts.
+
+    Before the ``_wrap_text`` fix, ``textwrap.fill`` collapsed all whitespace (including
+    embedded ``\\n``) into single spaces, flattening multi-line layouts like numbered
+    lists onto a single line. The two inputs below must render to different pixel
+    buffers — single-line text takes one row, multi-line text spans several.
+    """
+    single_line_converter = AddImageTextConverter(img_to_add=large_sample_image, font_size=20)
+    multi_line_converter = AddImageTextConverter(img_to_add=large_sample_image, font_size=20)
+
+    single_line_img = single_line_converter._add_text_to_image("1. 2. 3.")
+    multi_line_img = multi_line_converter._add_text_to_image("1.\n2.\n3.")
+
+    assert single_line_img.tobytes() != multi_line_img.tobytes()
+
+
+def test_add_image_text_converter_wrap_text_preserves_blank_lines(large_sample_image):
+    """A blank line in the source text should land as an empty line in the wrapped output."""
+    converter = AddImageTextConverter(img_to_add=large_sample_image, font_size=20)
+    lines = converter._wrap_text(text="first\n\nthird", font=converter._font, max_width=400)
+    assert lines == ["first", "", "third"]
+
+
+# --- line_spacing tests ---
+
+
+def test_add_image_text_converter_negative_line_spacing_raises(image_text_converter_sample_image):
+    with pytest.raises(ValueError, match="line_spacing must be non-negative"):
+        AddImageTextConverter(img_to_add=image_text_converter_sample_image, line_spacing=-1)
+
+
+def test_add_image_text_converter_line_spacing_default_is_zero(image_text_converter_sample_image):
+    converter = AddImageTextConverter(img_to_add=image_text_converter_sample_image)
+    assert converter._line_spacing == 0
+
+
+def test_add_image_text_converter_line_spacing_changes_layout(large_sample_image):
+    """A non-zero line_spacing should push subsequent lines down, changing the rendered pixels."""
+    zero_spacing = AddImageTextConverter(img_to_add=large_sample_image, font_size=20, line_spacing=0)
+    extra_spacing = AddImageTextConverter(img_to_add=large_sample_image, font_size=20, line_spacing=20)
+
+    tight_img = zero_spacing._add_text_to_image("alpha\nbeta\ngamma")
+    loose_img = extra_spacing._add_text_to_image("alpha\nbeta\ngamma")
+
+    assert tight_img.tobytes() != loose_img.tobytes()
+
+
+def test_add_image_text_converter_line_spacing_appears_in_identifier(image_text_converter_sample_image):
+    converter = AddImageTextConverter(img_to_add=image_text_converter_sample_image, line_spacing=11)
+    identifier = converter.get_identifier()
+    assert identifier.params["line_spacing"] == 11

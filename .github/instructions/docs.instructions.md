@@ -60,14 +60,27 @@ Before running `jupytext --execute`, make sure the kernel will exercise *the cod
      (this rebinds the existing kernel to this checkout, no new kernel needed).
    - Only create a new kernel (`python -m ipykernel install --user --name <name>`)
      if you actually need an isolated env.
-2. **Credentials must be pre-configured.** Most notebooks call live targets
-   (OpenAI, Azure, etc.) and load creds from `~/.pyrit/.env`. Make sure the
-   required keys are present before executing.
+2. **Credentials are already configured — just call `initialize_pyrit_async()`.**
+   `~/.pyrit/.env` holds the live-target keys (OpenAI, Azure, HuggingFace, etc.)
+   and `initialize_pyrit_async()` loads them on every notebook run. Don't add
+   "no-credential preview" fallbacks, mock targets, or try/except guards around
+   real API calls just to make the notebook executable in a sandbox — credentials
+   are available locally and the rendered outputs are what readers come for.
+   If a notebook genuinely fails to find a key, surface it; don't paper over.
 
 ### Keep the cell outputs
 
 **Do not strip cell outputs from notebooks under `doc/`.** Outputs are part of the
 documentation — readers rely on seeing rendered tables, images, and printer output.
+Just execute the notebook and commit it; the cached outputs (printed text, rendered
+images via `IPython.display`, transcripts from `PrettyConversationMemoryPrinter`,
+etc.) belong in the `.ipynb`.
+
+Pre-commit hooks strip a small, intentional subset (absolute paths in outputs,
+`tqdm` progress bars, jupytext kernelspec). Trust them to do that job — don't
+pre-emptively strip outputs yourself, and don't worry about "leaking" paths or
+progress bars in `git diff`; the hook will normalise them on commit.
+
 If a notebook can't execute end-to-end, that is exactly the regression we want
 to surface in review; don't paper over it by committing an output-less notebook.
 `nbstripout` is intentionally not run against `doc/` content for this reason.

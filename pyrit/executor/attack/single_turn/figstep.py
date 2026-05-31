@@ -19,9 +19,9 @@ import logging
 import textwrap
 import uuid
 from io import BytesIO
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.executor.attack.core.attack_config import (
@@ -36,7 +36,7 @@ from pyrit.executor.attack.single_turn.single_turn_attack_strategy import (
 )
 from pyrit.models import Message, MessagePiece, SeedPrompt
 from pyrit.models.data_type_serializer import data_serializer_factory
-from pyrit.prompt_converter import LLMGenericTextConverter
+from pyrit.prompt_converter import AddImageTextConverter, LLMGenericTextConverter
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -59,12 +59,18 @@ class FigStepAttack(PromptSendingAttack):
 
     The default rendering parameters mirror the FigStep paper's reference
     implementation: a 760x760 white canvas, font size 80, text wrapped at width 15
-    characters, three empty numbered items, and text origin at (20, 10).
+    characters, three empty numbered items, text origin at (20, 10), and an
+    11-pixel gap between rendered lines.
 
     By default the font is left to Pillow's built-in (consistent with
     ``AddImageTextConverter`` / ``_ComicJailbreakDataset``) so rendering works on
     any platform. Pass ``font_name="FreeMonoBold.ttf"`` for paper-faithful
     rendering when the font is installed locally.
+
+    Rendering is delegated to ``AddImageTextConverter``: the attack creates a
+    blank canvas once and reuses it on every invocation, then asks the converter
+    to lay text over it. The converter preserves embedded ``\\n`` characters,
+    which is what makes each numbered list item land on its own line.
 
     Reference: Gong et al., arXiv:2311.05608.
     """
@@ -194,6 +200,8 @@ class FigStepAttack(PromptSendingAttack):
         self._background_color = background_color
         self._text_origin = text_origin
         self._line_spacing = line_spacing
+        # Lazily built and cached on first render so subsequent invocations reuse the same canvas.
+        self._blank_canvas_path: Optional[str] = None
 
         if attack_adversarial_config is not None:
             if "{{ objective }}" not in rephrase_instructions and "{{objective}}" not in rephrase_instructions:
@@ -257,32 +265,35 @@ class FigStepAttack(PromptSendingAttack):
             wrapped += f"\n{idx}. "
         return wrapped
 
-    def _load_font(self) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    async def _ensure_blank_canvas_async(self) -> str:
         """
-        Load the FigStep font.
+        Lazily create a blank canvas for the configured size/background and cache its path.
 
-        Falls back to Pillow's built-in default font when ``self._font_name``
-        is ``None`` or the named TrueType font cannot be opened.
+        The canvas is persisted via ``data_serializer_factory`` so it lives in PyRIT's
+        configured results-storage backend (local results dir or Azure Blob), and
+        subsequent invocations reuse the same image rather than re-encoding it on
+        every render.
 
         Returns:
-            The loaded Pillow font object at ``self._font_size``.
+            str: Path (or backend URL) of the persisted blank canvas PNG.
         """
-        if self._font_name is None:
-            return cast("ImageFont.ImageFont", ImageFont.load_default(size=self._font_size))
-        try:
-            return ImageFont.truetype(self._font_name, self._font_size)
-        except OSError:
-            logger.warning(f"Cannot open font resource: {self._font_name!r}. Using Pillow built-in default font.")
-            return cast("ImageFont.ImageFont", ImageFont.load_default(size=self._font_size))
+        if self._blank_canvas_path is None:
+            canvas = Image.new("RGB", self._canvas_size, self._background_color)
+            buf = BytesIO()
+            canvas.save(buf, format="PNG")
+            serializer = data_serializer_factory(category="prompt-memory-entries", data_type="image_path")
+            await serializer.save_b64_image(data=base64.b64encode(buf.getvalue()))
+            self._blank_canvas_path = str(serializer.value)
+        return self._blank_canvas_path
 
     async def _render_figstep_image_async(self, *, text: str) -> str:
         """
-        Render multi-line ``text`` onto a blank canvas via direct PIL drawing.
+        Render multi-line ``text`` onto a blank canvas via ``AddImageTextConverter``.
 
-        Mirrors the FigStep reference implementation's ``text_to_image`` helper:
-        a single ``ImageDraw.text`` call that honours embedded newlines (each
-        numbered list item ends up on its own line) with the paper's default
-        ``spacing=11`` line gap.
+        Mirrors the FigStep paper's ``text_to_image`` helper: a single text-on-image
+        composition with paper-default ``spacing=11`` between lines. Embedded
+        ``\\n`` characters in ``text`` are preserved by the converter, which is what
+        makes each numbered list item land on its own line.
 
         Args:
             text: Pre-built FigStep text (wrapped stem followed by empty
@@ -292,24 +303,22 @@ class FigStepAttack(PromptSendingAttack):
             str: Path to the rendered PNG file, managed by PyRIT's configured
             results storage backend.
         """
-        canvas = Image.new("RGB", self._canvas_size, self._background_color)
-        draw = ImageDraw.Draw(canvas)
-        font = self._load_font()
-        draw.text(
-            xy=self._text_origin,
-            text=text,
-            font=font,
-            fill=self._text_color,
-            spacing=self._line_spacing,
+        blank_canvas = await self._ensure_blank_canvas_async()
+        converter = AddImageTextConverter(
+            img_to_add=blank_canvas,
+            font_name=self._font_name,
+            font_size=self._font_size,
+            color=self._text_color,
+            bounding_box=(
+                self._text_origin[0],
+                self._text_origin[1],
+                self._canvas_size[0],
+                self._canvas_size[1],
+            ),
+            line_spacing=self._line_spacing,
         )
-
-        buf = BytesIO()
-        canvas.save(buf, format="PNG")
-        image_b64 = base64.b64encode(buf.getvalue())
-
-        serializer = data_serializer_factory(category="prompt-memory-entries", data_type="image_path")
-        await serializer.save_b64_image(data=image_b64)
-        return str(serializer.value)
+        result = await converter.convert_async(prompt=text, input_type="text")
+        return result.output_text
 
     def _build_multimodal_message(self, *, image_path: str, carrier_text: str) -> Message:
         """
