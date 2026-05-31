@@ -116,6 +116,7 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
       {sessionOnlyNotice && (
         <MessageBar
           intent="warning"
+          layout="multiline"
           className={styles.persistHint}
           role="status"
           aria-label="Session-only target notice"
