@@ -47,6 +47,8 @@ from pyrit.executor.attack.multi_turn import (
 )
 from pyrit.executor.attack.single_turn import (
     ContextComplianceAttack,
+    FigStepAttack,
+    FigStepAttackParameters,
     FlipAttack,
     ManyShotJailbreakAttack,
     PromptSendingAttack,
@@ -83,6 +85,8 @@ __all__ = [
     "CrescendoAttack",
     "CrescendoAttackContext",
     "CrescendoAttackResult",
+    "FigStepAttack",
+    "FigStepAttackParameters",
     "FlipAttack",
     "ManyShotJailbreakAttack",
     "MarkdownAttackResultPrinter",

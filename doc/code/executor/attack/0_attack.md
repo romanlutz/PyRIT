@@ -41,6 +41,7 @@ flowchart LR
         S_psa3["ManyShotJailbreakAttack"]
         S_psa4["RolePlayAttack"]
         S_psa5["SkeletonKeyAttack"]
+        S_psa6["FigStepAttack"]
         S_psa["PromptSendingAttack"]
         S_single["SingleTurnAttackStrategy (ABC)"]
         S_c["CrescendoAttack"]
@@ -57,6 +58,7 @@ flowchart LR
     S_psa --> S_psa3
     S_psa --> S_psa4
     S_psa --> S_psa5
+    S_psa --> S_psa6
     S_single --> S_psa
     S_multi --> S_c
     S_multi --> S_r
