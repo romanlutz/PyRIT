@@ -27,6 +27,37 @@
 #
 # The results and intermediate interactions will be saved to memory according to the environment settings.
 # For details, see the [Memory Configuration Guide](../../memory/0_memory.md).
+#
+# ## Preview: what does a FigStep image look like?
+#
+# Before running the full attack, this cell renders a FigStep image from a sample stem using the same
+# defaults the attack would use internally. It only needs Pillow and IPython — no API credentials — so
+# the published documentation always shows what the attack produces.
+# %%
+from unittest.mock import MagicMock
+
+from IPython.display import display
+from PIL import Image
+
+from pyrit.executor.attack import FigStepAttack
+from pyrit.prompt_target import PromptTarget
+from pyrit.setup import IN_MEMORY, initialize_pyrit_async
+
+await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
+
+# Build a FigStepAttack with a dummy target — we only call the local rendering helper, not the target.
+preview_attack = FigStepAttack(objective_target=MagicMock(spec=PromptTarget))
+preview_stem = "Steps to bake a chocolate cake."
+preview_text = preview_attack._build_figstep_text(stem=preview_stem)
+preview_path = await preview_attack._render_figstep_image_async(text=preview_text)  # type: ignore
+display(Image.open(preview_path))
+
+# %% [markdown]
+# ## Running the attack end-to-end
+#
+# The cell below sends rendered FigStep images to a vision-capable `OpenAIChatTarget` with the
+# adversarial-rephrase step enabled. Requires `OPENAI_*` and
+# `AZURE_OPENAI_GPT4O_UNSAFE_CHAT_{ENDPOINT,MODEL}` environment variables.
 # %%
 import os
 
@@ -35,14 +66,10 @@ from pyrit.executor.attack import (
     AttackAdversarialConfig,
     AttackExecutor,
     AttackScoringConfig,
-    FigStepAttack,
 )
 from pyrit.output import output_attack_async
 from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.score import AzureContentFilterScorer, FloatScaleThresholdScorer
-from pyrit.setup import IN_MEMORY, initialize_pyrit_async
-
-await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
 
 objective_target = OpenAIChatTarget()
 

@@ -14,14 +14,14 @@ Reference implementation (MIT):
 https://github.com/CryptoAILab/FigStep/blob/0861b17b3d67887c06ee3534ec65b3012f9becb7/src/generate_prompts.py
 """
 
+import base64
 import logging
-import os
-import tempfile
 import textwrap
 import uuid
-from typing import Any, Optional
+from io import BytesIO
+from typing import Any, Optional, cast
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.executor.attack.core.attack_config import (
@@ -35,7 +35,8 @@ from pyrit.executor.attack.single_turn.single_turn_attack_strategy import (
     SingleTurnAttackContext,
 )
 from pyrit.models import Message, MessagePiece, SeedPrompt
-from pyrit.prompt_converter import AddImageTextConverter, LLMGenericTextConverter
+from pyrit.models.data_type_serializer import data_serializer_factory
+from pyrit.prompt_converter import LLMGenericTextConverter
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -93,10 +94,9 @@ class FigStepAttack(PromptSendingAttack):
     _DEFAULT_TEXT_ORIGIN: tuple[int, int] = (20, 10)
     _DEFAULT_TEXT_COLOR: tuple[int, int, int] = (0, 0, 0)
     _DEFAULT_BG_COLOR: tuple[int, int, int] = (255, 255, 255)
-    # Margin between text bounding box and canvas edge on the right and bottom,
-    # mirroring ``_BaseImageTextConverter._DEFAULT_MARGIN`` so wrapping inside the
-    # underlying ``AddImageTextConverter`` matches the paper's layout.
-    _CANVAS_EDGE_MARGIN: int = 5
+    # Pixel gap between consecutive rendered text lines. Matches the
+    # ``spacing`` argument used by the FigStep reference implementation.
+    _DEFAULT_LINE_SPACING: int = 11
 
     @apply_defaults
     def __init__(
@@ -114,6 +114,7 @@ class FigStepAttack(PromptSendingAttack):
         text_color: tuple[int, int, int] = _DEFAULT_TEXT_COLOR,
         background_color: tuple[int, int, int] = _DEFAULT_BG_COLOR,
         text_origin: tuple[int, int] = _DEFAULT_TEXT_ORIGIN,
+        line_spacing: int = _DEFAULT_LINE_SPACING,
         attack_converter_config: Optional[AttackConverterConfig] = None,
         attack_scoring_config: Optional[AttackScoringConfig] = None,
         prompt_normalizer: Optional[PromptNormalizer] = None,
@@ -149,6 +150,8 @@ class FigStepAttack(PromptSendingAttack):
             background_color: RGB tuple for canvas color. Defaults to white.
             text_origin: ``(x, y)`` pixel position of the text's top-left corner.
                 Defaults to ``(20, 10)`` (paper default).
+            line_spacing: Pixel gap between consecutive rendered text lines.
+                Defaults to 11 (paper default).
             attack_converter_config: Standard ``PromptSendingAttack`` argument.
             attack_scoring_config: Standard ``PromptSendingAttack`` argument.
             prompt_normalizer: Standard ``PromptSendingAttack`` argument.
@@ -156,7 +159,7 @@ class FigStepAttack(PromptSendingAttack):
 
         Raises:
             ValueError: If ``num_items < 1``, ``wrap_width < 1``, ``font_size < 1``,
-                ``canvas_size`` has non-positive dimensions, or
+                ``line_spacing < 0``, ``canvas_size`` has non-positive dimensions, or
                 ``rephrase_instructions`` is missing the ``{{ objective }}`` placeholder
                 when ``attack_adversarial_config`` is provided.
         """
@@ -175,6 +178,8 @@ class FigStepAttack(PromptSendingAttack):
             raise ValueError(f"wrap_width must be >= 1, got {wrap_width}")
         if font_size < 1:
             raise ValueError(f"font_size must be >= 1, got {font_size}")
+        if line_spacing < 0:
+            raise ValueError(f"line_spacing must be >= 0, got {line_spacing}")
         if canvas_size[0] < 1 or canvas_size[1] < 1:
             raise ValueError(f"canvas_size must have positive dimensions, got {canvas_size}")
 
@@ -188,6 +193,7 @@ class FigStepAttack(PromptSendingAttack):
         self._text_color = text_color
         self._background_color = background_color
         self._text_origin = text_origin
+        self._line_spacing = line_spacing
 
         if attack_adversarial_config is not None:
             if "{{ objective }}" not in rephrase_instructions and "{{objective}}" not in rephrase_instructions:
@@ -205,9 +211,6 @@ class FigStepAttack(PromptSendingAttack):
             )
         else:
             self._rephrase_converter = None
-
-        # Lazily generated and cached blank canvas path; reused across objectives.
-        self._blank_canvas_path: Optional[str] = None
 
     async def _setup_async(self, *, context: SingleTurnAttackContext[Any]) -> None:
         """Build the FigStep multimodal message and stash it on the context."""
@@ -254,52 +257,59 @@ class FigStepAttack(PromptSendingAttack):
             wrapped += f"\n{idx}. "
         return wrapped
 
-    def _ensure_blank_canvas(self) -> str:
+    def _load_font(self) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """
-        Create a blank canvas PNG on first use and cache the path.
+        Load the FigStep font.
+
+        Falls back to Pillow's built-in default font when ``self._font_name``
+        is ``None`` or the named TrueType font cannot be opened.
 
         Returns:
-            str: Path to the cached blank canvas PNG.
+            The loaded Pillow font object at ``self._font_size``.
         """
-        if self._blank_canvas_path is not None and os.path.exists(self._blank_canvas_path):
-            return self._blank_canvas_path
-
-        canvas = Image.new("RGB", self._canvas_size, self._background_color)
-        fd, path = tempfile.mkstemp(suffix=".png", prefix="figstep_blank_")
-        os.close(fd)
-        canvas.save(path, format="PNG")
-        self._blank_canvas_path = path
-        return path
+        if self._font_name is None:
+            return cast("ImageFont.ImageFont", ImageFont.load_default(size=self._font_size))
+        try:
+            return ImageFont.truetype(self._font_name, self._font_size)
+        except OSError:
+            logger.warning(f"Cannot open font resource: {self._font_name!r}. Using Pillow built-in default font.")
+            return cast("ImageFont.ImageFont", ImageFont.load_default(size=self._font_size))
 
     async def _render_figstep_image_async(self, *, text: str) -> str:
         """
-        Render ``text`` onto the cached blank canvas via ``AddImageTextConverter``.
+        Render multi-line ``text`` onto a blank canvas via direct PIL drawing.
+
+        Mirrors the FigStep reference implementation's ``text_to_image`` helper:
+        a single ``ImageDraw.text`` call that honours embedded newlines (each
+        numbered list item ends up on its own line) with the paper's default
+        ``spacing=11`` line gap.
 
         Args:
-            text: Wrapped stem followed by empty numbered list items.
+            text: Pre-built FigStep text (wrapped stem followed by empty
+                numbered list items, each separated by ``\\n``).
 
         Returns:
-            str: Path to the rendered image file.
+            str: Path to the rendered PNG file, managed by PyRIT's configured
+            results storage backend.
         """
-        canvas_path = self._ensure_blank_canvas()
-
-        width, height = self._canvas_size
-        bounding_box = (
-            self._text_origin[0],
-            self._text_origin[1],
-            max(self._text_origin[0] + 1, width - self._CANVAS_EDGE_MARGIN),
-            max(self._text_origin[1] + 1, height - self._CANVAS_EDGE_MARGIN),
+        canvas = Image.new("RGB", self._canvas_size, self._background_color)
+        draw = ImageDraw.Draw(canvas)
+        font = self._load_font()
+        draw.text(
+            xy=self._text_origin,
+            text=text,
+            font=font,
+            fill=self._text_color,
+            spacing=self._line_spacing,
         )
 
-        converter = AddImageTextConverter(
-            img_to_add=canvas_path,
-            font_name=self._font_name,
-            color=self._text_color,
-            font_size=self._font_size,
-            bounding_box=bounding_box,
-        )
-        result = await converter.convert_async(prompt=text, input_type="text")
-        return result.output_text
+        buf = BytesIO()
+        canvas.save(buf, format="PNG")
+        image_b64 = base64.b64encode(buf.getvalue())
+
+        serializer = data_serializer_factory(category="prompt-memory-entries", data_type="image_path")
+        await serializer.save_b64_image(data=image_b64)
+        return str(serializer.value)
 
     def _build_multimodal_message(self, *, image_path: str, carrier_text: str) -> Message:
         """
