@@ -134,7 +134,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
         *,
         languages: list[str] | None = None,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
         """
@@ -146,11 +145,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
                 language. Defaults to ``["en"]``.
             text_modifiers (list[str] | None): Subset of {"assistance", "intention"} to include.
                 Defaults to both.
-            max_examples (int | None): Maximum number of test pairs to successfully load
-                across all languages and modifiers combined. Rows whose image fetch fails
-                are skipped and do NOT count toward this limit, so a request for N examples
-                returns up to N pairs as long as enough source rows succeed. Each loaded
-                pair produces 2 SeedPrompts (image + text). Defaults to None (no limit).
             token (str | None): Optional HuggingFace authentication token.
 
         Raises:
@@ -158,7 +152,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
         """
         self.languages = self._resolve_languages(languages)
         self.text_modifiers = self._resolve_text_modifiers(text_modifiers)
-        self.max_examples = max_examples
         self.token = token
         self.source = f"https://huggingface.co/datasets/{_HF_REPO_ID}"
 
@@ -175,10 +168,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
         and both have ``sequence=0``, so they are delivered together as a single
         multimodal user message (image + text) rather than as two separate turns.
 
-        When ``max_examples`` is set, only successfully loaded pairs count toward the
-        limit; rows whose image fetch fails are logged and skipped without consuming
-        the quota.
-
         Args:
             cache (bool): Whether to cache the fetched dataset and images. Defaults to True.
 
@@ -189,7 +178,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
 
         prompts: list[SeedPrompt] = []
         failed_image_count = 0
-        successful_pairs = 0
 
         for language in self.languages:
             split_name = _LANGUAGE_TO_SPLIT[language]
@@ -201,9 +189,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
             )
 
             for row in split_data:
-                if self.max_examples is not None and successful_pairs >= self.max_examples:
-                    break
-
                 if row.get("prompt_type") not in self.text_modifiers:
                     continue
 
@@ -218,10 +203,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
                     continue
 
                 prompts.extend(pair)
-                successful_pairs += 1
-
-            if self.max_examples is not None and successful_pairs >= self.max_examples:
-                break
 
         if failed_image_count > 0:
             logger.warning(f"[MSTS] Skipped {failed_image_count} example(s) due to image fetch failures")
@@ -505,10 +486,9 @@ class _MSTSGermanDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["de"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["de"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -525,10 +505,9 @@ class _MSTSRussianDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["ru"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["ru"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -545,10 +524,9 @@ class _MSTSChineseDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["zh"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["zh"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -565,10 +543,9 @@ class _MSTSHindiDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["hi"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["hi"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -585,10 +562,9 @@ class _MSTSSpanishDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["es"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["es"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -605,10 +581,9 @@ class _MSTSItalianDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["it"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["it"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -625,10 +600,9 @@ class _MSTSFrenchDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["fr"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["fr"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -645,10 +619,9 @@ class _MSTSKoreanDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["ko"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["ko"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -665,10 +638,9 @@ class _MSTSArabicDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["ar"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["ar"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:
@@ -685,10 +657,9 @@ class _MSTSFarsiDataset(_MSTSDataset):
         self,
         *,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
-        super().__init__(languages=["fa"], text_modifiers=text_modifiers, max_examples=max_examples, token=token)
+        super().__init__(languages=["fa"], text_modifiers=text_modifiers, token=token)
 
     @property
     def dataset_name(self) -> str:

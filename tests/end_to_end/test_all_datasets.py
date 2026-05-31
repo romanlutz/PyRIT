@@ -22,21 +22,8 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from pyrit.datasets import SeedDatasetProvider
 from pyrit.datasets.seed_datasets.remote import (
     _HarmBenchMultimodalDataset,
-    _MSTSArabicDataset,
-    _MSTSChineseDataset,
-    _MSTSDataset,
-    _MSTSFarsiDataset,
-    _MSTSFrenchDataset,
-    _MSTSGermanDataset,
-    _MSTSHindiDataset,
-    _MSTSItalianDataset,
-    _MSTSKoreanDataset,
-    _MSTSRussianDataset,
-    _MSTSSpanishDataset,
     _PromptIntelDataset,
-    _VLGuardDataset,
-    _VLGuardSafeSafesDataset,
-    _VLGuardSafeUnsafesDataset,
+    _SIUODataset,
     _VLSUMultimodalDataset,
 )
 from pyrit.models import SeedDataset
@@ -52,27 +39,16 @@ _RETRYABLE_ERRORS = (OSError, ConnectionError, TimeoutError)
 
 # Providers that download many remote images; each image fetch may fail
 # due to rate-limiting, so an empty result is expected in some environments.
-_IMAGE_FETCHING_PROVIDERS: set[type] = {_HarmBenchMultimodalDataset, _VLSUMultimodalDataset}
+_IMAGE_FETCHING_PROVIDERS: set[type] = {_HarmBenchMultimodalDataset, _SIUODataset, _VLSUMultimodalDataset}
 
 # Image-heavy providers where we cap rows in e2e to keep CI bounded.  Production
 # defaults are unchanged; this is a test-only override applied only when
-# instantiating the provider for the daily e2e sweep.
+# instantiating the provider for the daily e2e sweep.  Only providers whose
+# constructor still accepts ``max_examples`` belong here — see
+# https://github.com/microsoft/PyRIT/pull/1788 for the removal of the knob
+# from MSTS / VLGuard / etc.
 _CAPPED_PROVIDERS: set[type] = {
     _VLSUMultimodalDataset,
-    _MSTSDataset,
-    _MSTSGermanDataset,
-    _MSTSRussianDataset,
-    _MSTSChineseDataset,
-    _MSTSHindiDataset,
-    _MSTSSpanishDataset,
-    _MSTSItalianDataset,
-    _MSTSFrenchDataset,
-    _MSTSKoreanDataset,
-    _MSTSArabicDataset,
-    _MSTSFarsiDataset,
-    _VLGuardDataset,
-    _VLGuardSafeUnsafesDataset,
-    _VLGuardSafeSafesDataset,
 }
 _CAPPED_MAX_EXAMPLES = 6
 
