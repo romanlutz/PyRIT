@@ -51,13 +51,15 @@ COPY --chown=vscode:vscode doc/ /app/doc/
 # above so they don't shadow the installed wheel: WORKDIR is /app, so otherwise
 # `python -m pyrit.*` would import the local source — which is how the
 # missing-alembic crash on Test GUI (PyPI) happens (local source uses alembic
-# but PyPI <=0.13.0 doesn't depend on it).
+# but PyPI <=0.13.0 doesn't depend on it). The rm mirrors the COPY block above
+# (lines 43-47) one-to-one, except /app/doc which is intentionally retained
+# because the later RUN block copies it into /app/notebooks/ for Jupyter mode.
 # Note: We use 'uv pip' because the devcontainer creates venv with uv (no pip by default)
 RUN if [ "$PYRIT_SOURCE" = "pypi" ]; then \
         echo "Installing PyRIT from PyPI version: $PYRIT_VERSION"; \
         uv pip install --python /opt/venv/bin/python pyrit[speech,opencv,fairness_bias,fastapi,playwright]==$PYRIT_VERSION; \
         echo "Removing local source so the installed PyPI package isn't shadowed"; \
-        rm -rf /app/pyrit /app/frontend /app/build_scripts /app/pyproject.toml /app/MANIFEST.in; \
+        rm -rf /app/pyrit /app/frontend /app/build_scripts /app/pyproject.toml /app/MANIFEST.in /app/README.md /app/LICENSE; \
     elif [ "$PYRIT_SOURCE" = "local" ]; then \
         echo "Installing PyRIT from local source"; \
         uv pip install --python /opt/venv/bin/python -e .[speech,opencv,fairness_bias,fastapi,playwright]; \
