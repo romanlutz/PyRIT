@@ -3,6 +3,9 @@
 
 """Identifiers module for PyRIT components."""
 
+from typing import TYPE_CHECKING, Any
+
+from pyrit.common.deprecation import print_deprecation_message
 from pyrit.models.identifiers.atomic_attack_identifier import (
     build_atomic_attack_identifier,
     build_seed_identifier,
@@ -26,13 +29,11 @@ from pyrit.models.identifiers.evaluation_identifier import (
 )
 from pyrit.models.identifiers.identifier_filters import IdentifierFilter, IdentifierType
 
-# Deprecation alias for the pre-#1387 name. ``ScorerIdentifier`` was collapsed into
-# ``ComponentIdentifier`` by #1387 (MAINT: Migrating from the old Identifier to ComponentIdentifier),
-# but the old name is still imported by external partners (e.g. azure-ai-evaluation's
-# ``_rai_scorer.py`` uses ``from pyrit.identifiers import ScorerIdentifier`` as a return-type
-# annotation). Keep the alias so partner code keeps working until they migrate; will be removed
-# in 0.16.0 alongside the ``pyrit.identifiers`` shim.
-ScorerIdentifier = ComponentIdentifier
+if TYPE_CHECKING:
+    # Type-only alias so static checkers can resolve ``from pyrit.models.identifiers import
+    # ScorerIdentifier``. At runtime the symbol is served by ``__getattr__`` below so we can
+    # emit a one-shot DeprecationWarning per process.
+    ScorerIdentifier = ComponentIdentifier
 
 __all__ = [
     "AtomicAttackEvaluationIdentifier",
@@ -56,3 +57,26 @@ __all__ = [
     "IdentifierFilter",
     "IdentifierType",
 ]
+
+# Deprecated rename aliases (pre-#1387 names that were collapsed into ComponentIdentifier).
+# Served via ``__getattr__`` rather than as static module attributes so accessing them emits
+# a one-shot DeprecationWarning per process. Will be removed in 0.16.0.
+_DEPRECATED_RENAME_ALIASES: dict[str, Any] = {
+    "ScorerIdentifier": ComponentIdentifier,
+}
+
+_warned: set[str] = set()
+
+
+def __getattr__(name: str) -> Any:
+    if name in _DEPRECATED_RENAME_ALIASES:
+        target = _DEPRECATED_RENAME_ALIASES[name]
+        if name not in _warned:
+            print_deprecation_message(
+                old_item=f"{__name__}.{name}",
+                new_item=target,
+                removed_in="0.16.0",
+            )
+            _warned.add(name)
+        return target
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

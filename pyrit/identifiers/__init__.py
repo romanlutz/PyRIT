@@ -66,11 +66,17 @@ __all__ = [
 
 _warned: set[str] = set()
 
+# Names that have an additional deprecation warning at the new pyrit.models.identifiers path —
+# for these, skip the shim's path-migration warning and let the deeper module's __getattr__
+# emit the (more informative) name-deprecation warning pointing at the actual replacement
+# class. Otherwise users would see two warnings on a single access.
+_NAMES_DEPRECATED_AT_NEW_PATH = frozenset({"ScorerIdentifier"})
+
 
 def __getattr__(name: str) -> Any:
     if name not in __all__:
         raise AttributeError(f"module 'pyrit.identifiers' has no attribute {name!r}")
-    if name not in _warned:
+    if name not in _NAMES_DEPRECATED_AT_NEW_PATH and name not in _warned:
         print_deprecation_message(
             old_item=f"pyrit.identifiers.{name}",
             new_item=f"pyrit.models.identifiers.{name}",
