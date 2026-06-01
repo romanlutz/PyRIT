@@ -81,7 +81,7 @@ results = await AttackExecutor().execute_attack_from_seed_groups_async(  # type:
     seed_groups=[seed_group],
 )
 
-await printer.print_result_async(result=results.completed_results[0])  # type: ignore
+await printer.write_async(results.completed_results[0])  # type: ignore
 
 # %% [markdown]
 # You can also generate all or part of `prepended_conversation` and `next_message` using an attack model using a `seed_simulated_conversation`. The below example shows how to create these parameters such that the objective target has the following:
@@ -114,7 +114,7 @@ results = await AttackExecutor().execute_attack_from_seed_groups_async(  # type:
     attack=attack, seed_groups=[seed_group], adversarial_chat=target, objective_scorer=objective_scorer
 )
 
-await printer.print_result_async(result=results.completed_results[0])  # type: ignore
+await printer.write_async(results.completed_results[0])  # type: ignore
 
 # %% [markdown]
 # ## Defining Seeds through YAML
