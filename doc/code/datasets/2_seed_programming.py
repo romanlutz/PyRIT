@@ -30,6 +30,7 @@ import pathlib
 
 from pyrit.executor.attack import (
     AttackExecutor,
+    ConsoleAttackResultPrinter,
     PromptSendingAttack,
 )
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
@@ -40,6 +41,8 @@ from pyrit.score.true_false.true_false_inverter_scorer import TrueFalseInverterS
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
 await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
+
+printer = ConsoleAttackResultPrinter()
 
 image_path = pathlib.Path(".") / ".." / ".." / ".." / "assets" / "pyrit_architecture.png"
 
