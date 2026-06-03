@@ -154,7 +154,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
         archetype = self.ARCHETYPE.value
         logger.info(f"Loading MASK dataset from {self.HF_DATASET_NAME} (config={archetype})")
 
-        data = await self._fetch_from_huggingface(
+        data = await self._fetch_from_huggingface_async(
             dataset_name=self.HF_DATASET_NAME,
             config=archetype,
             split=self.HF_SPLIT,

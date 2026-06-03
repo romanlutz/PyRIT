@@ -262,7 +262,7 @@ class TestMaskCommonFetchBehaviour:
 
     async def test_fetch_returns_seed_dataset(self, mock_continuations_data):
         loader = _MaskContinuationsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_continuations_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_continuations_data)):
             dataset = await loader.fetch_dataset_async()
 
         assert isinstance(dataset, SeedDataset)
@@ -277,7 +277,7 @@ class TestMaskCommonFetchBehaviour:
     async def test_fetch_forwards_config_revision_and_token(self, mock_continuations_data):
         loader = _MaskContinuationsDataset(token="my-token")
         mock_fetch = AsyncMock(return_value=mock_continuations_data)
-        with patch.object(loader, "_fetch_from_huggingface", new=mock_fetch):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async(cache=False)
 
         mock_fetch.assert_called_once()
@@ -291,13 +291,13 @@ class TestMaskCommonFetchBehaviour:
 
     async def test_fetch_empty_rows_raises(self):
         loader = _MaskContinuationsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=[])):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=[])):
             with pytest.raises(ValueError, match="returned no rows"):
                 await loader.fetch_dataset_async()
 
     async def test_objective_carries_full_metadata(self, mock_continuations_data):
         loader = _MaskContinuationsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_continuations_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_continuations_data)):
             dataset = await loader.fetch_dataset_async()
 
         row = mock_continuations_data[0]
@@ -322,7 +322,9 @@ class TestMaskCommonFetchBehaviour:
 
     async def test_pressured_conversation_pieces_have_correct_roles_and_sequences(self, mock_disinformation_data):
         loader = _MaskDisinformationDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_disinformation_data)):
+        with patch.object(
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_disinformation_data)
+        ):
             dataset = await loader.fetch_dataset_async()
 
         row = mock_disinformation_data[0]
@@ -343,7 +345,7 @@ class TestMaskDoublingDown:
 
     async def test_doubling_down_builds_four_piece_conversation(self, mock_doubling_down_data):
         loader = _MaskDoublingDownKnownFactsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_doubling_down_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_doubling_down_data)):
             dataset = await loader.fetch_dataset_async()
 
         row = mock_doubling_down_data[0]
@@ -369,7 +371,7 @@ class TestMaskDoublingDown:
     async def test_doubling_down_uses_correct_config(self, mock_doubling_down_data):
         loader = _MaskDoublingDownKnownFactsDataset()
         mock_fetch = AsyncMock(return_value=mock_doubling_down_data)
-        with patch.object(loader, "_fetch_from_huggingface", new=mock_fetch):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async()
 
         assert mock_fetch.call_args.kwargs["config"] == "doubling_down_known_facts"
@@ -378,7 +380,7 @@ class TestMaskDoublingDown:
 class TestMaskKnownFacts:
     async def test_fetch_known_facts(self, mock_known_facts_data):
         loader = _MaskKnownFactsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_known_facts_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_known_facts_data)):
             dataset = await loader.fetch_dataset_async()
 
         row = mock_known_facts_data[0]
@@ -393,7 +395,9 @@ class TestMaskProvidedFacts:
 
     async def test_missing_belief_fields_default_to_empty_string(self, mock_provided_facts_data):
         loader = _MaskProvidedFactsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_provided_facts_data)):
+        with patch.object(
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_provided_facts_data)
+        ):
             dataset = await loader.fetch_dataset_async()
 
         objective = next(s for s in dataset.seeds if isinstance(s, SeedObjective))
@@ -404,7 +408,9 @@ class TestMaskProvidedFacts:
 
     async def test_pressured_conversation_still_two_pieces(self, mock_provided_facts_data):
         loader = _MaskProvidedFactsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_provided_facts_data)):
+        with patch.object(
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_provided_facts_data)
+        ):
             dataset = await loader.fetch_dataset_async()
 
         prompts = sorted(
@@ -419,7 +425,7 @@ class TestMaskStatistics:
 
     async def test_numeric_ground_truth_preserved_as_string(self, mock_statistics_data):
         loader = _MaskStatisticsDataset()
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_statistics_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_statistics_data)):
             dataset = await loader.fetch_dataset_async()
 
         objective = next(s for s in dataset.seeds if isinstance(s, SeedObjective))
@@ -433,7 +439,7 @@ class TestMaskStatistics:
     async def test_statistics_uses_correct_config(self, mock_statistics_data):
         loader = _MaskStatisticsDataset()
         mock_fetch = AsyncMock(return_value=mock_statistics_data)
-        with patch.object(loader, "_fetch_from_huggingface", new=mock_fetch):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async()
 
         assert mock_fetch.call_args.kwargs["config"] == "statistics"
