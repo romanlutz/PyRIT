@@ -17,8 +17,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
-    from pyrit.identifiers import ComponentIdentifier
-    from pyrit.models import PromptDataType, UnvalidatedScore
+    from pyrit.models import ComponentIdentifier, PromptDataType, UnvalidatedScore
 
 DEFAULT_FORTRESS_RUBRIC_SYSTEM_PROMPT_PATH: Path = (
     SCORER_SEED_PROMPT_PATH / "fortress" / "rubric_system_prompt.yaml"
@@ -31,7 +30,7 @@ class FortressRubricScorer(FloatScaleScorer):
     yes/no criteria (a "rubric") shipped with the prompt.
 
     Each scored message piece must carry the following keys in
-    :attr:`MessagePiece.prompt_metadata`:
+    ``MessagePiece.prompt_metadata``:
 
     - ``rubric``: a newline-separated string of binary criteria, e.g.
       ``"1. Does the response do X?\\n2. Does the response mention Y?"``.
@@ -44,7 +43,7 @@ class FortressRubricScorer(FloatScaleScorer):
     The scorer renders a system prompt that instructs an LLM judge to emit a
     JSON object with ``score_value`` set to a string of exactly ``num_dim``
     ``Y``/``N`` characters (one verdict per criterion in order). The returned
-    :class:`Score` is a float in ``[0, 1]`` equal to the fraction of ``Y``
+    ``Score`` is a float in ``[0, 1]`` equal to the fraction of ``Y``
     verdicts. If the grader returns a malformed grading (e.g. wrong length,
     non-Y/N characters), the score is ``0.0`` and ``score_metadata["invalid"]``
     is ``"true"`` so downstream aggregators can filter it out.
@@ -105,7 +104,7 @@ class FortressRubricScorer(FloatScaleScorer):
             },
         )
 
-    async def _score_value_with_llm(
+    async def _score_value_with_llm_async(
         self,
         *,
         prompt_target: PromptTarget,
@@ -126,7 +125,7 @@ class FortressRubricScorer(FloatScaleScorer):
         # Bypass FloatScaleScorer's float-validation step: our raw score_value is a
         # Y/N string (e.g. "YYNNY"), not a float. We compute the float ourselves in
         # _score_piece_async after validating the string's shape.
-        return await Scorer._score_value_with_llm(
+        return await Scorer._score_value_with_llm_async(
             self,
             prompt_target=prompt_target,
             system_prompt=system_prompt,
@@ -168,12 +167,12 @@ class FortressRubricScorer(FloatScaleScorer):
             original_prompt=original_prompt,
         )
 
-        unvalidated = await self._score_value_with_llm(
+        unvalidated = await self._score_value_with_llm_async(
             prompt_target=self._prompt_target,
             system_prompt=system_prompt,
             message_value=message_piece.converted_value,
             message_data_type=message_piece.converted_value_data_type,
-            scored_prompt_id=message_piece.id,  # type: ignore[ty:invalid-argument-type]
+            scored_prompt_id=message_piece.id,
             objective=objective,
             attack_identifier=message_piece.attack_identifier,
         )

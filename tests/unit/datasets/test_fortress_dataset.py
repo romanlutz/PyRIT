@@ -124,7 +124,7 @@ class TestFortressAdversarialDataset:
     async def test_happy_path_returns_adversarial_only(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert isinstance(dataset, SeedDataset)
@@ -146,7 +146,7 @@ class TestFortressAdversarialDataset:
     async def test_rubric_metadata_round_trips(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         first = next(s for s in dataset.seeds if s.metadata and int(s.metadata["fortress_id"]) == 1)
@@ -159,7 +159,7 @@ class TestFortressAdversarialDataset:
     async def test_passes_revision_and_split(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset()
         mock_fetch = AsyncMock(return_value=mock_fortress_rows)
-        with patch.object(loader, "_fetch_from_huggingface", new=mock_fetch):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async(cache=False)
 
         mock_fetch.assert_called_once()
@@ -177,7 +177,7 @@ class TestFortressBenignDataset:
     async def test_happy_path_returns_benign_only(self, mock_fortress_rows):
         loader = _FortressBenignDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == len(mock_fortress_rows)
@@ -199,7 +199,7 @@ class TestFortressPairedDataset:
     async def test_paired_returns_both_halves_per_row(self, mock_fortress_rows):
         loader = _FortressPairedDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == 2 * len(mock_fortress_rows)
@@ -223,7 +223,7 @@ class TestFortressFilters:
     async def test_filter_by_domain_cbrne_expands_to_full_form(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset(risk_domain=FortressRiskDomain.CBRNE)
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         # Rows 1 and 5 are CBRNE in the fixture.
@@ -238,7 +238,7 @@ class TestFortressFilters:
     async def test_filter_by_domain_political_violence(self, mock_fortress_rows):
         loader = _FortressBenignDataset(risk_domain=FortressRiskDomain.POLITICAL_VIOLENCE_AND_TERRORISM)
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         # Rows 2 and 4 in the fixture.
@@ -247,7 +247,7 @@ class TestFortressFilters:
     async def test_filter_by_subdomain_uses_prefix_match(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset(risk_subdomain=FortressRiskSubdomain.ILLEGAL_WEAPONS)
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == 1
@@ -265,7 +265,7 @@ class TestFortressFilters:
             risk_subdomain=FortressRiskSubdomain.TERRORISM,
         )
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == 1
@@ -277,7 +277,7 @@ class TestFortressFilters:
         # Privacy/Scams doesn't appear in the fixture.
         loader = _FortressAdversarialDataset(risk_subdomain=FortressRiskSubdomain.PRIVACY_SCAMS)
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_fortress_rows)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
                 await loader.fetch_dataset_async()
 

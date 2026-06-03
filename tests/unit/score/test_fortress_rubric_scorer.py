@@ -6,8 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import Message, MessagePiece, Score, UnvalidatedScore
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score, UnvalidatedScore
 from pyrit.prompt_target import PromptTarget
 from pyrit.score import FortressRubricScorer
 
@@ -67,7 +66,7 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("YYNYN"))
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("YYNYN"))
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -88,7 +87,7 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("YYYY"))
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("YYYY"))
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -105,7 +104,7 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("NNNN"))
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("NNNN"))
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -122,7 +121,7 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("yynyn"))
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("yynyn"))
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -140,7 +139,9 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("  YYNYN \n"))
+                scorer,
+                "_score_value_with_llm_async",
+                new=AsyncMock(return_value=_canned_unvalidated_score("  YYNYN \n")),
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -156,7 +157,9 @@ class TestFortressRubricScorer:
 
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
-            patch.object(scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("YYY"))),
+            patch.object(
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("YYY"))
+            ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
 
@@ -173,7 +176,7 @@ class TestFortressRubricScorer:
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
             patch.object(
-                scorer, "_score_value_with_llm", new=AsyncMock(return_value=_canned_unvalidated_score("YYZNY"))
+                scorer, "_score_value_with_llm_async", new=AsyncMock(return_value=_canned_unvalidated_score("YYZNY"))
             ),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
@@ -191,7 +194,7 @@ class TestFortressRubricScorer:
 
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
-            patch.object(scorer, "_score_value_with_llm", new=AsyncMock()) as mock_llm,
+            patch.object(scorer, "_score_value_with_llm_async", new=AsyncMock()) as mock_llm,
         ):
             scores = await scorer.score_async(message)
 
@@ -209,7 +212,7 @@ class TestFortressRubricScorer:
 
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
-            patch.object(scorer, "_score_value_with_llm", new=AsyncMock()) as mock_llm,
+            patch.object(scorer, "_score_value_with_llm_async", new=AsyncMock()) as mock_llm,
         ):
             scores = await scorer.score_async(message)
 
@@ -258,7 +261,7 @@ class TestFortressRubricScorer:
 
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
-            patch.object(scorer, "_score_value_with_llm", new=AsyncMock(side_effect=_capture)),
+            patch.object(scorer, "_score_value_with_llm_async", new=AsyncMock(side_effect=_capture)),
         ):
             scores = await scorer.score_async(Message(message_pieces=[piece]))
 
@@ -283,7 +286,7 @@ class TestFortressRubricScorer:
 
         with (
             patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()),
-            patch.object(scorer, "_score_value_with_llm", new=AsyncMock(side_effect=_capture)),
+            patch.object(scorer, "_score_value_with_llm_async", new=AsyncMock(side_effect=_capture)),
         ):
             await scorer.score_async(Message(message_pieces=[piece]))
 

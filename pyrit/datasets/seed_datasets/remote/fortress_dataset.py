@@ -150,7 +150,7 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         self.risk_domain = risk_domain
         self.risk_subdomain = risk_subdomain
 
-    async def _fetch_filtered_rows(self, *, cache: bool) -> list[dict[str, Any]]:
+    async def _fetch_filtered_rows_async(self, *, cache: bool) -> list[dict[str, Any]]:
         """
         Fetch the (single) Fortress train split from HF and apply enum filters.
 
@@ -163,7 +163,7 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         Raises:
             ValueError: If no rows remain after filtering.
         """
-        data = await self._fetch_from_huggingface(
+        data = await self._fetch_from_huggingface_async(
             dataset_name=self.HF_DATASET_NAME,
             split="train",
             cache=cache,
@@ -314,7 +314,7 @@ class _FortressAdversarialDataset(_FortressBaseDataset):
             f"risk_subdomain={self.risk_subdomain})"
         )
 
-        rows = await self._fetch_filtered_rows(cache=cache)
+        rows = await self._fetch_filtered_rows_async(cache=cache)
         seeds = [
             self._build_seed_prompt(row=row, adversarial_or_benign="adversarial", description=self._DESCRIPTION)
             for row in rows
@@ -370,7 +370,7 @@ class _FortressBenignDataset(_FortressBaseDataset):
             f"Loading Fortress benign dataset (risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
         )
 
-        rows = await self._fetch_filtered_rows(cache=cache)
+        rows = await self._fetch_filtered_rows_async(cache=cache)
         seeds = [
             self._build_seed_prompt(row=row, adversarial_or_benign="benign", description=self._DESCRIPTION)
             for row in rows
@@ -431,7 +431,7 @@ class _FortressPairedDataset(_FortressBaseDataset):
             f"Loading Fortress paired dataset (risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
         )
 
-        rows = await self._fetch_filtered_rows(cache=cache)
+        rows = await self._fetch_filtered_rows_async(cache=cache)
         seeds: list[SeedPrompt] = []
         for row in rows:
             seeds.append(
@@ -450,7 +450,7 @@ def _shorten_risk_subdomain(long_subdomain: str) -> str:
     Shorten the stored ``risk_subdomain`` to its canonical title prefix.
 
     HF stores the subdomain as ``"<Title>: <descriptive suffix>"``. We match against
-    the known short prefixes from :class:`FortressRiskSubdomain` and return the
+    the known short prefixes from ``FortressRiskSubdomain`` and return the
     matching short form. If no match (unexpected upstream value), the raw value
     before the first colon is returned as a best-effort fallback.
 
