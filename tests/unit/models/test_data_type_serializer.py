@@ -453,4 +453,3 @@ async def test_save_formatted_audio_cleans_up_temp_file_on_azure_upload_failure(
     # Check no NEW wav files leaked after test
     leaked_files = set(glob.glob(str(DB_DATA_PATH / "*.wav"))) - existing_wav_files
     assert len(leaked_files) == 0, f"Temp files leaked: {leaked_files}"
-
