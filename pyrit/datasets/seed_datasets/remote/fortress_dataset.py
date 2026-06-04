@@ -3,7 +3,7 @@
 
 import logging
 from enum import Enum
-from typing import Any
+from typing import Any, override
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -293,10 +293,12 @@ class _FortressAdversarialDataset(_FortressBaseDataset):
     )
 
     @property
+    @override
     def dataset_name(self) -> str:
         """Return the dataset name."""
         return "fortress_adversarial"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch the adversarial Fortress prompts as a SeedDataset.
@@ -341,7 +343,7 @@ class _FortressBenignDataset(_FortressBaseDataset):
     """
 
     size: str = "medium"
-    tags: set[str] = {"safety", "over_refusal", "calibration", "national_security"}
+    tags: set[str] = {"safety", "refusal", "calibration", "national_security"}
 
     _DESCRIPTION: str = (
         "Benign half of FORTRESS: 500 same-topic rephrasings of the adversarial prompts, "
@@ -350,10 +352,12 @@ class _FortressBenignDataset(_FortressBaseDataset):
     )
 
     @property
+    @override
     def dataset_name(self) -> str:
         """Return the dataset name."""
         return "fortress_benign"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch the benign Fortress prompts as a SeedDataset.
@@ -398,7 +402,7 @@ class _FortressPairedDataset(_FortressBaseDataset):
     """
 
     size: str = "large"
-    tags: set[str] = {"safety", "jailbreak", "over_refusal", "calibration", "national_security"}
+    tags: set[str] = {"safety", "jailbreak", "refusal", "calibration", "national_security"}
 
     _DESCRIPTION: str = (
         "Paired FORTRESS dataset: each adversarial prompt is followed by its benign "
@@ -408,10 +412,12 @@ class _FortressPairedDataset(_FortressBaseDataset):
     )
 
     @property
+    @override
     def dataset_name(self) -> str:
         """Return the dataset name."""
         return "fortress_paired"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch both adversarial and benign Fortress prompts as a single SeedDataset.

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, override
 
 from pyrit.common import verify_and_resolve_path
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
@@ -88,6 +88,7 @@ class FortressRubricScorer(FloatScaleScorer):
         self._system_prompt_path = resolved_path
         self._system_prompt_template: SeedPrompt = SeedPrompt.from_yaml_file(resolved_path)
 
+    @override
     def _build_identifier(self) -> ComponentIdentifier:
         """
         Build the identifier for this scorer.
@@ -104,6 +105,7 @@ class FortressRubricScorer(FloatScaleScorer):
             },
         )
 
+    @override
     async def _score_value_with_llm_async(
         self,
         *,
@@ -143,6 +145,7 @@ class FortressRubricScorer(FloatScaleScorer):
             attack_identifier=attack_identifier,
         )
 
+    @override
     async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
         """
         Grade a single message piece against its rubric.

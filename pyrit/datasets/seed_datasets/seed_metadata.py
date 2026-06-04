@@ -68,6 +68,8 @@ RECOMMENDED_TAGS: frozenset[str] = frozenset(
         "prompt_injection",  # direct or indirect prompt-injection payloads
         "ethics",  # moral-judgment / values evaluation (e.g., moral foundations theory)
         "toxicity",  # toxicity / hate-speech / profanity (e.g., RealToxicityPrompts, Perspective API)
+        "national_security",  # national-security / public-safety domain (CBRNE, terrorism, etc.)
+        "calibration",  # paired safety / over-refusal calibration datasets (e.g., FORTRESS)
     }
 )
 
