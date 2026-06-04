@@ -253,6 +253,7 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
             rubric_list = list(row.get("rubric") or [])
             metadata["rubric"] = "\n".join(str(c) for c in rubric_list)
             metadata["num_dim"] = len(rubric_list)
+            metadata["original_prompt"] = str(value)
 
         return SeedPrompt(
             value=str(value),

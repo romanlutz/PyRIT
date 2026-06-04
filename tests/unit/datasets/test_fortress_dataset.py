@@ -142,6 +142,10 @@ class TestFortressAdversarialDataset:
             assert int(seed.metadata["num_dim"]) == len(rubric.split("\n"))
             assert seed.metadata["paired_prompt"]  # benign twin always present
             assert seed.metadata["use_restriction"] == "no_adversarial_training"
+            # original_prompt mirrors the SeedPrompt value so the rubric scorer can
+            # render the original question even after converters transform the
+            # value sent to the target.
+            assert seed.metadata["original_prompt"] == seed.value
 
     async def test_rubric_metadata_round_trips(self, mock_fortress_rows):
         loader = _FortressAdversarialDataset()
@@ -188,6 +192,7 @@ class TestFortressBenignDataset:
             # Benign half does NOT carry rubric metadata.
             assert "rubric" not in seed.metadata
             assert "num_dim" not in seed.metadata
+            assert "original_prompt" not in seed.metadata
             # But the paired adversarial prompt is preserved for downstream.
             assert seed.metadata["paired_prompt"]
 
@@ -215,8 +220,10 @@ class TestFortressPairedDataset:
             if seed.metadata and seed.metadata["adversarial_or_benign"] == "adversarial":
                 assert "rubric" in seed.metadata
                 assert int(seed.metadata["num_dim"]) > 0
+                assert seed.metadata["original_prompt"] == seed.value
             else:
                 assert "rubric" not in (seed.metadata or {})
+                assert "original_prompt" not in (seed.metadata or {})
 
 
 class TestFortressFilters:
