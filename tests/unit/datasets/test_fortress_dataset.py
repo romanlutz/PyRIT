@@ -10,9 +10,8 @@ from pyrit.datasets.seed_datasets.remote.fortress_dataset import (
     HF_REVISION,
     FortressRiskDomain,
     FortressRiskSubdomain,
-    _FortressAdversarialDataset,
-    _FortressBenignDataset,
-    _FortressPairedDataset,
+    FortressSplit,
+    _FortressDataset,
     _shorten_risk_subdomain,
 )
 from pyrit.models import SeedDataset, SeedPrompt
@@ -119,10 +118,10 @@ class TestFortressRiskSubdomainShortener:
 
 class TestFortressAdversarialDataset:
     async def test_dataset_name(self):
-        assert _FortressAdversarialDataset().dataset_name == "fortress_adversarial"
+        assert _FortressDataset().dataset_name == "fortress"
 
     async def test_happy_path_returns_adversarial_only(self, mock_fortress_rows):
-        loader = _FortressAdversarialDataset()
+        loader = _FortressDataset()
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -133,7 +132,7 @@ class TestFortressAdversarialDataset:
         assert {s.value for s in dataset.seeds} == {r["adversarial_prompt"] for r in mock_fortress_rows}
 
         for seed in dataset.seeds:
-            assert seed.dataset_name == "fortress_adversarial"
+            assert seed.dataset_name == "fortress"
             assert seed.data_type == "text"
             assert seed.metadata is not None
             assert seed.metadata["adversarial_or_benign"] == "adversarial"
@@ -148,7 +147,7 @@ class TestFortressAdversarialDataset:
             assert seed.metadata["original_prompt"] == seed.value
 
     async def test_rubric_metadata_round_trips(self, mock_fortress_rows):
-        loader = _FortressAdversarialDataset()
+        loader = _FortressDataset()
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -161,7 +160,7 @@ class TestFortressAdversarialDataset:
         assert "Does the response name a specific precursor?" in rubric
 
     async def test_passes_revision_and_split(self, mock_fortress_rows):
-        loader = _FortressAdversarialDataset()
+        loader = _FortressDataset()
         mock_fetch = AsyncMock(return_value=mock_fortress_rows)
         with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async(cache=False)
@@ -176,10 +175,10 @@ class TestFortressAdversarialDataset:
 
 class TestFortressBenignDataset:
     async def test_dataset_name(self):
-        assert _FortressBenignDataset().dataset_name == "fortress_benign"
+        assert _FortressDataset(split=FortressSplit.BENIGN).dataset_name == "fortress"
 
     async def test_happy_path_returns_benign_only(self, mock_fortress_rows):
-        loader = _FortressBenignDataset()
+        loader = _FortressDataset(split=FortressSplit.BENIGN)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -199,10 +198,10 @@ class TestFortressBenignDataset:
 
 class TestFortressPairedDataset:
     async def test_dataset_name(self):
-        assert _FortressPairedDataset().dataset_name == "fortress_paired"
+        assert _FortressDataset(split=FortressSplit.ALL).dataset_name == "fortress"
 
     async def test_paired_returns_both_halves_per_row(self, mock_fortress_rows):
-        loader = _FortressPairedDataset()
+        loader = _FortressDataset(split=FortressSplit.ALL)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -228,7 +227,7 @@ class TestFortressPairedDataset:
 
 class TestFortressFilters:
     async def test_filter_by_domain_cbrne_expands_to_full_form(self, mock_fortress_rows):
-        loader = _FortressAdversarialDataset(risk_domain=FortressRiskDomain.CBRNE)
+        loader = _FortressDataset(risk_domain=FortressRiskDomain.CBRNE)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -243,7 +242,9 @@ class TestFortressFilters:
         assert str(row5.metadata["risk_subdomain_full"]).startswith("Terrorism")
 
     async def test_filter_by_domain_political_violence(self, mock_fortress_rows):
-        loader = _FortressBenignDataset(risk_domain=FortressRiskDomain.POLITICAL_VIOLENCE_AND_TERRORISM)
+        loader = _FortressDataset(
+            split=FortressSplit.BENIGN, risk_domain=FortressRiskDomain.POLITICAL_VIOLENCE_AND_TERRORISM
+        )
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -252,7 +253,7 @@ class TestFortressFilters:
         assert {int(s.metadata["fortress_id"]) for s in dataset.seeds if s.metadata} == {2, 4}
 
     async def test_filter_by_subdomain_uses_prefix_match(self, mock_fortress_rows):
-        loader = _FortressAdversarialDataset(risk_subdomain=FortressRiskSubdomain.ILLEGAL_WEAPONS)
+        loader = _FortressDataset(risk_subdomain=FortressRiskSubdomain.ILLEGAL_WEAPONS)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
@@ -267,7 +268,7 @@ class TestFortressFilters:
     async def test_combined_domain_and_subdomain_filter(self, mock_fortress_rows):
         # CBRNE + Terrorism subdomain should match the mismatched row 5 only (not row 2,
         # which is Terrorism subdomain under PVT domain).
-        loader = _FortressAdversarialDataset(
+        loader = _FortressDataset(
             risk_domain=FortressRiskDomain.CBRNE,
             risk_subdomain=FortressRiskSubdomain.TERRORISM,
         )
@@ -282,7 +283,7 @@ class TestFortressFilters:
 
     async def test_empty_after_filter_raises(self, mock_fortress_rows):
         # Privacy/Scams doesn't appear in the fixture.
-        loader = _FortressAdversarialDataset(risk_subdomain=FortressRiskSubdomain.PRIVACY_SCAMS)
+        loader = _FortressDataset(risk_subdomain=FortressRiskSubdomain.PRIVACY_SCAMS)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
@@ -290,39 +291,29 @@ class TestFortressFilters:
 
     def test_invalid_domain_type_raises(self):
         with pytest.raises(ValueError, match="Expected FortressRiskDomain"):
-            _FortressAdversarialDataset(risk_domain="CBRNE")  # type: ignore[ty:invalid-argument-type]
+            _FortressDataset(risk_domain="CBRNE")  # type: ignore[ty:invalid-argument-type]
 
     def test_invalid_subdomain_type_raises(self):
         with pytest.raises(ValueError, match="Expected FortressRiskSubdomain"):
-            _FortressBenignDataset(risk_subdomain="Chemical")  # type: ignore[ty:invalid-argument-type]
+            _FortressDataset(split=FortressSplit.BENIGN, risk_subdomain="Chemical")  # type: ignore[ty:invalid-argument-type]
 
 
 class TestFortressClassMetadata:
-    def test_three_siblings_have_distinct_dataset_names(self):
-        assert _FortressAdversarialDataset.modalities == ["text"]
-        assert _FortressBenignDataset.modalities == ["text"]
-        assert _FortressPairedDataset.modalities == ["text"]
+    def test_dataset_name_is_singular(self):
+        assert _FortressDataset.modalities == ["text"]
+        assert _FortressDataset().dataset_name == "fortress"
+        assert _FortressDataset(split=FortressSplit.BENIGN).dataset_name == "fortress"
+        assert _FortressDataset(split=FortressSplit.ALL).dataset_name == "fortress"
 
-        names = {
-            _FortressAdversarialDataset().dataset_name,
-            _FortressBenignDataset().dataset_name,
-            _FortressPairedDataset().dataset_name,
-        }
-        assert names == {"fortress_adversarial", "fortress_benign", "fortress_paired"}
-
-    def test_size_buckets(self):
-        # adversarial / benign cover 500 rows -> medium; paired covers 1000 -> large.
-        assert _FortressAdversarialDataset.size == "medium"
-        assert _FortressBenignDataset.size == "medium"
-        assert _FortressPairedDataset.size == "large"
+    def test_size_is_medium(self):
+        # 500 rows per split, 1000 total — "medium" is the appropriate bucket.
+        assert _FortressDataset.size == "medium"
 
     def test_tags_include_national_security(self):
-        for cls in (_FortressAdversarialDataset, _FortressBenignDataset, _FortressPairedDataset):
-            assert "national_security" in cls.tags
-            assert "safety" in cls.tags
+        assert "national_security" in _FortressDataset.tags
+        assert "safety" in _FortressDataset.tags
 
     def test_harm_categories_lowercased_and_cover_all_subdomains(self):
         # Class-level harm_categories should be the lowercased set of the 10 subdomains.
         expected = {sd.value.lower() for sd in FortressRiskSubdomain}
-        for cls in (_FortressAdversarialDataset, _FortressBenignDataset, _FortressPairedDataset):
-            assert set(cls.harm_categories) == expected
+        assert set(_FortressDataset.harm_categories) == expected

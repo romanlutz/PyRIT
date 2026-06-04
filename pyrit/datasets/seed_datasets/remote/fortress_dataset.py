@@ -3,7 +3,7 @@
 
 import logging
 from enum import Enum
-from typing import Any, override
+from typing import Any
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -19,6 +19,23 @@ HF_SOURCE_URL: str = f"https://huggingface.co/datasets/{HF_DATASET_NAME}"
 # The risk_domain field in HF stores CBRNE's full descriptive name. Other two
 # domains are stored verbatim as below. Inspect Evals applies the same expansion.
 _CBRNE_FULL: str = "Chemical, Biological, Radiological, Nuclear, and Explosive (CBRNE)"
+
+
+class FortressSplit(Enum):
+    """
+    Which half of the FORTRESS dataset to load.
+
+    Every upstream row carries both an adversarial prompt and a benign rephrasing
+    on the same topic. This enum selects which half(s) the loader emits.
+
+    - ``ADVERSARIAL``: the 500 expert-crafted adversarial prompts (default).
+    - ``BENIGN``: the 500 benign rephrasings, for over-refusal measurement.
+    - ``ALL``: both halves, 1000 seeds total (adversarial then benign per row).
+    """
+
+    ADVERSARIAL = "adversarial"
+    BENIGN = "benign"
+    ALL = "all"
 
 
 class FortressRiskDomain(Enum):
@@ -77,21 +94,16 @@ _AUTHORS: list[str] = [
 _GROUPS: list[str] = ["Scale AI"]
 
 
-class _FortressBaseDataset(_RemoteDatasetLoader):
+class _FortressDataset(_RemoteDatasetLoader):
     """
-    Base loader for the FORTRESS (Frontier Risk Evaluation for National Security
-    and Public Safety) dataset from Scale AI.
+    Loader for the FORTRESS dataset from Scale AI (national-security safety eval).
 
     FORTRESS is 500 expert-crafted adversarial prompts, each paired with a benign
     rephrasing on the same topic and an instance-specific 4-7 binary-question rubric.
-    The dataset is designed for the paired (ARS, ORS) safety-vs-utility evaluation
-    described in the paper. Three sibling loaders are exposed:
+    Designed for the paired (ARS, ORS) safety-vs-utility evaluation in the paper.
 
-    - ``_FortressAdversarialDataset`` — the 500 adversarial prompts only (each row
-      carries its rubric and ``num_dim`` in metadata so the per-row rubric scorer
-      can grade against it).
-    - ``_FortressBenignDataset`` — the 500 benign twin prompts only.
-    - ``_FortressPairedDataset`` — both halves, with cross-link metadata.
+    ``split`` selects which half(s) to emit (default ``FortressSplit.ADVERSARIAL``;
+    pass ``FortressSplit.ALL`` for both halves, 1000 seeds total).
 
     Use restriction: This dataset should be used for safety evaluations only, and
     it is prohibited to use these data for any adversarial training or research.
@@ -110,6 +122,8 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
     HF_REVISION: str = HF_REVISION
 
     modalities: list[str] = ["text"]
+    size: str = "medium"
+    tags: set[str] = {"safety", "jailbreak", "refusal", "calibration", "national_security"}
     harm_categories: list[str] = [
         "biological",
         "chemical",
@@ -123,9 +137,18 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         "terrorism",
     ]
 
+    _DESCRIPTION: str = (
+        "FORTRESS: 500 expert-crafted national-security adversarial prompts (CBRNE, "
+        "Political Violence & Terrorism, Criminal & Financial Illicit Activities), each "
+        "paired with a benign rephrasing on the same topic. Adversarial seeds carry a "
+        "per-row 4-7-question binary rubric in metadata for use with FortressRubricScorer; "
+        "both halves carry the partner prompt for (ARS, ORS) trade-off analysis."
+    )
+
     def __init__(
         self,
         *,
+        split: FortressSplit = FortressSplit.ADVERSARIAL,
         risk_domain: FortressRiskDomain | None = None,
         risk_subdomain: FortressRiskSubdomain | None = None,
     ) -> None:
@@ -133,6 +156,7 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         Initialize the Fortress dataset loader.
 
         Args:
+            split (FortressSplit): Which half(s) to load. Defaults to ``ADVERSARIAL``.
             risk_domain (FortressRiskDomain | None): If set, only return rows whose
                 ``risk_domain`` field matches this domain. Defaults to None (all domains).
             risk_subdomain (FortressRiskSubdomain | None): If set, only return rows whose
@@ -140,13 +164,15 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
                 Defaults to None (all subdomains).
 
         Raises:
-            ValueError: If ``risk_domain`` / ``risk_subdomain`` is not the expected enum type.
+            ValueError: If ``split`` / ``risk_domain`` / ``risk_subdomain`` is not the expected enum type.
         """
+        self._validate_enum(value=split, enum_cls=FortressSplit, label="split")
         if risk_domain is not None:
             self._validate_enum(value=risk_domain, enum_cls=FortressRiskDomain, label="risk_domain")
         if risk_subdomain is not None:
             self._validate_enum(value=risk_subdomain, enum_cls=FortressRiskSubdomain, label="risk_subdomain")
 
+        self.split = split
         self.risk_domain = risk_domain
         self.risk_subdomain = risk_subdomain
 
@@ -214,7 +240,6 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         *,
         row: dict[str, Any],
         adversarial_or_benign: str,
-        description: str,
     ) -> SeedPrompt:
         """
         Build a single SeedPrompt for either the adversarial or benign half of a row.
@@ -222,7 +247,6 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
         Args:
             row (dict[str, Any]): A raw Fortress HF row.
             adversarial_or_benign (str): ``"adversarial"`` or ``"benign"``.
-            description (str): Per-sibling description to attach to the SeedPrompt.
 
         Returns:
             SeedPrompt: The constructed seed prompt.
@@ -260,195 +284,48 @@ class _FortressBaseDataset(_RemoteDatasetLoader):
             data_type="text",
             dataset_name=self.dataset_name,
             harm_categories=[subdomain_short] if subdomain_short else [],
-            description=description,
+            description=self._DESCRIPTION,
             source=HF_SOURCE_URL,
             authors=_AUTHORS,
             groups=_GROUPS,
             metadata=metadata,
         )
 
-
-class _FortressAdversarialDataset(_FortressBaseDataset):
-    """
-    Loader for the adversarial half of FORTRESS (500 expert-crafted prompts).
-
-    Each row carries the per-prompt 4-7-question rubric in
-    ``metadata["rubric"]`` (newline-separated) and ``metadata["num_dim"]``
-    so ``FortressRubricScorer`` can grade responses against the prompt's own rubric.
-
-    Use restriction: This dataset should be used for safety evaluations only, and
-    it is prohibited to use these data for any adversarial training or research.
-
-    Reference: [@knight2025fortress]
-    """
-
-    size: str = "medium"
-    tags: set[str] = {"safety", "jailbreak", "calibration", "national_security"}
-
-    _DESCRIPTION: str = (
-        "Adversarial half of FORTRESS: 500 expert-crafted national-security prompts "
-        "spanning CBRNE, Political Violence & Terrorism, and Criminal & Financial "
-        "Illicit Activities. Each prompt carries a per-row 4-7-question binary rubric "
-        "in metadata for use with the FortressRubricScorer."
-    )
-
     @property
-    @override
     def dataset_name(self) -> str:
         """Return the dataset name."""
-        return "fortress_adversarial"
+        return "fortress"
 
-    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
-        Fetch the adversarial Fortress prompts as a SeedDataset.
+        Fetch the Fortress dataset as a SeedDataset, respecting ``self.split``.
 
         Args:
             cache (bool): Whether to cache the fetched dataset. Defaults to True.
 
         Returns:
-            SeedDataset: The adversarial prompts, optionally filtered by domain/subdomain.
+            SeedDataset: The selected Fortress prompts.
 
         Raises:
             ValueError: If no rows remain after filtering.
         """
         logger.info(
-            f"Loading Fortress adversarial dataset (risk_domain={self.risk_domain}, "
-            f"risk_subdomain={self.risk_subdomain})"
+            f"Loading Fortress dataset (split={self.split.value}, "
+            f"risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
         )
 
         rows = await self._fetch_filtered_rows_async(cache=cache)
-        seeds = [
-            self._build_seed_prompt(row=row, adversarial_or_benign="adversarial", description=self._DESCRIPTION)
-            for row in rows
-        ]
+        emit_adv = self.split in (FortressSplit.ADVERSARIAL, FortressSplit.ALL)
+        emit_benign = self.split in (FortressSplit.BENIGN, FortressSplit.ALL)
 
-        logger.info(f"Successfully loaded {len(seeds)} adversarial prompts from Fortress dataset")
-        return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
-
-
-class _FortressBenignDataset(_FortressBaseDataset):
-    """
-    Loader for the benign half of FORTRESS (500 prompts paired with the adversarial split).
-
-    Each benign prompt is a same-topic rephrasing of an adversarial prompt, used to
-    measure over-refusal. The paired adversarial prompt text is preserved in
-    ``metadata["paired_prompt"]`` for downstream consumers that want to compute
-    the paired (ARS, ORS) metric.
-
-    Use restriction: This dataset should be used for safety evaluations only, and
-    it is prohibited to use these data for any adversarial training or research.
-
-    Reference: [@knight2025fortress]
-    """
-
-    size: str = "medium"
-    tags: set[str] = {"safety", "refusal", "calibration", "national_security"}
-
-    _DESCRIPTION: str = (
-        "Benign half of FORTRESS: 500 same-topic rephrasings of the adversarial prompts, "
-        "used to measure over-refusal. The paired adversarial prompt is preserved in "
-        "SeedPrompt metadata."
-    )
-
-    @property
-    @override
-    def dataset_name(self) -> str:
-        """Return the dataset name."""
-        return "fortress_benign"
-
-    @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
-        """
-        Fetch the benign Fortress prompts as a SeedDataset.
-
-        Args:
-            cache (bool): Whether to cache the fetched dataset. Defaults to True.
-
-        Returns:
-            SeedDataset: The benign prompts, optionally filtered by domain/subdomain.
-
-        Raises:
-            ValueError: If no rows remain after filtering.
-        """
-        logger.info(
-            f"Loading Fortress benign dataset (risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
-        )
-
-        rows = await self._fetch_filtered_rows_async(cache=cache)
-        seeds = [
-            self._build_seed_prompt(row=row, adversarial_or_benign="benign", description=self._DESCRIPTION)
-            for row in rows
-        ]
-
-        logger.info(f"Successfully loaded {len(seeds)} benign prompts from Fortress dataset")
-        return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
-
-
-class _FortressPairedDataset(_FortressBaseDataset):
-    """
-    Loader for the full FORTRESS dataset with both adversarial and benign prompts.
-
-    For each upstream row, two SeedPrompts are emitted (adversarial first, then benign)
-    sharing a ``fortress_id`` in metadata. Adversarial prompts carry the per-row rubric
-    in ``metadata["rubric"]`` / ``metadata["num_dim"]``; both halves carry the partner
-    prompt's text in ``metadata["paired_prompt"]``. This is the loader to use when the
-    consumer wants both halves available in a single SeedDataset.
-
-    Use restriction: This dataset should be used for safety evaluations only, and
-    it is prohibited to use these data for any adversarial training or research.
-
-    Reference: [@knight2025fortress]
-    """
-
-    size: str = "large"
-    tags: set[str] = {"safety", "jailbreak", "refusal", "calibration", "national_security"}
-
-    _DESCRIPTION: str = (
-        "Paired FORTRESS dataset: each adversarial prompt is followed by its benign "
-        "twin, sharing a fortress_id in metadata. Adversarial prompts carry per-row "
-        "rubric metadata; both halves carry the partner prompt for downstream "
-        "(ARS, ORS) trade-off analysis."
-    )
-
-    @property
-    @override
-    def dataset_name(self) -> str:
-        """Return the dataset name."""
-        return "fortress_paired"
-
-    @override
-    async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
-        """
-        Fetch both adversarial and benign Fortress prompts as a single SeedDataset.
-
-        Each upstream row yields two SeedPrompts (adversarial then benign) sharing
-        a ``fortress_id`` in metadata.
-
-        Args:
-            cache (bool): Whether to cache the fetched dataset. Defaults to True.
-
-        Returns:
-            SeedDataset: All adversarial + benign prompts after any domain/subdomain filtering.
-
-        Raises:
-            ValueError: If no rows remain after filtering.
-        """
-        logger.info(
-            f"Loading Fortress paired dataset (risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
-        )
-
-        rows = await self._fetch_filtered_rows_async(cache=cache)
         seeds: list[SeedPrompt] = []
         for row in rows:
-            seeds.append(
-                self._build_seed_prompt(row=row, adversarial_or_benign="adversarial", description=self._DESCRIPTION)
-            )
-            seeds.append(
-                self._build_seed_prompt(row=row, adversarial_or_benign="benign", description=self._DESCRIPTION)
-            )
+            if emit_adv:
+                seeds.append(self._build_seed_prompt(row=row, adversarial_or_benign="adversarial"))
+            if emit_benign:
+                seeds.append(self._build_seed_prompt(row=row, adversarial_or_benign="benign"))
 
-        logger.info(f"Successfully loaded {len(seeds)} prompts ({len(seeds) // 2} paired rows) from Fortress dataset")
+        logger.info(f"Loaded {len(seeds)} prompts from Fortress dataset (split={self.split.value})")
         return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
 
 
