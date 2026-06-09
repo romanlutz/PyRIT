@@ -2,6 +2,8 @@
 # Licensed under the MIT license.
 
 
+from typing import ClassVar
+
 from pyrit.models import ComponentIdentifier, PromptDataType
 from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
 
@@ -14,13 +16,19 @@ class UnicodeSubstitutionConverter(PromptConverter):
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
 
-    def __init__(self, *, start_value: int = 0xE0000) -> None:
+    # Default Unicode starting point: the Tags block at U+E0000.
+    DEFAULT_START_VALUE: ClassVar[int] = 0xE0000
+
+    def __init__(self, *, start_value: int | None = None) -> None:
         """
         Initialize the converter with a specified unicode starting point.
 
         Args:
-            start_value (int): The unicode starting point to use for encoding.
+            start_value (int | None): The unicode starting point to use for encoding; defaults to
+                ``DEFAULT_START_VALUE`` (``0xE0000``).
         """
+        if start_value is None:
+            start_value = self.DEFAULT_START_VALUE
         self.startValue = start_value
 
     def _build_identifier(self) -> ComponentIdentifier:

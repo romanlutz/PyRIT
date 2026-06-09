@@ -3,7 +3,7 @@
 
 import abc
 import logging
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pyrit.models import ComponentIdentifier
 from pyrit.models.literals import PromptDataType
@@ -23,22 +23,27 @@ class SmugglerConverter(PromptConverter, abc.ABC):
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
 
+    DEFAULT_ACTION: ClassVar[Literal["encode", "decode"]] = "encode"
+
     # Grandfathered: ``action`` is part of the public positional API of every
     # SmugglerConverter subclass.
     # TODO: remove this opt-out and insert ``*,`` after ``self`` in 0.16.0
     # (this will be a BREAKING CHANGE for callers passing ``action`` positionally).
     _brick_legacy_init = True
 
-    def __init__(self, action: Literal["encode", "decode"] = "encode") -> None:
+    def __init__(self, action: Literal["encode", "decode"] | None = None) -> None:
         """
         Initialize the converter with options for encoding/decoding.
 
         Args:
-            action (Literal["encode", "decode"]): The action to perform.
+            action (Literal["encode", "decode"] | None): The action to perform; defaults to
+                ``DEFAULT_ACTION`` (``"encode"``).
 
         Raises:
             ValueError: If the action is not 'encode' or 'decode'.
         """
+        if action is None:
+            action = self.DEFAULT_ACTION
         if action not in ["encode", "decode"]:
             raise ValueError("Action must be either 'encode' or 'decode'")
         self.action = action

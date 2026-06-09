@@ -26,12 +26,13 @@ class AsciiSmugglerConverter(SmugglerConverter):
     # TODO: remove this opt-out and insert ``*,`` after ``self`` in 0.16.0.
     _brick_legacy_init = True
 
-    def __init__(self, action: Literal["encode", "decode"] = "encode", unicode_tags: bool = False) -> None:
+    def __init__(self, action: Literal["encode", "decode"] | None = None, unicode_tags: bool = False) -> None:
         """
         Initialize the converter with options for encoding/decoding.
 
         Args:
-            action (Literal["encode", "decode"]): The action to perform.
+            action (Literal["encode", "decode"] | None): The action to perform; defaults to
+                ``SmugglerConverter.DEFAULT_ACTION`` (``"encode"``).
             unicode_tags (bool): Whether to add Unicode tags during encoding.
         """
         self.unicode_tags = unicode_tags

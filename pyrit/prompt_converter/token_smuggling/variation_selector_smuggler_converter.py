@@ -35,7 +35,7 @@ class VariationSelectorSmugglerConverter(SmugglerConverter):
 
     def __init__(
         self,
-        action: Literal["encode", "decode"] = "encode",
+        action: Literal["encode", "decode"] | None = None,
         base_char_utf8: str | None = None,
         embed_in_base: bool = True,
     ) -> None:
@@ -43,7 +43,8 @@ class VariationSelectorSmugglerConverter(SmugglerConverter):
         Initialize the converter with options for encoding/decoding.
 
         Args:
-            action (Literal["encode", "decode"]): The action to perform.
+            action (Literal["encode", "decode"] | None): The action to perform; defaults to
+                ``SmugglerConverter.DEFAULT_ACTION`` (``"encode"``).
             base_char_utf8 (str | None): Base character for ``variation_selector_smuggler`` mode (default: 😊).
             embed_in_base (bool): If True, the hidden payload is embedded directly into the base character.
                                     If False, a visible separator (space) is inserted between the base and payload.

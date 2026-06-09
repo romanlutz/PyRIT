@@ -28,7 +28,7 @@ class SneakyBitsSmugglerConverter(SmugglerConverter):
 
     def __init__(
         self,
-        action: Literal["encode", "decode"] = "encode",
+        action: Literal["encode", "decode"] | None = None,
         zero_char: str | None = None,
         one_char: str | None = None,
     ) -> None:
@@ -36,7 +36,8 @@ class SneakyBitsSmugglerConverter(SmugglerConverter):
         Initialize the converter with options for encoding/decoding in Sneaky Bits mode.
 
         Args:
-            action (Literal["encode", "decode"]): The action to perform.
+            action (Literal["encode", "decode"] | None): The action to perform; defaults to
+                ``SmugglerConverter.DEFAULT_ACTION`` (``"encode"``).
             zero_char (str | None): Character to represent binary 0 in ``sneaky_bits`` mode (default: U+2062).
             one_char (str | None): Character to represent binary 1 in ``sneaky_bits`` mode (default: U+2064).
 
