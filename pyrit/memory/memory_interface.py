@@ -10,7 +10,7 @@ import weakref
 from collections.abc import MutableSequence, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from sqlalchemy import MetaData, and_, not_, or_
 from sqlalchemy.engine.base import Engine
@@ -82,9 +82,6 @@ class MemoryInterface(abc.ABC):
     # Conservative default based on SQLite's limit of 999. Subclasses can override
     # for backends with higher limits (e.g., Azure SQL supports 2100).
     _MAX_BIND_VARS: int = 500
-
-    # Default combination semantics for ``_get_condition_json_array_match``.
-    DEFAULT_MATCH_MODE: ClassVar[Literal["all", "any"]] = "all"
 
     memory_embedding: "MemoryEmbedding | None" = None
     results_storage_io: StorageIO | None = None
@@ -264,7 +261,7 @@ class MemoryInterface(abc.ABC):
         property_path: str,
         array_element_path: str | None = None,
         array_to_match: Sequence[str],
-        match_mode: Literal["all", "any"] | None = None,
+        match_mode: Literal["all", "any"] = "all",
     ) -> Any:
         """
         Return a database-specific condition for matching an array at a given path within a JSON object.
@@ -282,11 +279,10 @@ class MemoryInterface(abc.ABC):
                 Combination semantics for multiple entries are controlled by ``match_mode``.
                 If ``array_to_match`` is empty, the condition matches only if the target is also an
                 empty array or None (overloaded "absence" semantics, regardless of ``match_mode``).
-            match_mode (Literal["all", "any"] | None): How to combine multiple entries in
-                ``array_to_match``. Defaults to ``DEFAULT_MATCH_MODE`` (``"all"``) when None,
-                which requires every listed value to be present in the JSON array. ``"any"``
-                requires at least one listed value to be present. Ignored when ``array_to_match``
-                has fewer than 2 entries or is empty.
+            match_mode (Literal["all", "any"]): How to combine multiple entries in ``array_to_match``.
+                ``"all"`` (default) requires every listed value to be present in the JSON array.
+                ``"any"`` requires at least one listed value to be present. Ignored when
+                ``array_to_match`` has fewer than 2 entries or is empty.
 
         Returns:
             Any: A database-specific SQLAlchemy condition.
