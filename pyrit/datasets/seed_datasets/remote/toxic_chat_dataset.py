@@ -3,7 +3,7 @@
 
 import json
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -31,6 +31,7 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
     """
 
     HF_DATASET_NAME: str = "lmsys/toxic-chat"
+    DEFAULT_SPLIT: ClassVar[str] = "train"
 
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
@@ -43,15 +44,17 @@ class _ToxicChatDataset(_RemoteDatasetLoader):
         self,
         *,
         config: str = "toxicchat0124",
-        split: str = "train",
+        split: str | None = None,
     ) -> None:
         """
         Initialize the ToxicChat dataset loader.
 
         Args:
             config: Dataset configuration. Defaults to "toxicchat0124".
-            split: Dataset split to load. Defaults to "train".
+            split: Dataset split to load. Defaults to ``DEFAULT_SPLIT`` ("train").
         """
+        if split is None:
+            split = self.DEFAULT_SPLIT
         self.config = config
         self.split = split
 

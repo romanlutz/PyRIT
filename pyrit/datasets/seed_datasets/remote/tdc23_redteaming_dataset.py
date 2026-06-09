@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
@@ -27,6 +27,8 @@ class _TDC23RedteamingDataset(_RemoteDatasetLoader):
 
     Reference: [@mazeika2023tdc]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "walledai/TDC23-RedTeaming"
 
     _AUTHORS = [
         "Mantas Mazeika",
@@ -57,14 +59,17 @@ class _TDC23RedteamingDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "walledai/TDC23-RedTeaming",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the TDC23-RedTeaming dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "walledai/TDC23-RedTeaming".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("walledai/TDC23-RedTeaming").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

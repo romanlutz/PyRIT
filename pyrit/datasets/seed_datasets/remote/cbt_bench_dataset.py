@@ -3,7 +3,7 @@
 
 import logging
 import warnings
-from typing import Any
+from typing import Any, ClassVar
 
 from typing_extensions import override
 
@@ -31,6 +31,8 @@ class _CBTBenchDataset(_RemoteDatasetLoader):
         - [@zhang2024cbtbench]
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "Psychotherapy-LLM/CBT-Bench"
+
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
     size: str = "small"  # 20 core_fine_seed therapy seeds (default config)
@@ -39,7 +41,7 @@ class _CBTBenchDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "Psychotherapy-LLM/CBT-Bench",
+        source: str | None = None,
         config: str = "core_fine_seed",
         split: str | None = None,
     ) -> None:
@@ -47,7 +49,8 @@ class _CBTBenchDataset(_RemoteDatasetLoader):
         Initialize the CBT-Bench dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "Psychotherapy-LLM/CBT-Bench".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("Psychotherapy-LLM/CBT-Bench").
             config: Dataset configuration/subset to load. Defaults to "core_fine_seed".
             split: **Deprecated.** Every config of ``Psychotherapy-LLM/CBT-Bench`` publishes
                 only the ``"train"`` split, so this kwarg has no effect. It will be removed
@@ -61,6 +64,8 @@ class _CBTBenchDataset(_RemoteDatasetLoader):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
         self.config = config
 

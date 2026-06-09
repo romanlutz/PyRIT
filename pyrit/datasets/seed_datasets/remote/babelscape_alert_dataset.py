@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from typing_extensions import override
 
@@ -27,6 +27,8 @@ class _BabelscapeAlertDataset(_RemoteDatasetLoader):
 
     Reference: [@tedeschi2024alert]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "Babelscape/ALERT"
 
     _AUTHORS = [
         "Simone Tedeschi",
@@ -57,20 +59,22 @@ class _BabelscapeAlertDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "Babelscape/ALERT",
+        source: str | None = None,
         category: Literal["alert", "alert_adversarial"] | None = "alert_adversarial",
     ) -> None:
         """
         Initialize the Babelscape ALERT dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "Babelscape/ALERT".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME`` ("Babelscape/ALERT").
             category: The dataset category. "alert", "alert_adversarial", or None for both.
                 Defaults to "alert_adversarial".
 
         Raises:
             ValueError: If an invalid category is provided.
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
         self.category = category
 

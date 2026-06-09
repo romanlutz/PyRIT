@@ -4,7 +4,7 @@
 import logging
 import uuid
 from enum import Enum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from typing_extensions import override
 
@@ -45,6 +45,11 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
     Paper: [@mazeika2024harmbench]
     """
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/centerforaisafety/HarmBench/c0423b9/data/behavior_datasets/"
+        "harmbench_behaviors_multimodal_all.csv"
+    )
+
     _AUTHORS = [
         "Mantas Mazeika",
         "Long Phan",
@@ -76,10 +81,7 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/centerforaisafety/HarmBench/c0423b9/data/behavior_datasets/"
-            "harmbench_behaviors_multimodal_all.csv"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
         categories: list[SemanticCategory] | None = None,
     ) -> None:
@@ -87,7 +89,8 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
         Initialize the HarmBench multimodal dataset loader.
 
         Args:
-            source: URL or file path to the HarmBench CSV file. Defaults to official repository.
+            source: URL or file path to the HarmBench CSV file. Defaults to ``DEFAULT_SOURCE_URL``
+                (the official repository).
             source_type: The type of source ('public_url' or 'file').
             categories: List of semantic categories to filter examples.
                 If None, all categories are included (default).
@@ -95,6 +98,8 @@ class _HarmBenchMultimodalDataset(_RemoteDatasetLoader):
         Raises:
             ValueError: If any of the specified categories are invalid.
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
         self.categories = categories

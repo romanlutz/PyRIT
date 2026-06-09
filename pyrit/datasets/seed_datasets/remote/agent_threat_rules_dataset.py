@@ -3,7 +3,7 @@
 
 import logging
 from enum import Enum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from typing_extensions import override
 
@@ -119,6 +119,11 @@ class _AgentThreatRulesDataset(_RemoteDatasetLoader):
     Passing an empty list is rejected — pass ``None`` to disable a filter.
     """
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/"
+        "db793f9/data/autoresearch/adversarial-samples.json"
+    )
+
     # Class-attribute metadata picked up by SeedDatasetMetadata. Derived from
     # _RULE_ID_TO_CATEGORY so the categories the loader claims to cover always
     # match the categories it actually produces — same single-source-of-truth
@@ -131,10 +136,7 @@ class _AgentThreatRulesDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/Agent-Threat-Rule/agent-threat-rules/"
-            "db793f9/data/autoresearch/adversarial-samples.json"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
         categories: list[ATRCategory] | None = None,
         techniques: list[str] | None = None,
@@ -146,9 +148,9 @@ class _AgentThreatRulesDataset(_RemoteDatasetLoader):
 
         Args:
             source: URL or local path to ``adversarial-samples.json``. Defaults
-                to a pinned commit on the upstream ATR repository for
-                reproducibility; pass the raw URL on ``main`` or a different
-                tag to track upstream.
+                to ``DEFAULT_SOURCE_URL``, a pinned commit on the upstream ATR
+                repository for reproducibility; pass the raw URL on ``main`` or
+                a different tag to track upstream.
             source_type: ``"public_url"`` or ``"file"``.
             categories: Optional non-empty list of ATRCategory values; if
                 provided, only payloads whose original rule maps to one of
@@ -194,7 +196,7 @@ class _AgentThreatRulesDataset(_RemoteDatasetLoader):
                 )
             self._validate_enums(variation_types, ATRVariationType, "variation_type")
 
-        self.source = source
+        self.source = source if source is not None else self.DEFAULT_SOURCE_URL
         self.source_type: Literal["public_url", "file"] = source_type
         self._categories = {c.value for c in categories} if categories else None
         self._techniques = set(techniques) if techniques else None

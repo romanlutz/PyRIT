@@ -3,6 +3,7 @@
 
 import logging
 import re
+from typing import ClassVar
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -31,6 +32,7 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
     """
 
     HF_DATASET_NAME: str = "walledai/SaladBench"
+    DEFAULT_SPLIT: ClassVar[str] = "base"
 
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
@@ -41,7 +43,7 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
         self,
         *,
         config: str = "prompts",
-        split: str = "base",
+        split: str | None = None,
     ) -> None:
         """
         Initialize the SALAD-Bench dataset loader.
@@ -49,8 +51,10 @@ class _SaladBenchDataset(_RemoteDatasetLoader):
         Args:
             config: Dataset configuration. Defaults to "prompts".
             split: Dataset split to load. One of "base", "attackEnhanced", "defenseEnhanced".
-                Defaults to "base".
+                Defaults to ``DEFAULT_SPLIT`` ("base").
         """
+        if split is None:
+            split = self.DEFAULT_SPLIT
         self.config = config
         self.split = split
 

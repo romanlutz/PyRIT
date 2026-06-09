@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
+from typing import ClassVar
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -30,6 +31,7 @@ class _BeaverTailsDataset(_RemoteDatasetLoader):
     """
 
     HF_DATASET_NAME: str = "PKU-Alignment/BeaverTails"
+    DEFAULT_SPLIT: ClassVar[str] = "330k_train"
 
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
@@ -39,16 +41,18 @@ class _BeaverTailsDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        split: str = "330k_train",
+        split: str | None = None,
         unsafe_only: bool = True,
     ) -> None:
         """
         Initialize the BeaverTails dataset loader.
 
         Args:
-            split: Dataset split to load. Defaults to "330k_train".
+            split: Dataset split to load. Defaults to ``DEFAULT_SPLIT`` ("330k_train").
             unsafe_only: If True, only load entries marked as unsafe. Defaults to True.
         """
+        if split is None:
+            split = self.DEFAULT_SPLIT
         self.split = split
         self.unsafe_only = unsafe_only
 

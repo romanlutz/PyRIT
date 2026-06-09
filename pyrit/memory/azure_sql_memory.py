@@ -392,7 +392,7 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         property_path: str,
         array_element_path: str | None = None,
         array_to_match: Sequence[str],
-        match_mode: Literal["all", "any"] = "all",
+        match_mode: Literal["all", "any"] | None = None,
     ) -> Any:
         """
         Return an Azure SQL DB condition for matching an array at a given path within a JSON object.
@@ -405,13 +405,16 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
                 Combination semantics for multiple entries are controlled by ``match_mode``.
                 If ``array_to_match`` is empty, the condition matches only if the target is also an
                 empty array or None (overloaded "absence" semantics, regardless of ``match_mode``).
-            match_mode (Literal["all", "any"]): How to combine multiple entries in ``array_to_match``.
-                ``"all"`` (default) requires every listed value to be present in the JSON array.
+            match_mode (Literal["all", "any"] | None): How to combine multiple entries in
+                ``array_to_match``. Defaults to ``DEFAULT_MATCH_MODE`` (``"all"``) when None.
+                ``"all"`` requires every listed value to be present in the JSON array.
                 ``"any"`` requires at least one listed value to be present.
 
         Returns:
             Any: A database-specific SQLAlchemy condition.
         """
+        if match_mode is None:
+            match_mode = self.DEFAULT_MATCH_MODE
         uid = self._uid()
         table_name = json_column.class_.__tablename__
         column_name = json_column.key

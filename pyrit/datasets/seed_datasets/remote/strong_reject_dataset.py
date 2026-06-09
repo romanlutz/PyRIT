@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -30,6 +30,11 @@ class _StrongRejectDataset(_RemoteDatasetLoader):
     Reference: [@souly2024strongreject]
     """
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/alexandrasouly/strongreject/"
+        "3432b2d696b428f242bd507df96d80f686571d5e/strongreject_dataset/strongreject_dataset.csv"
+    )
+
     # Metadata
     harm_categories: list[str] = [
         "disinformation and deception",
@@ -46,20 +51,19 @@ class _StrongRejectDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/alexandrasouly/strongreject/"
-            "3432b2d696b428f242bd507df96d80f686571d5e/strongreject_dataset/strongreject_dataset.csv"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
     ) -> None:
         """
         Initialize the StrongREJECT dataset loader.
 
         Args:
-            source (str): URL to the StrongREJECT CSV file. Defaults to the pinned-commit raw URL
-                on the upstream GitHub repository.
+            source (str | None): URL to the StrongREJECT CSV file. Defaults to
+                ``DEFAULT_SOURCE_URL`` (the pinned-commit raw URL on the upstream GitHub repository).
             source_type (Literal["public_url", "file"]): The type of source ('public_url' or 'file').
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
 

@@ -3,6 +3,7 @@
 
 import logging
 import warnings
+from typing import ClassVar
 
 from typing_extensions import override
 
@@ -28,6 +29,8 @@ class _ForbiddenQuestionsDataset(_RemoteDatasetLoader):
     Website: https://jailbreak-llms.xinyueshen.me/
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "TrustAIRLab/forbidden_question_set"
+
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
     size: str = "medium"  # 390 questions (13 scenarios x 30 questions)
@@ -36,14 +39,15 @@ class _ForbiddenQuestionsDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "TrustAIRLab/forbidden_question_set",
+        source: str | None = None,
         split: str | None = None,
     ) -> None:
         """
         Initialize the Forbidden Questions dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "TrustAIRLab/forbidden_question_set".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("TrustAIRLab/forbidden_question_set").
             split: **Deprecated.** This kwarg was misforwarded to HuggingFace as ``config``,
                 and ``TrustAIRLab/forbidden_question_set`` publishes only one config
                 (``"default"``) with one split (``"train"``), so it never did anything
@@ -58,6 +62,8 @@ class _ForbiddenQuestionsDataset(_RemoteDatasetLoader):
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

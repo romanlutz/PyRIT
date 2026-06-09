@@ -3,6 +3,7 @@
 
 import ast
 import logging
+from typing import ClassVar
 from uuid import uuid4
 
 from typing_extensions import override
@@ -26,6 +27,8 @@ class _RedTeamSocialBiasDataset(_RemoteDatasetLoader):
     Reference: [@vantaylor2024socialbias]
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "svannie678/red_team_repo_social_bias_prompts"
+
     _AUTHORS = ["Simone Van Taylor"]
 
     _GROUPS: list[str] = []
@@ -38,14 +41,17 @@ class _RedTeamSocialBiasDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "svannie678/red_team_repo_social_bias_prompts",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the Red Team Social Bias dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "svannie678/red_team_repo_social_bias_prompts".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("svannie678/red_team_repo_social_bias_prompts").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

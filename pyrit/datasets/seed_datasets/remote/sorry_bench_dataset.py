@@ -3,6 +3,7 @@
 
 import logging
 import os
+from typing import ClassVar
 
 from typing_extensions import override
 
@@ -23,6 +24,8 @@ class _SorryBenchDataset(_RemoteDatasetLoader):
 
     Reference: [@xie2024sorrybench]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "sorry-bench/sorry-bench-202503"
 
     _AUTHORS = [
         "Tinghao Xie",
@@ -131,7 +134,7 @@ class _SorryBenchDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "sorry-bench/sorry-bench-202503",
+        source: str | None = None,
         categories: list[str] | None = None,
         prompt_style: str | None = None,
         token: str | None = None,
@@ -140,7 +143,8 @@ class _SorryBenchDataset(_RemoteDatasetLoader):
         Initialize the Sorry-Bench dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "sorry-bench/sorry-bench-202503".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("sorry-bench/sorry-bench-202503").
             categories: Optional list of categories to filter. Defaults to None (all categories).
             prompt_style: Optional prompt style to filter. Defaults to "base".
                 Available: "base", "ascii", "caesar", "slang", "authority_endorsement", etc.
@@ -149,6 +153,8 @@ class _SorryBenchDataset(_RemoteDatasetLoader):
         Raises:
             ValueError: If invalid categories or prompt_style are provided.
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
         self.categories = categories
         self.prompt_style = prompt_style if prompt_style is not None else "base"

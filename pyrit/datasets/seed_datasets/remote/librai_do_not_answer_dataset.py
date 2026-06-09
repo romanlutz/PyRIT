@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
@@ -28,6 +28,8 @@ class _LibrAIDoNotAnswerDataset(_RemoteDatasetLoader):
     GitHub: https://github.com/libr-ai/do-not-answer
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "LibrAI/do-not-answer"
+
     _AUTHORS = [
         "Yuxia Wang",
         "Haonan Li",
@@ -49,14 +51,17 @@ class _LibrAIDoNotAnswerDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "LibrAI/do-not-answer",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the LibrAI Do Not Answer dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "LibrAI/do-not-answer".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("LibrAI/do-not-answer").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

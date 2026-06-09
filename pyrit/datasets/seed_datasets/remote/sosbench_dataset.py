@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
+from typing import ClassVar
 
 from typing_extensions import override
 
@@ -24,6 +25,8 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
     Reference: [@jiang2025sosbench]
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "SOSBench/SOSBench"
+
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
     size: str = "large"  # 3,000 hazard-focused scientific prompts across 6 domains
@@ -32,14 +35,16 @@ class _SOSBenchDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "SOSBench/SOSBench",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the SOSBench dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "SOSBench/SOSBench".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME`` ("SOSBench/SOSBench").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
@@ -26,6 +26,8 @@ class _LLMLatentAdversarialTrainingDataset(_RemoteDatasetLoader):
 
     Reference: [@sheshadri2024lat]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "LLM-LAT/harmful-dataset"
 
     _AUTHORS = [
         "Abhay Sheshadri",
@@ -61,14 +63,17 @@ class _LLMLatentAdversarialTrainingDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "LLM-LAT/harmful-dataset",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the LLM-LAT harmful dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "LLM-LAT/harmful-dataset".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("LLM-LAT/harmful-dataset").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

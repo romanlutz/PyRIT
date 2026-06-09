@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import override
 
@@ -27,6 +27,8 @@ class _CCPSensitivePromptsDataset(_RemoteDatasetLoader):
     Reference: [@promptfoo2025ccp]
     """
 
+    HF_DATASET_NAME: ClassVar[str] = "promptfoo/CCP-sensitive-prompts"
+
     _AUTHORS = ["Ian Webster"]
 
     _GROUPS = ["Promptfoo"]
@@ -39,14 +41,17 @@ class _CCPSensitivePromptsDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "promptfoo/CCP-sensitive-prompts",
+        source: str | None = None,
     ) -> None:
         """
         Initialize the CCP-sensitive prompts dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "promptfoo/CCP-sensitive-prompts".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("promptfoo/CCP-sensitive-prompts").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
     @property

@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from typing_extensions import override
 
@@ -47,19 +47,26 @@ class _XSTestDataset(_RemoteDatasetLoader):
     size: str = "medium"  # 450 safe + unsafe contrast prompts
     tags: frozenset[str] = frozenset({"default", "safety", "refusal"})
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/paul-rottger/exaggerated-safety/a3bb396/xstest_v2_prompts.csv"
+    )
+
     def __init__(
         self,
         *,
-        source: str = "https://raw.githubusercontent.com/paul-rottger/exaggerated-safety/a3bb396/xstest_v2_prompts.csv",
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
     ) -> None:
         """
         Initialize the XSTest dataset loader.
 
         Args:
-            source: URL to the XSTest CSV file. Defaults to the official repository.
+            source: URL to the XSTest CSV file. Defaults to ``DEFAULT_SOURCE_URL``
+                (the official repository).
             source_type: The type of source ('public_url' or 'file').
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
 

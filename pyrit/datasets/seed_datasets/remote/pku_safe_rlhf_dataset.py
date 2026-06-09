@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import Literal
+from typing import ClassVar, Literal
 
 from typing_extensions import override
 
@@ -24,6 +24,8 @@ class _PKUSafeRLHFDataset(_RemoteDatasetLoader):
     Reference: https://huggingface.co/datasets/PKU-Alignment/PKU-SafeRLHF
     Paper: [@ji2024pkusaferlhf]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "PKU-Alignment/PKU-SafeRLHF"
 
     _AUTHORS = [
         "Jiaming Ji",
@@ -55,7 +57,7 @@ class _PKUSafeRLHFDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "PKU-Alignment/PKU-SafeRLHF",
+        source: str | None = None,
         include_safe_prompts: bool = True,
         filter_harm_categories: list[
             Literal[
@@ -86,11 +88,14 @@ class _PKUSafeRLHFDataset(_RemoteDatasetLoader):
         Initialize the PKU-SafeRLHF dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "PKU-Alignment/PKU-SafeRLHF".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("PKU-Alignment/PKU-SafeRLHF").
             include_safe_prompts: All prompts returned if True; only unsafe subset if False.
             filter_harm_categories: List of harm categories to filter. Defaults to None (all categories).
                 Only prompts with at least one matching category are included.
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
         self.include_safe_prompts = include_safe_prompts
         self.filter_harm_categories = filter_harm_categories

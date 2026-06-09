@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from typing_extensions import override
 
@@ -21,6 +21,11 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
     Reference: https://github.com/centerforaisafety/HarmBench
     """
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/centerforaisafety/HarmBench/c0423b9/data/behavior_datasets/"
+        "harmbench_behaviors_text_all.csv"
+    )
+
     # Metadata
     harm_categories: list[str] = ["cybercrime", "illegal", "harmful", "chemical_biological", "harassment"]
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
@@ -30,19 +35,19 @@ class _HarmBenchDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/centerforaisafety/HarmBench/c0423b9/data/behavior_datasets/"
-            "harmbench_behaviors_text_all.csv"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
     ) -> None:
         """
         Initialize the HarmBench dataset loader.
 
         Args:
-            source: URL to the HarmBench CSV file. Defaults to the official repository.
+            source: URL to the HarmBench CSV file. Defaults to ``DEFAULT_SOURCE_URL``
+                (the official repository).
             source_type: The type of source ('public_url' or 'file').
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
 

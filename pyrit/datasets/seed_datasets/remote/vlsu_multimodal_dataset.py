@@ -4,7 +4,7 @@
 import logging
 import uuid
 from enum import Enum
-from typing import Literal
+from typing import ClassVar, Literal
 
 from typing_extensions import override
 
@@ -71,6 +71,8 @@ class _VLSUMultimodalDataset(_RemoteDatasetLoader):
 
     _GROUPS = ["Apple"]
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = "https://raw.githubusercontent.com/apple/ml-vlsu/main/data/VLSU.csv"
+
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT, Modality.IMAGE)
     size: str = "huge"  # 11074 image-text safety annotations
@@ -79,7 +81,7 @@ class _VLSUMultimodalDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "https://raw.githubusercontent.com/apple/ml-vlsu/main/data/VLSU.csv",
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
         categories: list[VLSUCategory] | None = None,
         unsafe_grades: list[str] | None = None,
@@ -89,7 +91,8 @@ class _VLSUMultimodalDataset(_RemoteDatasetLoader):
         Initialize the ML-VLSU multimodal dataset loader.
 
         Args:
-            source: URL or file path to the VLSU CSV file. Defaults to official repository.
+            source: URL or file path to the VLSU CSV file. Defaults to ``DEFAULT_SOURCE_URL``
+                (the official repository).
             source_type: The type of source ('public_url' or 'file').
             categories: List of VLSU categories to filter examples.
                 If None, all categories are included (default).
@@ -105,6 +108,8 @@ class _VLSUMultimodalDataset(_RemoteDatasetLoader):
         """
         if unsafe_grades is None:
             unsafe_grades = ["unsafe", "borderline"]
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
         self.categories = categories

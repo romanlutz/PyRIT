@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import Literal, cast
+from typing import ClassVar, Literal, cast
 
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
@@ -33,6 +33,11 @@ class _DangerousQADataset(_RemoteDatasetLoader):
     Warning: This dataset contains harmful questions designed to test LLM safety.
     """
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/SALT-NLP/chain-of-thought-bias/"
+        "445568d3b73f81a9054f51c739172186d5648157/data/dangerous-q/toxic_outs.json"
+    )
+
     # Metadata
     # Per-prompt harm categories are intentionally omitted: the source JSON has
     # no per-item labels and the paper only describes the dataset's coverage at
@@ -45,20 +50,20 @@ class _DangerousQADataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/SALT-NLP/chain-of-thought-bias/"
-            "445568d3b73f81a9054f51c739172186d5648157/data/dangerous-q/toxic_outs.json"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
     ) -> None:
         """
         Initialize the DangerousQA dataset loader.
 
         Args:
-            source: URL or path to the DangerousQA JSON file. Defaults to a pinned
-                commit of the official SALT-NLP/chain-of-thought-bias repository.
+            source: URL or path to the DangerousQA JSON file. Defaults to
+                ``DEFAULT_SOURCE_URL``, a pinned commit of the official
+                SALT-NLP/chain-of-thought-bias repository.
             source_type: The type of source ('public_url' or 'file').
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
 

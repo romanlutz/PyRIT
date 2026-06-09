@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from typing_extensions import override
 
@@ -39,6 +39,11 @@ class _MLCommonsAILuminateDataset(_RemoteDatasetLoader):
 
     _GROUPS = ["MLCommons AI Safety Working Group"]
 
+    DEFAULT_SOURCE_URL: ClassVar[str] = (
+        "https://raw.githubusercontent.com/mlcommons/ailuminate/refs/heads/main/"
+        "airr_official_1.0_demo_en_us_prompt_set_release.csv"
+    )
+
     # Metadata
     modalities: tuple[Modality, ...] = (Modality.TEXT,)
     size: str = "large"  # 1,200 hazard-category prompts
@@ -65,19 +70,19 @@ class _MLCommonsAILuminateDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = (
-            "https://raw.githubusercontent.com/mlcommons/ailuminate/refs/heads/main/"
-            "airr_official_1.0_demo_en_us_prompt_set_release.csv"
-        ),
+        source: str | None = None,
         source_type: Literal["public_url", "file"] = "public_url",
     ) -> None:
         """
         Initialize the AILuminate dataset loader.
 
         Args:
-            source: URL to the AILuminate CSV file. Defaults to official repository.
+            source: URL to the AILuminate CSV file. Defaults to ``DEFAULT_SOURCE_URL``
+                (the official repository).
             source_type: The type of source ('public_url' or 'file').
         """
+        if source is None:
+            source = self.DEFAULT_SOURCE_URL
         self.source = source
         self.source_type: Literal["public_url", "file"] = source_type
 

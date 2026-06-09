@@ -3,7 +3,7 @@
 
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from typing_extensions import override
 
@@ -28,6 +28,8 @@ class _EquityMedQADataset(_RemoteDatasetLoader):
 
     Reference: [@pfohl2024equitymedqa]
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "katielink/EquityMedQA"
 
     _AUTHORS = [
         "Stephen R. Pfohl",
@@ -131,19 +133,22 @@ class _EquityMedQADataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "katielink/EquityMedQA",
+        source: str | None = None,
         subset_name: Literal["all"] | str | Sequence[str] = "all",
     ) -> None:
         """
         Initialize the EquityMedQA dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "katielink/EquityMedQA".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("katielink/EquityMedQA").
             subset_name: The name(s) of the subset to fetch. Defaults to "all" which returns all subsets.
 
         Raises:
             ValueError: If any of the specified subset names are invalid.
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
         self.source = source
 
         # Determine which subsets to load

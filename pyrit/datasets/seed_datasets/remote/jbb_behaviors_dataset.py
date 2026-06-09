@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
+from typing import ClassVar
 
 from typing_extensions import override
 
@@ -25,6 +26,9 @@ class _JBBBehaviorsDataset(_RemoteDatasetLoader):
     and may contain offensive content. Users should check with their legal department
     before using these prompts against production LLMs.
     """
+
+    HF_DATASET_NAME: ClassVar[str] = "JailbreakBench/JBB-Behaviors"
+    DEFAULT_SPLIT: ClassVar[str] = "behaviors"
 
     _AUTHORS = [
         "Patrick Chao",
@@ -56,16 +60,21 @@ class _JBBBehaviorsDataset(_RemoteDatasetLoader):
     def __init__(
         self,
         *,
-        source: str = "JailbreakBench/JBB-Behaviors",
-        split: str = "behaviors",
+        source: str | None = None,
+        split: str | None = None,
     ) -> None:
         """
         Initialize the JBB-Behaviors dataset loader.
 
         Args:
-            source: HuggingFace dataset identifier. Defaults to "JailbreakBench/JBB-Behaviors".
-            split: Dataset split to load. Defaults to "behaviors".
+            source: HuggingFace dataset identifier. Defaults to ``HF_DATASET_NAME``
+                ("JailbreakBench/JBB-Behaviors").
+            split: Dataset split to load. Defaults to ``DEFAULT_SPLIT`` ("behaviors").
         """
+        if source is None:
+            source = self.HF_DATASET_NAME
+        if split is None:
+            split = self.DEFAULT_SPLIT
         self.source = source
         self.split = split
 
