@@ -11,6 +11,9 @@ from pyrit.executor.attack.component.conversation_manager import (
     get_prepended_turn_count,
     mark_messages_as_simulated,
 )
+from pyrit.executor.attack.component.modality_router import (
+    ModalityFeedbackRouter,
+)
 from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
@@ -22,5 +25,6 @@ __all__ = [
     "get_adversarial_chat_messages",
     "get_prepended_turn_count",
     "mark_messages_as_simulated",
+    "ModalityFeedbackRouter",
     "PrependedConversationConfig",
 ]

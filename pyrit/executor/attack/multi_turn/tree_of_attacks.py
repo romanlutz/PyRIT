@@ -25,6 +25,7 @@ from pyrit.exceptions import (
 )
 from pyrit.executor.attack.component import (
     ConversationManager,
+    ModalityFeedbackRouter,
     PrependedConversationConfig,
     get_prepended_turn_count,
 )
@@ -291,6 +292,7 @@ class _TreeOfAttacksNode:
         auxiliary_scorers: list[Scorer] | None,
         attack_id: ComponentIdentifier,
         attack_strategy_name: str,
+        modality_router: ModalityFeedbackRouter,
         memory_labels: dict[str, str] | None = None,
         parent_id: str | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
@@ -313,6 +315,10 @@ class _TreeOfAttacksNode:
             auxiliary_scorers (list[Scorer] | None): Additional scorers for the response
             attack_id (ComponentIdentifier): Unique identifier for the attack.
             attack_strategy_name (str): Name of the attack strategy for execution context.
+            modality_router (ModalityFeedbackRouter): Capability-aware router that decides
+                whether prior media should travel back to the adversarial chat or forward to
+                the objective target, and fills adversarial-placeholder pieces in seed
+                messages. Typically shared across all nodes of the same attack.
             memory_labels (dict[str, str] | None): Labels for memory storage.
             parent_id (str | None): ID of the parent node, if this is a child node
             prompt_normalizer (PromptNormalizer | None): Normalizer for handling prompts and responses.
@@ -334,6 +340,7 @@ class _TreeOfAttacksNode:
         self._attack_id = attack_id
         self._attack_strategy_name = attack_strategy_name
         self._memory_labels = memory_labels or {}
+        self._modality_router = modality_router
 
         # Initialize utilities
         self._memory = CentralMemory.get_memory_instance()
@@ -356,7 +363,7 @@ class _TreeOfAttacksNode:
         self.objective_score: Score | None = None
         self.auxiliary_scores: dict[str, Score] = {}
         self.last_prompt_sent: str | None = None
-        self.last_response: str | None = None
+        self.last_response: Message | None = None
         self.error_message: str | None = None
 
         # Context from prepended conversation (for adversarial chat system prompt)
@@ -551,8 +558,13 @@ class _TreeOfAttacksNode:
         if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
             self.objective_target_conversation_id = str(uuid.uuid4())
 
-        # Create message from the generated prompt
-        message = Message.from_prompt(prompt=prompt, role="user")
+        # Build the request message via the modality router so prior media (if any)
+        # is included when the objective target accepts it.
+        message = self._modality_router.build_objective_input_message(
+            text=prompt,
+            last_response=self.last_response,
+            turn_index=0 if self._is_first_turn() else 1,
+        )
 
         # Send prompt with configured converters
         with execution_context(
@@ -573,9 +585,8 @@ class _TreeOfAttacksNode:
                 attack_identifier=self._attack_id,
             )
 
-        # Store the last response text for reference
-        response_piece = response.get_piece()
-        self.last_response = response_piece.converted_value
+        # Store the full response so subsequent turns can forward media when supported.
+        self.last_response = response
         logger.debug(f"Node {self.node_id}: Received response from target")
 
         return response
@@ -588,13 +599,18 @@ class _TreeOfAttacksNode:
         initial prompt directly. It supports multimodal messages. The initial prompt
         is cleared after use to ensure subsequent turns use normal generation.
 
+        If the initial prompt contains ``MessagePiece.adversarial_placeholder``
+        pieces (e.g. seed media combined with a placeholder for adversarial-generated
+        text), the adversarial chat is invoked to produce the text and the router
+        substitutes it into the placeholder slots before sending.
+
         Returns:
             Message: The response from the objective target.
 
         Side Effects:
             - Clears self._initial_prompt after use
             - Sets self.last_prompt_sent to the initial prompt text value
-            - Sets self.last_response to the target's response text
+            - Sets self.last_response to the target's response
 
         Raises:
             ValueError: If _initial_prompt is None when this method is called
@@ -606,9 +622,22 @@ class _TreeOfAttacksNode:
         if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
             self.objective_target_conversation_id = str(uuid.uuid4())
 
-        # Duplicate to ensure fresh IDs (avoids conflicts if message was already in memory)
-        message = self._initial_prompt.duplicate()
+        # If the initial prompt contains adversarial-placeholder pieces, generate the
+        # adversarial text first and fill the slots; otherwise use the initial prompt as-is.
+        initial_prompt = self._initial_prompt
         self._initial_prompt = None  # Clear for future turns
+
+        has_placeholder = any(piece.is_adversarial_placeholder() for piece in initial_prompt.message_pieces)
+        if has_placeholder:
+            assert self._objective is not None
+            adversarial_text = await self._generate_red_teaming_prompt_async(objective=self._objective)
+            message = self._modality_router.fill_adversarial_placeholders(
+                message=initial_prompt,
+                adversarial_text=adversarial_text,
+            )
+        else:
+            # Duplicate to ensure fresh IDs (avoids conflicts if message was already in memory)
+            message = initial_prompt.duplicate()
 
         # Store the prompt text for reference
         self.last_prompt_sent = message.get_value()
@@ -633,9 +662,8 @@ class _TreeOfAttacksNode:
                 attack_identifier=self._attack_id,
             )
 
-        # Store the last response text for reference
-        response_piece = response.get_piece()
-        self.last_response = response_piece.converted_value
+        # Store the full response so subsequent turns can forward media when supported.
+        self.last_response = response
         logger.debug(f"Node {self.node_id}: Received response from target")
 
         return response
@@ -807,6 +835,7 @@ class _TreeOfAttacksNode:
             auxiliary_scorers=self._auxiliary_scorers,
             attack_id=self._attack_id,
             attack_strategy_name=self._attack_strategy_name,
+            modality_router=self._modality_router,
             memory_labels=self._memory_labels,
             desired_response_prefix=self._desired_response_prefix,
             parent_id=self.node_id,
@@ -1103,8 +1132,8 @@ class _TreeOfAttacksNode:
             which is typically the objective score in the TAP algorithm context.
         """
         pieces = self._memory.get_message_pieces(prompt_ids=[str(response_id)])
-        if pieces and pieces[0].scores:
-            return str(normalize_score_to_float(pieces[0].scores[0]))
+        if pieces and pieces[0].scores:  # ty: ignore[unresolved-attribute]
+            return str(normalize_score_to_float(pieces[0].scores[0]))  # ty: ignore[unresolved-attribute]
         return "unavailable"
 
     async def _send_to_adversarial_chat_async(self, prompt_text: str) -> str:
@@ -1130,9 +1159,13 @@ class _TreeOfAttacksNode:
                 This response should contain at least a "prompt" field with the generated
                 attack prompt.
         """
-        # Configure for JSON response
-        message = Message.from_prompt(prompt=prompt_text, role="user")
-        message.message_pieces[0].prompt_metadata = {"response_format": "json"}
+        # Configure for JSON response. Router decides whether to also forward
+        # prior objective media when the adversarial accepts it.
+        message = self._modality_router.build_adversarial_input_message(
+            text=prompt_text,
+            last_response=self.last_response,
+            prompt_metadata={"response_format": "json"},
+        )
 
         # Send and get response
         with execution_context(
@@ -1383,6 +1416,16 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         except ValueError as exc:
             raise ValueError(f"TreeOfAttacksWithPruningAttack {exc}") from exc
 
+        # Router that decides — based on each target's declared capabilities —
+        # whether prior media should travel back to the adversarial chat or
+        # forward to the objective target, and that fills in adversarial
+        # placeholders when ``next_message`` carries seed media. Shared across
+        # all nodes of the tree.
+        self._modality_router = ModalityFeedbackRouter(
+            adversarial_target=self._adversarial_chat,
+            objective_target=objective_target,
+        )
+
         # Load system prompts
         self._adversarial_chat_system_prompt_path = (
             attack_adversarial_config.system_prompt_path
@@ -1498,7 +1541,9 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         Validate the context before execution.
 
         This method ensures the attack context contains all required configuration
-        before the attack can proceed. Currently validates that an objective is set.
+        before the attack can proceed. Currently validates that an objective is set
+        and that any first-turn seed media required by the objective target is
+        present on ``context.next_message``.
 
         Args:
             context (TAPAttackContext): The attack context to validate, containing
@@ -1507,9 +1552,15 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         Raises:
             ValueError: If the context is invalid, specifically:
                 - If context.objective is empty or None
+                - If the objective target requires media on turn 0 but the
+                  context's ``next_message`` does not supply any
         """
         if not context.objective:
             raise ValueError("The attack objective must be set in the context.")
+
+        # Fail fast if the objective target requires media on turn 0 but
+        # ``next_message`` does not supply any (i.e. edit-only mode without a seed).
+        self._modality_router.validate_first_turn_seed(next_message=context.next_message)
 
     async def _setup_async(self, *, context: TAPAttackContext) -> None:
         """
@@ -1959,6 +2010,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             auxiliary_scorers=self._auxiliary_scorers,
             attack_id=self.get_identifier(),
             attack_strategy_name=self.__class__.__name__,
+            modality_router=self._modality_router,
             memory_labels=context.memory_labels,
             desired_response_prefix=self._desired_response_prefix,
             parent_id=parent_id,

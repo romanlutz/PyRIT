@@ -21,6 +21,7 @@ from pyrit.exceptions import (
 )
 from pyrit.executor.attack.component import (
     ConversationManager,
+    ModalityFeedbackRouter,
     PrependedConversationConfig,
 )
 from pyrit.executor.attack.core import (
@@ -219,6 +220,15 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         except ValueError as exc:
             raise ValueError(f"CrescendoAttack {exc}") from exc
 
+        # Router that decides — based on each target's declared capabilities —
+        # whether prior media should travel back to the adversarial chat or
+        # forward to the objective target, and that fills in adversarial
+        # placeholders when ``next_message`` carries seed media.
+        self._modality_router = ModalityFeedbackRouter(
+            adversarial_target=self._adversarial_chat,
+            objective_target=objective_target,
+        )
+
         system_prompt_template_path = (
             attack_adversarial_config.system_prompt_path
             or CrescendoAttack.DEFAULT_ADVERSARIAL_CHAT_SYSTEM_PROMPT_TEMPLATE_PATH
@@ -281,6 +291,10 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         for validator, error_msg in validators:
             if not validator():
                 raise ValueError(error_msg)
+
+        # Fail fast if the objective target requires media on turn 0 but
+        # ``next_message`` does not supply any (i.e. edit-only mode without a seed).
+        self._modality_router.validate_first_turn_seed(next_message=context.next_message)
 
     async def _setup_async(self, *, context: CrescendoAttackContext) -> None:
         """
@@ -536,9 +550,9 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         """
         # Set JSON format in metadata
         prompt_metadata: dict[str, str | int] = {"response_format": "json"}
-        message = Message.from_prompt(
-            prompt=prompt_text,
-            role="user",
+        message = self._modality_router.build_adversarial_input_message(
+            text=prompt_text,
+            last_response=context.last_response,
             prompt_metadata=prompt_metadata,
         )
 
@@ -781,8 +795,16 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         """
         Generate the next prompt to be sent to the target during the Crescendo attack.
 
-        This method determines whether to use a custom message (bypassing adversarial chat) or
-        generate a new attack prompt using the adversarial chat based on previous feedback.
+        Three branches:
+
+        1. ``next_message`` is set with no adversarial placeholder pieces — the message is sent
+           to the objective target as-is, bypassing the adversarial chat entirely (pre-existing
+           first-turn override).
+        2. ``next_message`` is set with adversarial-placeholder pieces — the adversarial chat
+           generates text which the router then substitutes into the placeholder slots, allowing
+           a caller to supply seed media (e.g. an image to edit) alongside adversarial text.
+        3. ``next_message`` is unset — the adversarial chat generates text, and the router
+           builds the objective request including prior media when the target accepts it.
 
         Args:
             context (CrescendoAttackContext): The attack context containing the current state and configuration.
@@ -790,13 +812,14 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         Returns:
             Message: The generated message to be sent to the target.
         """
-        # If custom message is set, use it and bypass adversarial chat generation
-        if context.next_message:
-            self._logger.debug("Using custom message, bypassing adversarial chat")
-            # Duplicate to ensure fresh IDs (avoids conflicts if message was already in memory)
-            message = context.next_message.duplicate()
+        next_message = context.next_message
+        if next_message is not None:
             context.next_message = None  # Clear for future turns
-            return message
+            has_placeholder = any(piece.is_adversarial_placeholder() for piece in next_message.message_pieces)
+            if not has_placeholder:
+                self._logger.debug("Using custom message, bypassing adversarial chat")
+                # Duplicate to ensure fresh IDs (avoids conflicts if message was already in memory)
+                return next_message.duplicate()
 
         # Generate prompt using adversarial chat
         self._logger.debug("Generating new attack prompt using adversarial chat")
@@ -804,7 +827,19 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             context=context,
             refused_text=context.refused_text or "",
         )
-        return Message.from_prompt(prompt=prompt_text, role="user")
+
+        if next_message is not None:
+            # Placeholder branch: substitute adversarial text into the seed message.
+            return self._modality_router.fill_adversarial_placeholders(
+                message=next_message,
+                adversarial_text=prompt_text,
+            )
+
+        return self._modality_router.build_objective_input_message(
+            text=prompt_text,
+            last_response=context.last_response,
+            turn_index=context.executed_turns,
+        )
 
     async def _perform_backtrack_if_refused_async(
         self,
