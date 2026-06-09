@@ -36,11 +36,11 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
         min_value: int = 0,
         max_value: int = 100,
         validator: ScorerPromptValidator | None = None,
-        score_value_output_key: str = "score_value",
-        rationale_output_key: str = "rationale",
-        description_output_key: str = "description",
-        metadata_output_key: str = "metadata",
-        category_output_key: str = "category",
+        score_value_output_key: str | None = None,
+        rationale_output_key: str | None = None,
+        description_output_key: str | None = None,
+        metadata_output_key: str | None = None,
+        category_output_key: str | None = None,
     ) -> None:
         """
         Initialize the SelfAskGeneralFloatScaleScorer.
@@ -64,11 +64,16 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
             max_value (int): Maximum of the model's native scale. Defaults to 100.
             validator (ScorerPromptValidator | None): Custom validator. If omitted, a default
                 validator will be used requiring text input and an objective.
-            score_value_output_key (str): JSON key for the score value. Defaults to "score_value".
-            rationale_output_key (str): JSON key for the rationale. Defaults to "rationale".
-            description_output_key (str): JSON key for the description. Defaults to "description".
-            metadata_output_key (str): JSON key for the metadata. Defaults to "metadata".
-            category_output_key (str): JSON key for the category. Defaults to "category".
+            score_value_output_key (str | None): JSON key for the score value. Defaults to
+                ``DEFAULT_SCORE_VALUE_OUTPUT_KEY`` ("score_value").
+            rationale_output_key (str | None): JSON key for the rationale. Defaults to
+                ``DEFAULT_RATIONALE_OUTPUT_KEY`` ("rationale").
+            description_output_key (str | None): JSON key for the description. Defaults to
+                ``DEFAULT_DESCRIPTION_OUTPUT_KEY`` ("description").
+            metadata_output_key (str | None): JSON key for the metadata. Defaults to
+                ``DEFAULT_METADATA_OUTPUT_KEY`` ("metadata").
+            category_output_key (str | None): JSON key for the category. Defaults to
+                ``DEFAULT_CATEGORY_OUTPUT_KEY`` ("category").
 
         Raises:
             ValueError: If system_prompt_format_string is not provided or empty.
@@ -87,11 +92,21 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
         self._score_category = category
         self._min_value = min_value
         self._max_value = max_value
-        self._score_value_output_key = score_value_output_key
-        self._rationale_output_key = rationale_output_key
-        self._description_output_key = description_output_key
-        self._metadata_output_key = metadata_output_key
-        self._category_output_key = category_output_key
+        self._score_value_output_key = (
+            score_value_output_key if score_value_output_key is not None else self.DEFAULT_SCORE_VALUE_OUTPUT_KEY
+        )
+        self._rationale_output_key = (
+            rationale_output_key if rationale_output_key is not None else self.DEFAULT_RATIONALE_OUTPUT_KEY
+        )
+        self._description_output_key = (
+            description_output_key if description_output_key is not None else self.DEFAULT_DESCRIPTION_OUTPUT_KEY
+        )
+        self._metadata_output_key = (
+            metadata_output_key if metadata_output_key is not None else self.DEFAULT_METADATA_OUTPUT_KEY
+        )
+        self._category_output_key = (
+            category_output_key if category_output_key is not None else self.DEFAULT_CATEGORY_OUTPUT_KEY
+        )
 
     def _build_identifier(self) -> ComponentIdentifier:
         """

@@ -141,11 +141,11 @@ class FloatScaleScorer(Scorer):
         prepended_text_message_piece: str | None = None,
         category: str | UUID | None = None,
         objective: str | None = None,
-        score_value_output_key: str = "score_value",
-        rationale_output_key: str = "rationale",
-        description_output_key: str = "description",
-        metadata_output_key: str = "metadata",
-        category_output_key: str = "category",
+        score_value_output_key: str | None = None,
+        rationale_output_key: str | None = None,
+        description_output_key: str | None = None,
+        metadata_output_key: str | None = None,
+        category_output_key: str | None = None,
         attack_identifier: ComponentIdentifier | None = None,
     ) -> UnvalidatedScore:
         score: UnvalidatedScore | None = None

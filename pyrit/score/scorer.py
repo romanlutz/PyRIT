@@ -72,6 +72,15 @@ class Scorer(Identifiable, abc.ABC):
     #: validate it.
     TARGET_REQUIREMENTS: ClassVar[TargetRequirements] = TargetRequirements()
 
+    #: Default JSON keys parsed from the LLM scoring response in
+    #: ``_score_value_with_llm_async``. Subclasses and callers may pass
+    #: overrides through that method or their own constructors.
+    DEFAULT_SCORE_VALUE_OUTPUT_KEY: ClassVar[str] = "score_value"
+    DEFAULT_RATIONALE_OUTPUT_KEY: ClassVar[str] = "rationale"
+    DEFAULT_DESCRIPTION_OUTPUT_KEY: ClassVar[str] = "description"
+    DEFAULT_METADATA_OUTPUT_KEY: ClassVar[str] = "metadata"
+    DEFAULT_CATEGORY_OUTPUT_KEY: ClassVar[str] = "category"
+
     _identifier: ComponentIdentifier | None = None
 
     #: When True, blocked responses that contain partial content
@@ -671,11 +680,11 @@ class Scorer(Identifiable, abc.ABC):
         prepended_text_message_piece: str | None = None,
         category: Sequence[str] | str | None = None,
         objective: str | None = None,
-        score_value_output_key: str = "score_value",
-        rationale_output_key: str = "rationale",
-        description_output_key: str = "description",
-        metadata_output_key: str = "metadata",
-        category_output_key: str = "category",
+        score_value_output_key: str | None = None,
+        rationale_output_key: str | None = None,
+        description_output_key: str | None = None,
+        metadata_output_key: str | None = None,
+        category_output_key: str | None = None,
         attack_identifier: ComponentIdentifier | None = None,
     ) -> UnvalidatedScore:
         """
@@ -700,16 +709,16 @@ class Scorer(Identifiable, abc.ABC):
                 the JSON response if not provided. Defaults to None.
             objective (str | None): A description of the objective that is associated with the score,
                 used for contextualizing the result. Defaults to None.
-            score_value_output_key (str): The key in the JSON response that contains the score value.
-                Defaults to "score_value".
-            rationale_output_key (str): The key in the JSON response that contains the rationale.
-                Defaults to "rationale".
-            description_output_key (str): The key in the JSON response that contains the description.
-                Defaults to "description".
-            metadata_output_key (str): The key in the JSON response that contains the metadata.
-                Defaults to "metadata".
-            category_output_key (str): The key in the JSON response that contains the category.
-                Defaults to "category".
+            score_value_output_key (str | None): The key in the JSON response that contains the score value.
+                Defaults to ``DEFAULT_SCORE_VALUE_OUTPUT_KEY`` ("score_value").
+            rationale_output_key (str | None): The key in the JSON response that contains the rationale.
+                Defaults to ``DEFAULT_RATIONALE_OUTPUT_KEY`` ("rationale").
+            description_output_key (str | None): The key in the JSON response that contains the description.
+                Defaults to ``DEFAULT_DESCRIPTION_OUTPUT_KEY`` ("description").
+            metadata_output_key (str | None): The key in the JSON response that contains the metadata.
+                Defaults to ``DEFAULT_METADATA_OUTPUT_KEY`` ("metadata").
+            category_output_key (str | None): The key in the JSON response that contains the category.
+                Defaults to ``DEFAULT_CATEGORY_OUTPUT_KEY`` ("category").
             attack_identifier (ComponentIdentifier | None): The attack identifier.
                 Defaults to None.
 
@@ -722,6 +731,17 @@ class Scorer(Identifiable, abc.ABC):
             InvalidJsonException: If the response is not valid JSON.
             Exception: For other unexpected errors during scoring.
         """
+        if score_value_output_key is None:
+            score_value_output_key = self.DEFAULT_SCORE_VALUE_OUTPUT_KEY
+        if rationale_output_key is None:
+            rationale_output_key = self.DEFAULT_RATIONALE_OUTPUT_KEY
+        if description_output_key is None:
+            description_output_key = self.DEFAULT_DESCRIPTION_OUTPUT_KEY
+        if metadata_output_key is None:
+            metadata_output_key = self.DEFAULT_METADATA_OUTPUT_KEY
+        if category_output_key is None:
+            category_output_key = self.DEFAULT_CATEGORY_OUTPUT_KEY
+
         conversation_id = str(uuid.uuid4())
 
         prompt_target.set_system_prompt(
