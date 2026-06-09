@@ -6,7 +6,7 @@ import logging
 import os
 from abc import ABC
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from openai import RateLimitError
 from tenacity import (
@@ -116,15 +116,24 @@ class _DynamicWaitRandomExponential(wait_base):
 class PyritException(Exception, ABC):  # noqa: N818
     """Base exception class for PyRIT components."""
 
-    def __init__(self, *, status_code: int = 500, message: str = "An error occurred") -> None:
+    DEFAULT_STATUS_CODE: ClassVar[int] = 500
+    DEFAULT_MESSAGE: ClassVar[str] = "An error occurred"
+
+    def __init__(self, *, status_code: int | None = None, message: str | None = None) -> None:
         """
         Initialize a PyritException.
 
         Args:
-            status_code (int): HTTP-style status code associated with the error.
-            message (str): Human-readable error description.
+            status_code (int | None): HTTP-style status code associated with the error.
+                Defaults to ``DEFAULT_STATUS_CODE`` (500).
+            message (str | None): Human-readable error description.
+                Defaults to ``DEFAULT_MESSAGE`` ("An error occurred").
 
         """
+        if status_code is None:
+            status_code = self.DEFAULT_STATUS_CODE
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         self.status_code = status_code
         self.message = message
         super().__init__(f"Status Code: {status_code}, Message: {message}")
@@ -146,46 +155,79 @@ class PyritException(Exception, ABC):  # noqa: N818
 class BadRequestException(PyritException):
     """Exception class for bad client requests."""
 
-    def __init__(self, *, status_code: int = 400, message: str = "Bad Request") -> None:
+    DEFAULT_STATUS_CODE: ClassVar[int] = 400
+    DEFAULT_MESSAGE: ClassVar[str] = "Bad Request"
+
+    def __init__(self, *, status_code: int | None = None, message: str | None = None) -> None:
         """
         Initialize a bad request exception.
 
         Args:
-            status_code (int): Status code for the error.
-            message (str): Error message.
+            status_code (int | None): Status code for the error.
+                Defaults to ``DEFAULT_STATUS_CODE`` (400).
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("Bad Request").
 
         """
+        if status_code is None:
+            status_code = self.DEFAULT_STATUS_CODE
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(status_code=status_code, message=message)
 
 
 class RateLimitException(PyritException):
     """Exception class for authentication errors."""
 
-    def __init__(self, *, status_code: int = 429, message: str = "Rate Limit Exception") -> None:
+    DEFAULT_STATUS_CODE: ClassVar[int] = 429
+    DEFAULT_MESSAGE: ClassVar[str] = "Rate Limit Exception"
+
+    def __init__(self, *, status_code: int | None = None, message: str | None = None) -> None:
         """
         Initialize a rate limit exception.
 
         Args:
-            status_code (int): Status code for the error.
-            message (str): Error message.
+            status_code (int | None): Status code for the error.
+                Defaults to ``DEFAULT_STATUS_CODE`` (429).
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("Rate Limit Exception").
 
         """
+        if status_code is None:
+            status_code = self.DEFAULT_STATUS_CODE
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(status_code=status_code, message=message)
 
 
 class ServerErrorException(PyritException):
     """Exception class for opaque 5xx errors returned by the server."""
 
-    def __init__(self, *, status_code: int = 500, message: str = "Server Error", body: str | None = None) -> None:
+    DEFAULT_STATUS_CODE: ClassVar[int] = 500
+    DEFAULT_MESSAGE: ClassVar[str] = "Server Error"
+
+    def __init__(
+        self,
+        *,
+        status_code: int | None = None,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> None:
         """
         Initialize a server error exception.
 
         Args:
-            status_code (int): Status code for the error.
-            message (str): Error message.
+            status_code (int | None): Status code for the error.
+                Defaults to ``DEFAULT_STATUS_CODE`` (500).
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("Server Error").
             body (str | None): Optional raw server response body.
 
         """
+        if status_code is None:
+            status_code = self.DEFAULT_STATUS_CODE
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(status_code=status_code, message=message)
         self.body = body
 
@@ -193,43 +235,62 @@ class ServerErrorException(PyritException):
 class EmptyResponseException(BadRequestException):
     """Exception class for empty response errors."""
 
-    def __init__(self, *, status_code: int = 204, message: str = "No Content") -> None:
+    DEFAULT_STATUS_CODE: ClassVar[int] = 204
+    DEFAULT_MESSAGE: ClassVar[str] = "No Content"
+
+    def __init__(self, *, status_code: int | None = None, message: str | None = None) -> None:
         """
         Initialize an empty response exception.
 
         Args:
-            status_code (int): Status code for the error.
-            message (str): Error message.
+            status_code (int | None): Status code for the error.
+                Defaults to ``DEFAULT_STATUS_CODE`` (204).
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("No Content").
 
         """
+        if status_code is None:
+            status_code = self.DEFAULT_STATUS_CODE
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(status_code=status_code, message=message)
 
 
 class InvalidJsonException(PyritException):
     """Exception class for blocked content errors."""
 
-    def __init__(self, *, message: str = "Invalid JSON Response") -> None:
+    DEFAULT_MESSAGE: ClassVar[str] = "Invalid JSON Response"
+
+    def __init__(self, *, message: str | None = None) -> None:
         """
         Initialize an invalid JSON exception.
 
         Args:
-            message (str): Error message.
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("Invalid JSON Response").
 
         """
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(message=message)
 
 
 class MissingPromptPlaceholderException(PyritException):
     """Exception class for missing prompt placeholder errors."""
 
-    def __init__(self, *, message: str = "No prompt placeholder") -> None:
+    DEFAULT_MESSAGE: ClassVar[str] = "No prompt placeholder"
+
+    def __init__(self, *, message: str | None = None) -> None:
         """
         Initialize a missing placeholder exception.
 
         Args:
-            message (str): Error message.
+            message (str | None): Error message.
+                Defaults to ``DEFAULT_MESSAGE`` ("No prompt placeholder").
 
         """
+        if message is None:
+            message = self.DEFAULT_MESSAGE
         super().__init__(message=message)
 
 
