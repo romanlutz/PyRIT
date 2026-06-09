@@ -28,7 +28,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         sink: Sink | None = None,
         score_printer: MarkdownScorePrinter | None = None,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
         blurred_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """
@@ -44,14 +44,16 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
                 Note: blurred files are cached by path. If the original image content
                 changes but the blurred file already exists, the stale blurred copy
                 is reused. Callers are responsible for cleaning up blurred artifacts.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
             blurred_dir (str | PathLike | None): Directory to write blurred copies into.
                 When None (default), blurred files are written as ``<stem>_blurred.png``
                 next to the original. When set, blurred files are written under this
                 directory using the original basename plus ``_blurred.png``.
         """
         super().__init__(sink=sink)
+        if blur_radius is None:
+            blur_radius = self.DEFAULT_BLUR_RADIUS
         self._score_printer = score_printer or MarkdownScorePrinter(sink=sink)
         self._blur_images = blur_images
         self._blur_radius = blur_radius
@@ -385,7 +387,7 @@ class MarkdownConversationMemoryPrinter(MarkdownConversationPrinter):
         sink: Sink | None = None,
         score_printer: MarkdownScorePrinter | None = None,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
         blurred_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """
@@ -396,8 +398,8 @@ class MarkdownConversationMemoryPrinter(MarkdownConversationPrinter):
             score_printer (MarkdownScorePrinter | None): Score printer for inline score rendering.
             blur_images (bool): If True, write a blurred copy next to each image and
                 link to it instead of the original. Defaults to False.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
             blurred_dir (str | PathLike | None): Directory to write blurred copies into.
                 Defaults to None (sibling of the original).
         """

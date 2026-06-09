@@ -25,7 +25,7 @@ class PrettyScenarioResultPrinter(ScenarioResultPrinterBase):
         self,
         *,
         sink: Sink | None = None,
-        width: int = 100,
+        width: int | None = None,
         indent_size: int = 2,
         enable_colors: bool = True,
         scorer_printer: ScorerPrinterBase | None = None,
@@ -36,7 +36,7 @@ class PrettyScenarioResultPrinter(ScenarioResultPrinterBase):
 
         Args:
             sink (Sink | None): Output sink. Defaults to StdoutSink().
-            width (int): Maximum width for text wrapping. Defaults to 100.
+            width (int | None): Maximum width for text wrapping. Defaults to ``DEFAULT_WIDTH`` (100).
             indent_size (int): Number of spaces for indentation. Defaults to 2.
             enable_colors (bool): Whether to enable ANSI color output. Defaults to True.
             scorer_printer (ScorerPrinterBase | None): Scorer printer for rendering scorer
@@ -47,6 +47,8 @@ class PrettyScenarioResultPrinter(ScenarioResultPrinterBase):
                 preserves insertion order.
         """
         super().__init__(sink=sink)
+        if width is None:
+            width = self.DEFAULT_WIDTH
         self._width = width
         self._indent = " " * indent_size
         self._enable_colors = enable_colors
@@ -267,7 +269,7 @@ class PrettyScenarioResultMemoryPrinter(PrettyScenarioResultPrinter):
         self,
         *,
         sink: Sink | None = None,
-        width: int = 100,
+        width: int | None = None,
         indent_size: int = 2,
         enable_colors: bool = True,
         sort_groups_by_success_rate: bool = False,
@@ -277,7 +279,7 @@ class PrettyScenarioResultMemoryPrinter(PrettyScenarioResultPrinter):
 
         Args:
             sink (Sink | None): Output sink. Defaults to StdoutSink().
-            width (int): Maximum width for text wrapping. Defaults to 100.
+            width (int | None): Maximum width for text wrapping. Defaults to ``DEFAULT_WIDTH`` (100).
             indent_size (int): Number of spaces for indentation. Defaults to 2.
             enable_colors (bool): Whether to enable ANSI color output. Defaults to True.
             sort_groups_by_success_rate (bool): When True, the Per-Group Breakdown is sorted

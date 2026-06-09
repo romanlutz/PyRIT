@@ -27,19 +27,19 @@ class PrettyConversationPrinter(ConversationPrinterBase):
         self,
         *,
         sink: Sink | None = None,
-        width: int = 100,
+        width: int | None = None,
         indent_size: int = 2,
         enable_colors: bool = True,
         score_printer: PrettyScorePrinter | None = None,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
     ) -> None:
         """
         Initialize the pretty conversation printer.
 
         Args:
             sink (Sink | None): Output sink. Defaults to StdoutSink().
-            width (int): Maximum width for text wrapping. Defaults to 100.
+            width (int | None): Maximum width for text wrapping. Defaults to ``DEFAULT_WIDTH`` (100).
             indent_size (int): Number of spaces for indentation. Defaults to 2.
             enable_colors (bool): Whether to enable ANSI color output. Defaults to True.
             score_printer (PrettyScorePrinter | None): Score printer for inline score rendering.
@@ -47,10 +47,14 @@ class PrettyConversationPrinter(ConversationPrinterBase):
             blur_images (bool): If True, apply a Gaussian blur to image outputs before
                 displaying them. Useful for reducing reviewer exposure to unsafe imagery
                 while still allowing the general content to be inspected. Defaults to False.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
         """
         super().__init__(sink=sink)
+        if width is None:
+            width = self.DEFAULT_WIDTH
+        if blur_radius is None:
+            blur_radius = self.DEFAULT_BLUR_RADIUS
         self._width = width
         self._indent = " " * indent_size
         self._enable_colors = enable_colors
@@ -254,26 +258,26 @@ class PrettyConversationMemoryPrinter(PrettyConversationPrinter):
         self,
         *,
         sink: Sink | None = None,
-        width: int = 100,
+        width: int | None = None,
         indent_size: int = 2,
         enable_colors: bool = True,
         score_printer: PrettyScorePrinter | None = None,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
     ) -> None:
         """
         Initialize the pretty conversation printer with CentralMemory data source.
 
         Args:
             sink (Sink | None): Output sink. Defaults to StdoutSink().
-            width (int): Maximum width for text wrapping. Defaults to 100.
+            width (int | None): Maximum width for text wrapping. Defaults to ``DEFAULT_WIDTH`` (100).
             indent_size (int): Number of spaces for indentation. Defaults to 2.
             enable_colors (bool): Whether to enable ANSI color output. Defaults to True.
             score_printer (PrettyScorePrinter | None): Score printer for inline score rendering.
             blur_images (bool): If True, apply a Gaussian blur to image outputs before
                 displaying them. Defaults to False.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
         """
         super().__init__(
             sink=sink,

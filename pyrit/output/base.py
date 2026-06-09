@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 from pyrit.output.sink import Sink, StdoutSink
 
@@ -15,6 +15,9 @@ class PrinterBase(ABC):
     ``write_async`` is concrete: it calls ``render_async`` then routes
     the result through the configured sink.
     """
+
+    DEFAULT_WIDTH: ClassVar[int] = 100
+    DEFAULT_BLUR_RADIUS: ClassVar[int] = 20
 
     def __init__(self, *, sink: Sink | None = None) -> None:
         """

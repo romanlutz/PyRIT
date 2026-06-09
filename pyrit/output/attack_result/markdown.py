@@ -28,7 +28,7 @@ class MarkdownAttackResultPrinter(AttackResultPrinterBase):
         conversation_printer: MarkdownConversationPrinter | None = None,
         score_printer: MarkdownScorePrinter | None = None,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
         blurred_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """
@@ -45,12 +45,14 @@ class MarkdownAttackResultPrinter(AttackResultPrinterBase):
             blur_images (bool): If True, write a blurred copy of each referenced
                 image and link to it instead of the original. Forwarded to the default
                 conversation printer when one is not supplied. Defaults to False.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
             blurred_dir (str | PathLike | None): Directory to write blurred copies into
                 when ``blur_images`` is True. Defaults to None (sibling of the original).
         """
         super().__init__(sink=sink)
+        if blur_radius is None:
+            blur_radius = self.DEFAULT_BLUR_RADIUS
         self._display_inline = display_inline
         self._score_printer = score_printer or MarkdownScorePrinter(sink=sink)
         self._conversation_printer = conversation_printer or MarkdownConversationPrinter(
@@ -342,7 +344,7 @@ class MarkdownAttackResultMemoryPrinter(MarkdownAttackResultPrinter):
         sink: Sink | None = None,
         display_inline: bool = True,
         blur_images: bool = False,
-        blur_radius: int = 20,
+        blur_radius: int | None = None,
         blurred_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """
@@ -354,8 +356,8 @@ class MarkdownAttackResultMemoryPrinter(MarkdownAttackResultPrinter):
                 All output is routed through the sink. Defaults to True.
             blur_images (bool): If True, write a blurred copy of each referenced
                 image and link to it instead of the original. Defaults to False.
-            blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-                Defaults to 20.
+            blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+                Defaults to ``DEFAULT_BLUR_RADIUS`` (20).
             blurred_dir (str | PathLike | None): Directory to write blurred copies into.
                 Defaults to None (sibling of the original).
         """

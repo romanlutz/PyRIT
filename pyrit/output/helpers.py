@@ -31,7 +31,7 @@ async def output_attack_async(
     include_pruned_conversations: bool = False,
     include_adversarial_conversation: bool = False,
     blur_images: bool = False,
-    blur_radius: int = 20,
+    blur_radius: int | None = None,
     blurred_dir: str | os.PathLike[str] | None = None,
 ) -> None:
     """
@@ -56,8 +56,8 @@ async def output_attack_async(
             is logged and a plain-text link to the original is emitted instead of an
             inline image — the original is not silently rendered.
             Defaults to False.
-        blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-            Defaults to 20.
+        blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+            Defaults to ``PrinterBase.DEFAULT_BLUR_RADIUS`` (20).
         blurred_dir (str | PathLike | None): For "markdown" output, directory to write
             blurred copies into. Defaults to None (sibling of the original). Ignored
             when ``format != "markdown"``.
@@ -152,7 +152,7 @@ async def output_conversation_async(
     include_scores: bool = False,
     include_reasoning_trace: bool = False,
     blur_images: bool = False,
-    blur_radius: int = 20,
+    blur_radius: int | None = None,
 ) -> None:
     """
     Print a conversation message history in the specified format.
@@ -171,8 +171,8 @@ async def output_conversation_async(
             not to enforce access control. If blurring fails for any reason, a warning
             is logged and the original is shown (pretty path only).
             Defaults to False.
-        blur_radius (int): Gaussian blur radius applied when ``blur_images`` is True.
-            Defaults to 20.
+        blur_radius (int | None): Gaussian blur radius applied when ``blur_images`` is True.
+            Defaults to ``PrinterBase.DEFAULT_BLUR_RADIUS`` (20).
 
     Raises:
         ValueError: If ``format`` is not a supported value.
