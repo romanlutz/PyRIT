@@ -10,6 +10,7 @@ parameters (no tree branching, no off-topic pruning) hardcoded.
 """
 
 import logging
+from typing import ClassVar
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.executor.attack.component import PrependedConversationConfig
@@ -51,6 +52,11 @@ class PAIRAttack(TreeOfAttacksWithPruningAttack):
         [@mehrotra2023tap]
     """
 
+    DEFAULT_TREE_WIDTH: ClassVar[int] = 3
+    DEFAULT_TREE_DEPTH: ClassVar[int] = 5
+    DEFAULT_DESIRED_RESPONSE_PREFIX: ClassVar[str] = "Sure, here is"
+    DEFAULT_BATCH_SIZE: ClassVar[int] = 10
+
     @apply_defaults
     def __init__(
         self,
@@ -60,10 +66,10 @@ class PAIRAttack(TreeOfAttacksWithPruningAttack):
         attack_converter_config: AttackConverterConfig | None = None,
         attack_scoring_config: TAPAttackScoringConfig | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
-        tree_width: int = 3,
-        tree_depth: int = 5,
-        desired_response_prefix: str = "Sure, here is",
-        batch_size: int = 10,
+        tree_width: int | None = None,
+        tree_depth: int | None = None,
+        desired_response_prefix: str | None = None,
+        batch_size: int | None = None,
         prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
@@ -81,17 +87,26 @@ class PAIRAttack(TreeOfAttacksWithPruningAttack):
                 SelfAskScaleScorer (threshold 0.7) is created. Defaults to None.
             prompt_normalizer (PromptNormalizer | None): The prompt normalizer to use.
                 Defaults to None.
-            tree_width (int): Number of parallel "streams" (N in the PAIR paper).
-                Defaults to 3.
-            tree_depth (int): Maximum refinement iterations per stream (K in the PAIR
-                paper). Defaults to 5.
-            desired_response_prefix (str): Expected prefix for successful responses.
-                Defaults to "Sure, here is".
-            batch_size (int): Number of nodes to process in parallel per batch.
-                Defaults to 10.
+            tree_width (int | None): Number of parallel "streams" (N in the PAIR paper).
+                Defaults to ``DEFAULT_TREE_WIDTH`` (3).
+            tree_depth (int | None): Maximum refinement iterations per stream (K in the PAIR
+                paper). Defaults to ``DEFAULT_TREE_DEPTH`` (5).
+            desired_response_prefix (str | None): Expected prefix for successful responses.
+                Defaults to ``DEFAULT_DESIRED_RESPONSE_PREFIX`` ("Sure, here is").
+            batch_size (int | None): Number of nodes to process in parallel per batch.
+                Defaults to ``DEFAULT_BATCH_SIZE`` (10).
             prepended_conversation_config (PrependedConversationConfig | None):
                 Configuration for prepended-conversation handling. Defaults to None.
         """
+        if tree_width is None:
+            tree_width = self.DEFAULT_TREE_WIDTH
+        if tree_depth is None:
+            tree_depth = self.DEFAULT_TREE_DEPTH
+        if desired_response_prefix is None:
+            desired_response_prefix = self.DEFAULT_DESIRED_RESPONSE_PREFIX
+        if batch_size is None:
+            batch_size = self.DEFAULT_BATCH_SIZE
+
         super().__init__(
             objective_target=objective_target,
             attack_adversarial_config=attack_adversarial_config,

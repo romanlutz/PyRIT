@@ -8,7 +8,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, cast, overload
 
 from treelib.tree import Tree
 
@@ -77,14 +77,6 @@ class TAPSystemPromptPaths(enum.Enum):
 
     TEXT_GENERATION = (EXECUTOR_SEED_PROMPT_PATH / "tree_of_attacks" / "adversarial_system_prompt.yaml").resolve()
     IMAGE_GENERATION = (EXECUTOR_SEED_PROMPT_PATH / "tree_of_attacks" / "image_generation.yaml").resolve()
-
-
-# TAP sets a system prompt on its adversarial target and drives a multi-turn dialogue through it.
-# Both capabilities must be natively supported — adaptation would silently change the semantics
-# (e.g. history-squash normalization would collapse the escalation into a single turn).
-_ADVERSARIAL_REQUIREMENTS = TargetRequirements(
-    native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
-)
 
 
 class TAPAttackScoringConfig(AttackScoringConfig):
@@ -1290,6 +1282,19 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         EXECUTOR_SEED_PROMPT_PATH / "tree_of_attacks" / "adversarial_seed_prompt.yaml"
     )
 
+    # TAP sets a system prompt on its adversarial target and drives a multi-turn dialogue through it.
+    # Both capabilities must be natively supported — adaptation would silently change the semantics
+    # (e.g. history-squash normalization would collapse the escalation into a single turn).
+    _ADVERSARIAL_REQUIREMENTS: ClassVar[TargetRequirements] = TargetRequirements(
+        native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
+    )
+
+    DEFAULT_TREE_WIDTH: ClassVar[int] = 3
+    DEFAULT_TREE_DEPTH: ClassVar[int] = 5
+    DEFAULT_BRANCHING_FACTOR: ClassVar[int] = 2
+    DEFAULT_DESIRED_RESPONSE_PREFIX: ClassVar[str] = "Sure, here is"
+    DEFAULT_BATCH_SIZE: ClassVar[int] = 10
+
     @apply_defaults
     def __init__(
         self,
@@ -1299,12 +1304,12 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         attack_converter_config: AttackConverterConfig | None = None,
         attack_scoring_config: TAPAttackScoringConfig | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
-        tree_width: int = 3,
-        tree_depth: int = 5,
-        branching_factor: int = 2,
+        tree_width: int | None = None,
+        tree_depth: int | None = None,
+        branching_factor: int | None = None,
         on_topic_checking_enabled: bool = True,
-        desired_response_prefix: str = "Sure, here is",
-        batch_size: int = 10,
+        desired_response_prefix: str | None = None,
+        batch_size: int | None = None,
         prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
@@ -1321,12 +1326,17 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
                 Can be either AttackScoringConfig or TAPAttackScoringConfig. If not provided,
                 a default configuration with SelfAskScaleScorer and threshold 0.7 is created.
             prompt_normalizer (PromptNormalizer | None): The prompt normalizer to use. Defaults to None.
-            tree_width (int): Number of branches to explore in parallel at each level. Defaults to 3.
-            tree_depth (int): Maximum number of iterations to perform. Defaults to 5.
-            branching_factor (int): Number of child branches to create from each parent. Defaults to 2.
+            tree_width (int | None): Number of branches to explore in parallel at each level. Defaults to
+                ``DEFAULT_TREE_WIDTH`` (3).
+            tree_depth (int | None): Maximum number of iterations to perform. Defaults to
+                ``DEFAULT_TREE_DEPTH`` (5).
+            branching_factor (int | None): Number of child branches to create from each parent. Defaults to
+                ``DEFAULT_BRANCHING_FACTOR`` (2).
             on_topic_checking_enabled (bool): Whether to check if prompts are on-topic. Defaults to True.
-            desired_response_prefix (str): Expected prefix for successful responses. Defaults to "Sure, here is".
-            batch_size (int): Number of nodes to process in parallel per batch. Defaults to 10.
+            desired_response_prefix (str | None): Expected prefix for successful responses. Defaults to
+                ``DEFAULT_DESIRED_RESPONSE_PREFIX`` ("Sure, here is").
+            batch_size (int | None): Number of nodes to process in parallel per batch. Defaults to
+                ``DEFAULT_BATCH_SIZE`` (10).
             prepended_conversation_config (PrependedConversationConfig | None):
                 Configuration for how to process prepended conversations. Controls converter
                 application by role, message normalization, and non-chat target behavior.
@@ -1345,6 +1355,18 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             ``score_blocked_content=True`` on the objective scorer (requires
             ``prompt_metadata["partial_content"]`` on the blocked piece).
         """
+        # Apply class-level defaults when caller hasn't overridden
+        if tree_width is None:
+            tree_width = self.DEFAULT_TREE_WIDTH
+        if tree_depth is None:
+            tree_depth = self.DEFAULT_TREE_DEPTH
+        if branching_factor is None:
+            branching_factor = self.DEFAULT_BRANCHING_FACTOR
+        if desired_response_prefix is None:
+            desired_response_prefix = self.DEFAULT_DESIRED_RESPONSE_PREFIX
+        if batch_size is None:
+            batch_size = self.DEFAULT_BATCH_SIZE
+
         # Validate tree parameters
         if tree_depth < 1:
             raise ValueError("The tree depth must be at least 1.")
@@ -1379,7 +1401,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         # (The class-level ``TARGET_REQUIREMENTS`` inherited from ``AttackStrategy``
         # only covers ``objective_target``; this is a separate target.)
         try:
-            _ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
+            self._ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
         except ValueError as exc:
             raise ValueError(f"TreeOfAttacksWithPruningAttack {exc}") from exc
 

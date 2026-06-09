@@ -8,7 +8,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import EXECUTOR_SEED_PROMPT_PATH
@@ -61,13 +61,6 @@ if TYPE_CHECKING:
     from pyrit.prompt_target.common.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
-
-# Crescendo sets a system prompt on its adversarial target and drives a multi-turn dialogue through it.
-# Both capabilities must be natively supported — adaptation would silently change the semantics
-# (e.g. history-squash normalization would collapse the escalation into a single turn).
-_ADVERSARIAL_REQUIREMENTS = TargetRequirements(
-    native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
-)
 
 
 @dataclass
@@ -133,6 +126,16 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         native_required=frozenset({CapabilityName.MULTI_TURN}),
     )
 
+    # Crescendo sets a system prompt on its adversarial target and drives a multi-turn dialogue through it.
+    # Both capabilities must be natively supported — adaptation would silently change the semantics
+    # (e.g. history-squash normalization would collapse the escalation into a single turn).
+    _ADVERSARIAL_REQUIREMENTS: ClassVar[TargetRequirements] = TargetRequirements(
+        native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
+    )
+
+    DEFAULT_MAX_BACKTRACKS: ClassVar[int] = 10
+    DEFAULT_MAX_TURNS: ClassVar[int] = 10
+
     # Default system prompt template path for Crescendo attack
     DEFAULT_ADVERSARIAL_CHAT_SYSTEM_PROMPT_TEMPLATE_PATH: Path = (
         Path(EXECUTOR_SEED_PROMPT_PATH) / "crescendo" / "crescendo_variant_1.yaml"
@@ -147,8 +150,8 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         attack_converter_config: AttackConverterConfig | None = None,
         attack_scoring_config: AttackScoringConfig | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
-        max_backtracks: int = 10,
-        max_turns: int = 10,
+        max_backtracks: int | None = None,
+        max_turns: int | None = None,
         prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
@@ -163,8 +166,10 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                 including request and response converters.
             attack_scoring_config (AttackScoringConfig | None): Configuration for scoring responses.
             prompt_normalizer (PromptNormalizer | None): Normalizer for prompts.
-            max_backtracks (int): Maximum number of backtracks allowed.
-            max_turns (int): Maximum number of turns allowed.
+            max_backtracks (int | None): Maximum number of backtracks allowed. Defaults to
+                ``DEFAULT_MAX_BACKTRACKS`` (10).
+            max_turns (int | None): Maximum number of turns allowed. Defaults to
+                ``DEFAULT_MAX_TURNS`` (10).
             prepended_conversation_config (PrependedConversationConfiguration | None):
                 Configuration for how to process prepended conversations. Controls converter
                 application by role, message normalization, and non-chat target behavior.
@@ -215,7 +220,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         # (The class-level ``TARGET_REQUIREMENTS`` only covers ``objective_target``;
         # this is a separate target.)
         try:
-            _ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
+            self._ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
         except ValueError as exc:
             raise ValueError(f"CrescendoAttack {exc}") from exc
 
@@ -237,6 +242,11 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         )
 
         # Set the maximum number of backtracks and turns
+        if max_backtracks is None:
+            max_backtracks = self.DEFAULT_MAX_BACKTRACKS
+        if max_turns is None:
+            max_turns = self.DEFAULT_MAX_TURNS
+
         if max_backtracks < 0:
             raise ValueError("max_backtracks must be non-negative")
 

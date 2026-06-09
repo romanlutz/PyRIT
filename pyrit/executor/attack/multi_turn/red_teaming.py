@@ -6,7 +6,7 @@ from __future__ import annotations
 import enum
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import EXECUTOR_RED_TEAM_PATH
@@ -48,13 +48,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# RedTeamingAttack sets a system prompt on its adversarial target and drives a multi-turn dialogue
-# through it. Both capabilities must be natively supported — adaptation would silently change the
-# semantics (e.g. history-squash normalization would collapse the dialogue into a single turn).
-_ADVERSARIAL_REQUIREMENTS = TargetRequirements(
-    native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
-)
-
 
 class RTASystemPromptPaths(enum.Enum):
     """Enum for predefined red teaming attack system prompt paths."""
@@ -94,6 +87,15 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         "that can be passed to the red teaming chat. "
     )
 
+    # RedTeamingAttack sets a system prompt on its adversarial target and drives a multi-turn dialogue
+    # through it. Both capabilities must be natively supported — adaptation would silently change the
+    # semantics (e.g. history-squash normalization would collapse the dialogue into a single turn).
+    _ADVERSARIAL_REQUIREMENTS: ClassVar[TargetRequirements] = TargetRequirements(
+        native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
+    )
+
+    DEFAULT_MAX_TURNS: ClassVar[int] = 10
+
     @apply_defaults
     def __init__(
         self,
@@ -103,7 +105,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         attack_converter_config: AttackConverterConfig | None = None,
         attack_scoring_config: AttackScoringConfig | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
-        max_turns: int = 10,
+        max_turns: int | None = None,
         score_last_turn_only: bool = False,
     ) -> None:
         """
@@ -115,7 +117,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             attack_converter_config: Configuration for attack converters. Defaults to None.
             attack_scoring_config: Configuration for attack scoring. Defaults to None.
             prompt_normalizer: The prompt normalizer to use for sending prompts. Defaults to None.
-            max_turns (int): Maximum number of turns for the attack. Defaults to 10.
+            max_turns (int | None): Maximum number of turns for the attack. Defaults to
+                ``DEFAULT_MAX_TURNS`` (10).
             score_last_turn_only (bool): If True, only score the final turn instead of every turn.
                 This reduces LLM calls when intermediate scores are not needed (e.g., for
                 generating simulated conversations). The attack will run for exactly max_turns
@@ -149,7 +152,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         # The adversarial target must natively support multi-turn dialogue and system prompts;
         # the class-level ``TARGET_REQUIREMENTS`` only covers ``objective_target``.
         try:
-            _ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
+            self._ADVERSARIAL_REQUIREMENTS.validate(target=self._adversarial_chat)
         except ValueError as exc:
             raise ValueError(f"RedTeamingAttack {exc}") from exc
 
@@ -169,6 +172,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         self._conversation_manager = ConversationManager(attack_identifier=self.get_identifier())
 
         # set the maximum number of turns for the attack
+        if max_turns is None:
+            max_turns = self.DEFAULT_MAX_TURNS
         if max_turns <= 0:
             raise ValueError("Maximum turns must be a positive integer.")
 
