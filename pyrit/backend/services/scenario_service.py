@@ -9,6 +9,7 @@ through the REST API.
 """
 
 from functools import lru_cache
+from typing import ClassVar
 
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import (
@@ -59,6 +60,8 @@ class ScenarioService:
     Uses ScenarioRegistry as the source of truth for scenario metadata.
     """
 
+    DEFAULT_LIST_LIMIT: ClassVar[int] = 50
+
     def __init__(self) -> None:
         """Initialize the scenario service."""
         self._registry = ScenarioRegistry.get_registry_singleton()
@@ -66,19 +69,23 @@ class ScenarioService:
     async def list_scenarios_async(
         self,
         *,
-        limit: int = 50,
+        limit: int | None = None,
         cursor: str | None = None,
     ) -> ListRegisteredScenariosResponse:
         """
         List all available scenarios with pagination.
 
         Args:
-            limit: Maximum items to return per page.
+            limit: Maximum items to return per page. Defaults to
+                ``DEFAULT_LIST_LIMIT`` (50) when ``None``.
             cursor: Pagination cursor (scenario_name to start after).
 
         Returns:
             ScenarioListResponse with paginated scenario summaries.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
+
         all_metadata = self._registry.list_metadata()
         all_summaries = [_metadata_to_registered_scenario(m) for m in all_metadata]
 

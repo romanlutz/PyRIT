@@ -15,7 +15,7 @@ Targets can be:
 import logging
 import os
 from functools import lru_cache
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 from pyrit import prompt_target
@@ -139,6 +139,8 @@ class TargetService:
     API metadata is derived from the target objects' identifiers.
     """
 
+    DEFAULT_LIST_LIMIT: ClassVar[int] = 50
+
     def __init__(self) -> None:
         """Initialize the target service."""
         self._registry = TargetRegistry.get_registry_singleton()
@@ -177,19 +179,23 @@ class TargetService:
     async def list_targets_async(
         self,
         *,
-        limit: int = 50,
+        limit: int | None = None,
         cursor: str | None = None,
     ) -> TargetListResponse:
         """
         List all target instances with pagination.
 
         Args:
-            limit: Maximum items to return.
+            limit: Maximum items to return. Defaults to ``DEFAULT_LIST_LIMIT``
+                (50) when ``None``.
             cursor: Pagination cursor (target_registry_name to start after).
 
         Returns:
             TargetListResponse containing paginated targets.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
+
         items = [
             self._build_instance_from_object(target_registry_name=entry.name, target_obj=entry.instance)
             for entry in self._registry.get_all_instances()

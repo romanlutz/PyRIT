@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 from urllib.parse import parse_qs, urlparse
 
 from pyrit.backend.mappers import (
@@ -71,6 +71,8 @@ class AttackService:
     Uses PyRIT memory (database) as the source of truth via AttackResult.
     """
 
+    DEFAULT_LIST_LIMIT: ClassVar[int] = 20
+
     def __init__(self) -> None:
         """Initialize the attack service."""
         self._memory = CentralMemory.get_memory_instance()
@@ -90,7 +92,7 @@ class AttackService:
         labels: dict[str, str | Sequence[str]] | None = None,
         min_turns: int | None = None,
         max_turns: int | None = None,
-        limit: int = 20,
+        limit: int | None = None,
         cursor: str | None = None,
     ) -> AttackListResponse:
         """
@@ -119,12 +121,16 @@ class AttackService:
                 each name).
             min_turns: Filter by minimum executed turns.
             max_turns: Filter by maximum executed turns.
-            limit: Maximum items to return.
+            limit: Maximum items to return. Defaults to ``DEFAULT_LIST_LIMIT`` (20)
+                when ``None``.
             cursor: Pagination cursor.
 
         Returns:
             AttackListResponse with filtered and paginated attack summaries.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
+
         # Phase 1: Query + lightweight filtering (no pieces needed)
         # Coerce an empty converter_types list to None so it behaves as "no filter" at
         # this layer — the "attacks with no converters" case is expressed through

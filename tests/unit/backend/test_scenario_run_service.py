@@ -17,7 +17,6 @@ from pyrit.backend.models.scenarios import (
     ScenarioRunStatus,
 )
 from pyrit.backend.services.scenario_run_service import (
-    _DEFAULT_MAX_CONCURRENT_RUNS,
     ScenarioRunService,
 )
 from pyrit.models import AttackOutcome
@@ -431,7 +430,7 @@ class TestScenarioRunServiceStartRun:
         scenario_instance.initialize_async = AsyncMock(side_effect=_set_unique_id)
 
         # Fill up to the limit
-        for _ in range(_DEFAULT_MAX_CONCURRENT_RUNS):
+        for _ in range(ScenarioRunService.DEFAULT_MAX_CONCURRENT_RUNS):
             await service.start_run_async(request=_make_request())
 
         # Next one should fail

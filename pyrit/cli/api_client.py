@@ -12,7 +12,7 @@ at CLI parse time.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +33,10 @@ class PyRITApiClient:
             scenarios = await client.list_scenarios_async()
     """
 
+    DEFAULT_REQUEST_TIMEOUT: ClassVar[float] = 60.0
+    DEFAULT_LIST_LIMIT: ClassVar[int] = 200
+    DEFAULT_SCENARIO_RUNS_LIST_LIMIT: ClassVar[int] = 100
+
     def __init__(self, *, base_url: str, request_timeout: float | None = None) -> None:
         """
         Initialize the API client.
@@ -43,10 +47,11 @@ class PyRITApiClient:
                 non-polling request (catalog, results, cancel, start, etc.). Polling
                 the live scenario-run endpoint always uses ``read=None`` regardless
                 of this value, because the server may legitimately take many seconds
-                to respond while a scenario is executing. Defaults to ``60.0``.
+                to respond while a scenario is executing. Defaults to
+                ``DEFAULT_REQUEST_TIMEOUT`` (60.0) when ``None``.
         """
         self._base_url = base_url.rstrip("/")
-        self._request_timeout = request_timeout if request_timeout is not None else 60.0
+        self._request_timeout = request_timeout if request_timeout is not None else self.DEFAULT_REQUEST_TIMEOUT
         self._client: Any = None  # httpx.AsyncClient (typed Any to avoid top-level import)
 
     async def __aenter__(self) -> PyRITApiClient:
@@ -92,13 +97,19 @@ class PyRITApiClient:
     # Scenarios
     # ------------------------------------------------------------------
 
-    async def list_scenarios_async(self, *, limit: int = 200) -> dict[str, Any]:
+    async def list_scenarios_async(self, *, limit: int | None = None) -> dict[str, Any]:
         """
         List all available scenarios.
+
+        Args:
+            limit: Maximum items to return. Defaults to ``DEFAULT_LIST_LIMIT``
+                (200) when ``None``.
 
         Returns:
             dict: ``ListRegisteredScenariosResponse`` payload.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
         return await self._get_json_async(path="/api/scenarios/catalog", params={"limit": limit})
 
     async def get_scenario_async(self, *, scenario_name: str) -> dict[str, Any] | None:
@@ -124,13 +135,19 @@ class PyRITApiClient:
     # Initializers
     # ------------------------------------------------------------------
 
-    async def list_initializers_async(self, *, limit: int = 200) -> dict[str, Any]:
+    async def list_initializers_async(self, *, limit: int | None = None) -> dict[str, Any]:
         """
         List all available initializers.
+
+        Args:
+            limit: Maximum items to return. Defaults to ``DEFAULT_LIST_LIMIT``
+                (200) when ``None``.
 
         Returns:
             dict: ``ListRegisteredInitializersResponse`` payload.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
         return await self._get_json_async(path="/api/initializers", params={"limit": limit})
 
     async def register_initializer_async(self, *, name: str, script_content: str) -> dict[str, Any]:
@@ -162,13 +179,19 @@ class PyRITApiClient:
     # Targets
     # ------------------------------------------------------------------
 
-    async def list_targets_async(self, *, limit: int = 200) -> dict[str, Any]:
+    async def list_targets_async(self, *, limit: int | None = None) -> dict[str, Any]:
         """
         List all available targets.
+
+        Args:
+            limit: Maximum items to return. Defaults to ``DEFAULT_LIST_LIMIT``
+                (200) when ``None``.
 
         Returns:
             dict: ``TargetListResponse`` payload.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
         return await self._get_json_async(path="/api/targets", params={"limit": limit})
 
     # ------------------------------------------------------------------
@@ -244,13 +267,19 @@ class PyRITApiClient:
         self._raise_for_status(resp)
         return resp.json()
 
-    async def list_scenario_runs_async(self, *, limit: int = 100) -> dict[str, Any]:
+    async def list_scenario_runs_async(self, *, limit: int | None = None) -> dict[str, Any]:
         """
         List tracked scenario runs.
+
+        Args:
+            limit: Maximum items to return. Defaults to
+                ``DEFAULT_SCENARIO_RUNS_LIST_LIMIT`` (100) when ``None``.
 
         Returns:
             dict: ``ScenarioRunListResponse`` payload.
         """
+        if limit is None:
+            limit = self.DEFAULT_SCENARIO_RUNS_LIST_LIMIT
         return await self._get_json_async(path="/api/scenarios/runs", params={"limit": limit})
 
     # ------------------------------------------------------------------

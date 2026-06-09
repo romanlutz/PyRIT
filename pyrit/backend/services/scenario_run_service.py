@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pyrit.backend.models.scenarios import (
     RunScenarioRequest,
@@ -30,8 +30,6 @@ if TYPE_CHECKING:
     from pyrit.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_MAX_CONCURRENT_RUNS = 3
 
 
 @dataclass
@@ -52,8 +50,20 @@ class ScenarioRunService:
     Keeps an in-memory dict only for active asyncio tasks (cancellation support).
     """
 
-    def __init__(self, *, max_concurrent_runs: int = _DEFAULT_MAX_CONCURRENT_RUNS) -> None:
-        """Initialize the scenario run service."""
+    DEFAULT_MAX_CONCURRENT_RUNS: ClassVar[int] = 3
+    DEFAULT_LIST_LIMIT: ClassVar[int] = 100
+
+    def __init__(self, *, max_concurrent_runs: int | None = None) -> None:
+        """
+        Initialize the scenario run service.
+
+        Args:
+            max_concurrent_runs: Maximum number of scenario runs allowed
+                concurrently. Defaults to ``DEFAULT_MAX_CONCURRENT_RUNS`` (3)
+                when ``None``.
+        """
+        if max_concurrent_runs is None:
+            max_concurrent_runs = self.DEFAULT_MAX_CONCURRENT_RUNS
         self._max_concurrent_runs = max_concurrent_runs
         self._memory = CentralMemory.get_memory_instance()
         self._active_tasks: dict[str, _ActiveTask] = {}
@@ -131,16 +141,20 @@ class ScenarioRunService:
         """
         return self._build_response(scenario_result_id=scenario_result_id)
 
-    def list_runs(self, *, limit: int = 100) -> ScenarioRunListResponse:
+    def list_runs(self, *, limit: int | None = None) -> ScenarioRunListResponse:
         """
         List scenario runs by querying the database (most recent first).
 
         Args:
-            limit (int): Maximum number of runs to return. Defaults to 100.
+            limit (int | None): Maximum number of runs to return. Defaults to
+                ``DEFAULT_LIST_LIMIT`` (100) when ``None``.
 
         Returns:
             ScenarioRunListResponse with runs.
         """
+        if limit is None:
+            limit = self.DEFAULT_LIST_LIMIT
+
         # This is expensive, and we don't need all the data. At some point
         # we may want to add a lightweight "list" query to the DB layer that only
         results = self._memory.get_scenario_results(limit=limit)
@@ -542,11 +556,11 @@ def get_scenario_run_service() -> ScenarioRunService:
     if _service_instance is not None:
         return _service_instance
 
-    max_runs = _DEFAULT_MAX_CONCURRENT_RUNS
+    max_runs = ScenarioRunService.DEFAULT_MAX_CONCURRENT_RUNS
     try:
         from pyrit.backend.main import app
 
-        max_runs = getattr(app.state, "max_concurrent_scenario_runs", _DEFAULT_MAX_CONCURRENT_RUNS)
+        max_runs = getattr(app.state, "max_concurrent_scenario_runs", ScenarioRunService.DEFAULT_MAX_CONCURRENT_RUNS)
     except Exception:
         pass
 
