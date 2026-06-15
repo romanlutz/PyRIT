@@ -3,8 +3,13 @@
 
 import random
 import string
+from enum import StrEnum
 from pyrit.models import PromptDataType
 from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
+
+
+class BijectionType(StrEnum):
+    LETTER = "letter"
 
 
 class BijectionConverter(PromptConverter):
@@ -20,22 +25,38 @@ class BijectionConverter(PromptConverter):
     def __init__(
         self,
         *,
-        bijection_type: str = "letter",
+        bijection_type: BijectionType = BijectionType.LETTER,
         fixed_size: int = 0,
-        num_digits: int = 0,
     ) -> None:
         """
         Args:
             bijection_type: Type of bijection mapping. Currently supports "letter".
             fixed_size: Number of letters to keep unchanged (identity mapping).
-            num_digits: Number of digits to include in the mapping.
         """
         super().__init__()
-        self.bijection_type = bijection_type
-        self.fixed_size = fixed_size
-        self.num_digits = num_digits
-        self.mapping = self._generate_mapping()
-        self.inverse_mapping = {v: k for k, v in self.mapping.items()}
+        self._bijection_type = BijectionType(bijection_type)
+        self._fixed_size = fixed_size
+        self._mapping = self._generate_mapping()
+        self._inverse_mapping = {v: k for k, v in self._mapping.items()}
+
+    @property
+    def mapping(self) -> dict:
+        return self._mapping
+
+    @property
+    def inverse_mapping(self) -> dict:
+        return self._inverse_mapping
+
+    @property
+    def fixed_size(self) -> int:
+        return self._fixed_size
+
+    def _build_identifier(self) -> dict:
+        return self._create_identifier(params={
+            "bijection_type": self._bijection_type,
+            "fixed_size": self._fixed_size,
+            "mapping": str(self._mapping),
+        })
 
     def _generate_mapping(self) -> dict:
         """
@@ -43,15 +64,11 @@ class BijectionConverter(PromptConverter):
         """
         letters = list(string.ascii_lowercase)
 
-        # these letters stay as themselves (identity)
-        fixed_letters = letters[:self.fixed_size]
-
-        # these letters get shuffled
-        letters_to_shuffle = letters[self.fixed_size:]
+        fixed_letters = letters[:self._fixed_size]
+        letters_to_shuffle = letters[self._fixed_size:]
         shuffled = letters_to_shuffle.copy()
         random.shuffle(shuffled)
 
-        # combine fixed + shuffled into final mapping
         mapping = {}
         for letter in fixed_letters:
             mapping[letter] = letter
@@ -84,14 +101,12 @@ class BijectionConverter(PromptConverter):
 
         encoded = ""
         for char in prompt:
-            if char.lower() in self.mapping:
-                # handle uppercase letters
+            if char.lower() in self._mapping:
                 if char.isupper():
-                    encoded += self.mapping[char.lower()].upper()
+                    encoded += self._mapping[char.lower()].upper()
                 else:
-                    encoded += self.mapping[char]
+                    encoded += self._mapping[char]
             else:
-                # spaces, punctuation stay the same
                 encoded += char
 
         return ConverterResult(output_text=encoded, output_type="text")
@@ -108,11 +123,11 @@ class BijectionConverter(PromptConverter):
         """
         decoded = ""
         for char in encoded_text:
-            if char.lower() in self.inverse_mapping:
+            if char.lower() in self._inverse_mapping:
                 if char.isupper():
-                    decoded += self.inverse_mapping[char.lower()].upper()
+                    decoded += self._inverse_mapping[char.lower()].upper()
                 else:
-                    decoded += self.inverse_mapping[char]
+                    decoded += self._inverse_mapping[char]
             else:
                 decoded += char
 

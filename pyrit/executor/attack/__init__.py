@@ -46,6 +46,7 @@ from pyrit.executor.attack.multi_turn import (
     generate_simulated_conversation_async,
 )
 from pyrit.executor.attack.single_turn import (
+    BijectionAttack,
     ContextComplianceAttack,
     FlipAttack,
     ManyShotJailbreakAttack,
@@ -83,6 +84,7 @@ __all__ = [
     "CrescendoAttack",
     "CrescendoAttackContext",
     "CrescendoAttackResult",
+    "BijectionAttack",
     "FlipAttack",
     "ManyShotJailbreakAttack",
     "MarkdownAttackResultPrinter",
