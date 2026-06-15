@@ -7,8 +7,9 @@ from unittest.mock import MagicMock, AsyncMock
 from pyrit.executor.attack import BijectionAttack
 from pyrit.executor.attack.core import AttackParameters
 from pyrit.executor.attack.single_turn.single_turn_attack_strategy import SingleTurnAttackContext
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.models import MessagePiece
+from pyrit.models.identifiers import ComponentIdentifier
+from pyrit.prompt_converter import LetterBijectionConverter
 from pyrit.prompt_target import PromptTarget
 
 
@@ -56,7 +57,7 @@ class TestBijectionAttackInitialization:
     def test_bijection_converter_fixed_size(self, mock_objective_target):
         attack = BijectionAttack(
             objective_target=mock_objective_target,
-            fixed_size=5,
+            bijection_converter=LetterBijectionConverter(fixed_size=5),
         )
         assert attack._bijection_converter.fixed_size == 5
 
@@ -91,7 +92,7 @@ class TestBijectionAttackEndToEnd:
     async def test_response_is_decoded(self):
         """Test that the attack decodes the cipher-text response."""
         from tests.unit.mocks import MockPromptTarget
-        
+
         target = MockPromptTarget()
         attack = BijectionAttack(objective_target=target)
 
@@ -100,7 +101,6 @@ class TestBijectionAttackEndToEnd:
         plain_response = "this is a secret answer"
         cipher_response = "".join(mapping.get(c, c) for c in plain_response)
 
-        # override the mock target to return cipher text
         async def fake_send(*, normalized_conversation):
             last = normalized_conversation[-1]
             return [
@@ -122,4 +122,5 @@ class TestBijectionAttackEndToEnd:
         await attack._setup_async(context=context)
         result = await attack._perform_async(context=context)
 
-        assert result.last_response.original_value == plain_response
+        assert result.metadata.get("decoded_response") == plain_response
+        

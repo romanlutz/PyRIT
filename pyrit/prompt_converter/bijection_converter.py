@@ -1,21 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import abc
 import random
 import string
-from enum import StrEnum
 from pyrit.models import PromptDataType
 from pyrit.prompt_converter.prompt_converter import ConverterResult, PromptConverter
 
 
-class BijectionType(StrEnum):
-    LETTER = "letter"
-
-
-class BijectionConverter(PromptConverter):
+class BijectionConverter(PromptConverter, abc.ABC):
     """
-    Converts a prompt using a random bijection (one-to-one) character mapping.
-    This can be used to encode prompts to bypass safety filters.
+    Abstract base class for bijection converters.
+    Converts a prompt using a one-to-one character mapping to bypass safety filters.
     Based on the bijection attack from arXiv:2410.01294 (Haize Labs).
     """
 
@@ -25,57 +21,36 @@ class BijectionConverter(PromptConverter):
     def __init__(
         self,
         *,
-        bijection_type: BijectionType = BijectionType.LETTER,
-        fixed_size: int = 0,
+        mapping: dict[str, str] | None = None,
+        seed: int | None = None,
     ) -> None:
         """
         Args:
-            bijection_type: Type of bijection mapping. Currently supports "letter".
-            fixed_size: Number of letters to keep unchanged (identity mapping).
+            mapping: Optional explicit mapping dict. If provided, used directly.
+            seed: Optional random seed for reproducibility.
         """
         super().__init__()
-        self._bijection_type = BijectionType(bijection_type)
-        self._fixed_size = fixed_size
-        self._mapping = self._generate_mapping()
+        rng = random.Random(seed)
+        self._mapping = mapping if mapping is not None else self._generate_mapping(rng)
         self._inverse_mapping = {v: k for k, v in self._mapping.items()}
 
+    @abc.abstractmethod
+    def _generate_mapping(self, rng: random.Random) -> dict[str, str]:
+        """Generate the bijection mapping."""
+        ...
+
     @property
-    def mapping(self) -> dict:
+    def mapping(self) -> dict[str, str]:
         return self._mapping
 
     @property
-    def inverse_mapping(self) -> dict:
+    def inverse_mapping(self) -> dict[str, str]:
         return self._inverse_mapping
-
-    @property
-    def fixed_size(self) -> int:
-        return self._fixed_size
 
     def _build_identifier(self) -> dict:
         return self._create_identifier(params={
-            "bijection_type": self._bijection_type,
-            "fixed_size": self._fixed_size,
             "mapping": str(self._mapping),
         })
-
-    def _generate_mapping(self) -> dict:
-        """
-        Generates a random bijection mapping of letters.
-        """
-        letters = list(string.ascii_lowercase)
-
-        fixed_letters = letters[:self._fixed_size]
-        letters_to_shuffle = letters[self._fixed_size:]
-        shuffled = letters_to_shuffle.copy()
-        random.shuffle(shuffled)
-
-        mapping = {}
-        for letter in fixed_letters:
-            mapping[letter] = letter
-        for original, replacement in zip(letters_to_shuffle, shuffled):
-            mapping[original] = replacement
-
-        return mapping
 
     async def convert_async(
         self,
@@ -85,16 +60,6 @@ class BijectionConverter(PromptConverter):
     ) -> ConverterResult:
         """
         Encodes the prompt using the bijection mapping.
-
-        Args:
-            prompt: The prompt to be converted.
-            input_type: Type of data.
-
-        Returns:
-            The encoded prompt using the secret mapping.
-
-        Raises:
-            ValueError: If the input type is not supported.
         """
         if not self.input_supported(input_type):
             raise ValueError("Input type not supported")
@@ -113,13 +78,7 @@ class BijectionConverter(PromptConverter):
 
     def decode(self, encoded_text: str) -> str:
         """
-        Decodes an encoded response back to plain English using inverse mapping.
-
-        Args:
-            encoded_text: The encoded text to decode.
-
-        Returns:
-            The decoded plain English text.
+        Decodes an encoded response back to plain text using inverse mapping.
         """
         decoded = ""
         for char in encoded_text:
@@ -132,3 +91,82 @@ class BijectionConverter(PromptConverter):
                 decoded += char
 
         return decoded
+
+
+class LetterBijectionConverter(BijectionConverter):
+    """
+    Bijection converter that maps letters to other letters.
+    """
+
+    def __init__(
+        self,
+        *,
+        fixed_size: int = 0,
+        mapping: dict[str, str] | None = None,
+        seed: int | None = None,
+    ) -> None:
+        self._fixed_size = fixed_size
+        super().__init__(mapping=mapping, seed=seed)
+
+    @property
+    def fixed_size(self) -> int:
+        return self._fixed_size
+
+    def _generate_mapping(self, rng: random.Random) -> dict[str, str]:
+        letters = list(string.ascii_lowercase)
+        fixed_letters = letters[:self._fixed_size]
+        letters_to_shuffle = letters[self._fixed_size:]
+        shuffled = letters_to_shuffle.copy()
+        rng.shuffle(shuffled)
+
+        mapping = {}
+        for letter in fixed_letters:
+            mapping[letter] = letter
+        for original, replacement in zip(letters_to_shuffle, shuffled):
+            mapping[original] = replacement
+
+        return mapping
+
+    def _build_identifier(self) -> dict:
+        return self._create_identifier(params={
+            "fixed_size": self._fixed_size,
+            "mapping": str(self._mapping),
+        })
+
+
+class DigitBijectionConverter(BijectionConverter):
+    """
+    Bijection converter that maps digits to other digits.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_digits: int = 10,
+        mapping: dict[str, str] | None = None,
+        seed: int | None = None,
+    ) -> None:
+        self._num_digits = min(num_digits, 10)
+        super().__init__(mapping=mapping, seed=seed)
+
+    @property
+    def num_digits(self) -> int:
+        return self._num_digits
+
+    def _generate_mapping(self, rng: random.Random) -> dict[str, str]:
+        digits = list(string.digits[:self._num_digits])
+        shuffled = digits.copy()
+        rng.shuffle(shuffled)
+
+        mapping = {}
+        for original, replacement in zip(digits, shuffled):
+            mapping[original] = replacement
+
+        return mapping
+
+    def _build_identifier(self) -> dict:
+        return self._create_identifier(params={
+            "num_digits": self._num_digits,
+            "mapping": str(self._mapping),
+        })
+    

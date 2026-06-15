@@ -11,7 +11,7 @@ from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.executor.attack.single_turn.single_turn_attack_strategy import SingleTurnAttackContext
 from pyrit.models import AttackResult, Message, SeedPrompt
-from pyrit.prompt_converter import BijectionConverter, BijectionType
+from pyrit.prompt_converter import BijectionConverter, LetterBijectionConverter
 from pyrit.prompt_normalizer import PromptConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -39,8 +39,7 @@ class BijectionAttack(PromptSendingAttack):
         prompt_normalizer: PromptNormalizer | None = None,
         max_attempts_on_failure: int = 0,
         num_teaching_shots: int = 5,
-        bijection_type: BijectionType = BijectionType.LETTER,
-        fixed_size: int = 0,
+        bijection_converter: BijectionConverter | None = None,
     ) -> None:
         """
         Args:
@@ -50,8 +49,8 @@ class BijectionAttack(PromptSendingAttack):
             prompt_normalizer: Normalizer for handling prompts.
             max_attempts_on_failure: Maximum number of attempts to retry on failure.
             num_teaching_shots: Number of teaching demonstrations to prepend.
-            bijection_type: Type of bijection mapping.
-            fixed_size: Number of letters to keep unchanged in the mapping.
+            bijection_converter: The bijection converter to use. Defaults to LetterBijectionConverter.
+            num_teaching_shots: Number of teaching demonstrations to prepend.
         """
         super().__init__(
             objective_target=objective_target,
@@ -63,10 +62,7 @@ class BijectionAttack(PromptSendingAttack):
         )
 
         self._num_teaching_shots = num_teaching_shots
-        self._bijection_converter = BijectionConverter(
-            bijection_type=bijection_type,
-            fixed_size=fixed_size,
-        )
+        self._bijection_converter = bijection_converter or LetterBijectionConverter()
 
         bijection_cfg = PromptConverterConfiguration.from_converters(
             converters=[self._bijection_converter]
