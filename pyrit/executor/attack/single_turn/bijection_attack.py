@@ -3,7 +3,7 @@
 
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.executor.attack.core import AttackConverterConfig, AttackScoringConfig
@@ -11,7 +11,7 @@ from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.executor.attack.single_turn.single_turn_attack_strategy import SingleTurnAttackContext
 from pyrit.models import AttackResult, Message, SeedPrompt
-from pyrit.prompt_converter import BijectionConverter
+from pyrit.prompt_converter import BijectionConverter, BijectionType
 from pyrit.prompt_normalizer import PromptConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -34,12 +34,12 @@ class BijectionAttack(PromptSendingAttack):
         self,
         *,
         objective_target: PromptTarget = REQUIRED_VALUE,
-        attack_converter_config: Optional[AttackConverterConfig] = None,
-        attack_scoring_config: Optional[AttackScoringConfig] = None,
-        prompt_normalizer: Optional[PromptNormalizer] = None,
+        attack_converter_config: AttackConverterConfig | None = None,
+        attack_scoring_config: AttackScoringConfig | None = None,
+        prompt_normalizer: PromptNormalizer | None = None,
         max_attempts_on_failure: int = 0,
         num_teaching_shots: int = 5,
-        bijection_type: str = "letter",
+        bijection_type: BijectionType = BijectionType.LETTER,
         fixed_size: int = 0,
     ) -> None:
         """

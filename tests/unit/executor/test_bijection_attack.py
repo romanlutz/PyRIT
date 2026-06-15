@@ -72,10 +72,17 @@ class TestBijectionTeachingMessages:
         messages = attack._build_teaching_messages()
         assert len(messages) == 8
 
-    def test_teaching_messages_contain_secret_code(self, mock_objective_target):
+    def test_teaching_messages_first_message_is_user(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
         messages = attack._build_teaching_messages()
-        assert "secret code" in str(messages[0]).lower()
+        assert messages[0].message_pieces[0].role == "user"
+
+    def test_teaching_messages_alternate_roles(self, mock_objective_target):
+        attack = BijectionAttack(objective_target=mock_objective_target)
+        messages = attack._build_teaching_messages()
+        for i, message in enumerate(messages):
+            expected_role = "user" if i % 2 == 0 else "assistant"
+            assert message.message_pieces[0].role == expected_role
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -115,5 +122,4 @@ class TestBijectionAttackEndToEnd:
         await attack._setup_async(context=context)
         result = await attack._perform_async(context=context)
 
-        assert result.last_response is not None
         assert result.last_response.original_value == plain_response
