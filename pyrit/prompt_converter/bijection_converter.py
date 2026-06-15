@@ -136,17 +136,27 @@ class LetterBijectionConverter(BijectionConverter):
 
 class DigitBijectionConverter(BijectionConverter):
     """
-    Bijection converter that maps digits to other digits.
+    Bijection converter that maps letters to random digit strings.
+    Each English letter maps to a randomly-selected num_digits-digit number.
+    Based on mode 2 from arXiv:2410.01294 (Haize Labs).
     """
 
     def __init__(
         self,
         *,
-        num_digits: int = 10,
+        num_digits: int = 2,
         mapping: dict[str, str] | None = None,
         seed: int | None = None,
     ) -> None:
-        self._num_digits = min(num_digits, 10)
+        """
+        Args:
+            num_digits: Length of digit strings to map letters to (1-4).
+            mapping: Optional explicit mapping dict.
+            seed: Optional random seed for reproducibility.
+        """
+        if not 1 <= num_digits <= 4:
+            raise ValueError("num_digits must be between 1 and 4")
+        self._num_digits = num_digits
         super().__init__(mapping=mapping, seed=seed)
 
     @property
@@ -154,15 +164,11 @@ class DigitBijectionConverter(BijectionConverter):
         return self._num_digits
 
     def _generate_mapping(self, rng: random.Random) -> dict[str, str]:
-        digits = list(string.digits[:self._num_digits])
-        shuffled = digits.copy()
-        rng.shuffle(shuffled)
-
-        mapping = {}
-        for original, replacement in zip(digits, shuffled):
-            mapping[original] = replacement
-
-        return mapping
+        letters = list(string.ascii_lowercase)
+        low = 10 ** (self._num_digits - 1)
+        high = 10 ** self._num_digits
+        values = rng.sample(range(low, high), len(letters))
+        return {letter: str(v) for letter, v in zip(letters, values)}
 
     def _build_identifier(self) -> dict:
         return self._create_identifier(params={

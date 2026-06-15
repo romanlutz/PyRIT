@@ -57,9 +57,26 @@ def test_explicit_mapping():
 
 def test_digit_converter_mapping():
     converter = DigitBijectionConverter()
-    assert len(converter.mapping) == 10
-    for digit in string.digits:
-        assert digit in converter.mapping
+    # maps all 26 letters to digit strings
+    assert len(converter.mapping) == 26
+    for letter in string.ascii_lowercase:
+        assert letter in converter.mapping
+        # each value should be a digit string
+        assert converter.mapping[letter].isdigit()
+
+
+def test_digit_converter_encodes_letters():
+    converter = DigitBijectionConverter(num_digits=2)
+    # encoding "hello" should produce digit strings
+    result_chars = "".join(converter.mapping.get(c, c) for c in "hello")
+    assert result_chars != "hello"
+    assert result_chars.replace(" ", "").isdigit()
+
+
+def test_digit_converter_invalid_num_digits():
+    import pytest
+    with pytest.raises(ValueError):
+        DigitBijectionConverter(num_digits=5)
 
 
 def test_digit_converter_is_bijection():
@@ -98,4 +115,3 @@ async def test_unsupported_input_type():
     converter = LetterBijectionConverter()
     with pytest.raises(ValueError):
         await converter.convert_async(prompt="hello", input_type="image")
-        
