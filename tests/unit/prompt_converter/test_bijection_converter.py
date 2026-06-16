@@ -2,8 +2,10 @@
 # Licensed under the MIT license.
 
 import string
+
 import pytest
-from pyrit.prompt_converter import BijectionConverter, LetterBijectionConverter, DigitBijectionConverter
+
+from pyrit.prompt_converter import DigitBijectionConverter, LetterBijectionConverter
 
 
 def test_mapping_generated():
@@ -50,7 +52,7 @@ def test_seed_reproducibility():
 
 
 def test_explicit_mapping():
-    custom_mapping = {chr(ord('a') + i): chr(ord('z') - i) for i in range(26)}
+    custom_mapping = {chr(ord("a") + i): chr(ord("z") - i) for i in range(26)}
     converter = LetterBijectionConverter(mapping=custom_mapping)
     assert converter.mapping == custom_mapping
 
@@ -74,8 +76,7 @@ def test_digit_converter_encodes_letters():
 
 
 def test_digit_converter_invalid_num_digits():
-    import pytest
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="num_digits must be between 1 and 4"):
         DigitBijectionConverter(num_digits=5)
 
 
