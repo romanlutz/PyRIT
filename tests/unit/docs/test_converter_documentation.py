@@ -72,6 +72,7 @@ def test_all_converters_are_documented():
     # We can add exceptions here if needed
     exceptions = {
         "PromptConverter",  # Base class
+        "BijectionConverter",  # Abstract base class
         "LLMGenericTextConverter",  # Base class
         "WordLevelConverter",  # Base class
         "SmugglerConverter",  # Base class (in subdirectory)
