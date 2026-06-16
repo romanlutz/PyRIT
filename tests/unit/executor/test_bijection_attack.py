@@ -2,8 +2,10 @@
 # Licensed under the MIT license.
 
 import uuid
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+
 from pyrit.executor.attack import BijectionAttack
 from pyrit.executor.attack.core import AttackParameters
 from pyrit.executor.attack.single_turn.single_turn_attack_strategy import SingleTurnAttackContext
@@ -38,7 +40,6 @@ def basic_context():
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestBijectionAttackInitialization:
-
     def test_default_teaching_shots(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
         assert attack._num_teaching_shots == 5
@@ -64,7 +65,6 @@ class TestBijectionAttackInitialization:
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestBijectionTeachingMessages:
-
     def test_teaching_messages_length(self, mock_objective_target):
         attack = BijectionAttack(
             objective_target=mock_objective_target,
@@ -88,7 +88,6 @@ class TestBijectionTeachingMessages:
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestBijectionAttackEndToEnd:
-
     async def test_response_is_decoded(self):
         """Test that the attack decodes the cipher-text response."""
         from tests.unit.mocks import MockPromptTarget
@@ -123,4 +122,3 @@ class TestBijectionAttackEndToEnd:
         result = await attack._perform_async(context=context)
 
         assert result.metadata.get("decoded_response") == plain_response
-        
