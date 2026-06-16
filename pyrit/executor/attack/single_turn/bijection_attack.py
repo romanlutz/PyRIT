@@ -22,7 +22,7 @@ BijectionAttackParameters = AttackParameters.excluding("prepended_conversation",
 
 class BijectionAttack(PromptSendingAttack):
     """
-    Implements the Bijection Attack from arXiv:2410.01294 (Haize Labs).
+    Implement the Bijection Learning attack [@huang2024bijectionlearning].
 
     Teaches the target LLM a secret character mapping through demonstration shots,
     then sends harmful prompts encoded in that mapping to bypass safety filters.

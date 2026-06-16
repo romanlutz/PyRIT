@@ -13,7 +13,7 @@ class BijectionConverter(PromptConverter, abc.ABC):
     """
     Abstract base class for bijection converters.
     Converts a prompt using a one-to-one character mapping to bypass safety filters.
-    Based on the bijection attack from arXiv:2410.01294 (Haize Labs).
+    Based on the Bijection Learning attack [@huang2024bijectionlearning].
     """
 
     SUPPORTED_INPUT_TYPES = ("text",)
@@ -97,14 +97,26 @@ class BijectionConverter(PromptConverter, abc.ABC):
             str: The decoded plain text.
         """
         decoded = ""
-        for char in encoded_text:
-            if char.lower() in self._inverse_mapping:
-                if char.isupper():
-                    decoded += self._inverse_mapping[char.lower()].upper()
-                else:
-                    decoded += self._inverse_mapping[char]
-            else:
-                decoded += char
+        encoded_tokens = sorted(self._inverse_mapping, key=len, reverse=True)
+        i = 0
+        while i < len(encoded_text):
+            matched = False
+            for encoded_token in encoded_tokens:
+                candidate = encoded_text[i : i + len(encoded_token)]
+                if candidate == encoded_token:
+                    decoded += self._inverse_mapping[encoded_token]
+                    i += len(encoded_token)
+                    matched = True
+                    break
+                if len(encoded_token) == 1 and candidate.lower() == encoded_token and candidate.isupper():
+                    decoded += self._inverse_mapping[encoded_token].upper()
+                    i += 1
+                    matched = True
+                    break
+
+            if not matched:
+                decoded += encoded_text[i]
+                i += 1
 
         return decoded
 
@@ -161,7 +173,7 @@ class DigitBijectionConverter(BijectionConverter):
     """
     Bijection converter that maps letters to random digit strings.
     Each English letter maps to a randomly-selected num_digits-digit number.
-    Based on mode 2 from arXiv:2410.01294 (Haize Labs).
+    Based on mode 2 from the Bijection Learning attack [@huang2024bijectionlearning].
     """
 
     def __init__(
@@ -175,15 +187,15 @@ class DigitBijectionConverter(BijectionConverter):
         Initialize the converter.
 
         Args:
-            num_digits (int): Length of digit strings to map letters to (1-4).
+            num_digits (int): Length of digit strings to map letters to (2-4).
             mapping (dict[str, str], Optional): Explicit mapping dict. If provided, used directly.
             seed (int, Optional): Random seed for reproducibility.
 
         Raises:
-            ValueError: If num_digits is not between 1 and 4.
+            ValueError: If num_digits is not between 2 and 4.
         """
-        if not 1 <= num_digits <= 4:
-            raise ValueError("num_digits must be between 1 and 4")
+        if not 2 <= num_digits <= 4:
+            raise ValueError("num_digits must be between 2 and 4")
         self._num_digits = num_digits
         super().__init__(mapping=mapping, seed=seed)
 

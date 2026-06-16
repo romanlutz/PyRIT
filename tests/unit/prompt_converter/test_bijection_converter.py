@@ -5,13 +5,18 @@ import string
 
 import pytest
 
-from pyrit.prompt_converter import DigitBijectionConverter, LetterBijectionConverter
+from pyrit.prompt_converter import BijectionConverter, DigitBijectionConverter, LetterBijectionConverter
 
 
 def test_mapping_generated():
     converter = LetterBijectionConverter()
     assert converter.mapping is not None
     assert len(converter.mapping) == 26
+
+
+def test_abstract_converter_cannot_be_instantiated():
+    with pytest.raises(TypeError, match="_generate_mapping"):
+        BijectionConverter()
 
 
 def test_all_letters_mapped():
@@ -57,6 +62,29 @@ def test_explicit_mapping():
     assert converter.mapping == custom_mapping
 
 
+async def test_letter_converter_explicit_mapping_round_trip_preserves_case_and_punctuation():
+    custom_mapping = {chr(ord("a") + i): chr(ord("z") - i) for i in range(26)}
+    converter = LetterBijectionConverter(mapping=custom_mapping)
+
+    encoded = await converter.convert_async(prompt="Hello, World!")
+
+    assert encoded.output_text == "Svool, Dliow!"
+    assert converter.decode(encoded.output_text) == "Hello, World!"
+
+
+def test_letter_converter_fixed_size_all_letters_is_identity_mapping():
+    converter = LetterBijectionConverter(fixed_size=26)
+    assert converter.mapping == {letter: letter for letter in string.ascii_lowercase}
+
+
+def test_letter_converter_identifier_includes_fixed_size_and_mapping():
+    converter = LetterBijectionConverter(fixed_size=5, seed=42)
+    identifier = converter.get_identifier()
+
+    assert identifier.params["fixed_size"] == 5
+    assert identifier.params["mapping"] == str(converter.mapping)
+
+
 def test_digit_converter_mapping():
     converter = DigitBijectionConverter()
     # maps all 26 letters to digit strings
@@ -67,6 +95,28 @@ def test_digit_converter_mapping():
         assert converter.mapping[letter].isdigit()
 
 
+@pytest.mark.parametrize("num_digits", [2, 3, 4])
+def test_digit_converter_values_have_configured_length(num_digits: int):
+    converter = DigitBijectionConverter(num_digits=num_digits, seed=42)
+    assert {len(value) for value in converter.mapping.values()} == {num_digits}
+
+
+def test_digit_converter_seed_reproducibility():
+    converter1 = DigitBijectionConverter(seed=42)
+    converter2 = DigitBijectionConverter(seed=42)
+    assert converter1.mapping == converter2.mapping
+
+
+async def test_digit_converter_explicit_mapping_round_trip():
+    custom_mapping = {letter: str(index + 10) for index, letter in enumerate(string.ascii_lowercase)}
+    converter = DigitBijectionConverter(mapping=custom_mapping)
+
+    encoded = await converter.convert_async(prompt="abc xyz!")
+
+    assert encoded.output_text == "101112 333435!"
+    assert converter.decode(encoded.output_text) == "abc xyz!"
+
+
 def test_digit_converter_encodes_letters():
     converter = DigitBijectionConverter(num_digits=2)
     # encoding "hello" should produce digit strings
@@ -75,15 +125,24 @@ def test_digit_converter_encodes_letters():
     assert result_chars.replace(" ", "").isdigit()
 
 
-def test_digit_converter_invalid_num_digits():
-    with pytest.raises(ValueError, match="num_digits must be between 1 and 4"):
-        DigitBijectionConverter(num_digits=5)
+@pytest.mark.parametrize("num_digits", [1, 5])
+def test_digit_converter_invalid_num_digits(num_digits: int):
+    with pytest.raises(ValueError, match="num_digits must be between 2 and 4"):
+        DigitBijectionConverter(num_digits=num_digits)
 
 
 def test_digit_converter_is_bijection():
     converter = DigitBijectionConverter()
     values = list(converter.mapping.values())
     assert len(values) == len(set(values))
+
+
+def test_digit_converter_identifier_includes_num_digits_and_mapping():
+    converter = DigitBijectionConverter(num_digits=3, seed=42)
+    identifier = converter.get_identifier()
+
+    assert identifier.params["num_digits"] == 3
+    assert identifier.params["mapping"] == str(converter.mapping)
 
 
 async def test_encode_prompt():
@@ -114,5 +173,11 @@ async def test_uppercase_preserved():
 
 async def test_unsupported_input_type():
     converter = LetterBijectionConverter()
+    with pytest.raises(ValueError):
+        await converter.convert_async(prompt="hello", input_type="image")
+
+
+async def test_digit_converter_unsupported_input_type():
+    converter = DigitBijectionConverter()
     with pytest.raises(ValueError):
         await converter.convert_async(prompt="hello", input_type="image")

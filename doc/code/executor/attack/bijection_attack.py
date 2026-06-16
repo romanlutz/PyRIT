@@ -10,7 +10,7 @@
 # %% [markdown]
 # # Bijection Attack (Single-Turn)
 #
-# The Bijection Attack is based on arXiv:2410.01294 (Haize Labs).
+# The Bijection Attack is based on the Bijection Learning attack [@huang2024bijectionlearning].
 #
 # It works by teaching a target LLM a secret character mapping through demonstration shots,
 # then sending harmful prompts encoded in that mapping to bypass safety filters.
