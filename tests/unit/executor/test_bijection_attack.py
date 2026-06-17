@@ -12,7 +12,7 @@ from pyrit.executor.attack.single_turn.single_turn_attack_strategy import Single
 from pyrit.models import MessagePiece
 from pyrit.models.identifiers import ComponentIdentifier
 from pyrit.prompt_converter import DigitBijectionConverter, LetterBijectionConverter
-from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target import PromptTarget, TargetCapabilities
 
 
 def _mock_target_id(name: str = "MockTarget") -> ComponentIdentifier:
@@ -27,6 +27,7 @@ def mock_objective_target():
     target = MagicMock(spec=PromptTarget)
     target.send_prompt_async = AsyncMock()
     target.get_identifier.return_value = _mock_target_id()
+    target.capabilities = TargetCapabilities(supports_system_prompt=True)
     return target
 
 
@@ -93,6 +94,35 @@ class TestBijectionTeachingMessages:
         for i, message in enumerate(messages[1:], start=1):
             expected_role = "user" if i % 2 == 1 else "assistant"
             assert message.message_pieces[0].role == expected_role
+
+    def test_teaching_messages_fallback_to_user_when_system_prompt_unsupported(self, mock_objective_target):
+        mock_objective_target.capabilities = TargetCapabilities(supports_system_prompt=False)
+        attack = BijectionAttack(
+            objective_target=mock_objective_target,
+            num_teaching_shots=3,
+        )
+
+        messages = attack._build_teaching_messages()
+
+        assert len(messages) == 6
+        assert messages[0].message_pieces[0].role == "user"
+        assert "write every assistant response only in this secret code" in messages[0].message_pieces[0].original_value
+        assert "the quick brown fox" in messages[0].message_pieces[0].original_value
+        assert messages[1].message_pieces[0].role == "assistant"
+        assert messages[2].message_pieces[0].role == "user"
+
+    def test_teaching_messages_fallback_with_zero_shots_keeps_setup(self, mock_objective_target):
+        mock_objective_target.capabilities = TargetCapabilities(supports_system_prompt=False)
+        attack = BijectionAttack(
+            objective_target=mock_objective_target,
+            num_teaching_shots=0,
+        )
+
+        messages = attack._build_teaching_messages()
+
+        assert len(messages) == 1
+        assert messages[0].message_pieces[0].role == "user"
+        assert "write every assistant response only in this secret code" in messages[0].message_pieces[0].original_value
 
     def test_teaching_messages_use_encoded_assistant_responses(self, mock_objective_target):
         mapping = {
