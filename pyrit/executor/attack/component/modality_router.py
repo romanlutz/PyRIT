@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pyrit.models import Message, MessagePiece
 from pyrit.models.literals import MEDIA_PATH_DATA_TYPES, PromptDataType
@@ -130,7 +130,7 @@ class ModalityFeedbackRouter:
         *,
         text: str,
         last_response: Message | None,
-        prompt_metadata: dict[str, str | int] | None = None,
+        prompt_metadata: dict[str, Any] | None = None,
     ) -> Message:
         """
         Build the ``Message`` to send to the adversarial chat for this turn.
