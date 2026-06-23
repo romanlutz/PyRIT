@@ -218,3 +218,56 @@ class DigitBijectionConverter(BijectionConverter):
                 "mapping": str(self._mapping),
             },
         )
+
+class TokenBijectionConverter(BijectionConverter):
+    """
+    Bijection converter that maps letters to tokens from a tokenizer vocabulary.
+    Each English letter maps to a randomly sampled distinct token from the
+    target model's tokenizer vocabulary.
+    Based on mode 3 from arXiv:2410.01294 (Haize Labs).
+    """
+
+    def __init__(
+        self,
+        *,
+        tokenizer: object,
+        mapping: dict[str, str] | None = None,
+        seed: int | None = None,
+    ) -> None:
+        """
+        Args:
+            tokenizer: A HuggingFace tokenizer with get_vocab() method.
+            mapping: Optional explicit mapping dict.
+            seed: Optional random seed for reproducibility.
+        """
+        self._tokenizer = tokenizer
+        super().__init__(mapping=mapping, seed=seed)
+
+    def _generate_mapping(self, rng: random.Random) -> dict[str, str]:
+        vocab = self._tokenizer.get_vocab()
+
+        candidates = [
+            token for token in vocab.keys()
+            if (
+                len(token) >= 3
+                and len(token) <= 10
+                and token.isalpha()
+                and not token.startswith("<")
+                and not token.startswith("##")
+                and token.lower() == token
+            )
+        ]
+
+        if len(candidates) < 26:
+            raise ValueError(
+                f"Not enough valid tokens in vocabulary. Found {len(candidates)}, need 26."
+            )
+
+        selected = rng.sample(candidates, 26)
+        letters = list(string.ascii_lowercase)
+        return {letter: token for letter, token in zip(letters, selected)}
+
+    def _build_identifier(self) -> dict:
+        return self._create_identifier(params={
+            "mapping": str(self._mapping),
+        })

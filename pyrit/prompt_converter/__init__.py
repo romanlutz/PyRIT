@@ -32,6 +32,7 @@ from pyrit.prompt_converter.bijection_converter import (
     BijectionConverter,
     DigitBijectionConverter,
     LetterBijectionConverter,
+    TokenBijectionConverter
 )
 from pyrit.prompt_converter.bin_ascii_converter import BinAsciiConverter
 from pyrit.prompt_converter.binary_converter import BinaryConverter
@@ -226,6 +227,7 @@ __all__ = [
     "StringJoinConverter",
     "SuffixAppendConverter",
     "SuperscriptConverter",
+    "TokenBijectionConverter",
     "TatweelConverter",
     "TemplateSegmentConverter",
     "TenseConverter",
