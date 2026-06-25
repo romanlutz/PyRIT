@@ -218,6 +218,12 @@ class GCGMultiPromptAttack(MultiPromptAttack):
             current_control=self.control_str,
         )
 
+    def _get_control_length(self, *, control: str) -> int | None:
+        try:
+            return len(self.workers[0].tokenizer(control).input_ids[1:])
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     def step(
         self,
         *,
@@ -343,7 +349,9 @@ class GCGMultiPromptAttack(MultiPromptAttack):
         del control_cands, loss
         gc.collect()
 
-        logger.info(f"Current length: {len(self.workers[0].tokenizer(next_control).input_ids[1:])}")
+        current_length = self._get_control_length(control=next_control)
+        if current_length is not None:
+            logger.info(f"Current length: {current_length}")
         logger.info(next_control)
 
         return next_control, cand_loss.item() / len(self.prompts[0]) / len(self.workers)
