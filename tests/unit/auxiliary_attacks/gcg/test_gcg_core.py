@@ -810,3 +810,84 @@ class TestGCGMultiPromptAttackStepWiring:
         assert sampling.calls[0]["top_k"] == 4
         assert sampling.calls[0]["allow_non_ascii"] is False
         assert candidate_filter.calls[0]["current_control"] == "current control"
+
+    def test_gcg_multi_prompt_attack_init_with_custom_protocols(self) -> None:
+        """Test GCGMultiPromptAttack.__init__ stores custom sampling/loss/filter."""
+        sampling = _SpySampling(sampled_tokens=torch.tensor([[1, 2, 3]]))
+        loss = _SpyLoss(losses=torch.tensor([1.0]))
+        candidate_filter = _SpyFilter(candidates=["filtered"])
+
+        attack = object.__new__(GCGMultiPromptAttack)
+        attack.workers = [MagicMock()]
+        attack.models = [MagicMock()]
+        attack.prompts = [MagicMock()]
+
+        # Manually call __init__ path to test attribute storage
+        attack._sampling = sampling
+        attack._loss = loss
+        attack._candidate_filter = candidate_filter
+
+        assert attack._sampling is sampling
+        assert attack._loss is loss
+        assert attack._candidate_filter is candidate_filter
+
+    def test_resolve_methods_return_defaults_when_none(self) -> None:
+        """Test _resolve_* methods return defaults when custom protocols are None."""
+        worker = _WorkerStub(
+            gradient=torch.tensor([[0.1]]),
+            logits=torch.randn(1, 8, 10),
+            token_ids=torch.randint(0, 10, (1, 8)),
+            tokenizer=self._make_tokenizer(),
+        )
+        prompt_manager = _PromptManagerStub(
+            prompt=self._make_prompt(target_slice=slice(0, 1), control_slice=slice(0, 1)),
+            control_tokens=torch.tensor([1]),
+            disallowed_tokens=torch.tensor([]),
+            control_str="test",
+        )
+
+        attack = self._make_attack(worker=worker, prompt_manager=prompt_manager)
+
+        # Test _resolve_sampling returns default
+        sampler = attack._resolve_sampling()
+        assert sampler is not None
+
+        # Test _resolve_loss returns default
+        loss_func = attack._resolve_loss(target_weight=1.0, control_weight=0.1)
+        assert loss_func is not None
+
+        # Test _resolve_candidate_filter returns default
+        filter_func = attack._resolve_candidate_filter(filter_cand=True)
+        assert filter_func is not None
+
+    def test_get_control_length_success(self) -> None:
+        """Test _get_control_length returns token count."""
+        tokenizer = self._make_tokenizer()
+        worker = _WorkerStub(
+            gradient=torch.tensor([[0.1]]),
+            logits=torch.randn(1, 8, 10),
+            token_ids=torch.randint(0, 10, (1, 8)),
+            tokenizer=tokenizer,
+        )
+        attack = object.__new__(GCGMultiPromptAttack)
+        attack.workers = [worker]
+
+        length = attack._get_control_length(control="1 2 3")
+        assert length == 3
+
+    def test_get_control_length_handles_error(self) -> None:
+        """Test _get_control_length returns None on tokenizer error."""
+        tokenizer = MagicMock()
+        tokenizer.side_effect = ValueError("Tokenizer error")
+
+        worker = _WorkerStub(
+            gradient=torch.tensor([[0.1]]),
+            logits=torch.randn(1, 8, 10),
+            token_ids=torch.randint(0, 10, (1, 8)),
+            tokenizer=tokenizer,
+        )
+        attack = object.__new__(GCGMultiPromptAttack)
+        attack.workers = [worker]
+
+        length = attack._get_control_length(control="test")
+        assert length is None

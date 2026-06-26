@@ -273,6 +273,22 @@ class TestExtensionWiring:
         assert suffix_init.calls == [worker.tokenizer]
         assert mock_individual.call_args.kwargs["control_init"] == "initialized suffix"
 
+    def test_resolve_control_init_raises_when_suffix_init_requires_workers(self) -> None:
+        """Test _resolve_control_init raises ValueError when suffix_init configured but no workers."""
+
+        class _SuffixInitStub:
+            def make_initial_suffix(self, *, tokenizer: object) -> str:
+                return "initialized suffix"
+
+        suffix_init = _SuffixInitStub()
+        gen = GCGGenerator(
+            models=[GCGModelConfig(name=_LLAMA_2)],
+            algorithm=GCGAlgorithmConfig(suffix_init=suffix_init),
+        )
+
+        with pytest.raises(ValueError, match="Cannot resolve suffix_init without at least one worker"):
+            gen._resolve_control_init(workers=[])
+
     async def test_perform_async_binds_algorithm_extensions_into_mpa_factory(self, tmp_path: Path) -> None:
         class _SamplingStub:
             def sample_candidates(
