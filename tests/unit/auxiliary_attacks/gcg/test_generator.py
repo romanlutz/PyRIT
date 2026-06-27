@@ -273,6 +273,14 @@ class TestExtensionWiring:
         assert suffix_init.calls == [worker.tokenizer]
         assert mock_individual.call_args.kwargs["control_init"] == "initialized suffix"
 
+    def test_resolve_control_init_returns_default_when_suffix_init_not_configured(self) -> None:
+        gen = GCGGenerator(
+            models=[GCGModelConfig(name=_LLAMA_2)],
+            algorithm=GCGAlgorithmConfig(control_init="seed control"),
+        )
+
+        assert gen._resolve_control_init(workers=[]) == "seed control"
+
     def test_resolve_control_init_raises_when_suffix_init_requires_workers(self) -> None:
         """Test _resolve_control_init raises ValueError when suffix_init configured but no workers."""
 

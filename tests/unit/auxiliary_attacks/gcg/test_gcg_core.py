@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -816,20 +816,95 @@ class TestGCGMultiPromptAttackStepWiring:
         sampling = _SpySampling(sampled_tokens=torch.tensor([[1, 2, 3]]))
         loss = _SpyLoss(losses=torch.tensor([1.0]))
         candidate_filter = _SpyFilter(candidates=["filtered"])
+        workers = [MagicMock()]
 
-        attack = object.__new__(GCGMultiPromptAttack)
-        attack.workers = [MagicMock()]
-        attack.models = [MagicMock()]
-        attack.prompts = [MagicMock()]
+        with patch.object(MultiPromptAttack, "__init__", return_value=None) as mock_base_init:
+            attack = GCGMultiPromptAttack(
+                goals=["goal"],
+                targets=["target"],
+                workers=workers,
+                control_init="seed control",
+                sampling=sampling,
+                loss=loss,
+                candidate_filter=candidate_filter,
+            )
 
-        # Manually call __init__ path to test attribute storage
-        attack._sampling = sampling
-        attack._loss = loss
-        attack._candidate_filter = candidate_filter
+        assert mock_base_init.call_count == 1
+        assert mock_base_init.call_args.args[:4] == (["goal"], ["target"], workers, "seed control")
 
         assert attack._sampling is sampling
         assert attack._loss is loss
         assert attack._candidate_filter is candidate_filter
+
+    def test_step_aggregates_workers_when_grad_shapes_mismatch(self) -> None:
+        """Test step handles a worker gradient shape mismatch by sampling per group."""
+        tokenizer = self._make_tokenizer()
+        prompt = self._make_prompt(target_slice=slice(0, 1), control_slice=slice(0, 1))
+        prompt_manager1 = _PromptManagerStub(
+            prompt=prompt,
+            control_tokens=torch.tensor([1], dtype=torch.long),
+            disallowed_tokens=torch.tensor([], dtype=torch.long),
+            control_str="seed",
+        )
+        prompt_manager2 = _PromptManagerStub(
+            prompt=prompt,
+            control_tokens=torch.tensor([1], dtype=torch.long),
+            disallowed_tokens=torch.tensor([], dtype=torch.long),
+            control_str="seed",
+        )
+
+        grad1 = torch.tensor([[0.1, 0.2, 0.3]], dtype=torch.float32)
+        grad2 = torch.tensor([[0.4, 0.5, 0.6, 0.7]], dtype=torch.float32)
+        logits = torch.randn(1, 8, 10)
+        token_ids = torch.randint(0, 10, (1, 8))
+        worker1 = _WorkerStub(gradient=grad1, logits=logits, token_ids=token_ids, tokenizer=tokenizer)
+        worker2 = _WorkerStub(gradient=grad2, logits=logits, token_ids=token_ids, tokenizer=tokenizer)
+        worker1.results = _Queue([grad1, (logits, token_ids), (logits, token_ids)])
+        worker2.results = _Queue([grad2, (logits, token_ids), (logits, token_ids)])
+
+        attack = object.__new__(GCGMultiPromptAttack)
+        attack.workers = [worker1, worker2]
+        attack.models = [worker1.model]
+        attack.prompts = [prompt_manager1, prompt_manager2]
+        attack.control_str = "seed"
+
+        class _ConstantLoss:
+            @staticmethod
+            def compute_loss(
+                *,
+                logits: torch.Tensor,
+                token_ids: torch.Tensor,
+                target_slice: slice,
+                control_slice: slice,
+            ) -> torch.Tensor:
+                return torch.tensor([0.5], dtype=torch.float32)
+
+        with (
+            patch.object(
+                attack,
+                "_sample_control_candidates",
+                return_value=torch.tensor([[1, 2, 3]], dtype=torch.long),
+            ) as mock_sample,
+            patch.object(attack, "_filter_control_candidates", return_value=["candidate"]),
+            patch.object(attack, "_resolve_loss", return_value=_ConstantLoss()),
+            patch.object(attack, "_get_control_length", return_value=None),
+        ):
+            control, normalized_loss = attack.step(
+                batch_size=1,
+                topk=2,
+                temp=1.0,
+                allow_non_ascii=True,
+                target_weight=1.0,
+                control_weight=0.1,
+                verbose=False,
+                filter_cand=True,
+            )
+
+        assert control == "candidate"
+        assert normalized_loss == pytest.approx(0.5)
+        assert mock_sample.call_count == 2
+        assert mock_sample.call_args_list[0].kwargs["worker_index"] == 0
+        assert mock_sample.call_args_list[1].kwargs["worker_index"] == 1
 
     def test_resolve_methods_return_defaults_when_none(self) -> None:
         """Test _resolve_* methods return defaults when custom protocols are None."""
