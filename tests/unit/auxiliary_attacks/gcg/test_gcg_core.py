@@ -861,7 +861,7 @@ class TestGCGMultiPromptAttackStepWiring:
         assert filter_func is not None
 
     def test_get_control_length_success(self) -> None:
-        """Test _get_control_length returns token count."""
+        """Test _get_control_length returns token count after dropping the first token."""
         tokenizer = self._make_tokenizer()
         worker = _WorkerStub(
             gradient=torch.tensor([[0.1]]),
@@ -873,7 +873,7 @@ class TestGCGMultiPromptAttackStepWiring:
         attack.workers = [worker]
 
         length = attack._get_control_length(control="1 2 3")
-        assert length == 3
+        assert length == 2
 
     def test_get_control_length_handles_error(self) -> None:
         """Test _get_control_length returns None on tokenizer error."""
