@@ -896,7 +896,7 @@ class TestGCGMultiPromptAttackStepWiring:
                 allow_non_ascii=True,
                 target_weight=1.0,
                 control_weight=0.1,
-                verbose=False,
+                verbose=True,
                 filter_cand=True,
             )
 
