@@ -68,8 +68,8 @@ def make_attack_result(
     has_target: bool = True,
     name: str = "Test Attack",
     outcome: AttackOutcome = AttackOutcome.UNDETERMINED,
-    created_at: datetime = None,
-    updated_at: datetime = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> AttackResult:
     """Create a mock AttackResult for testing."""
     now = datetime.now(timezone.utc)
@@ -125,7 +125,7 @@ def make_mock_piece(
     sequence: int = 0,
     original_value: str = "test",
     converted_value: str = "test",
-    timestamp: datetime = None,
+    timestamp: datetime | None = None,
 ):
     """Create a mock message piece."""
     piece = MagicMock()
@@ -1639,6 +1639,69 @@ class TestPersistBase64Pieces:
         mock_serializer.save_b64_image_async.assert_awaited_once_with(data="aW1hZ2VkYXRh")
         assert request.pieces[0].original_value == "/saved/image.png"
 
+    async def test_data_uri_mime_type_supplies_extension_when_mime_type_missing(self, attack_service) -> None:
+        """Data URI media type should prevent image uploads from falling back to blocked .bin files."""
+        request = AddMessageRequest(
+            role="user",
+            pieces=[
+                MessagePieceRequest(
+                    data_type="image_path",
+                    original_value="data:image/png;base64,aW1hZ2VkYXRh",
+                ),
+            ],
+            send=False,
+            target_conversation_id="test-id",
+        )
+
+        mock_serializer = MagicMock()
+        mock_serializer.save_b64_image_async = AsyncMock()
+        mock_serializer.value = "/saved/image.png"
+
+        with patch(
+            "pyrit.backend.services.attack_service.data_serializer_factory",
+            return_value=mock_serializer,
+        ) as factory_mock:
+            await AttackService._persist_base64_pieces_async(request)
+
+        factory_mock.assert_called_once_with(
+            category="prompt-memory-entries",
+            data_type="image_path",
+            extension=".png",
+        )
+        mock_serializer.save_b64_image_async.assert_awaited_once_with(data="aW1hZ2VkYXRh")
+        assert request.pieces[0].original_value == "/saved/image.png"
+
+    async def test_path_data_type_supplies_extension_when_mime_type_missing(self, attack_service) -> None:
+        """Raw image base64 without MIME metadata should still use a media-serving extension."""
+        request = AddMessageRequest(
+            role="user",
+            pieces=[
+                MessagePieceRequest(
+                    data_type="image_path",
+                    original_value="aW1hZ2VkYXRh",
+                ),
+            ],
+            send=False,
+            target_conversation_id="test-id",
+        )
+
+        mock_serializer = MagicMock()
+        mock_serializer.save_b64_image_async = AsyncMock()
+        mock_serializer.value = "/saved/image.png"
+
+        with patch(
+            "pyrit.backend.services.attack_service.data_serializer_factory",
+            return_value=mock_serializer,
+        ) as factory_mock:
+            await AttackService._persist_base64_pieces_async(request)
+
+        factory_mock.assert_called_once_with(
+            category="prompt-memory-entries",
+            data_type="image_path",
+            extension=".png",
+        )
+        assert request.pieces[0].original_value == "/saved/image.png"
+
     async def test_http_url_is_kept_as_is(self, attack_service) -> None:
         """HTTPS blob URLs should not be re-persisted."""
         request = AddMessageRequest(
@@ -1757,7 +1820,7 @@ class TestGetConversations:
 
     async def test_returns_main_and_related_conversations(self, attack_service, mock_memory):
         """Should return main and PRUNED conversations sorted by timestamp."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations.add(
@@ -1910,7 +1973,7 @@ class TestUpdateMainConversation:
 
     async def test_swaps_main_conversation(self, attack_service, mock_memory):
         """Changing the main to a related conversation should swap it with the main."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -1950,7 +2013,7 @@ class TestAddMessageTargetConversation:
     async def test_stores_message_in_target_conversation(self, attack_service, mock_memory):
         """When target_conversation_id is set, messages should go to that conversation."""
         from pyrit.backend.models.attacks import AttackSummary, ConversationMessagesResponse
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -2017,7 +2080,7 @@ class TestConversationCount:
 
     async def test_list_attacks_includes_related_conversation_ids(self, attack_service, mock_memory):
         """Attacks with related conversations should expose them in the summary."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -2069,7 +2132,7 @@ class TestConversationCount:
     async def test_create_second_conversation_preserves_first(self, attack_service, mock_memory):
         """Creating a second related conversation should keep the first one."""
         from pyrit.backend.models.attacks import CreateConversationRequest
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -2099,7 +2162,7 @@ class TestConversationSorting:
 
     async def test_conversations_sorted_by_created_at_earliest_first(self, attack_service, mock_memory):
         """Conversations should be sorted by created_at with earliest first."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -2127,7 +2190,7 @@ class TestConversationSorting:
 
     async def test_empty_conversations_sorted_last(self, attack_service, mock_memory):
         """Conversations with no timestamp should appear at the bottom."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
@@ -2153,7 +2216,7 @@ class TestConversationSorting:
 
     async def test_empty_conversations_all_sort_last(self, attack_service, mock_memory):
         """Multiple empty conversations should all have created_at=None."""
-        from pyrit.models.conversation_reference import ConversationReference, ConversationType
+        from pyrit.models import ConversationReference, ConversationType
 
         ar = make_attack_result(conversation_id="attack-1")
         ar.related_conversations = {
