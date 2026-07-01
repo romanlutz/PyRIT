@@ -58,11 +58,12 @@ _LAZY_IMPORTS = {
     "SamplingStrategy": ("pyrit.auxiliary_attacks.gcg.extension_protocols", "SamplingStrategy"),
     "StandardGCGSampling": ("pyrit.auxiliary_attacks.gcg.default_implementations", "StandardGCGSampling"),
     "SuffixInitializer": ("pyrit.auxiliary_attacks.gcg.extension_protocols", "SuffixInitializer"),
+    "fetch_advbench_for_gcg_async": ("pyrit.auxiliary_attacks.gcg.data", "fetch_advbench_for_gcg_async"),
     "load_goals_and_targets": ("pyrit.auxiliary_attacks.gcg.data", "load_goals_and_targets"),
 }
 
 if TYPE_CHECKING:
-    from pyrit.auxiliary_attacks.gcg.data import load_goals_and_targets
+    from pyrit.auxiliary_attacks.gcg.data import fetch_advbench_for_gcg_async, load_goals_and_targets
     from pyrit.auxiliary_attacks.gcg.default_implementations import (
         CrossEntropyLoss,
         LengthPreservingFilter,
@@ -118,5 +119,6 @@ __all__ = [
     "SamplingStrategy",
     "StandardGCGSampling",
     "SuffixInitializer",
+    "fetch_advbench_for_gcg_async",
     "load_goals_and_targets",
 ]

@@ -111,18 +111,22 @@ ml_client.environments.create_or_update(env_docker_context)
 # Docker-installed package (Python's `-m` flag puts the cwd at the front of `sys.path`).
 #
 # The new public API takes a typed ``GCGConfig`` (strategy) and a separate
-# ``GCGDataConfig`` (CSV paths/counts). We build both locally with whatever
-# overrides we want, serialize each into a JSON file the AML job can read as
-# an input, and ship those paths through the job command. Defaults come from
-# the dataclasses in ``pyrit.auxiliary_attacks.gcg.config``; goals and targets
-# flow into ``GCGGenerator.execute_async`` at runtime, not through the config.
+# ``GCGDataConfig`` (resolved goals and targets). We fetch the AdvBench data
+# locally with ``fetch_advbench_for_gcg_async`` and materialize the goals and
+# targets inline into the ``GCGDataConfig`` via ``from_seed_dataset``, so the
+# serialized JSON the AML job reads already embeds the data and the compute
+# container never fetches it from the public internet. We build both configs
+# locally, serialize each into a JSON file the AML job mounts as an input, and
+# ship those paths through the job command. Defaults come from the dataclasses
+# in ``pyrit.auxiliary_attacks.gcg.config``; goals and targets flow into
+# ``GCGGenerator.execute_async`` at runtime, not through the config.
 #
 # We also have to specify a GPU compute target. In our experience, a GPU instance with
 # at least 24GB of vRAM is required (e.g., Standard_NC24ads_A100_v4).
 #
 # Depending on the compute instance you use, you may encounter "out of memory" errors.
-# In this case, we recommend training on a smaller model or lowering ``data.n_train_data``
-# or ``algorithm.batch_size``.
+# In this case, we recommend training on a smaller model or lowering the number
+# of goals fetched (``fetch_advbench_for_gcg_async(n=...)``) or ``algorithm.batch_size``.
 
 # %%
 import tempfile
@@ -133,6 +137,7 @@ from pyrit.auxiliary_attacks.gcg import (
     GCGDataConfig,
     GCGModelConfig,
     GCGOutputConfig,
+    fetch_advbench_for_gcg_async,
 )
 
 config = GCGConfig(
@@ -140,11 +145,8 @@ config = GCGConfig(
     algorithm=GCGAlgorithmConfig(n_steps=5, batch_size=64, test_steps=1),
     output=GCGOutputConfig(result_prefix="gcg_suffix"),
 )
-data_config = GCGDataConfig(
-    train_data=("https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv"),
-    n_train_data=5,
-    n_test_data=0,
-)
+objectives = await fetch_advbench_for_gcg_async(n=5)
+data_config = GCGDataConfig.from_seed_dataset(objectives)
 
 # Write the configs into a tempdir so AML can mount them as separate job inputs.
 config_dir = Path(tempfile.mkdtemp(prefix="gcg-aml-config-"))
