@@ -10,11 +10,12 @@ from unit.mocks import get_mock_target_identifier
 from pyrit.exceptions.exception_classes import InvalidJsonException
 from pyrit.memory.central_memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, SeedPrompt
 from pyrit.score import (
     SelfAskTrueFalseScorer,
     TrueFalseQuestion,
     TrueFalseQuestionPaths,
+    render_true_false_system_prompt,
 )
 
 
@@ -306,3 +307,196 @@ def test_self_ask_true_false_raises_when_yaml_loads_none(patch_central_database)
                 chat_target=chat_target,
                 true_false_question_path=TrueFalseQuestionPaths.GROUNDED.value,
             )
+
+
+def test_true_false_question_from_yaml_loads_fields():
+    """TrueFalseQuestion.from_yaml populates fields and render_params excludes category."""
+    question = TrueFalseQuestion.from_yaml(TrueFalseQuestionPaths.GROUNDED.value)
+
+    assert question.category == "grounded"
+    assert question.true_description
+
+    params = question.render_params
+    assert set(params) == {"true_description", "false_description", "metadata"}
+    assert "category" not in params
+
+
+def test_true_false_question_from_yaml_raises_on_none():
+    """TrueFalseQuestion.from_yaml raises when the YAML content is not a mapping."""
+    with patch("pyrit.score.true_false.self_ask_true_false_scorer.yaml.safe_load", return_value=None):
+        with pytest.raises(ValueError, match="Failed to load true_false_question YAML"):
+            TrueFalseQuestion.from_yaml(TrueFalseQuestionPaths.GROUNDED.value)
+
+
+def test_new_api_static_str_system_prompt(patch_central_database):
+    """A plain string system prompt is used verbatim with no JSON schema."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    scorer = SelfAskTrueFalseScorer(
+        target=chat_target,
+        system_prompt="a static classifier prompt",
+        score_category=["harm"],
+    )
+
+    assert scorer._system_prompt == "a static classifier prompt"
+    assert scorer._response_json_schema is None
+    assert scorer._score_category == ["harm"]
+
+
+def test_new_api_static_seed_prompt_preserves_schema(patch_central_database):
+    """A static SeedPrompt is used verbatim and its response_json_schema is preserved."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    seed_prompt = SeedPrompt(value="static seed prompt", data_type="text", response_json_schema={"type": "object"})
+    scorer = SelfAskTrueFalseScorer(target=chat_target, system_prompt=seed_prompt, score_category=["harm"])
+
+    assert scorer._system_prompt == "static seed prompt"
+    assert scorer._response_json_schema == {"type": "object"}
+
+
+def test_new_api_default_system_prompt_uses_task_achieved(patch_central_database):
+    """With only a target, the scorer falls back to the default TASK_ACHIEVED rubric."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    scorer = SelfAskTrueFalseScorer(target=chat_target)
+
+    assert scorer._score_category == "task_achieved"
+    assert scorer._response_json_schema is not None
+    assert "# Instructions" in scorer._system_prompt
+
+
+def test_new_api_templated_seed_prompt_from_separate_files(patch_central_database):
+    """Template YAML and question YAML can be separate: render the question, pass the SeedPrompt."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    question = TrueFalseQuestion.from_yaml(TrueFalseQuestionPaths.GROUNDED.value)
+    seed_prompt = render_true_false_system_prompt(question=question)
+
+    scorer = SelfAskTrueFalseScorer(
+        target=chat_target,
+        system_prompt=seed_prompt,
+        score_category=[question.category],
+    )
+
+    assert scorer._score_category == ["grounded"]
+    assert "# Instructions" in scorer._system_prompt
+    # The schema embedded in the template survives model_copy during rendering.
+    assert scorer._response_json_schema is not None
+
+
+async def test_new_api_scores_end_to_end(patch_central_database, scorer_true_false_response: Message):
+    """A composition-built scorer performs a full scoring round-trip with the default JSON handler."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+    chat_target.send_prompt_async = AsyncMock(return_value=[scorer_true_false_response])
+
+    question = TrueFalseQuestion.from_yaml(TrueFalseQuestionPaths.GROUNDED.value)
+    scorer = SelfAskTrueFalseScorer(
+        target=chat_target,
+        system_prompt=render_true_false_system_prompt(question=question),
+        score_category=[question.category],
+    )
+
+    scores = await scorer.score_text_async("true false")
+
+    assert len(scores) == 1
+    assert scores[0].get_value() is True
+    assert scores[0].score_category == ["grounded"]
+
+
+def test_init_raises_when_both_target_and_chat_target(patch_central_database):
+    """Providing both target and the deprecated chat_target is an error."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    with pytest.raises(ValueError, match="Provide either target or chat_target"):
+        SelfAskTrueFalseScorer(target=chat_target, chat_target=chat_target)
+
+
+def test_init_raises_when_no_target(patch_central_database):
+    """A target is required."""
+    with pytest.raises(ValueError, match="A target"):
+        SelfAskTrueFalseScorer()
+
+
+def test_init_raises_when_system_prompt_mixed_with_legacy(patch_central_database):
+    """Mixing the new system_prompt with legacy question kwargs is an error."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    with pytest.raises(ValueError, match="not both"):
+        SelfAskTrueFalseScorer(
+            target=chat_target,
+            system_prompt="x",
+            true_false_question=TrueFalseQuestion(true_description="pos"),
+        )
+
+
+def test_legacy_init_emits_deprecation_warning(patch_central_database):
+    """The legacy keyword arguments still work but emit a deprecation warning."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    with pytest.warns(DeprecationWarning):
+        scorer = SelfAskTrueFalseScorer(
+            chat_target=chat_target,
+            true_false_question_path=TrueFalseQuestionPaths.GROUNDED.value,
+        )
+
+    assert scorer._score_category == "grounded"
+
+
+def test_from_question_yaml_emits_deprecation_and_sets_category(patch_central_database):
+    """from_question_yaml is a deprecated shim that renders a question path into the new API."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    with pytest.warns(DeprecationWarning):
+        scorer = SelfAskTrueFalseScorer.from_question_yaml(
+            chat_target=chat_target,
+            true_false_question_path=TrueFalseQuestionPaths.GROUNDED.value,
+        )
+
+    assert scorer._score_category == ["grounded"]
+    assert "# Instructions" in scorer._system_prompt
+
+
+def test_from_question_yaml_with_question_object_renders_metadata(patch_central_database):
+    """from_question_yaml accepts a TrueFalseQuestion object and renders its metadata."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+
+    question = TrueFalseQuestion(
+        category="custom_harm_category",
+        true_description="positive",
+        false_description="negative",
+        metadata="extra-context",
+    )
+
+    with pytest.warns(DeprecationWarning):
+        scorer = SelfAskTrueFalseScorer.from_question_yaml(chat_target=chat_target, true_false_question=question)
+
+    assert scorer._score_category == ["custom_harm_category"]
+    assert "extra-context" in scorer._system_prompt
+
+
+async def test_from_question_yaml_scores_end_to_end(patch_central_database, scorer_true_false_response: Message):
+    """A scorer built via the from_question_yaml shim performs a full scoring round-trip."""
+    chat_target = MagicMock()
+    chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
+    chat_target.send_prompt_async = AsyncMock(return_value=[scorer_true_false_response])
+
+    with pytest.warns(DeprecationWarning):
+        scorer = SelfAskTrueFalseScorer.from_question_yaml(
+            chat_target=chat_target,
+            true_false_question_path=TrueFalseQuestionPaths.GROUNDED.value,
+        )
+
+    scores = await scorer.score_text_async("true false")
+
+    assert len(scores) == 1
+    assert scores[0].get_value() is True

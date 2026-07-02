@@ -127,7 +127,10 @@ async def _send_and_parse_async(
         system_prompt=system_prompt,
         conversation_id=conversation_id,
     )
-    prompt_metadata: dict[str, Any] = {"response_format": "json"}
+    prompt_metadata: dict[str, Any] = {}
+    response_format = response_handler.response_format
+    if response_format is not None:
+        prompt_metadata["response_format"] = response_format
     if response_json_schema is not None:
         # Always forward the schema; the target's normalization pipeline omits it
         # when the target cannot natively enforce a JSON schema.
