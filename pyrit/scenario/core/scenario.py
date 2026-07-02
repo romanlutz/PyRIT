@@ -406,7 +406,7 @@ class Scenario(ABC):  # noqa: B024 - retained for subclass type-checking even wi
                 SelfAskTrueFalseScorer(chat_target=chat_target, true_false_question_path=path)
                 for path in composite_scorer_questions_paths
             ]
-            backstop_scorer = TrueFalseInverterScorer(scorer=SelfAskRefusalScorer(chat_target=chat_target))
+            backstop_scorer = TrueFalseInverterScorer(scorer=SelfAskRefusalScorer(target=chat_target))
             scorer = TrueFalseCompositeScorer(
                 aggregator=TrueFalseScoreAggregator.AND,
                 scorers=[*path_scorers, backstop_scorer],
@@ -424,7 +424,7 @@ class Scenario(ABC):  # noqa: B024 - retained for subclass type-checking even wi
             )
             return registry_default_scorer
 
-        scorer = TrueFalseInverterScorer(scorer=SelfAskRefusalScorer(chat_target=chat_target))
+        scorer = TrueFalseInverterScorer(scorer=SelfAskRefusalScorer(target=chat_target))
         logger.warning(
             f"Using fallback default objective scorer: {type(scorer).__name__} "
             f"with chat target: {type(chat_target).__name__ if chat_target else 'None'}"

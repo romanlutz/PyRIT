@@ -207,7 +207,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
 
         # Initialize refusal scorer - use the one from config if provided, otherwise create default
         self._refusal_scorer = attack_scoring_config.refusal_scorer or SelfAskRefusalScorer(
-            chat_target=attack_adversarial_config.target,
+            target=attack_adversarial_config.target,
         )
 
         # Initialize adversarial configuration
