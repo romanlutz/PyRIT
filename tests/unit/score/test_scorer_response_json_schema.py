@@ -48,7 +48,7 @@ def _make_scorer(scorer_id: str):
         )
     elif scorer_id == "category":
         target = _mock_target('{"score_value": "True", "description": "d", "rationale": "r", "category": "harmful"}')
-        scorer = SelfAskCategoryScorer(
+        scorer = SelfAskCategoryScorer.from_content_classifier(
             chat_target=target,
             content_classifier_path=ContentClassifierPaths.HARMFUL_CONTENT_CLASSIFIER.value,
         )

@@ -7,7 +7,6 @@ from pathlib import Path
 import yaml
 
 from pyrit.common import verify_and_resolve_path
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.path import SCORER_CONTENT_CLASSIFIERS_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
@@ -110,10 +109,10 @@ class SelfAskCategoryScorer(TrueFalseScorer):
 
     There is also a false category that is used if the MessagePiece does not fit any of the categories.
 
-    The scorer holds a chat ``target``, a ``system_prompt`` (typically rendered from a classifier
+    The scorer holds a ``chat_target``, a ``system_prompt`` (typically rendered from a classifier
     via ``render_category_system_prompt``), and a ``response_handler``. The category is parsed from
-    the target's response rather than fixed on the scorer. The legacy keyword arguments
-    (``chat_target``, ``content_classifier_path``) remain supported with a deprecation warning.
+    the target's response rather than fixed on the scorer. Use ``from_content_classifier`` to build
+    the system prompt directly from a classifier YAML file.
     """
 
     _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(supported_data_types=["text"])
@@ -122,87 +121,89 @@ class SelfAskCategoryScorer(TrueFalseScorer):
     def __init__(
         self,
         *,
-        target: PromptTarget | None = None,
+        chat_target: PromptTarget | None = None,
         system_prompt: SeedPrompt | str | None = None,
         response_handler: ResponseHandler | None = None,
         score_aggregator: TrueFalseAggregatorFunc = TrueFalseScoreAggregator.OR,
         validator: ScorerPromptValidator | None = None,
-        chat_target: PromptTarget | None = None,
-        content_classifier_path: str | Path | None = None,
     ) -> None:
         """
         Initialize a new instance of the SelfAskCategoryScorer class.
 
         Args:
-            target (PromptTarget | None): The chat target used for scoring. Required unless the
-                legacy ``chat_target`` is given.
+            chat_target (PromptTarget | None): The chat target used for scoring. Must satisfy
+                CHAT_TARGET_REQUIREMENTS.
             system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
                 (e.g. rendered via ``render_category_system_prompt``) is used verbatim and may carry
-                a ``response_json_schema``; a ``str`` is used as-is. Required in the new API.
+                a ``response_json_schema``; a ``str`` is used as-is. Required.
             response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
                 to ``JsonSchemaResponseHandler``.
             score_aggregator (TrueFalseAggregatorFunc): The aggregator function to use.
                 Defaults to TrueFalseScoreAggregator.OR.
             validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
-            chat_target (PromptTarget | None): Deprecated alias for ``target``.
-            content_classifier_path (str | Path | None): Deprecated; the path to the classifier YAML
-                file.
 
         Raises:
-            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
-                if the legacy ``content_classifier_path`` is mixed with ``system_prompt``, or if
-                neither ``system_prompt`` nor ``content_classifier_path`` is supplied.
+            ValueError: If ``chat_target`` or ``system_prompt`` is not provided.
         """
-        legacy_used = any(value is not None for value in (chat_target, content_classifier_path))
-
-        if target is not None and chat_target is not None:
-            raise ValueError("Provide either target or chat_target, not both.")
-        resolved_target = target if target is not None else chat_target
-        if resolved_target is None:
-            raise ValueError("A target (chat target) must be provided.")
+        if chat_target is None:
+            raise ValueError("A chat_target must be provided.")
+        if system_prompt is None:
+            raise ValueError("system_prompt must be provided.")
 
         super().__init__(
             score_aggregator=score_aggregator,
             validator=validator or self._DEFAULT_VALIDATOR,
-            chat_target=resolved_target,
+            chat_target=chat_target,
         )
 
-        self._prompt_target = resolved_target
+        self._prompt_target = chat_target
         self._response_handler = response_handler or JsonSchemaResponseHandler()
-        self._no_category_found_category: str | None = None
+        self._system_prompt, self._response_json_schema = self._resolve_system_prompt(system_prompt)
 
-        if legacy_used:
-            if system_prompt is not None:
-                raise ValueError(
-                    "Provide either system_prompt (new API) or the legacy content_classifier_path "
-                    "keyword argument, not both."
-                )
-            if content_classifier_path is None:
-                raise ValueError("content_classifier_path must be provided when using the deprecated construction.")
-            print_deprecation_message(
-                old_item="SelfAskCategoryScorer(chat_target=..., content_classifier_path=...)",
-                new_item=(
-                    "SelfAskCategoryScorer(target=..., "
-                    "system_prompt=render_category_system_prompt(categories=..., no_category_found=...))"
-                ),
-                removed_in="0.17.0",
-            )
-            classifier_contents = yaml.safe_load(
-                verify_and_resolve_path(content_classifier_path).read_text(encoding="utf-8")
-            )
-            self._no_category_found_category = classifier_contents["no_category_found"]
-            rendered = render_category_system_prompt(
-                categories=classifier_contents["categories"],
-                no_category_found=self._no_category_found_category,
-            )
-            self._system_prompt = rendered.value
-            # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
-            # target, which enforces it natively when supported or omits it via normalization.
-            self._response_json_schema = rendered.response_json_schema
-        else:
-            if system_prompt is None:
-                raise ValueError("system_prompt must be provided.")
-            self._system_prompt, self._response_json_schema = self._resolve_system_prompt(system_prompt)
+    @classmethod
+    def from_content_classifier(
+        cls,
+        *,
+        chat_target: PromptTarget,
+        content_classifier_path: str | Path,
+        response_handler: ResponseHandler | None = None,
+        score_aggregator: TrueFalseAggregatorFunc = TrueFalseScoreAggregator.OR,
+        validator: ScorerPromptValidator | None = None,
+    ) -> "SelfAskCategoryScorer":
+        """
+        Build a scorer whose system prompt is rendered from a content-classifier YAML.
+
+        Loads the classifier categories and ``no_category_found`` marker from
+        ``content_classifier_path`` and renders the content-classification system prompt via
+        ``render_category_system_prompt``.
+
+        Args:
+            chat_target (PromptTarget): The chat target used for scoring.
+            content_classifier_path (str | Path): Path to the classifier YAML file (e.g. a
+                ``ContentClassifierPaths`` value).
+            response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
+                to None (uses ``JsonSchemaResponseHandler``).
+            score_aggregator (TrueFalseAggregatorFunc): The aggregator function to use. Defaults to
+                TrueFalseScoreAggregator.OR.
+            validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
+
+        Returns:
+            SelfAskCategoryScorer: The constructed scorer.
+        """
+        classifier_contents = yaml.safe_load(
+            verify_and_resolve_path(content_classifier_path).read_text(encoding="utf-8")
+        )
+        system_prompt = render_category_system_prompt(
+            categories=classifier_contents["categories"],
+            no_category_found=classifier_contents["no_category_found"],
+        )
+        return cls(
+            chat_target=chat_target,
+            system_prompt=system_prompt,
+            response_handler=response_handler,
+            score_aggregator=score_aggregator,
+            validator=validator,
+        )
 
     @staticmethod
     def _resolve_system_prompt(
@@ -246,7 +247,7 @@ class SelfAskCategoryScorer(TrueFalseScorer):
                          the score value is false and the _false_category is used.
         """
         unvalidated_score = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
             value=message_piece.converted_value,
