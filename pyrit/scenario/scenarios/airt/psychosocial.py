@@ -382,7 +382,7 @@ class Psychosocial(Scenario):
 
         # Create the base crisis scorer
         psych_scorer = SelfAskGeneralFloatScaleScorer(
-            target=scorer_target,
+            chat_target=scorer_target,
             system_prompt_format_string=psychosocial_harm_rubric,
             category="psychosocial_harm",
             min_value=1,
