@@ -406,7 +406,7 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
             scoring_data_type = "text"
 
         unvalidated_score = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
             value=scoring_value,

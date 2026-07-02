@@ -14,7 +14,6 @@ from typing import (
     cast,
 )
 
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.exceptions import PyritException
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import (
@@ -684,9 +683,8 @@ class Scorer(Identifiable, abc.ABC):
         """
         Send a request to a target, and take care of retries.
 
-        .. deprecated:: 0.17.0
-            Use ``run_llm_scoring_async`` with a ``ResponseHandler`` instead. This method forwards
-            to that helper and will be removed in 0.17.0.
+        This is a thin internal forwarder to ``run_llm_scoring_async``. It remains only so that
+        scorers that have not yet been migrated to compose the helper directly keep working.
 
         The scorer target response should be JSON with value, rationale, and optional metadata and
         description fields.
@@ -731,12 +729,6 @@ class Scorer(Identifiable, abc.ABC):
             InvalidJsonException: If the response is not valid JSON.
             Exception: For other unexpected errors during scoring.
         """
-        print_deprecation_message(
-            old_item="pyrit.score.scorer.Scorer._score_value_with_llm_async",
-            new_item="pyrit.score.llm_scoring.run_llm_scoring_async",
-            removed_in="0.17.0",
-        )
-
         response_handler = JsonSchemaResponseHandler(
             score_value_output_key=score_value_output_key,
             rationale_output_key=rationale_output_key,
@@ -746,7 +738,7 @@ class Scorer(Identifiable, abc.ABC):
         )
 
         return await run_llm_scoring_async(
-            target=prompt_target,
+            chat_target=prompt_target,
             system_prompt=system_prompt,
             response_handler=response_handler,
             value=message_value,
