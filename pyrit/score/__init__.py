@@ -66,7 +66,11 @@ from pyrit.score.true_false.regex.shell_command_output_scorer import ShellComman
 from pyrit.score.true_false.regex.sql_injection_output_scorer import SQLInjectionOutputScorer
 from pyrit.score.true_false.regex.static_prompt_injection_scorer import StaticPromptInjectionScorer
 from pyrit.score.true_false.regex.xss_output_scorer import XSSOutputScorer
-from pyrit.score.true_false.self_ask_category_scorer import ContentClassifierPaths, SelfAskCategoryScorer
+from pyrit.score.true_false.self_ask_category_scorer import (
+    ContentClassifierPaths,
+    SelfAskCategoryScorer,
+    render_category_system_prompt,
+)
 from pyrit.score.true_false.self_ask_general_true_false_scorer import SelfAskGeneralTrueFalseScorer
 from pyrit.score.true_false.self_ask_question_answer_scorer import SelfAskQuestionAnswerScorer
 from pyrit.score.true_false.self_ask_refusal_scorer import RefusalScorerPaths, SelfAskRefusalScorer
@@ -171,6 +175,7 @@ __all__ = [
     "QuestionAnswerScorer",
     "RegexScorer",
     "RegistryUpdateBehavior",
+    "render_category_system_prompt",
     "render_insecure_code_system_prompt",
     "render_true_false_system_prompt",
     "ResponseHandler",
