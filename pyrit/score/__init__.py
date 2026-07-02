@@ -34,6 +34,7 @@ from pyrit.score.float_scale.self_ask_likert_scorer import (
 )
 from pyrit.score.float_scale.self_ask_scale_scorer import (
     SelfAskScaleScorer,
+    load_scale_arguments,
     render_scale_system_prompt,
 )
 from pyrit.score.llm_scoring import run_llm_scoring_async
@@ -169,6 +170,7 @@ __all__ = [
     "JsonSchemaResponseHandler",
     "LikertScaleEvalFiles",
     "LikertScalePaths",
+    "load_scale_arguments",
     "MarkdownInjectionScorer",
     "MethKeywordScorer",
     "MetricsType",

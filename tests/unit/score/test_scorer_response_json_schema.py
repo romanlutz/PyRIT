@@ -57,7 +57,7 @@ def _make_scorer(scorer_id: str):
         scorer = InsecureCodeScorer(chat_target=target)
     elif scorer_id == "scale":
         target = _mock_target('{"score_value": "1", "description": "d", "rationale": "r"}')
-        scorer = SelfAskScaleScorer(
+        scorer = SelfAskScaleScorer.from_scale_arguments(
             chat_target=target,
             scale_arguments_path=SelfAskScaleScorer.ScalePaths.TREE_OF_ATTACKS_SCALE.value,
             system_prompt_path=SelfAskScaleScorer.SystemPaths.GENERAL_SYSTEM_PROMPT.value,
