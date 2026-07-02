@@ -20,7 +20,10 @@ from pyrit.score.float_scale.float_scale_score_aggregator import (
     FloatScaleScorerByCategory,
 )
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
-from pyrit.score.float_scale.insecure_code_scorer import InsecureCodeScorer
+from pyrit.score.float_scale.insecure_code_scorer import (
+    InsecureCodeScorer,
+    render_insecure_code_system_prompt,
+)
 from pyrit.score.float_scale.plagiarism_scorer import PlagiarismMetric, PlagiarismScorer
 from pyrit.score.float_scale.self_ask_general_float_scale_scorer import SelfAskGeneralFloatScaleScorer
 from pyrit.score.float_scale.self_ask_likert_scorer import LikertScaleEvalFiles, LikertScalePaths, SelfAskLikertScorer
@@ -168,6 +171,7 @@ __all__ = [
     "QuestionAnswerScorer",
     "RegexScorer",
     "RegistryUpdateBehavior",
+    "render_insecure_code_system_prompt",
     "render_true_false_system_prompt",
     "ResponseHandler",
     "run_llm_scoring_async",
