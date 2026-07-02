@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from pyrit.models import MessagePiece, Score
     from pyrit.prompt_target import PromptTarget
+    from pyrit.score.response_handler import ResponseHandler
 
 
 class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
@@ -43,6 +44,7 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
         *,
         chat_target: PromptTarget,
         true_false_question_path: pathlib.Path | None = None,
+        response_handler: ResponseHandler | None = None,
         validator: ScorerPromptValidator | None = None,
         score_aggregator: TrueFalseAggregatorFunc = TrueFalseScoreAggregator.OR,
     ) -> None:
@@ -55,6 +57,8 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
                 possibly via normalization-pipeline adaptation).
             true_false_question_path (pathlib.Path | None): The path to the true/false question file.
                 Defaults to None, which uses the default question_answering.yaml file.
+            response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
+                to None (uses ``JsonSchemaResponseHandler``).
             validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
             score_aggregator (TrueFalseAggregatorFunc): The aggregator function to use.
                 Defaults to TrueFalseScoreAggregator.OR.
@@ -68,6 +72,7 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
         super().__init__(
             chat_target=chat_target,
             system_prompt=system_prompt,
+            response_handler=response_handler,
             score_category=[question.category],
             validator=validator,
             score_aggregator=score_aggregator,
@@ -91,7 +96,7 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
         )
 
         unvalidated_score = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
             value=prompt,
