@@ -4,7 +4,7 @@
 import uuid
 from pathlib import Path
 from textwrap import dedent
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from unit.mocks import get_mock_target_identifier
@@ -221,10 +221,12 @@ async def test_scale_scorer_score_calls_send_chat(patch_central_database):
         objective="task",
     )
 
-    scorer._score_value_with_llm_async = AsyncMock(return_value=score)
-
-    await scorer.score_text_async(text="example text", objective="task")
-    assert scorer._score_value_with_llm_async.call_count == 1
+    with patch(
+        "pyrit.score.float_scale.self_ask_scale_scorer.run_llm_scoring_async",
+        new=AsyncMock(return_value=score),
+    ) as mock_run:
+        await scorer.score_text_async(text="example text", objective="task")
+    assert mock_run.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -256,13 +258,15 @@ async def test_scale_scorer_non_text_sends_prepended_text(patch_central_database
         objective="Generate a cat",
     )
 
-    scorer._score_value_with_llm_async = AsyncMock(return_value=score)
+    with patch(
+        "pyrit.score.float_scale.self_ask_scale_scorer.run_llm_scoring_async",
+        new=AsyncMock(return_value=score),
+    ) as mock_run:
+        await scorer.score_image_async(image_path="/path/to/image.png", objective="Generate a cat")
 
-    await scorer.score_image_async(image_path="/path/to/image.png", objective="Generate a cat")
-
-    scorer._score_value_with_llm_async.assert_called_once()
-    call_kwargs = scorer._score_value_with_llm_async.call_args
-    # Non-text content should send prepended_text_message_piece with objective
-    assert call_kwargs.kwargs["prepended_text_message_piece"] == "objective: Generate a cat\nresponse:"
-    assert call_kwargs.kwargs["message_data_type"] == "image_path"
-    assert call_kwargs.kwargs["message_value"] == "/path/to/image.png"
+    mock_run.assert_called_once()
+    call_kwargs = mock_run.call_args
+    # Non-text content should send prepended_text with objective
+    assert call_kwargs.kwargs["prepended_text"] == "objective: Generate a cat\nresponse:"
+    assert call_kwargs.kwargs["data_type"] == "image_path"
+    assert call_kwargs.kwargs["value"] == "/path/to/image.png"

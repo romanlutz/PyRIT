@@ -2,22 +2,106 @@
 # Licensed under the MIT license.
 
 import enum
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from pyrit.common import verify_and_resolve_path
+from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.path import SCORER_SCALES_PATH
-from pyrit.models import ComponentIdentifier, MessagePiece, Score, SeedPrompt, UnvalidatedScore
+from pyrit.models import (
+    ComponentIdentifier,
+    JsonSchemaDefinition,
+    MessagePiece,
+    Score,
+    SeedPrompt,
+)
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
+from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
+
+_DEFAULT_SCALE_ARGUMENTS_PATH = Path(SCORER_SCALES_PATH, "tree_of_attacks_scale.yaml").resolve()
+_DEFAULT_SCALE_SYSTEM_PROMPT_PATH = Path(SCORER_SCALES_PATH, "general_system_prompt.yaml").resolve()
+
+
+def _validate_scale_arguments(scale_args: dict[str, Any]) -> None:
+    try:
+        minimum_value = scale_args["minimum_value"]
+        maximum_value = scale_args["maximum_value"]
+        category = scale_args["category"]
+    except KeyError as e:
+        raise ValueError(f"Missing key in scale_args: {e.args[0]}") from None
+
+    if not isinstance(minimum_value, int):
+        raise ValueError(f"Minimum value must be an integer, got {type(minimum_value).__name__}.")
+    if not isinstance(maximum_value, int):
+        raise ValueError(f"Maximum value must be an integer, got {type(maximum_value).__name__}.")
+    if minimum_value > maximum_value:
+        raise ValueError("Minimum value must be less than or equal to the maximum value.")
+    if not category:
+        raise ValueError("Category must be set and cannot be empty.")
+
+
+def _load_scale_arguments(scale_arguments_path: Path | str | None = None) -> dict[str, Any]:
+    """
+    Load and validate a scale-arguments YAML file (min/max/category and rendering parameters).
+
+    Args:
+        scale_arguments_path (Path | str | None): Path to the scale-arguments YAML file. Defaults to
+            the bundled tree-of-attacks scale.
+
+    Returns:
+        dict[str, Any]: The validated scale arguments.
+    """
+    resolved_path = verify_and_resolve_path(scale_arguments_path or _DEFAULT_SCALE_ARGUMENTS_PATH)
+    scale_args = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
+    _validate_scale_arguments(scale_args)
+    return scale_args
+
+
+def render_scale_system_prompt(
+    *,
+    scale_args: Mapping[str, Any],
+    system_prompt_path: Path | str | None = None,
+) -> SeedPrompt:
+    """
+    Render a numeric-scale scoring system prompt from scale arguments and a template.
+
+    Loads the templated system-prompt ``SeedPrompt`` (defaulting to the bundled
+    ``general_system_prompt.yaml``) and renders it with the scale arguments (``minimum_value``,
+    ``maximum_value``, ``category`` and their descriptions). The returned ``SeedPrompt`` is a copy
+    whose ``value`` is the rendered text; the template's other fields (notably
+    ``response_json_schema``) are preserved so schema forwarding keeps working.
+
+    Args:
+        scale_args (Mapping[str, Any]): The scale arguments supplying the render parameters.
+        system_prompt_path (Path | str | None): Path to the system-prompt template YAML. Defaults to
+            the bundled general scale system prompt.
+
+    Returns:
+        SeedPrompt: A rendered copy of the template with its ``value`` populated.
+    """
+    resolved_path = verify_and_resolve_path(
+        system_prompt_path if system_prompt_path else _DEFAULT_SCALE_SYSTEM_PROMPT_PATH
+    )
+    template = SeedPrompt.from_yaml_file(resolved_path)
+    rendered_value = template.render_template_value(**scale_args)
+    return template.model_copy(update={"value": rendered_value})
 
 
 class SelfAskScaleScorer(FloatScaleScorer):
     """
-    A class that represents a "self-ask" score for text scoring for a customizable numeric scale.
+    A "self-ask" scorer for text scoring on a customizable numeric scale.
+
+    The scorer holds a chat ``target``, a ``system_prompt`` (a rendered or static ``SeedPrompt`` or a
+    plain ``str``), and a ``response_handler`` that turns the target's raw output into a score. The
+    legacy ``chat_target``/``scale_arguments_path``/``system_prompt_path`` keyword arguments remain
+    supported with a deprecation warning; render a scale system prompt with
+    ``render_scale_system_prompt`` for the new API.
     """
 
     class ScalePaths(enum.Enum):
@@ -43,49 +127,119 @@ class SelfAskScaleScorer(FloatScaleScorer):
     def __init__(
         self,
         *,
-        chat_target: PromptTarget,
+        target: PromptTarget | None = None,
+        system_prompt: SeedPrompt | str | None = None,
+        response_handler: ResponseHandler | None = None,
+        min_value: int = 1,
+        max_value: int = 10,
+        score_category: str | None = None,
+        validator: ScorerPromptValidator | None = None,
+        chat_target: PromptTarget | None = None,
         scale_arguments_path: Path | str | None = None,
         system_prompt_path: Path | str | None = None,
-        validator: ScorerPromptValidator | None = None,
     ) -> None:
         """
         Initialize the SelfAskScaleScorer.
 
         Args:
-            chat_target (PromptTarget): The chat target to use for scoring.
-            scale_arguments_path (Path | str | None): Path to the YAML file containing scale definitions.
-                Defaults to TREE_OF_ATTACKS_SCALE if not provided.
-            system_prompt_path (Path | str | None): Path to the YAML file containing the system prompt.
-                Defaults to GENERAL_SYSTEM_PROMPT if not provided.
-            validator (ScorerPromptValidator | None): Custom validator for the scorer. Defaults to None.
+            target (PromptTarget | None): The chat target used for scoring. Must satisfy
+                CHAT_TARGET_REQUIREMENTS. Required unless the legacy ``chat_target`` is given.
+            system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
+                (e.g. rendered via ``render_scale_system_prompt``) is used verbatim and may carry a
+                ``response_json_schema``; a ``str`` is used as-is; ``None`` falls back to the default
+                tree-of-attacks scale rendered with the general system prompt. Defaults to None.
+            response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
+                to ``JsonSchemaResponseHandler``.
+            min_value (int): Minimum of the model's native scale, used when ``system_prompt`` is
+                provided explicitly. Defaults to 1.
+            max_value (int): Maximum of the model's native scale, used when ``system_prompt`` is
+                provided explicitly. Defaults to 10.
+            score_category (str | None): Category to attach to scores when ``system_prompt`` is
+                provided explicitly. Defaults to None.
+            validator (ScorerPromptValidator | None): Custom validator for the scorer. Defaults to
+                None.
+            chat_target (PromptTarget | None): Deprecated alias for ``target``.
+            scale_arguments_path (Path | str | None): Deprecated; path to the YAML file containing
+                scale definitions. Defaults to the tree-of-attacks scale.
+            system_prompt_path (Path | str | None): Deprecated; path to the YAML file containing the
+                system prompt. Defaults to the general system prompt.
+
+        Raises:
+            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
+                or if legacy scale keyword arguments are mixed with ``system_prompt``.
         """
-        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
+        legacy_used = any(v is not None for v in (chat_target, scale_arguments_path, system_prompt_path))
 
-        self._prompt_target = chat_target
+        if target is not None and chat_target is not None:
+            raise ValueError("Provide either target or chat_target, not both.")
+        resolved_target = target if target is not None else chat_target
+        if resolved_target is None:
+            raise ValueError("A target (chat target) must be provided.")
 
-        if not system_prompt_path:
-            system_prompt_path = self.SystemPaths.GENERAL_SYSTEM_PROMPT.value
+        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=resolved_target)
+        self._prompt_target = resolved_target
+        self._response_handler = response_handler or JsonSchemaResponseHandler()
 
-        if not scale_arguments_path:
-            scale_arguments_path = self.ScalePaths.TREE_OF_ATTACKS_SCALE.value
+        if legacy_used:
+            if system_prompt is not None:
+                raise ValueError(
+                    "Provide either system_prompt (new API) or the legacy scale_arguments_path/"
+                    "system_prompt_path keyword arguments, not both."
+                )
+            print_deprecation_message(
+                old_item="SelfAskScaleScorer(chat_target=..., scale_arguments_path=..., system_prompt_path=...)",
+                new_item="SelfAskScaleScorer(target=..., system_prompt=render_scale_system_prompt(...), ...)",
+                removed_in="0.17.0",
+            )
+            (
+                self._system_prompt,
+                self._response_json_schema,
+                self._minimum_value,
+                self._maximum_value,
+                self._category,
+            ) = self._build_from_scale_arguments(scale_arguments_path, system_prompt_path)
+        elif system_prompt is None:
+            (
+                self._system_prompt,
+                self._response_json_schema,
+                self._minimum_value,
+                self._maximum_value,
+                self._category,
+            ) = self._build_from_scale_arguments(None, None)
+        else:
+            rendered_value, schema = self._resolve_system_prompt(system_prompt)
+            self._system_prompt = rendered_value
+            self._response_json_schema = schema
+            self._minimum_value = min_value
+            self._maximum_value = max_value
+            self._category = score_category
 
-        system_prompt_path = verify_and_resolve_path(system_prompt_path)
-        scale_arguments_path = verify_and_resolve_path(scale_arguments_path)
-
-        scale_args = yaml.safe_load(scale_arguments_path.read_text(encoding="utf-8"))
-
-        self._validate_scale_arguments_set(scale_args)
-
-        self._minimum_value = scale_args["minimum_value"]
-        self._maximum_value = scale_args["maximum_value"]
-        self._category = scale_args["category"]
-
-        scoring_instructions_template = SeedPrompt.from_yaml_file(system_prompt_path)
-
-        self._system_prompt = scoring_instructions_template.render_template_value(**scale_args)
+    @staticmethod
+    def _build_from_scale_arguments(
+        scale_arguments_path: Path | str | None,
+        system_prompt_path: Path | str | None,
+    ) -> tuple[str, JsonSchemaDefinition | None, int, int, str]:
+        scale_args = _load_scale_arguments(scale_arguments_path)
+        rendered = render_scale_system_prompt(scale_args=scale_args, system_prompt_path=system_prompt_path)
         # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
         # target, which enforces it natively when supported or omits it via normalization.
-        self._response_json_schema = scoring_instructions_template.response_json_schema
+        return (
+            rendered.value,
+            rendered.response_json_schema,
+            scale_args["minimum_value"],
+            scale_args["maximum_value"],
+            scale_args["category"],
+        )
+
+    @staticmethod
+    def _resolve_system_prompt(
+        system_prompt: SeedPrompt | str,
+    ) -> tuple[str, JsonSchemaDefinition | None]:
+        if isinstance(system_prompt, SeedPrompt):
+            return system_prompt.value, system_prompt.response_json_schema
+        if isinstance(system_prompt, str):
+            return system_prompt, None
+        raise TypeError("system_prompt must be a SeedPrompt, str, or None.")
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -131,16 +285,19 @@ class SelfAskScaleScorer(FloatScaleScorer):
             scoring_value = f"objective: {objective}\nresponse: {message_piece.converted_value}"
             scoring_data_type = "text"
 
-        unvalidated_score: UnvalidatedScore = await self._score_value_with_llm_async(
-            prompt_target=self._prompt_target,
+        unvalidated_score = await run_llm_scoring_async(
+            target=self._prompt_target,
             system_prompt=self._system_prompt,
-            message_value=scoring_value,
-            message_data_type=scoring_data_type,
+            response_handler=self._response_handler,
+            value=scoring_value,
+            data_type=scoring_data_type,
             scored_prompt_id=message_piece.id,
-            prepended_text_message_piece=prepended_text,
+            scorer_identifier=self.get_identifier(),
+            prepended_text=prepended_text,
             category=self._category,
             objective=objective,
             response_json_schema=self._response_json_schema,
+            numeric_value=self._score_value_is_numeric,
         )
 
         score = unvalidated_score.to_score(
@@ -155,18 +312,4 @@ class SelfAskScaleScorer(FloatScaleScorer):
         return [score]
 
     def _validate_scale_arguments_set(self, scale_args: dict[str, Any]) -> None:
-        try:
-            minimum_value = scale_args["minimum_value"]
-            maximum_value = scale_args["maximum_value"]
-            category = scale_args["category"]
-        except KeyError as e:
-            raise ValueError(f"Missing key in scale_args: {e.args[0]}") from None
-
-        if not isinstance(minimum_value, int):
-            raise ValueError(f"Minimum value must be an integer, got {type(minimum_value).__name__}.")
-        if not isinstance(maximum_value, int):
-            raise ValueError(f"Maximum value must be an integer, got {type(maximum_value).__name__}.")
-        if minimum_value > maximum_value:
-            raise ValueError("Minimum value must be less than or equal to the maximum value.")
-        if not category:
-            raise ValueError("Category must be set and cannot be empty.")
+        _validate_scale_arguments(scale_args)
