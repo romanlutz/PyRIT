@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from pyrit.common import verify_and_resolve_path
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
@@ -53,12 +52,9 @@ class InsecureCodeScorer(FloatScaleScorer):
 
     This scorer is intended for generated-code evaluation scenarios where the response to score is
     source code or a code-like snippet, such as insecure-coding parity checks across vulnerability
-    scanners. It holds a chat ``target``, a ``system_prompt`` (a rendered or static ``SeedPrompt``,
-    a plain ``str``, or ``None`` for the default insecure-code rubric), and a ``response_handler``
-    that turns the target's raw output into a float-scale score.
-
-    The legacy keyword arguments (``chat_target``, ``system_prompt_path``) remain supported with a
-    deprecation warning.
+    scanners. It holds a chat ``chat_target``, a ``system_prompt`` (a rendered or static
+    ``SeedPrompt``, a plain ``str``, or ``None`` for the default insecure-code rubric), and a
+    ``response_handler`` that turns the target's raw output into a float-scale score.
     """
 
     _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(supported_data_types=["text"])
@@ -67,20 +63,17 @@ class InsecureCodeScorer(FloatScaleScorer):
     def __init__(
         self,
         *,
-        target: PromptTarget | None = None,
+        chat_target: PromptTarget | None = None,
         system_prompt: SeedPrompt | str | None = None,
         response_handler: ResponseHandler | None = None,
         score_category: Sequence[str] | str | None = None,
         validator: ScorerPromptValidator | None = None,
-        chat_target: PromptTarget | None = None,
-        system_prompt_path: str | Path | None = None,
     ) -> None:
         """
         Initialize the Insecure Code Scorer.
 
         Args:
-            target (PromptTarget | None): The chat target used for scoring. Required unless the
-                legacy ``chat_target`` is given.
+            chat_target (PromptTarget | None): The chat target used for scoring.
             system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
                 (e.g. rendered via ``render_insecure_code_system_prompt``) is used verbatim and may
                 carry a ``response_json_schema``; a ``str`` is used as-is; ``None`` falls back to the
@@ -91,47 +84,21 @@ class InsecureCodeScorer(FloatScaleScorer):
                 to "security".
             validator (ScorerPromptValidator | None): Custom validator for the scorer. Defaults to
                 None.
-            chat_target (PromptTarget | None): Deprecated alias for ``target``.
-            system_prompt_path (str | Path | None): Deprecated; path to the system-prompt template
-                YAML file.
 
         Raises:
-            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
-                or if the legacy ``system_prompt_path`` is mixed with ``system_prompt``.
+            ValueError: If ``chat_target`` is not provided.
         """
-        legacy_used = any(value is not None for value in (chat_target, system_prompt_path))
+        if chat_target is None:
+            raise ValueError("A chat_target must be provided.")
 
-        if target is not None and chat_target is not None:
-            raise ValueError("Provide either target or chat_target, not both.")
-        resolved_target = target if target is not None else chat_target
-        if resolved_target is None:
-            raise ValueError("A target (chat target) must be provided.")
+        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
 
-        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=resolved_target)
-
-        self._prompt_target = resolved_target
+        self._prompt_target = chat_target
         self._response_handler = response_handler or JsonSchemaResponseHandler()
 
-        if legacy_used:
-            if system_prompt is not None:
-                raise ValueError(
-                    "Provide either system_prompt (new API) or the legacy system_prompt_path "
-                    "keyword argument, not both."
-                )
-            print_deprecation_message(
-                old_item="InsecureCodeScorer(chat_target=..., system_prompt_path=...)",
-                new_item="InsecureCodeScorer(target=..., system_prompt=..., response_handler=...)",
-                removed_in="0.17.0",
-            )
-            rendered = render_insecure_code_system_prompt(template_path=system_prompt_path)
-            self._system_prompt = rendered.value
-            # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
-            # target, which enforces it natively when supported or omits it via normalization.
-            self._response_json_schema = rendered.response_json_schema
-        else:
-            rendered_value, schema = self._resolve_system_prompt(system_prompt)
-            self._system_prompt = rendered_value
-            self._response_json_schema = schema
+        rendered_value, schema = self._resolve_system_prompt(system_prompt)
+        self._system_prompt = rendered_value
+        self._response_json_schema = schema
 
         self._score_category: Sequence[str] | str = (
             score_category if score_category is not None else _DEFAULT_HARM_CATEGORY
@@ -180,7 +147,7 @@ class InsecureCodeScorer(FloatScaleScorer):
             InvalidJsonException: If the response is not valid JSON or the score value is not a float.
         """
         unvalidated_score = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
             value=message_piece.original_value,
