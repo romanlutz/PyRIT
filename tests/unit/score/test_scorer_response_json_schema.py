@@ -64,7 +64,7 @@ def _make_scorer(scorer_id: str):
         )
     elif scorer_id == "likert":
         target = _mock_target('{"score_value": "1", "description": "d", "rationale": "r"}')
-        scorer = SelfAskLikertScorer(chat_target=target, likert_scale=LikertScalePaths.CYBER_SCALE)
+        scorer = SelfAskLikertScorer.from_likert_scale(chat_target=target, likert_scale=LikertScalePaths.CYBER_SCALE)
     else:  # pragma: no cover - guard against typos in parametrization
         raise ValueError(f"Unknown scorer id: {scorer_id}")
     return scorer, target

@@ -9,7 +9,6 @@ from pathlib import Path
 import yaml
 
 from pyrit.common import verify_and_resolve_path
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.path import HARM_DEFINITION_PATH, SCORER_LIKERT_PATH
 from pyrit.models import (
     ComponentIdentifier,
@@ -323,28 +322,23 @@ class SelfAskLikertScorer(FloatScaleScorer):
     def __init__(
         self,
         *,
-        target: PromptTarget | None = None,
+        chat_target: PromptTarget | None = None,
         system_prompt: SeedPrompt | str | None = None,
         response_handler: ResponseHandler | None = None,
         score_category: str | None = None,
         min_scale_value: int = 1,
         max_scale_value: int = 5,
         validator: ScorerPromptValidator | None = None,
-        chat_target: PromptTarget | None = None,
-        likert_scale: LikertScalePaths | None = None,
-        custom_likert_path: Path | None = None,
-        custom_system_prompt_path: Path | None = None,
     ) -> None:
         """
         Initialize the SelfAskLikertScorer.
 
         Args:
-            target (PromptTarget | None): The chat target used for scoring. Must satisfy
-                CHAT_TARGET_REQUIREMENTS. Required unless the legacy ``chat_target`` is given.
+            chat_target (PromptTarget | None): The chat target used for scoring. Must satisfy
+                CHAT_TARGET_REQUIREMENTS.
             system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
                 (e.g. rendered via ``render_likert_system_prompt``) is used verbatim and may carry a
-                ``response_json_schema``; a ``str`` is used as-is. Required unless a legacy Likert
-                scale keyword argument is given. Defaults to None.
+                ``response_json_schema``; a ``str`` is used as-is. Required.
             response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
                 to ``JsonSchemaResponseHandler``.
             score_category (str | None): Category to attach to scores when ``system_prompt`` is
@@ -355,105 +349,112 @@ class SelfAskLikertScorer(FloatScaleScorer):
                 provided explicitly. Defaults to 5.
             validator (ScorerPromptValidator | None): Custom validator for the scorer. Defaults to
                 None.
-            chat_target (PromptTarget | None): Deprecated alias for ``target``.
-            likert_scale (LikertScalePaths | None): Deprecated; the Likert scale configuration to use
-                for scoring.
-            custom_likert_path (Path | None): Deprecated; path to a custom YAML file containing the
-                Likert scale definition. Only one of ``likert_scale`` or ``custom_likert_path`` should
-                be provided. Defaults to None.
-            custom_system_prompt_path (Path | None): Deprecated; path to a custom system prompt file.
-                Defaults to None.
 
         Raises:
-            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
-                if legacy Likert keyword arguments are mixed with ``system_prompt``, if both
-                ``likert_scale`` and ``custom_likert_path`` are provided, if neither is provided in
-                the legacy path, or if a provided YAML file is improperly formatted.
+            ValueError: If ``chat_target`` or ``system_prompt`` is not provided.
         """
-        legacy_used = any(
-            v is not None for v in (chat_target, likert_scale, custom_likert_path, custom_system_prompt_path)
-        )
+        if chat_target is None:
+            raise ValueError("A chat_target must be provided.")
+        if system_prompt is None:
+            raise ValueError("system_prompt must be provided.")
 
-        if target is not None and chat_target is not None:
-            raise ValueError("Provide either target or chat_target, not both.")
-        resolved_target = target if target is not None else chat_target
-        if resolved_target is None:
-            raise ValueError("A target (chat target) must be provided.")
+        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
 
-        super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=resolved_target)
-
-        self._prompt_target = resolved_target
+        self._prompt_target = chat_target
         self._response_handler = response_handler or JsonSchemaResponseHandler()
-        self._likert_scale = likert_scale
+        self._likert_scale: LikertScalePaths | None = None
 
-        if legacy_used:
-            if system_prompt is not None:
-                raise ValueError(
-                    "Provide either system_prompt (new API) or the legacy likert_scale/"
-                    "custom_likert_path/custom_system_prompt_path keyword arguments, not both."
-                )
-            print_deprecation_message(
-                old_item=(
-                    "SelfAskLikertScorer(chat_target=..., likert_scale=..., custom_likert_path=..., "
-                    "custom_system_prompt_path=...)"
-                ),
-                new_item=("SelfAskLikertScorer(target=..., system_prompt=render_likert_system_prompt(...), ...)"),
-                removed_in="0.17.0",
-            )
-            self._build_from_likert_scale(
-                likert_scale=likert_scale,
-                custom_likert_path=custom_likert_path,
-                custom_system_prompt_path=custom_system_prompt_path,
-            )
-        elif system_prompt is None:
-            raise ValueError("A system_prompt (or a legacy likert_scale/custom_likert_path) must be provided.")
-        else:
-            rendered_value, schema = self._resolve_system_prompt(system_prompt)
-            self._system_prompt = rendered_value
-            self._response_json_schema = schema
-            self._score_category = score_category
-            self._min_scale_value = min_scale_value
-            self._max_scale_value = max_scale_value
+        rendered_value, schema = self._resolve_system_prompt(system_prompt)
+        self._system_prompt = rendered_value
+        self._response_json_schema = schema
+        self._score_category = score_category
+        self._min_scale_value = min_scale_value
+        self._max_scale_value = max_scale_value
 
-    def _build_from_likert_scale(
-        self,
+    @classmethod
+    def from_likert_scale(
+        cls,
         *,
-        likert_scale: LikertScalePaths | None,
-        custom_likert_path: Path | None,
-        custom_system_prompt_path: Path | None,
-    ) -> None:
+        chat_target: PromptTarget,
+        likert_scale: LikertScalePaths | None = None,
+        custom_likert_path: Path | None = None,
+        custom_system_prompt_path: Path | None = None,
+        response_handler: ResponseHandler | None = None,
+        validator: ScorerPromptValidator | None = None,
+    ) -> "SelfAskLikertScorer":
+        """
+        Build a scorer whose system prompt, category and min/max are driven by a Likert scale.
+
+        Renders the Likert scoring system prompt from a preset ``likert_scale`` (a
+        ``LikertScalePaths`` value) or a ``custom_likert_path`` YAML file (mutually exclusive), and
+        derives the category and score range from the scale. When a preset ``likert_scale`` carries
+        evaluation datasets, its evaluation-file mapping is attached to the scorer.
+
+        Args:
+            chat_target (PromptTarget): The chat target used for scoring.
+            likert_scale (LikertScalePaths | None): The preset Likert scale configuration. Defaults
+                to None.
+            custom_likert_path (Path | None): Path to a custom Likert scale YAML file. Mutually
+                exclusive with ``likert_scale``. Defaults to None.
+            custom_system_prompt_path (Path | None): Path to a custom system-prompt template YAML.
+                Defaults to None.
+            response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
+                to None (uses ``JsonSchemaResponseHandler``).
+            validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
+
+        Returns:
+            SelfAskLikertScorer: The constructed scorer.
+
+        Raises:
+            ValueError: If both or neither of ``likert_scale`` and ``custom_likert_path`` are
+                provided, or if a provided YAML file is improperly formatted.
+        """
         if likert_scale is not None and custom_likert_path is not None:
             raise ValueError("Only one of 'likert_scale' or 'custom_likert_path' should be provided, not both.")
         if likert_scale is None and custom_likert_path is None:
             raise ValueError("One of 'likert_scale' or 'custom_likert_path' must be provided.")
 
         if custom_system_prompt_path is not None:
-            self._validate_custom_system_prompt_path(custom_system_prompt_path)
+            cls._validate_custom_system_prompt_path(custom_system_prompt_path)
 
+        eval_files: LikertScaleEvalFiles | None = None
         if likert_scale is not None:
-            # Auto-set evaluation file mapping from the LikertScalePaths enum
-            if likert_scale.evaluation_files is not None:
-                from pyrit.score.scorer_evaluation.scorer_evaluator import (
-                    ScorerEvalDatasetFiles,
-                )
-
-                eval_files = likert_scale.evaluation_files
-                self.evaluation_file_mapping = ScorerEvalDatasetFiles(
-                    human_labeled_datasets_files=eval_files.human_labeled_datasets_files,
-                    result_file=eval_files.result_file,
-                    harm_category=eval_files.harm_category,
-                )
-
+            eval_files = likert_scale.evaluation_files
             likert_scale_path: Path = likert_scale.path
         else:
             assert custom_likert_path is not None
-            self._validate_custom_likert_path(custom_likert_path)
+            cls._validate_custom_likert_path(custom_likert_path)
             likert_scale_path = custom_likert_path
 
-        self._set_likert_scale_system_prompt(
+        rendered, category, min_scale_value, max_scale_value = render_likert_system_prompt(
             likert_scale_path=likert_scale_path,
             system_prompt_path=custom_system_prompt_path,
         )
+
+        scorer = cls(
+            chat_target=chat_target,
+            system_prompt=rendered,
+            response_handler=response_handler,
+            score_category=category,
+            min_scale_value=min_scale_value,
+            max_scale_value=max_scale_value,
+            validator=validator,
+        )
+        scorer._likert_scale = likert_scale
+
+        # Auto-set evaluation file mapping from the LikertScalePaths enum
+        if eval_files is not None:
+            from pyrit.score.scorer_evaluation.scorer_evaluator import (
+                ScorerEvalDatasetFiles,
+            )
+
+            scorer.evaluation_file_mapping = ScorerEvalDatasetFiles(
+                human_labeled_datasets_files=eval_files.human_labeled_datasets_files,
+                result_file=eval_files.result_file,
+                harm_category=eval_files.harm_category,
+            )
+
+        return scorer
 
     @staticmethod
     def _resolve_system_prompt(
@@ -479,36 +480,6 @@ class SelfAskLikertScorer(FloatScaleScorer):
             },
             prompt_target=self._prompt_target.get_identifier(),
         )
-
-    def _set_likert_scale_system_prompt(
-        self, likert_scale_path: Path, *, system_prompt_path: Path | None = None
-    ) -> None:
-        """
-        Set the Likert scale to use for scoring.
-
-        Delegates to the module-level ``render_likert_system_prompt`` to parse the YAML file, derive
-        the minimum and maximum score values, and render the system prompt, then stores the results
-        as instance attributes so that ``_score_piece_async`` can normalise the raw LLM score to
-        [0, 1] correctly for any custom non-negative integer range (not just the default 1-5).
-
-        Args:
-            likert_scale_path (Path): The path to the YAML file containing the Likert scale description.
-            system_prompt_path (Path | None): Optional path to a custom system prompt template.
-
-        Raises:
-            ValueError: If the Likert scale YAML file is improperly formatted.
-        """
-        rendered, category, min_scale_value, max_scale_value = render_likert_system_prompt(
-            likert_scale_path=likert_scale_path,
-            system_prompt_path=system_prompt_path,
-        )
-        self._score_category = category
-        self._min_scale_value = min_scale_value
-        self._max_scale_value = max_scale_value
-        self._system_prompt = rendered.value
-        # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
-        # target, which enforces it natively when supported or omits it via normalization.
-        self._response_json_schema = rendered.response_json_schema
 
     def _likert_scale_description_to_string(self, descriptions: list[dict[str, str]], likert_scale_path: Path) -> str:
         """
@@ -597,7 +568,7 @@ class SelfAskLikertScorer(FloatScaleScorer):
                 The score_value is a value from [0,1] that is scaled from the likert scale.
         """
         unvalidated_score = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
             value=message_piece.converted_value,
