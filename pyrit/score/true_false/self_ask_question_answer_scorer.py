@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
+from pyrit.score.llm_scoring import run_llm_scoring_async
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.self_ask_true_false_scorer import (
     SelfAskTrueFalseScorer,
@@ -20,7 +21,7 @@ from pyrit.score.true_false.true_false_score_aggregator import (
 if TYPE_CHECKING:
     import pathlib
 
-    from pyrit.models import MessagePiece, Score, UnvalidatedScore
+    from pyrit.models import MessagePiece, Score
     from pyrit.prompt_target import PromptTarget
 
 
@@ -89,14 +90,17 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
             f"Evaluate if the response is correct:\n{message_piece.converted_value}"
         )
 
-        unvalidated_score: UnvalidatedScore = await self._score_value_with_llm_async(
-            prompt_target=self._prompt_target,
+        unvalidated_score = await run_llm_scoring_async(
+            target=self._prompt_target,
             system_prompt=self._system_prompt,
-            message_value=prompt,
-            message_data_type="text",
+            response_handler=self._response_handler,
+            value=prompt,
+            data_type="text",
             scored_prompt_id=message_piece.id,
+            scorer_identifier=self.get_identifier(),
             category=self._score_category,
             objective=objective,
+            response_json_schema=self._response_json_schema,
         )
 
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")
