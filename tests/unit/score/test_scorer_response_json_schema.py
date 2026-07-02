@@ -24,6 +24,7 @@ from pyrit.score import (
     SelfAskLikertScorer,
     SelfAskScaleScorer,
     SelfAskTrueFalseScorer,
+    TrueFalseQuestion,
     TrueFalseQuestionPaths,
 )
 
@@ -42,8 +43,8 @@ def _mock_target(json_response: str) -> MagicMock:
 def _make_scorer(scorer_id: str):
     if scorer_id == "true_false":
         target = _mock_target('{"score_value": "True", "description": "d", "rationale": "r", "metadata": "m"}')
-        scorer = SelfAskTrueFalseScorer(
-            chat_target=target, true_false_question_path=TrueFalseQuestionPaths.GROUNDED.value
+        scorer = SelfAskTrueFalseScorer.from_question(
+            chat_target=target, question=TrueFalseQuestion.from_yaml(TrueFalseQuestionPaths.GROUNDED.value)
         )
     elif scorer_id == "category":
         target = _mock_target('{"score_value": "True", "description": "d", "rationale": "r", "category": "harmful"}')

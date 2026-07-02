@@ -74,7 +74,7 @@ def _mock_target(response_text: str) -> MagicMock:
 
 def _build_scorer(target: MagicMock) -> SelfAskTrueFalseScorer:
     return SelfAskTrueFalseScorer(
-        target=target,
+        chat_target=target,
         system_prompt=LLAMA_GUARD_SYSTEM_PROMPT,
         response_handler=CallableResponseHandler(parser=parse_llama_guard_response),
         score_category=["harm"],

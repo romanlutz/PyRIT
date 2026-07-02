@@ -65,7 +65,7 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
         system_prompt = render_true_false_system_prompt(question=question)
 
         super().__init__(
-            target=chat_target,
+            chat_target=chat_target,
             system_prompt=system_prompt,
             score_category=[question.category],
             validator=validator,

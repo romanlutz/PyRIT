@@ -2,15 +2,13 @@
 # Licensed under the MIT license.
 
 import enum
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from pyrit.common import verify_and_resolve_path
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
@@ -102,22 +100,6 @@ class TrueFalseQuestion(BaseModel):
             "metadata": self.metadata,
         }
 
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return the value of the specified attribute, or ``default`` if absent."""
-        return getattr(self, key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        """Return the value of the specified attribute (dict-style access)."""
-        return getattr(self, key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        """Set the value of the specified attribute (dict-style access)."""
-        setattr(self, key, value)
-
-    def __iter__(self) -> Iterator[str]:  # type: ignore[override]
-        """Return an iterator over the core question keys (kept for backward compatibility)."""
-        return iter(("category", "true_description", "false_description"))
-
 
 def render_true_false_system_prompt(
     *,
@@ -151,7 +133,7 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
     """
     A self-ask true/false scorer with scorer-owned composition.
 
-    The scorer holds three collaborators: a chat ``target``, a ``system_prompt`` (a rendered or
+    The scorer holds three collaborators: a ``chat_target``, a ``system_prompt`` (a rendered or
     static ``SeedPrompt``, a plain ``str``, or ``None`` for the default TASK_ACHIEVED rubric), and a
     ``response_handler`` that turns the target's raw output into a score. Given written descriptions
     of "true" and "false", it returns the value that matches either description most closely.
@@ -160,12 +142,9 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
 
     - Static system prompt: pass ``system_prompt`` as a ``str`` or a static ``SeedPrompt`` (e.g. a
       canonical classifier prompt) and, typically, an explicit ``score_category``.
-    - Templated question: render a ``SeedPrompt`` from a ``TrueFalseQuestion`` via
-      ``render_true_false_system_prompt`` and pass it as ``system_prompt``.
-
-    The legacy keyword arguments (``chat_target``, ``true_false_question``,
-    ``true_false_question_path``, ``true_false_system_prompt_path``) remain supported with a
-    deprecation warning; ``from_question_yaml`` offers the same behavior as an explicit shim.
+    - Question-driven: use ``from_question`` (or pass a ``SeedPrompt`` rendered via
+      ``render_true_false_system_prompt``) so a ``TrueFalseQuestion`` drives both the system prompt
+      and the score category.
     """
 
     _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(
@@ -176,23 +155,19 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
     def __init__(
         self,
         *,
-        target: PromptTarget | None = None,
+        chat_target: PromptTarget | None = None,
         system_prompt: SeedPrompt | str | None = None,
         response_handler: ResponseHandler | None = None,
         score_category: Sequence[str] | str | None = None,
         validator: ScorerPromptValidator | None = None,
         score_aggregator: TrueFalseAggregatorFunc = TrueFalseScoreAggregator.OR,
-        chat_target: PromptTarget | None = None,
-        true_false_question: TrueFalseQuestion | Mapping[str, Any] | None = None,
-        true_false_question_path: str | Path | None = None,
-        true_false_system_prompt_path: str | Path | None = None,
     ) -> None:
         """
         Initialize the SelfAskTrueFalseScorer.
 
         Args:
-            target (PromptTarget | None): The chat target used for scoring. Must satisfy
-                CHAT_TARGET_REQUIREMENTS. Required unless the legacy ``chat_target`` is given.
+            chat_target (PromptTarget | None): The chat target used for scoring. Must satisfy
+                CHAT_TARGET_REQUIREMENTS.
             system_prompt (SeedPrompt | str | None): The scoring system prompt. A ``SeedPrompt``
                 (e.g. rendered via ``render_true_false_system_prompt``) is used verbatim and may
                 carry a ``response_json_schema``; a ``str`` is used as-is; ``None`` falls back to the
@@ -204,69 +179,28 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
             validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
             score_aggregator (TrueFalseAggregatorFunc): The aggregator function to use. Defaults to
                 TrueFalseScoreAggregator.OR.
-            chat_target (PromptTarget | None): Deprecated alias for ``target``.
-            true_false_question (TrueFalseQuestion | Mapping[str, Any] | None): Deprecated; a question
-                to render the system prompt from.
-            true_false_question_path (str | Path | None): Deprecated; path to a question YAML file.
-            true_false_system_prompt_path (str | Path | None): Deprecated; path to a system prompt
-                template YAML file.
 
         Raises:
-            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
-                or if legacy question keyword arguments are mixed with ``system_prompt``.
+            ValueError: If ``chat_target`` is not provided.
         """
-        legacy_used = any(
-            value is not None
-            for value in (chat_target, true_false_question, true_false_question_path, true_false_system_prompt_path)
-        )
-
-        if target is not None and chat_target is not None:
-            raise ValueError("Provide either target or chat_target, not both.")
-        resolved_target = target if target is not None else chat_target
-        if resolved_target is None:
-            raise ValueError("A target (chat target) must be provided.")
+        if chat_target is None:
+            raise ValueError("A chat_target must be provided.")
 
         super().__init__(
             validator=validator or self._DEFAULT_VALIDATOR,
             score_aggregator=score_aggregator,
-            chat_target=resolved_target,
+            chat_target=chat_target,
         )
 
-        self._prompt_target = resolved_target
+        self._prompt_target = chat_target
         self._response_handler = response_handler or JsonSchemaResponseHandler()
 
-        if legacy_used:
-            if system_prompt is not None:
-                raise ValueError(
-                    "Provide either system_prompt (new API) or the legacy true_false_question* "
-                    "keyword arguments, not both."
-                )
-            print_deprecation_message(
-                old_item=(
-                    "SelfAskTrueFalseScorer(chat_target=..., true_false_question[_path]=..., "
-                    "true_false_system_prompt_path=...)"
-                ),
-                new_item=(
-                    "SelfAskTrueFalseScorer(target=..., system_prompt=..., response_handler=...) "
-                    "or SelfAskTrueFalseScorer.from_question_yaml(...)"
-                ),
-                removed_in="0.17.0",
-            )
-            rendered_prompt, category = self._build_system_prompt_from_question(
-                true_false_question=true_false_question,
-                true_false_question_path=true_false_question_path,
-                true_false_system_prompt_path=true_false_system_prompt_path,
-            )
-            self._system_prompt = rendered_prompt.value
-            # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
-            # target, which enforces it natively when supported or omits it via normalization.
-            self._response_json_schema = rendered_prompt.response_json_schema
-            self._score_category = category
-        else:
-            rendered_value, schema, default_category = self._resolve_system_prompt(system_prompt)
-            self._system_prompt = rendered_value
-            self._response_json_schema = schema
-            self._score_category = score_category if score_category is not None else default_category
+        rendered_value, schema, default_category = self._resolve_system_prompt(system_prompt)
+        self._system_prompt = rendered_value
+        # Optional JSON schema embedded in the system prompt YAML. Forwarded to the scoring
+        # target, which enforces it natively when supported or omits it via normalization.
+        self._response_json_schema = schema
+        self._score_category = score_category if score_category is not None else default_category
 
     @staticmethod
     def _resolve_system_prompt(
@@ -282,61 +216,29 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
             return system_prompt, None, None
         raise TypeError("system_prompt must be a SeedPrompt, str, or None.")
 
-    @staticmethod
-    def _build_system_prompt_from_question(
-        *,
-        true_false_question: TrueFalseQuestion | Mapping[str, Any] | None = None,
-        true_false_question_path: str | Path | None = None,
-        true_false_system_prompt_path: str | Path | None = None,
-    ) -> tuple[SeedPrompt, str]:
-        if true_false_question_path and true_false_question is not None:
-            raise ValueError("Only one of true_false_question_path or true_false_question should be provided.")
-        if true_false_question_path is None and true_false_question is None:
-            true_false_question_path = TrueFalseQuestionPaths.TASK_ACHIEVED.value
-
-        if true_false_question_path is not None:
-            question = TrueFalseQuestion.from_yaml(true_false_question_path)
-        elif isinstance(true_false_question, TrueFalseQuestion):
-            question = true_false_question
-        elif isinstance(true_false_question, Mapping):
-            known = {
-                key: true_false_question[key]
-                for key in ("category", "true_description", "false_description", "metadata")
-                if key in true_false_question
-            }
-            question = TrueFalseQuestion(**known)
-        else:
-            raise TypeError("true_false_question must be a TrueFalseQuestion or a mapping.")
-
-        rendered = render_true_false_system_prompt(question=question, template_path=true_false_system_prompt_path)
-        return rendered, question.category
-
     @classmethod
-    def from_question_yaml(
+    def from_question(
         cls,
         *,
         chat_target: PromptTarget,
-        true_false_question_path: str | Path | None = None,
-        true_false_question: TrueFalseQuestion | Mapping[str, Any] | None = None,
-        true_false_system_prompt_path: str | Path | None = None,
+        question: TrueFalseQuestion,
+        response_handler: ResponseHandler | None = None,
         validator: ScorerPromptValidator | None = None,
         score_aggregator: TrueFalseAggregatorFunc = TrueFalseScoreAggregator.OR,
     ) -> "SelfAskTrueFalseScorer":
         """
-        Build a scorer from a true/false question YAML (deprecated compatibility shim).
+        Build a scorer whose system prompt and category are driven by a ``TrueFalseQuestion``.
 
-        Renders the system prompt from the supplied question (or question YAML) and forwards it to
-        the composition-based ``__init__``. Prefer constructing the scorer directly with
-        ``target`` and ``system_prompt`` (optionally via ``render_true_false_system_prompt``).
+        Renders the true/false scoring system prompt from ``question`` (via
+        ``render_true_false_system_prompt``) and sets ``score_category`` from ``question.category``.
+        Use this when a preset question drives more than the prompt; for a fully custom or static
+        prompt, construct the scorer directly with ``system_prompt``.
 
         Args:
             chat_target (PromptTarget): The chat target used for scoring.
-            true_false_question_path (str | Path | None): Path to a question YAML file. Defaults to
-                None (falls back to the TASK_ACHIEVED rubric when no question is given).
-            true_false_question (TrueFalseQuestion | Mapping[str, Any] | None): A question to render
-                the system prompt from. Defaults to None.
-            true_false_system_prompt_path (str | Path | None): Path to a system prompt template YAML
-                file. Defaults to the bundled true/false system prompt.
+            question (TrueFalseQuestion): The question supplying the system prompt and category.
+            response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
+                to None (uses ``JsonSchemaResponseHandler``).
             validator (ScorerPromptValidator | None): Custom validator. Defaults to None.
             score_aggregator (TrueFalseAggregatorFunc): The aggregator function to use. Defaults to
                 TrueFalseScoreAggregator.OR.
@@ -344,20 +246,11 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
         Returns:
             SelfAskTrueFalseScorer: The constructed scorer.
         """
-        print_deprecation_message(
-            old_item="SelfAskTrueFalseScorer.from_question_yaml(...)",
-            new_item="SelfAskTrueFalseScorer(target=..., system_prompt=render_true_false_system_prompt(question=...))",
-            removed_in="0.17.0",
-        )
-        rendered_prompt, category = cls._build_system_prompt_from_question(
-            true_false_question=true_false_question,
-            true_false_question_path=true_false_question_path,
-            true_false_system_prompt_path=true_false_system_prompt_path,
-        )
         return cls(
-            target=chat_target,
-            system_prompt=rendered_prompt,
-            score_category=[category],
+            chat_target=chat_target,
+            system_prompt=render_true_false_system_prompt(question=question),
+            response_handler=response_handler,
+            score_category=[question.category],
             validator=validator,
             score_aggregator=score_aggregator,
         )
