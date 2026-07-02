@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS
 from pyrit.score.llm_scoring import run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
@@ -31,9 +30,8 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
     A general-purpose self-ask True/False scorer that uses a chat target and a configurable
     system prompt and prompt format.
 
-    The scorer holds a chat ``target`` and a ``response_handler``; the system prompt is rendered
-    per-piece from ``system_prompt_format_string``. The legacy ``chat_target`` keyword argument
-    remains supported with a deprecation warning.
+    The scorer holds a chat ``chat_target`` and a ``response_handler``; the system prompt is
+    rendered per-piece from ``system_prompt_format_string``.
     """
 
     _DEFAULT_VALIDATOR: ScorerPromptValidator = ScorerPromptValidator(
@@ -46,7 +44,7 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
         self,
         *,
         system_prompt_format_string: str,
-        target: PromptTarget | None = None,
+        chat_target: PromptTarget | None = None,
         prompt_format_string: str | None = None,
         category: str | None = None,
         response_handler: ResponseHandler | None = None,
@@ -58,7 +56,6 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
         metadata_output_key: str = "metadata",
         category_output_key: str = "category",
         response_json_schema: JsonSchemaDefinition | None = None,
-        chat_target: PromptTarget | None = None,
     ) -> None:
         """
         Initialize the SelfAskGeneralTrueFalseScorer.
@@ -73,8 +70,8 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
         Args:
             system_prompt_format_string (str): System prompt template with placeholders for
                 objective, task (alias of objective), prompt, and message_piece.
-            target (PromptTarget | None): The chat target used to score. Must satisfy
-                CHAT_TARGET_REQUIREMENTS. Required unless the legacy ``chat_target`` is given.
+            chat_target (PromptTarget | None): The chat target used to score. Must satisfy
+                CHAT_TARGET_REQUIREMENTS.
             prompt_format_string (str | None): User prompt template with the same placeholders.
             category (str | None): Category for the score.
             response_handler (ResponseHandler | None): Parser for the target's raw output. Defaults
@@ -91,30 +88,20 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
             response_json_schema (JsonSchemaDefinition | None): An optional JSON schema constraining
                 the scoring response. When provided, it is forwarded to the scoring target, which
                 enforces it natively when supported or omits it via normalization. Defaults to None.
-            chat_target (PromptTarget | None): Deprecated alias for ``target``.
 
         Raises:
-            ValueError: If both ``target`` and ``chat_target`` are provided, if neither is provided,
-                or if system_prompt_format_string is not provided or empty.
+            ValueError: If ``chat_target`` is not provided, or if system_prompt_format_string is not
+                provided or empty.
         """
-        if target is not None and chat_target is not None:
-            raise ValueError("Provide either target or chat_target, not both.")
-        resolved_target = target if target is not None else chat_target
-        if resolved_target is None:
-            raise ValueError("A target (chat target) must be provided.")
-        if chat_target is not None:
-            print_deprecation_message(
-                old_item="SelfAskGeneralTrueFalseScorer(chat_target=...)",
-                new_item="SelfAskGeneralTrueFalseScorer(target=...)",
-                removed_in="0.17.0",
-            )
+        if chat_target is None:
+            raise ValueError("A chat_target must be provided.")
 
         super().__init__(
             validator=validator or self._DEFAULT_VALIDATOR,
             score_aggregator=score_aggregator,
-            chat_target=resolved_target,
+            chat_target=chat_target,
         )
-        self._prompt_target = resolved_target
+        self._prompt_target = chat_target
         if not system_prompt_format_string:
             raise ValueError("system_prompt_format_string must be provided and non-empty.")
         self._system_prompt_format_string = system_prompt_format_string
@@ -176,7 +163,7 @@ class SelfAskGeneralTrueFalseScorer(TrueFalseScorer):
             )
 
         unvalidated = await run_llm_scoring_async(
-            target=self._prompt_target,
+            chat_target=self._prompt_target,
             system_prompt=system_prompt,
             response_handler=self._response_handler,
             value=user_prompt,
