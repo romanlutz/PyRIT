@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import json
 import logging
-import uuid
 from abc import abstractmethod
 from typing import (
     TYPE_CHECKING,
@@ -16,15 +14,10 @@ from typing import (
     cast,
 )
 
-from pyrit.exceptions import (
-    InvalidJsonException,
-    PyritException,
-    pyrit_json_retry,
-    remove_markdown_json,
-)
+from pyrit.common.deprecation import print_deprecation_message
+from pyrit.exceptions import PyritException
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import (
-    JSON_SCHEMA_METADATA_KEY,
     ChatMessageRole,
     ComponentIdentifier,
     Identifiable,
@@ -40,6 +33,8 @@ from pyrit.models import (
 )
 from pyrit.prompt_target.batch_helper import batch_task_async
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
+from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.response_handler import JsonSchemaResponseHandler
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -668,7 +663,6 @@ class Scorer(Identifiable, abc.ABC):
 
         return (value - min_value) / (max_value - min_value)
 
-    @pyrit_json_retry
     async def _score_value_with_llm_async(
         self,
         *,
@@ -689,6 +683,10 @@ class Scorer(Identifiable, abc.ABC):
     ) -> UnvalidatedScore:
         """
         Send a request to a target, and take care of retries.
+
+        .. deprecated:: 0.17.0
+            Use ``run_llm_scoring_async`` with a ``ResponseHandler`` instead. This method forwards
+            to that helper and will be removed in 0.17.0.
 
         The scorer target response should be JSON with value, rationale, and optional metadata and
         description fields.
@@ -733,116 +731,34 @@ class Scorer(Identifiable, abc.ABC):
             InvalidJsonException: If the response is not valid JSON.
             Exception: For other unexpected errors during scoring.
         """
-        conversation_id = str(uuid.uuid4())
+        print_deprecation_message(
+            old_item="pyrit.score.scorer.Scorer._score_value_with_llm_async",
+            new_item="pyrit.score.llm_scoring.run_llm_scoring_async",
+            removed_in="0.17.0",
+        )
 
-        prompt_target.set_system_prompt(
+        response_handler = JsonSchemaResponseHandler(
+            score_value_output_key=score_value_output_key,
+            rationale_output_key=rationale_output_key,
+            description_output_key=description_output_key,
+            metadata_output_key=metadata_output_key,
+            category_output_key=category_output_key,
+        )
+
+        return await run_llm_scoring_async(
+            target=prompt_target,
             system_prompt=system_prompt,
-            conversation_id=conversation_id,
+            response_handler=response_handler,
+            value=message_value,
+            data_type=message_data_type,
+            scored_prompt_id=scored_prompt_id,
+            scorer_identifier=self.get_identifier(),
+            prepended_text=prepended_text_message_piece,
+            category=category,
+            objective=objective,
+            response_json_schema=response_json_schema,
+            numeric_value=getattr(self, "_score_value_is_numeric", False),
         )
-        prompt_metadata: dict[str, Any] = {"response_format": "json"}
-        if response_json_schema is not None:
-            # Always forward the schema; the target's normalization pipeline omits it
-            # when the target cannot natively enforce a JSON schema.
-            prompt_metadata[JSON_SCHEMA_METADATA_KEY] = response_json_schema
-
-        # Build message pieces - prepended text context first (if provided), then the main message being scored
-        message_pieces: list[MessagePiece] = []
-
-        # Add prepended text context piece if provided (e.g., objective context for non-text scoring)
-        if prepended_text_message_piece:
-            message_pieces.append(
-                MessagePiece(
-                    role="user",
-                    original_value=prepended_text_message_piece,
-                    original_value_data_type="text",
-                    converted_value_data_type="text",
-                    conversation_id=conversation_id,
-                    prompt_metadata=prompt_metadata,
-                )
-            )
-
-        # Add the main message piece being scored
-        message_pieces.append(
-            MessagePiece(
-                role="user",
-                original_value=message_value,
-                original_value_data_type=message_data_type,
-                converted_value_data_type=message_data_type,
-                conversation_id=conversation_id,
-                prompt_metadata=prompt_metadata,
-            )
-        )
-
-        scorer_llm_request = Message(message_pieces=message_pieces)
-        try:
-            response = await prompt_target.send_prompt_async(message=scorer_llm_request)
-        except Exception as ex:
-            raise Exception(f"Error scoring prompt with original prompt ID: {scored_prompt_id}") from ex
-
-        response_json: str = ""
-        try:
-            # Get the text piece which contains the JSON response containing the score_value and rationale from the LLM
-            text_piece = next(
-                piece for piece in response[0].message_pieces if piece.converted_value_data_type == "text"
-            )
-            response_json = text_piece.converted_value
-
-            response_json = remove_markdown_json(response_json)
-            parsed_response = json.loads(response_json)
-            category_response = parsed_response.get(category_output_key)
-
-            if category_response and category:
-                raise ValueError("Category is present in the response and an argument")
-
-            # Validate and normalize category to a list of strings
-            cat_val = category_response if category_response is not None else category
-            normalized_category: list[str] | None
-            if cat_val is None:
-                normalized_category = None
-            elif isinstance(cat_val, str):
-                normalized_category = [cat_val]
-            elif isinstance(cat_val, list):
-                if not all(isinstance(x, str) for x in cat_val):
-                    raise ValueError("'category' must be a string or a list of strings")
-                normalized_category = cat_val  # type: ignore[ty:invalid-assignment]
-            else:
-                # JSON must yield either a string or a list of strings
-                raise ValueError("'category' must be a string or a list of strings")
-
-            # Normalize metadata to a dictionary with string keys and string/int/float values
-            raw_md = parsed_response.get(metadata_output_key)
-            normalized_md: dict[str, str | int | float] | None
-            if raw_md is None:
-                normalized_md = None
-            elif isinstance(raw_md, dict):
-                # Coerce keys to str and filter to str/int/float values only
-                normalized_md = {str(k): v for k, v in raw_md.items() if isinstance(v, (str, int, float))}
-                # If dictionary becomes empty after filtering, keep as empty dict
-            elif isinstance(raw_md, (str, int, float)):
-                # Wrap primitive metadata into a namespaced field
-                normalized_md = {"metadata": raw_md}
-            else:
-                # Unrecognized metadata shape; drop to avoid downstream errors
-                normalized_md = None
-
-            score = UnvalidatedScore(
-                raw_score_value=str(parsed_response[score_value_output_key]),
-                score_value_description=parsed_response.get(description_output_key),
-                score_category=normalized_category,
-                score_rationale=parsed_response[rationale_output_key],
-                scorer_class_identifier=self.get_identifier(),
-                score_metadata=normalized_md,
-                message_piece_id=scored_prompt_id,
-                objective=objective,
-            )
-
-        except json.JSONDecodeError:
-            raise InvalidJsonException(message=f"Invalid JSON response: {response_json}") from None
-
-        except KeyError:
-            raise InvalidJsonException(message=f"Invalid JSON response, missing Key: {response_json}") from None
-
-        return score
 
     def _extract_objective_from_response(self, response: Message) -> str:
         """
