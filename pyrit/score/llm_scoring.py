@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 async def run_llm_scoring_async(
     *,
-    target: PromptTarget,
+    chat_target: PromptTarget,
     system_prompt: str,
     response_handler: ResponseHandler,
     value: str,
@@ -46,7 +46,7 @@ async def run_llm_scoring_async(
     particular ``Scorer`` so that scorers can compose it without inheriting LLM machinery.
 
     Args:
-        target (PromptTarget): The target LLM to send the message to.
+        chat_target (PromptTarget): The target LLM to send the message to.
         system_prompt (str): The system-level prompt that guides the target LLM.
         response_handler (ResponseHandler): Parser that turns the target's raw text into an
             ``UnvalidatedScore``.
@@ -79,7 +79,7 @@ async def run_llm_scoring_async(
         Exception: For other unexpected errors during scoring.
     """
     score = await _send_and_parse_async(
-        target=target,
+        chat_target=chat_target,
         system_prompt=system_prompt,
         response_handler=response_handler,
         value=value,
@@ -109,7 +109,7 @@ async def run_llm_scoring_async(
 @pyrit_json_retry
 async def _send_and_parse_async(
     *,
-    target: PromptTarget,
+    chat_target: PromptTarget,
     system_prompt: str,
     response_handler: ResponseHandler,
     value: str,
@@ -123,7 +123,7 @@ async def _send_and_parse_async(
 ) -> UnvalidatedScore:
     conversation_id = str(uuid.uuid4())
 
-    target.set_system_prompt(
+    chat_target.set_system_prompt(
         system_prompt=system_prompt,
         conversation_id=conversation_id,
     )
@@ -163,7 +163,7 @@ async def _send_and_parse_async(
 
     scorer_llm_request = Message(message_pieces=message_pieces)
     try:
-        response = await target.send_prompt_async(message=scorer_llm_request)
+        response = await chat_target.send_prompt_async(message=scorer_llm_request)
     except Exception as ex:
         raise Exception(f"Error scoring prompt with original prompt ID: {scored_prompt_id}") from ex
 
