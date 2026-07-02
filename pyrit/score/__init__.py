@@ -26,7 +26,12 @@ from pyrit.score.float_scale.insecure_code_scorer import (
 )
 from pyrit.score.float_scale.plagiarism_scorer import PlagiarismMetric, PlagiarismScorer
 from pyrit.score.float_scale.self_ask_general_float_scale_scorer import SelfAskGeneralFloatScaleScorer
-from pyrit.score.float_scale.self_ask_likert_scorer import LikertScaleEvalFiles, LikertScalePaths, SelfAskLikertScorer
+from pyrit.score.float_scale.self_ask_likert_scorer import (
+    LikertScaleEvalFiles,
+    LikertScalePaths,
+    SelfAskLikertScorer,
+    render_likert_system_prompt,
+)
 from pyrit.score.float_scale.self_ask_scale_scorer import (
     SelfAskScaleScorer,
     render_scale_system_prompt,
@@ -180,6 +185,7 @@ __all__ = [
     "RegistryUpdateBehavior",
     "render_category_system_prompt",
     "render_insecure_code_system_prompt",
+    "render_likert_system_prompt",
     "render_scale_system_prompt",
     "render_true_false_system_prompt",
     "ResponseHandler",
