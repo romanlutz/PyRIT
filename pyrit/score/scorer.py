@@ -32,7 +32,7 @@ from pyrit.models import (
 )
 from pyrit.prompt_target.batch_helper import batch_task_async
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler
 
 if TYPE_CHECKING:
@@ -683,7 +683,7 @@ class Scorer(Identifiable, abc.ABC):
         """
         Send a request to a target, and take care of retries.
 
-        This is a thin internal forwarder to ``run_llm_scoring_async``. It remains only so that
+        This is a thin internal forwarder to ``_run_llm_scoring_async``. It remains only so that
         scorers that have not yet been migrated to compose the helper directly keep working.
 
         The scorer target response should be JSON with value, rationale, and optional metadata and
@@ -737,7 +737,7 @@ class Scorer(Identifiable, abc.ABC):
             category_output_key=category_output_key,
         )
 
-        return await run_llm_scoring_async(
+        return await _run_llm_scoring_async(
             chat_target=prompt_target,
             system_prompt=system_prompt,
             response_handler=response_handler,

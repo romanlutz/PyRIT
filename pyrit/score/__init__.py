@@ -25,7 +25,6 @@ from pyrit.score.float_scale.plagiarism_scorer import PlagiarismMetric, Plagiari
 from pyrit.score.float_scale.self_ask_general_float_scale_scorer import SelfAskGeneralFloatScaleScorer
 from pyrit.score.float_scale.self_ask_likert_scorer import LikertScaleEvalFiles, LikertScalePaths, SelfAskLikertScorer
 from pyrit.score.float_scale.self_ask_scale_scorer import SelfAskScaleScorer
-from pyrit.score.llm_scoring import run_llm_scoring_async
 from pyrit.score.response_handler import (
     CallableResponseHandler,
     JsonSchemaResponseHandler,
@@ -170,7 +169,6 @@ __all__ = [
     "RegistryUpdateBehavior",
     "render_true_false_system_prompt",
     "ResponseHandler",
-    "run_llm_scoring_async",
     "Scorer",
     "ScorerEvalDatasetFiles",
     "ScorerEvaluator",

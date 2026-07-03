@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pyrit.score.response_handler import ResponseHandler
 
 
-async def run_llm_scoring_async(
+async def _run_llm_scoring_async(
     *,
     chat_target: PromptTarget,
     system_prompt: str,

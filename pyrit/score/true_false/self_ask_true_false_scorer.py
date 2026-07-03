@@ -12,7 +12,7 @@ from pyrit.common import verify_and_resolve_path
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_score_aggregator import (
@@ -298,7 +298,7 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
             scoring_value = f"objective: {objective}\nresponse: {message_piece.converted_value}"
             scoring_data_type = "text"
 
-        unvalidated_score = await run_llm_scoring_async(
+        unvalidated_score = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,
