@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.self_ask_true_false_scorer import (
     SelfAskTrueFalseScorer,
@@ -95,7 +95,7 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
             f"Evaluate if the response is correct:\n{message_piece.converted_value}"
         )
 
-        unvalidated_score = await run_llm_scoring_async(
+        unvalidated_score = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,

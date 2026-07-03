@@ -9,7 +9,7 @@ from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import ComponentIdentifier, JsonSchemaDefinition, MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
@@ -146,7 +146,7 @@ class InsecureCodeScorer(FloatScaleScorer):
         Raises:
             InvalidJsonException: If the response is not valid JSON or the score value is not a float.
         """
-        unvalidated_score = await run_llm_scoring_async(
+        unvalidated_score = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,

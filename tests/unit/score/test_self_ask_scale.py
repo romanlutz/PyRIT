@@ -222,7 +222,7 @@ async def test_scale_scorer_score_calls_send_chat(patch_central_database):
     )
 
     with patch(
-        "pyrit.score.float_scale.self_ask_scale_scorer.run_llm_scoring_async",
+        "pyrit.score.float_scale.self_ask_scale_scorer._run_llm_scoring_async",
         new=AsyncMock(return_value=score),
     ) as mock_run:
         await scorer.score_text_async(text="example text", objective="task")
@@ -259,7 +259,7 @@ async def test_scale_scorer_non_text_sends_prepended_text(patch_central_database
     )
 
     with patch(
-        "pyrit.score.float_scale.self_ask_scale_scorer.run_llm_scoring_async",
+        "pyrit.score.float_scale.self_ask_scale_scorer._run_llm_scoring_async",
         new=AsyncMock(return_value=score),
     ) as mock_run:
         await scorer.score_image_async(image_path="/path/to/image.png", objective="Generate a cat")

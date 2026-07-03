@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
@@ -161,7 +161,7 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
                 message_piece=message_piece,
             )
 
-        unvalidated = await run_llm_scoring_async(
+        unvalidated = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=system_prompt,
             response_handler=self._response_handler,

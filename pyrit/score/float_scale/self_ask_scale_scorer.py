@@ -19,7 +19,7 @@ from pyrit.models import (
 )
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
-from pyrit.score.llm_scoring import run_llm_scoring_async
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler, ResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
@@ -296,7 +296,7 @@ class SelfAskScaleScorer(FloatScaleScorer):
             scoring_value = f"objective: {objective}\nresponse: {message_piece.converted_value}"
             scoring_data_type = "text"
 
-        unvalidated_score = await run_llm_scoring_async(
+        unvalidated_score = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
             response_handler=self._response_handler,

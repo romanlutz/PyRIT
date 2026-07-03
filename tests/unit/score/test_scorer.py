@@ -18,8 +18,8 @@ from pyrit.score import (
     Scorer,
     ScorerPromptValidator,
     TrueFalseScorer,
-    run_llm_scoring_async,
 )
+from pyrit.score.llm_scoring import _run_llm_scoring_async
 
 
 @pytest.fixture
@@ -174,7 +174,7 @@ async def test_scorer_send_chat_target_async_bad_json_exception_retries(bad_json
     chat_target.send_prompt_async = AsyncMock(return_value=[bad_json_resp])
     scorer = MockScorer()
     with pytest.raises(InvalidJsonException):
-        await run_llm_scoring_async(
+        await _run_llm_scoring_async(
             chat_target=chat_target,
             response_handler=JsonSchemaResponseHandler(),
             scorer_identifier=scorer.get_identifier(),
@@ -198,7 +198,7 @@ async def test_scorer_score_value_with_llm_exception_display_prompt_id():
     scorer = MockScorer()
 
     with pytest.raises(Exception, match="Error scoring prompt with original prompt ID: 123"):
-        await run_llm_scoring_async(
+        await _run_llm_scoring_async(
             chat_target=chat_target,
             response_handler=JsonSchemaResponseHandler(),
             scorer_identifier=scorer.get_identifier(),
@@ -222,7 +222,7 @@ async def test_scorer_send_chat_target_async_good_response(good_json):
 
     scorer = MockScorer()
 
-    await run_llm_scoring_async(
+    await _run_llm_scoring_async(
         chat_target=chat_target,
         response_handler=JsonSchemaResponseHandler(),
         scorer_identifier=scorer.get_identifier(),
@@ -250,7 +250,7 @@ async def test_scorer_remove_markdown_json_called(good_json):
     with patch(
         "pyrit.score.response_handler.remove_markdown_json", wraps=remove_markdown_json
     ) as mock_remove_markdown_json:
-        await run_llm_scoring_async(
+        await _run_llm_scoring_async(
             chat_target=chat_target,
             response_handler=JsonSchemaResponseHandler(),
             scorer_identifier=scorer.get_identifier(),
@@ -276,7 +276,7 @@ async def test_score_value_with_llm_prepended_text_message_piece_creates_multipi
 
     scorer = MockScorer()
 
-    await run_llm_scoring_async(
+    await _run_llm_scoring_async(
         chat_target=chat_target,
         response_handler=JsonSchemaResponseHandler(),
         scorer_identifier=scorer.get_identifier(),
@@ -321,7 +321,7 @@ async def test_score_value_with_llm_no_prepended_text_creates_single_piece_messa
 
     scorer = MockScorer()
 
-    await run_llm_scoring_async(
+    await _run_llm_scoring_async(
         chat_target=chat_target,
         response_handler=JsonSchemaResponseHandler(),
         scorer_identifier=scorer.get_identifier(),
@@ -358,7 +358,7 @@ async def test_score_value_with_llm_prepended_text_works_with_audio(good_json):
 
     scorer = MockScorer()
 
-    await run_llm_scoring_async(
+    await _run_llm_scoring_async(
         chat_target=chat_target,
         response_handler=JsonSchemaResponseHandler(),
         scorer_identifier=scorer.get_identifier(),
@@ -1552,7 +1552,7 @@ async def test_score_value_with_llm_skips_reasoning_piece(good_json):
 
     scorer = MockScorer()
 
-    result = await run_llm_scoring_async(
+    result = await _run_llm_scoring_async(
         chat_target=chat_target,
         response_handler=JsonSchemaResponseHandler(),
         scorer_identifier=scorer.get_identifier(),

@@ -37,7 +37,7 @@ async def test_score_async_returns_score_from_unvalidated(mock_chat_target):
     message = MessagePiece(role="assistant", original_value="4").to_message()
     with patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()):
         with patch(
-            "pyrit.score.true_false.self_ask_question_answer_scorer.run_llm_scoring_async",
+            "pyrit.score.true_false.self_ask_question_answer_scorer._run_llm_scoring_async",
             new=AsyncMock(return_value=unvalidated),
         ):
             scores = await scorer.score_async(message, objective="2+2=?\nanswer: 4")

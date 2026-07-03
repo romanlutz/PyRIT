@@ -42,7 +42,7 @@ async def test_insecure_code_scorer_valid_response(mock_chat_target):
     # Patch _memory.add_scores_to_memory to prevent sqlite errors and check for call
     with patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()) as mock_add_scores:
         with patch(
-            "pyrit.score.float_scale.insecure_code_scorer.run_llm_scoring_async",
+            "pyrit.score.float_scale.insecure_code_scorer._run_llm_scoring_async",
             new=AsyncMock(return_value=unvalidated_score),
         ):
             # Create a message piece object
@@ -66,9 +66,9 @@ async def test_insecure_code_scorer_invalid_json(mock_chat_target):
 
     # Patch scorer._memory.add_scores_to_memory to make it a mock
     with patch.object(scorer._memory, "add_scores_to_memory", new=MagicMock()) as mock_add_scores:
-        # Mock run_llm_scoring_async to raise InvalidJsonException
+        # Mock _run_llm_scoring_async to raise InvalidJsonException
         with patch(
-            "pyrit.score.float_scale.insecure_code_scorer.run_llm_scoring_async",
+            "pyrit.score.float_scale.insecure_code_scorer._run_llm_scoring_async",
             new=AsyncMock(side_effect=InvalidJsonException(message="Invalid JSON")),
         ):
             message = MessagePiece(role="user", original_value="sample code").to_message()

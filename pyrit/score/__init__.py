@@ -37,7 +37,6 @@ from pyrit.score.float_scale.self_ask_scale_scorer import (
     load_scale_arguments,
     render_scale_system_prompt,
 )
-from pyrit.score.llm_scoring import run_llm_scoring_async
 from pyrit.score.response_handler import (
     CallableResponseHandler,
     JsonSchemaResponseHandler,
@@ -191,7 +190,6 @@ __all__ = [
     "render_scale_system_prompt",
     "render_true_false_system_prompt",
     "ResponseHandler",
-    "run_llm_scoring_async",
     "Scorer",
     "ScorerEvalDatasetFiles",
     "ScorerEvaluator",
