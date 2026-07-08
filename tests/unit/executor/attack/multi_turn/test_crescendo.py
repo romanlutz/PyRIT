@@ -67,6 +67,10 @@ def create_mock_chat_target(*, name: str = "MockChatTarget") -> MagicMock:
     target.send_prompt_async = AsyncMock()
     target.set_system_prompt = MagicMock()
     target.get_identifier.return_value = _mock_target_id(name)
+    # Sensible default for the _ModalityFeedbackRouter: text-only target. Tests
+    # that need multimodal behavior override input_modalities on their own copy.
+    target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+    target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
     return target
 
 
@@ -264,7 +268,8 @@ class CrescendoTestHelper:
         This method handles the complex initialization of CrescendoAttack,
         allowing tests to focus on specific scenarios without repeating setup code.
         """
-        adversarial_config = AttackAdversarialConfig(target=adversarial_chat, system_prompt_path=system_prompt_path)
+        system_prompt = SeedPrompt.from_yaml_file(system_prompt_path) if system_prompt_path else None
+        adversarial_config = AttackAdversarialConfig(target=adversarial_chat, system_prompt=system_prompt)
 
         # Only create scoring config if scorers are provided
         # This allows testing both with custom scorers and default scorers
@@ -358,7 +363,8 @@ class TestCrescendoAttackInitialization:
 
     @pytest.mark.parametrize(
         "system_prompt_path",
-        [Path(EXECUTOR_SEED_PROMPT_PATH) / "crescendo" / f"crescendo_variant_{i}.yaml" for i in range(1, 6)],
+        [Path(EXECUTOR_SEED_PROMPT_PATH) / "crescendo" / f"crescendo_variant_{i}.yaml" for i in range(1, 6)]
+        + [Path(EXECUTOR_SEED_PROMPT_PATH) / "crescendo" / "image_generation.yaml"],
     )
     def test_init_with_different_system_prompt_variants(
         self,
@@ -368,7 +374,7 @@ class TestCrescendoAttackInitialization:
     ):
         """Test initialization with different Crescendo system prompt variants."""
         adversarial_config = AttackAdversarialConfig(
-            target=mock_adversarial_chat, system_prompt_path=system_prompt_path
+            target=mock_adversarial_chat, system_prompt=SeedPrompt.from_yaml_file(system_prompt_path)
         )
 
         attack = CrescendoAttack(
@@ -381,19 +387,15 @@ class TestCrescendoAttackInitialization:
         # Making sure the system prompt template has expected parameters
         assert "objective" in attack._adversarial_chat_system_prompt_template.parameters
         assert "max_turns" in attack._adversarial_chat_system_prompt_template.parameters
+        assert attack._adversarial_chat_system_prompt_template.response_json_schema is not None
 
     def test_init_with_invalid_system_prompt_path_raises_error(
         self, mock_objective_target: MagicMock, mock_adversarial_chat: MagicMock
     ):
-        """Test that invalid system prompt path raises FileNotFoundError."""
-        adversarial_config = AttackAdversarialConfig(
-            target=mock_adversarial_chat, system_prompt_path="nonexistent_file.yaml"
-        )
-
+        """Test that loading a nonexistent system prompt path raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
-            CrescendoAttack(
-                objective_target=mock_objective_target,
-                attack_adversarial_config=adversarial_config,
+            AttackAdversarialConfig(
+                target=mock_adversarial_chat, system_prompt=SeedPrompt.from_yaml_file("nonexistent_file.yaml")
             )
 
     @pytest.mark.parametrize("max_backtracks", [-1, -10])
@@ -884,6 +886,9 @@ class TestPromptGeneration:
         basic_context: CrescendoAttackContext,
     ):
         """The shared adversarial_chat JSON schema is forwarded to the target via metadata."""
+        mock_adversarial_chat.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text"}), frozenset({"text", "image_path"})}
+        )
         attack = CrescendoTestHelper.create_attack(
             objective_target=mock_objective_target,
             adversarial_chat=mock_adversarial_chat,
@@ -897,9 +902,34 @@ class TestPromptGeneration:
             text=create_adversarial_json_response()
         )
 
-        await attack._send_prompt_to_adversarial_chat_async(prompt_text="Test prompt", context=basic_context)
+        seed_message = Message(
+            message_pieces=[
+                MessagePiece(
+                    role="user",
+                    original_value="",
+                    original_value_data_type="text",
+                    conversation_id="crescendo-seed-forwarding-conv",
+                    prompt_metadata={"adversarial_placeholder": True},
+                ),
+                MessagePiece(
+                    role="user",
+                    original_value="/path/to/seed.png",
+                    original_value_data_type="image_path",
+                    conversation_id="crescendo-seed-forwarding-conv",
+                ),
+            ]
+        )
+
+        await attack._send_prompt_to_adversarial_chat_async(
+            prompt_text="Test prompt",
+            context=basic_context,
+            seed_message=seed_message,
+        )
 
         sent_message = mock_prompt_normalizer.send_prompt_async.call_args.kwargs["message"]
+        assert len(sent_message.message_pieces) == 2
+        assert sent_message.message_pieces[1].original_value_data_type == "image_path"
+        assert sent_message.message_pieces[1].original_value == "/path/to/seed.png"
         metadata = sent_message.message_pieces[0].prompt_metadata
         assert metadata["response_format"] == "json"
         assert metadata[JSON_SCHEMA_METADATA_KEY] == schema
@@ -2396,6 +2426,169 @@ class TestCrescendoConversationTracking:
 
 
 @pytest.mark.usefixtures("patch_central_database")
+class TestModalityRouterIntegration:
+    """Integration tests for the capability-aware modality router wiring in Crescendo."""
+
+    @staticmethod
+    def _set_image_capable_objective(target: MagicMock) -> None:
+        target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text"}), frozenset({"text", "image_path"})}
+        )
+        target.configuration.capabilities.output_modalities = frozenset({frozenset({"image_path"})})
+
+    @staticmethod
+    def _make_image_response() -> Message:
+        return Message(
+            message_pieces=[
+                MessagePiece(
+                    role="assistant",
+                    original_value="/tmp/output.png",
+                    original_value_data_type="image_path",
+                    converted_value="/tmp/output.png",
+                    converted_value_data_type="image_path",
+                )
+            ]
+        )
+
+    async def test_generate_next_prompt_forwards_prev_image_to_objective(
+        self,
+        mock_objective_target: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+    ):
+        """Objective accepting {text, image_path} gets prev image in turn-N request."""
+        self._set_image_capable_objective(mock_objective_target)
+        attack = CrescendoTestHelper.create_attack(
+            objective_target=mock_objective_target,
+            adversarial_chat=mock_adversarial_chat,
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        context = CrescendoAttackContext(
+            params=AttackParameters(objective="goal"),
+            session=ConversationSession(),
+            executed_turns=1,
+            last_response=self._make_image_response(),
+        )
+
+        with patch.object(attack, "_get_attack_prompt_async", new_callable=AsyncMock, return_value="next question"):
+            result = await attack._generate_next_prompt_async(context=context)
+
+        assert len(result.message_pieces) == 2
+        assert result.message_pieces[0].original_value == "next question"
+        assert result.message_pieces[1].original_value_data_type == "image_path"
+        assert result.message_pieces[1].original_value == "/tmp/output.png"
+
+    async def test_generate_next_prompt_text_only_objective_drops_prev_image(
+        self,
+        mock_objective_target: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+    ):
+        """Text-only objective never receives prior images even if available."""
+        # mock_objective_target default is text-only.
+        attack = CrescendoTestHelper.create_attack(
+            objective_target=mock_objective_target,
+            adversarial_chat=mock_adversarial_chat,
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        context = CrescendoAttackContext(
+            params=AttackParameters(objective="goal"),
+            session=ConversationSession(),
+            executed_turns=1,
+            last_response=self._make_image_response(),
+        )
+
+        with patch.object(attack, "_get_attack_prompt_async", new_callable=AsyncMock, return_value="next question"):
+            result = await attack._generate_next_prompt_async(context=context)
+
+        assert len(result.message_pieces) == 1
+        assert result.get_value() == "next question"
+
+    async def test_generate_next_prompt_placeholder_branch_fills_in_adv_text(
+        self,
+        mock_objective_target: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+    ):
+        """next_message with placeholder + seed image -> adv text fills the slot."""
+        mock_objective_target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text", "image_path"})}
+        )
+
+        attack = CrescendoTestHelper.create_attack(
+            objective_target=mock_objective_target,
+            adversarial_chat=mock_adversarial_chat,
+            prompt_normalizer=mock_prompt_normalizer,
+        )
+
+        shared_conv = "edit-conv"
+        seed_message = Message(
+            message_pieces=[
+                MessagePiece(
+                    role="user",
+                    original_value="",
+                    original_value_data_type="text",
+                    conversation_id=shared_conv,
+                    prompt_metadata={"adversarial_placeholder": True},
+                ),
+                MessagePiece(
+                    role="user",
+                    original_value="/path/to/seed.png",
+                    original_value_data_type="image_path",
+                    conversation_id=shared_conv,
+                ),
+            ]
+        )
+        # Use the context-level override so the cleared-after-use assertion holds
+        # without relying on mutating frozen AttackParameters.
+        context = CrescendoAttackContext(
+            params=AttackParameters(objective="goal"),
+            session=ConversationSession(),
+            executed_turns=0,
+        )
+        context.next_message = seed_message
+
+        with patch.object(
+            attack, "_get_attack_prompt_async", new_callable=AsyncMock, return_value="seed text"
+        ) as mock_get:
+            result = await attack._generate_next_prompt_async(context=context)
+
+        assert context.next_message is None
+        mock_get.assert_awaited_once_with(
+            context=context,
+            refused_text="",
+            seed_message=seed_message,
+        )
+        assert len(result.message_pieces) == 2
+        assert result.message_pieces[0].original_value == "seed text"
+        assert result.message_pieces[0].original_value_data_type == "text"
+        assert result.message_pieces[1].original_value_data_type == "image_path"
+        assert result.message_pieces[1].original_value == "/path/to/seed.png"
+
+    def test_validate_context_raises_when_edit_only_target_has_no_seed(
+        self,
+        mock_objective_target: MagicMock,
+        mock_adversarial_chat: MagicMock,
+    ):
+        """Edit-only objective without seed in next_message fails validation early."""
+        mock_objective_target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text", "image_path"})}
+        )
+        attack = CrescendoTestHelper.create_attack(
+            objective_target=mock_objective_target,
+            adversarial_chat=mock_adversarial_chat,
+        )
+        context = CrescendoAttackContext(
+            params=AttackParameters(objective="goal"),
+            session=ConversationSession(),
+        )
+
+        with pytest.raises(ValueError, match="seed"):
+            attack._validate_context(context=context)
+
+
 class TestCrescendoAdversarialIdentity:
     """Tests for adversarial config in the Crescendo attack identity and inline system prompt."""
 

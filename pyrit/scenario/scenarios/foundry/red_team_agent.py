@@ -16,19 +16,9 @@ from inspect import signature
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pyrit.common import REQUIRED_VALUE, apply_defaults
-from pyrit.common.deprecation import print_deprecation_message  # Deprecated. Will be removed in 0.16.0.
 from pyrit.datasets import TextJailBreak
-from pyrit.executor.attack import (
-    CrescendoAttack,
-    PromptSendingAttack,
-    RedTeamingAttack,
-    TreeOfAttacksWithPruningAttack,
-)
-from pyrit.executor.attack.core.attack_config import (
-    AttackAdversarialConfig,
-    AttackConverterConfig,
-    AttackScoringConfig,
-)
+from pyrit.executor.attack import CrescendoAttack, PromptSendingAttack, RedTeamingAttack, TreeOfAttacksWithPruningAttack
+from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackConverterConfig, AttackScoringConfig
 from pyrit.models import SeedAttackGroup
 from pyrit.prompt_converter import (
     AnsiAttackConverter,
@@ -53,18 +43,15 @@ from pyrit.prompt_converter import (
     UrlConverter,
 )
 from pyrit.prompt_converter.binary_converter import BinaryConverter
-from pyrit.prompt_converter.token_smuggling.ascii_smuggler_converter import (
-    AsciiSmugglerConverter,
-)
-from pyrit.prompt_normalizer.prompt_converter_configuration import (
-    PromptConverterConfiguration,
-)
+from pyrit.prompt_converter.token_smuggling.ascii_smuggler_converter import AsciiSmugglerConverter
+from pyrit.prompt_normalizer.prompt_converter_configuration import PromptConverterConfiguration
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.scenario import Scenario
-from pyrit.scenario.core.scenario_strategy import ScenarioCompositeStrategy, ScenarioStrategy
+from pyrit.scenario.core.scenario_context import ScenarioContext
+from pyrit.scenario.core.scenario_strategy import ScenarioStrategy
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 
 if TYPE_CHECKING:
@@ -222,7 +209,6 @@ class RedTeamAgent(Scenario):
         adversarial_chat: PromptTarget | None = None,
         attack_scoring_config: AttackScoringConfig | None = None,
         scenario_result_id: str | None = None,
-        include_baseline: bool | None = None,  # Deprecated. Will be removed in 0.16.0.
     ) -> None:
         """
         Initialize a Foundry Scenario with the specified attack strategies.
@@ -235,8 +221,6 @@ class RedTeamAgent(Scenario):
                 including the objective scorer and auxiliary scorers. If not provided, creates a default
                 configuration with a composite scorer using Azure Content Filter and SelfAsk Refusal scorers.
             scenario_result_id (str | None): Optional ID of an existing scenario result to resume.
-            include_baseline (bool | None): **Deprecated.** Will be removed in 0.16.0. Pass
-                ``include_baseline`` to ``initialize_async`` instead.
 
         Raises:
             ValueError: If attack_strategies is empty or contains unsupported strategies.
@@ -263,16 +247,6 @@ class RedTeamAgent(Scenario):
             scenario_result_id=scenario_result_id,
         )
 
-        # Deprecated constructor-time baseline override. Will be removed in 0.16.0, along with
-        # the include_baseline kwarg above.
-        if include_baseline is not None:
-            print_deprecation_message(
-                old_item="RedTeamAgent(include_baseline=...)",
-                new_item="RedTeamAgent.initialize_async(include_baseline=...)",
-                removed_in="0.16.0",
-            )
-            self._legacy_include_baseline = include_baseline
-
         self._scenario_composites: list[FoundryComposite] = []
 
     @apply_defaults
@@ -280,7 +254,7 @@ class RedTeamAgent(Scenario):
         self,
         *,
         objective_target: PromptTarget = REQUIRED_VALUE,  # type: ignore[ty:invalid-parameter-default]
-        scenario_strategies: Sequence["FoundryStrategy | FoundryComposite | ScenarioCompositeStrategy"] | None = None,
+        scenario_strategies: Sequence["FoundryStrategy | FoundryComposite"] | None = None,
         dataset_config: DatasetAttackConfiguration | None = None,
         max_concurrency: int = 4,
         max_retries: int = 0,
@@ -292,10 +266,9 @@ class RedTeamAgent(Scenario):
 
         Args:
             objective_target (PromptTarget): The target system to attack.
-            scenario_strategies (Sequence[FoundryStrategy | FoundryComposite | ScenarioCompositeStrategy] | None): The
+            scenario_strategies (Sequence[FoundryStrategy | FoundryComposite] | None): The
                 strategies to execute. Accepts bare FoundryStrategy enum members, FoundryComposite
-                objects (for pairing an attack with converters), or a mix of both. Passing
-                ScenarioCompositeStrategy is deprecated — use FoundryComposite instead.
+                objects (for pairing an attack with converters), or a mix of both.
                 If None, uses the default aggregate (EASY).
             dataset_config (DatasetAttackConfiguration | None): Configuration for the dataset source.
             max_concurrency (int): Maximum number of concurrent attack executions. Defaults to 4.
@@ -303,12 +276,15 @@ class RedTeamAgent(Scenario):
             memory_labels (dict[str, str] | None): Labels to attach to all memory entries.
             include_baseline (bool | None): See ``Scenario.initialize_async``.
         """
-        # This override exists purely for type-widening: FoundryComposite is a dataclass,
-        # not a ScenarioStrategy enum member, so the base class signature would reject it.
-        # All logic lives in _prepare_strategies (also overridden below).
+        # This override exists to widen the accepted strategy types (FoundryComposite is a
+        # dataclass, not a ScenarioStrategy enum member) and to expand composites up-front:
+        # _resolve_foundry_strategies populates self._scenario_composites (consumed by
+        # _build_atomic_attacks_async) and returns the flat concrete strategy list the base
+        # class tracks.
+        flat_strategies = self._resolve_foundry_strategies(scenario_strategies)
         await super().initialize_async(
             objective_target=objective_target,
-            scenario_strategies=scenario_strategies,
+            scenario_strategies=flat_strategies,
             dataset_config=dataset_config,
             max_concurrency=max_concurrency,
             max_retries=max_retries,
@@ -316,9 +292,9 @@ class RedTeamAgent(Scenario):
             include_baseline=include_baseline,
         )
 
-    def _prepare_strategies(  # type: ignore[ty:invalid-method-override]
+    def _resolve_foundry_strategies(
         self,
-        strategies: "Sequence[FoundryStrategy | FoundryComposite | ScenarioCompositeStrategy] | None",
+        strategies: "Sequence[FoundryStrategy | FoundryComposite] | None",
     ) -> list[ScenarioStrategy]:
         """
         Resolve strategies and build FoundryComposite objects.
@@ -344,18 +320,6 @@ class RedTeamAgent(Scenario):
         seen: set[FoundryStrategy] = set()
 
         for item in strategies:
-            if isinstance(item, ScenarioCompositeStrategy):
-                # Legacy backward-compat: convert to FoundryComposite (ScenarioCompositeStrategy
-                # is deprecated — use FoundryComposite directly instead).
-                # Route by tags rather than position: the first attack-tagged strategy
-                # becomes `attack`; all converter-tagged strategies become `converters`.
-                foundry_strats = [s for s in item.strategies if isinstance(s, FoundryStrategy)]
-                if not foundry_strats:
-                    continue
-                attack_strat = next((s for s in foundry_strats if "attack" in s.tags), None)
-                converter_strats = [s for s in foundry_strats if "attack" not in s.tags]
-                item = FoundryComposite(attack=attack_strat, converters=converter_strats)
-
             if isinstance(item, FoundryComposite):
                 composites.append(item)
                 if item.attack:
@@ -389,39 +353,32 @@ class RedTeamAgent(Scenario):
             return FoundryComposite(attack=strategy)
         return FoundryComposite(attack=None, converters=[strategy])
 
-    async def _resolve_seed_groups_async(self) -> list[SeedAttackGroup]:
+    async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """
-        Resolve seed groups from the dataset configuration.
+        Build one ``AtomicAttack`` per resolved FoundryComposite.
 
-        Returns:
-            list[SeedGroup]: The resolved seed groups.
-        """
-        return await self._dataset_config.get_seed_attack_groups_async()
-
-    async def _get_atomic_attacks_async(self) -> list[AtomicAttack]:
-        """
-        Retrieve the list of AtomicAttack instances in this scenario.
+        Args:
+            context (ScenarioContext): The resolved runtime inputs for this run.
 
         Returns:
             list[AtomicAttack]: The list of AtomicAttack instances in this scenario.
         """
-        # Resolve seed groups now that initialize_async has been called
-        self._seed_groups = await self._resolve_seed_groups_async()
+        seed_groups = list(context.seed_groups)
+        return [
+            self._get_attack_from_strategy(composite=composition, seed_groups=seed_groups)
+            for composition in self._scenario_composites
+        ]
 
-        atomic_attacks = [self._get_attack_from_strategy(composition) for composition in self._scenario_composites]
-
-        if self._include_baseline:
-            atomic_attacks.insert(0, self._build_baseline_atomic_attack(seed_groups=self._seed_groups))
-
-        return atomic_attacks
-
-    def _get_attack_from_strategy(self, composite: FoundryComposite) -> AtomicAttack:
+    def _get_attack_from_strategy(
+        self, *, composite: FoundryComposite, seed_groups: list[SeedAttackGroup]
+    ) -> AtomicAttack:
         """
         Get an atomic attack for the specified FoundryComposite.
 
         Args:
             composite (FoundryComposite): Typed composite with an optional attack strategy
                 and zero or more converter strategies.
+            seed_groups (list[SeedAttackGroup]): Seed groups the attack draws from.
 
         Returns:
             AtomicAttack: The configured atomic attack.
@@ -497,7 +454,7 @@ class RedTeamAgent(Scenario):
         return AtomicAttack(
             atomic_attack_name=composite.name,
             attack_technique=AttackTechnique(attack=attack),
-            seed_groups=self._seed_groups,
+            seed_groups=seed_groups,
             adversarial_chat=self._adversarial_chat,
             objective_scorer=self._attack_scoring_config.objective_scorer,
             memory_labels=self._memory_labels,
@@ -561,7 +518,7 @@ class RedTeamAgent(Scenario):
 
             # Create the adversarial config from self._adversarial_target
             attack_adversarial_config = AttackAdversarialConfig(target=self._adversarial_chat)
-            kwargs["attack_adversarial_config"] = attack_adversarial_config  # type: ignore[ty:invalid-assignment]
+            kwargs["attack_adversarial_config"] = attack_adversarial_config
 
         # Add attack-specific kwargs if provided
         if attack_kwargs:

@@ -6,29 +6,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pyrit.common import apply_defaults
-from pyrit.common.deprecation import print_deprecation_message  # Deprecated. Will be removed in 0.16.0.
-from pyrit.common.path import (
-    EXECUTOR_RED_TEAM_PATH,
-    SCORER_SEED_PROMPT_PATH,
-)
-from pyrit.executor.attack import (
-    ContextComplianceAttack,
-    RedTeamingAttack,
-    RolePlayAttack,
-    RolePlayPaths,
-)
-from pyrit.executor.attack.core.attack_config import (
-    AttackAdversarialConfig,
-    AttackScoringConfig,
-)
-from pyrit.models import Parameter, SeedAttackGroup
+from pyrit.common.path import EXECUTOR_RED_TEAM_PATH, SCORER_SEED_PROMPT_PATH
+from pyrit.executor.attack import ContextComplianceAttack, RedTeamingAttack, RolePlayAttack, RolePlayPaths
+from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
+from pyrit.models import Parameter, SeedAttackGroup, SeedPrompt
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
-from pyrit.scenario.core.dataset_configuration import (
-    DatasetAttackConfiguration,
-)
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.scenario import Scenario
+from pyrit.scenario.core.scenario_context import ScenarioContext
 from pyrit.scenario.core.scenario_strategy import ScenarioStrategy
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.score import TrueFalseScorer
@@ -57,14 +44,24 @@ class ScamStrategy(ScenarioStrategy):
         to be used during training seminars.
     - PersuasiveRedTeamingAttack: This multi-turn attack uses a persuasive persona with the `RedTeamingAttack` to
         iteratively convince the target to comply with the scam objective over multiple turns.
+
+    Aggregate Values:
+    - ALL: Every technique (both single-turn and the multi-turn PersuasiveRedTeamingAttack).
+    - DEFAULT: The single-turn techniques (ContextCompliance, RolePlay). Excludes the multi-turn
+        PersuasiveRedTeamingAttack so the default run stays fast; opt into it via ALL or MULTI_TURN.
+    - SINGLE_TURN / MULTI_TURN: Group techniques by turn count. DEFAULT intentionally shares
+        membership with SINGLE_TURN today (both are the single-turn techniques); they are kept
+        distinct because DEFAULT is the recommended fast default while SINGLE_TURN is a turn-count
+        grouping, and their membership may diverge later.
     """
 
     ALL = ("all", {"all"})
+    DEFAULT = ("default", {"default"})
     SINGLE_TURN = ("single_turn", {"single_turn"})
     MULTI_TURN = ("multi_turn", {"multi_turn"})
 
-    ContextCompliance = ("context_compliance", {"single_turn"})
-    RolePlay = ("role_play", {"single_turn"})
+    ContextCompliance = ("context_compliance", {"single_turn", "default"})
+    RolePlay = ("role_play", {"single_turn", "default"})
     PersuasiveRedTeamingAttack = ("persuasive_rta", {"multi_turn"})
 
     @classmethod
@@ -76,7 +73,7 @@ class ScamStrategy(ScenarioStrategy):
             set[str]: Set of tags that are aggregate markers.
         """
         # Include base class aggregates ("all") and add scenario-specific ones
-        return super().get_aggregate_tags() | {"single_turn", "multi_turn"}
+        return super().get_aggregate_tags() | {"default", "single_turn", "multi_turn"}
 
 
 class Scam(Scenario):
@@ -85,7 +82,7 @@ class Scam(Scenario):
     (e.g., phishing emails, fraudulent messages) with primarily persuasion-oriented techniques.
     """
 
-    VERSION: int = 1
+    VERSION: int = 2
 
     @classmethod
     def _get_additional_scoring_questions(cls) -> list[Path]:
@@ -126,7 +123,6 @@ class Scam(Scenario):
         objective_scorer: TrueFalseScorer | None = None,
         adversarial_chat: PromptTarget | None = None,
         scenario_result_id: str | None = None,
-        include_baseline: bool | None = None,  # Deprecated. Will be removed in 0.16.0.
     ) -> None:
         """
         Initialize the ScamScenario.
@@ -137,8 +133,6 @@ class Scam(Scenario):
             adversarial_chat (PromptTarget | None): Chat target used to rephrase the
                 objective into the role-play context (in single-turn strategies).
             scenario_result_id (str | None): Optional ID of an existing scenario result to resume.
-            include_baseline (bool | None): **Deprecated.** Will be removed in 0.16.0. Pass
-                ``include_baseline`` to ``initialize_async`` instead.
         """
         if not objective_scorer:
             objective_scorer = self._get_default_objective_scorer()
@@ -151,43 +145,19 @@ class Scam(Scenario):
         super().__init__(
             version=self.VERSION,
             strategy_class=ScamStrategy,
-            default_strategy=ScamStrategy.ALL,
+            default_strategy=ScamStrategy.DEFAULT,
             default_dataset_config=DatasetAttackConfiguration(dataset_names=["airt_scams"], max_dataset_size=4),
             objective_scorer=objective_scorer,
             scenario_result_id=scenario_result_id,
         )
 
-        # Deprecated constructor-time baseline override. Will be removed in 0.16.0, along with
-        # the include_baseline kwarg above.
-        if include_baseline is not None:
-            print_deprecation_message(
-                old_item="Scam(include_baseline=...)",
-                new_item="Scam.initialize_async(include_baseline=...)",
-                removed_in="0.16.0",
-            )
-            self._legacy_include_baseline = include_baseline
-
-        # Will be resolved in _get_atomic_attacks_async
-        self._seed_groups: list[SeedAttackGroup] | None = None
-
-    async def _resolve_seed_groups_async(self) -> list[SeedAttackGroup]:
-        """
-        Resolve seed groups from dataset configuration.
-
-        Returns:
-            list[SeedAttackGroup]: List of seed attack groups with objectives to be tested.
-        """
-        # Use dataset_config (guaranteed to be set by initialize_async). Auto-fetch
-        # populates memory first; a still-empty result raises a DatasetConstraintError
-        # naming the offending dataset, which we let propagate.
-        return list(await self._dataset_config.get_seed_attack_groups_async())
-
-    def _get_atomic_attack_from_strategy(self, strategy: str) -> AtomicAttack:
+    def _get_atomic_attack_from_strategy(self, *, strategy: str, seed_groups: list[SeedAttackGroup]) -> AtomicAttack:
         """
         Translate the strategies into actual AtomicAttacks.
 
         Args:
             strategy (str): The strategy to create the attack from.
+            seed_groups (list[SeedAttackGroup]): Seed groups the attack draws from.
 
         Returns:
             AtomicAttack: Configured for the specified strategy.
@@ -204,9 +174,9 @@ class Scam(Scenario):
 
         if strategy == "persuasive_rta":
             # Set system prompt to generic persuasion persona
-            self._adversarial_config.system_prompt_path = Path(
-                PERSUASION_DECEPTION_PATH, "persuasion_persona_generic.yaml"
-            ).resolve()
+            self._adversarial_config.system_prompt = SeedPrompt.from_yaml_file(
+                Path(PERSUASION_DECEPTION_PATH, "persuasion_persona_generic.yaml").resolve()
+            )
 
             attack_strategy = RedTeamingAttack(
                 objective_target=self._objective_target,
@@ -223,7 +193,7 @@ class Scam(Scenario):
             )
         elif strategy == "context_compliance":
             # Set system prompt to default
-            self._adversarial_config.system_prompt_path = None
+            self._adversarial_config.system_prompt = None
 
             attack_strategy = ContextComplianceAttack(
                 objective_target=self._objective_target,
@@ -236,25 +206,23 @@ class Scam(Scenario):
         return AtomicAttack(
             atomic_attack_name=f"scam_{strategy}",
             attack_technique=AttackTechnique(attack=attack_strategy),
-            seed_groups=self._seed_groups or [],
+            seed_groups=seed_groups,
             memory_labels=self._memory_labels,
         )
 
-    async def _get_atomic_attacks_async(self) -> list[AtomicAttack]:
+    async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """
         Generate atomic attacks for each strategy.
+
+        Args:
+            context (ScenarioContext): The resolved runtime inputs for this run.
 
         Returns:
             list[AtomicAttack]: List of atomic attacks to execute.
         """
-        # Resolve seed groups from deprecated objectives or dataset config
-        self._seed_groups = await self._resolve_seed_groups_async()
+        seed_groups = list(context.seed_groups)
+        strategies = {s.value for s in context.scenario_strategies}
 
-        strategies = {s.value for s in self._scenario_strategies}
-
-        atomic_attacks = [self._get_atomic_attack_from_strategy(strategy) for strategy in strategies]
-
-        if self._include_baseline:
-            atomic_attacks.insert(0, self._build_baseline_atomic_attack(seed_groups=self._seed_groups or []))
-
-        return atomic_attacks
+        return [
+            self._get_atomic_attack_from_strategy(strategy=strategy, seed_groups=seed_groups) for strategy in strategies
+        ]

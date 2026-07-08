@@ -12,8 +12,6 @@ from urllib.parse import urlparse
 
 import aiofiles
 
-from pyrit.common.deprecation import print_deprecation_message
-
 if TYPE_CHECKING:
     from azure.identity.aio import DefaultAzureCredential
     from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
@@ -66,86 +64,6 @@ class StorageIO(ABC):
         Asynchronously creates a directory or equivalent in the storage system if it doesn't exist.
         """
 
-    async def read_file(self, path: Path | str) -> bytes:  # pyrit-async-suffix-exempt
-        """
-        Read a file from storage (deprecated alias of ``read_file_async``).
-
-        Args:
-            path (Union[Path, str]): The path to the file.
-
-        Returns:
-            bytes: The content of the file.
-        """
-        print_deprecation_message(
-            old_item="pyrit.memory.storage.storage.StorageIO.read_file",
-            new_item="pyrit.memory.storage.storage.StorageIO.read_file_async",
-            removed_in="0.16.0",
-        )
-        return await self.read_file_async(path)
-
-    async def write_file(self, path: Path | str, data: bytes) -> None:  # pyrit-async-suffix-exempt
-        """
-        Write data to storage (deprecated alias of ``write_file_async``).
-
-        Args:
-            path (Union[Path, str]): The path to the file.
-            data (bytes): The content to write to the file.
-        """
-        print_deprecation_message(
-            old_item="pyrit.memory.storage.storage.StorageIO.write_file",
-            new_item="pyrit.memory.storage.storage.StorageIO.write_file_async",
-            removed_in="0.16.0",
-        )
-        await self.write_file_async(path, data)
-
-    async def path_exists(self, path: Path | str) -> bool:  # pyrit-async-suffix-exempt
-        """
-        Check whether a path exists (deprecated alias of ``path_exists_async``).
-
-        Args:
-            path (Union[Path, str]): The path to check.
-
-        Returns:
-            bool: True if the path exists, False otherwise.
-        """
-        print_deprecation_message(
-            old_item="pyrit.memory.storage.storage.StorageIO.path_exists",
-            new_item="pyrit.memory.storage.storage.StorageIO.path_exists_async",
-            removed_in="0.16.0",
-        )
-        return await self.path_exists_async(path)
-
-    async def is_file(self, path: Path | str) -> bool:  # pyrit-async-suffix-exempt
-        """
-        Check whether the given path is a file (deprecated alias of ``is_file_async``).
-
-        Args:
-            path (Union[Path, str]): The path to check.
-
-        Returns:
-            bool: True if the path is a file, False otherwise.
-        """
-        print_deprecation_message(
-            old_item="pyrit.memory.storage.storage.StorageIO.is_file",
-            new_item="pyrit.memory.storage.storage.StorageIO.is_file_async",
-            removed_in="0.16.0",
-        )
-        return await self.is_file_async(path)
-
-    async def create_directory_if_not_exists(self, path: Path | str) -> None:  # pyrit-async-suffix-exempt
-        """
-        Create a directory if it does not exist (deprecated alias of ``create_directory_if_not_exists_async``).
-
-        Args:
-            path (Union[Path, str]): The directory path to create.
-        """
-        print_deprecation_message(
-            old_item="pyrit.memory.storage.storage.StorageIO.create_directory_if_not_exists",
-            new_item="pyrit.memory.storage.storage.StorageIO.create_directory_if_not_exists_async",
-            removed_in="0.16.0",
-        )
-        await self.create_directory_if_not_exists_async(path)
-
 
 class DiskStorageIO(StorageIO):
     """
@@ -157,7 +75,7 @@ class DiskStorageIO(StorageIO):
         Asynchronously reads a file from the local disk.
 
         Args:
-            path (Union[Path, str]): The path to the file.
+            path (Path | str): The path to the file.
 
         Returns:
             bytes: The content of the file.
@@ -225,7 +143,7 @@ class DiskStorageIO(StorageIO):
         Convert an input path to a Path object.
 
         Args:
-            path (Union[Path, str]): Input path value.
+            path (Path | str): Input path value.
 
         Returns:
             Path: Normalized Path instance.
@@ -250,8 +168,8 @@ class AzureBlobStorageIO(StorageIO):
         Initialize an Azure Blob Storage I/O adapter.
 
         Args:
-            container_url (Optional[str]): Azure Blob container URL.
-            sas_token (Optional[str]): Optional SAS token.
+            container_url (str | None): Azure Blob container URL.
+            sas_token (str | None): Optional SAS token.
             blob_content_type (SupportedContentType): Blob content type for uploads.
 
         Raises:
@@ -394,7 +312,7 @@ class AzureBlobStorageIO(StorageIO):
         created on Windows still produce valid blob names.
 
         Args:
-            path (Union[Path, str]): Blob URL or relative blob path.
+            path (Path | str): Blob URL or relative blob path.
 
         Returns:
             str: The resolved blob name.
@@ -458,7 +376,7 @@ class AzureBlobStorageIO(StorageIO):
         If a relative path is provided, it is used as the blob name directly.
 
         Args:
-            path (Union[Path, str]): Full blob URL or relative blob path.
+            path (Path | str): Full blob URL or relative blob path.
             data (bytes): The data to write.
         """
         if not self._client_async:
@@ -477,7 +395,7 @@ class AzureBlobStorageIO(StorageIO):
         Check whether a given path exists in the Azure Blob Storage container.
 
         Args:
-            path (Union[Path, str]): Blob URL or path to test.
+            path (Path | str): Blob URL or path to test.
 
         Returns:
             bool: True when the path exists.
@@ -501,7 +419,7 @@ class AzureBlobStorageIO(StorageIO):
         Check whether the path refers to a file (blob) in Azure Blob Storage.
 
         Args:
-            path (Union[Path, str]): Blob URL or path to test.
+            path (Path | str): Blob URL or path to test.
 
         Returns:
             bool: True when the blob exists and has non-zero content size.
@@ -525,7 +443,7 @@ class AzureBlobStorageIO(StorageIO):
         Log a no-op directory creation for Azure Blob Storage.
 
         Args:
-            directory_path (Union[Path, str]): Requested directory path.
+            directory_path (Path | str): Requested directory path.
 
         """
         logger.info(

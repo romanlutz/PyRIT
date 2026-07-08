@@ -10,14 +10,14 @@ from azure.storage.blob.aio import BlobClient as AsyncBlobClient
 from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
 from unit.mocks import get_image_message_piece, get_sample_conversations
 
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import AzureBlobStorageTarget
 
 
 @pytest.fixture
 def sample_entries() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
 @pytest.fixture
@@ -32,6 +32,11 @@ def test_initialization_with_required_parameters(azure_blob_storage_target: Azur
     assert azure_blob_storage_target._container_url == "https://test.blob.core.windows.net/test"
     assert azure_blob_storage_target._client_async is None
     assert azure_blob_storage_target._sas_token == "valid_sas_token"
+
+
+def test_supported_auth_modes_includes_identity():
+    """Blob advertises identity-based auth (DefaultAzureCredential) alongside api_key."""
+    assert AzureBlobStorageTarget.supported_auth_modes == ("api_key", "identity")
 
 
 def test_initialization_with_required_parameters_from_env():

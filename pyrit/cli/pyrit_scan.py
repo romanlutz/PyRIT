@@ -23,7 +23,9 @@ from pyrit.cli._cli_args import (
     ARG_HELP,
     _parse_initializer_arg,
     build_parameters_from_api,
+    collapse_dataset_filters,
     non_negative_int,
+    parse_dataset_filter,
     positive_int,
     validate_log_level_argparse,
 )
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
     from pyrit.models.catalog import (
         RegisteredScenario,
         RunScenarioRequest,
-        ScenarioParameterSummary,
         ScenarioRunSummary,
     )
     from pyrit.models.parameter import Parameter
@@ -87,10 +88,14 @@ Examples:
   # Start the backend server
   pyrit_scan --start-server
 
-  # List scenarios, initializers, or targets
+  # List scenarios, initializers, targets, or converters
   pyrit_scan --list-scenarios
   pyrit_scan --list-initializers
   pyrit_scan --list-targets
+  pyrit_scan --list-converters
+
+  # List available datasets
+  pyrit_scan --list-datasets
 
   # Run single-turn cyber attacks against a target
   pyrit_scan airt.cyber --target openai_chat --strategies single_turn
@@ -99,6 +104,10 @@ Examples:
   pyrit_scan airt.rapid_response --target openai_chat
     --strategies role_play --dataset-names airt_hate
     --max-dataset-size 5 --max-concurrency 4
+
+  # Attach registered converters to a technique (repeatable, applied in order)
+  pyrit_scan airt.rapid_response --target openai_chat
+    --strategies role_play:converter.translation_spanish:converter.leetspeak
 
   # Run multi-turn red team agent with labels for tracking
   pyrit_scan airt.red_team_agent --target openai_chat
@@ -190,6 +199,16 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         help="List all available targets and exit",
     )
     discovery_group.add_argument(
+        "--list-converters",
+        action="store_true",
+        help="List all registered converter instances and exit",
+    )
+    discovery_group.add_argument(
+        "--list-datasets",
+        action="store_true",
+        help="List all available datasets and exit",
+    )
+    discovery_group.add_argument(
         "--add-initializer",
         type=str,
         nargs="+",
@@ -249,6 +268,13 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         "--max-dataset-size",
         type=positive_int,
         help=ARG_HELP["max_dataset_size"],
+    )
+    run_group.add_argument(
+        "--dataset-filters",
+        type=parse_dataset_filter,
+        nargs="+",
+        metavar="KEY=VALUE",
+        help=ARG_HELP["dataset_filters"],
     )
 
     return parser
@@ -328,7 +354,7 @@ def _scenario_param_kwargs(*, parameter: Parameter) -> dict[str, Any]:
     return kwargs
 
 
-def _add_scenario_params_from_api(*, parser: ArgumentParser, params: list[ScenarioParameterSummary]) -> None:
+def _add_scenario_params_from_api(*, parser: ArgumentParser, params: list[Parameter]) -> None:
     """
     Add scenario-declared parameters as CLI flags.
 
@@ -452,6 +478,8 @@ def _is_command_specified(*, parsed_args: Namespace) -> bool:
         parsed_args.list_scenarios
         or parsed_args.list_initializers
         or parsed_args.list_targets
+        or parsed_args.list_converters
+        or parsed_args.list_datasets
         or parsed_args.add_initializer
         or parsed_args.scenario_name
     )
@@ -515,6 +543,14 @@ async def _handle_list_commands_async(*, client: Any, parsed_args: Namespace) ->
         targets = await client.list_targets_async()
         _output.print_target_list(items=targets)
         return 0
+    if parsed_args.list_datasets:
+        resp = await client.list_datasets_async()
+        _output.print_dataset_list(items=resp.get("items", []))
+        return 0
+    if parsed_args.list_converters:
+        resp = await client.list_converters_async()
+        _output.print_converter_list(items=resp.get("items", []))
+        return 0
     return None
 
 
@@ -545,9 +581,7 @@ async def _handle_add_initializer_async(*, client: Any, parsed_args: Namespace) 
     return 0
 
 
-def _reparse_with_scenario_params(
-    *, parsed_args: Namespace, supported_params: list[ScenarioParameterSummary]
-) -> Namespace | None:
+def _reparse_with_scenario_params(*, parsed_args: Namespace, supported_params: list[Parameter]) -> Namespace | None:
     """
     Re-parse the original args with scenario-declared flags added to the base parser.
 
@@ -619,6 +653,8 @@ def _build_run_request(*, parsed_args: Namespace, scenario_name: str) -> RunScen
         kwargs["dataset_names"] = parsed_args.dataset_names
     if parsed_args.max_dataset_size is not None:
         kwargs["max_dataset_size"] = parsed_args.max_dataset_size
+    if parsed_args.dataset_filters:
+        kwargs["dataset_filters"] = collapse_dataset_filters(parsed_args.dataset_filters)
     if parsed_args.memory_labels:
         kwargs["labels"] = parse_memory_labels(json_string=parsed_args.memory_labels)
 

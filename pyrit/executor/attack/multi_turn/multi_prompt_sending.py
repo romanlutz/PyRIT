@@ -1,9 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.utils import get_kwarg_param
@@ -51,13 +53,13 @@ class MultiPromptSendingAttackParameters(AttackParameters):
 
     @classmethod
     async def from_seed_group_async(
-        cls: type["MultiPromptSendingAttackParameters"],
+        cls: type[MultiPromptSendingAttackParameters],
         seed_group: SeedAttackGroup,
         *,
-        adversarial_chat: Optional["PromptTarget"] = None,
-        objective_scorer: Optional["TrueFalseScorer"] = None,
+        adversarial_chat: PromptTarget | None = None,
+        objective_scorer: TrueFalseScorer | None = None,
         **overrides: Any,
-    ) -> "MultiPromptSendingAttackParameters":
+    ) -> MultiPromptSendingAttackParameters:
         """
         Create parameters from a SeedGroup, extracting user messages.
 
@@ -358,13 +360,15 @@ class MultiPromptSendingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[An
             objective_target_conversation_id=context.session.conversation_id,
             objective=context.objective,
         ):
+            if context.memory_labels:
+                for piece in current_message.message_pieces:
+                    piece.labels = context.memory_labels
             return await self._prompt_normalizer.send_prompt_async(
                 message=current_message,
                 target=self._objective_target,
                 conversation_id=context.session.conversation_id,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
-                labels=context.memory_labels,  # combined with strategy labels at _setup()
             )
 
     async def _evaluate_response_async(self, *, response: Message, objective: str) -> Score | None:

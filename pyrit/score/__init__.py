@@ -10,7 +10,6 @@ import importlib
 from typing import TYPE_CHECKING
 
 from pyrit.output.scorer.base import ScorerPrinterBase as ScorerPrinter
-from pyrit.output.scorer.pretty import PrettyScorerMemoryPrinter as ConsoleScorerPrinter
 from pyrit.score.batch_scorer import BatchScorer
 from pyrit.score.conversation_scorer import ConversationScorer, create_conversation_scorer
 from pyrit.score.float_scale.azure_content_filter_scorer import AzureContentFilterScorer
@@ -48,15 +47,20 @@ from pyrit.score.true_false.question_answer_scorer import QuestionAnswerScorer
 from pyrit.score.true_false.regex.anthrax_keyword_scorer import AnthraxKeywordScorer
 from pyrit.score.true_false.regex.credential_leak_scorer import CredentialLeakScorer
 from pyrit.score.true_false.regex.fentanyl_keyword_scorer import FentanylKeywordScorer
+from pyrit.score.true_false.regex.ldap_injection_output_scorer import LDAPInjectionOutputScorer
 from pyrit.score.true_false.regex.markdown_injection import MarkdownInjectionScorer
 from pyrit.score.true_false.regex.meth_keyword_scorer import MethKeywordScorer
 from pyrit.score.true_false.regex.nerve_agent_keyword_scorer import NerveAgentKeywordScorer
+from pyrit.score.true_false.regex.open_redirect_output_scorer import OpenRedirectOutputScorer
 from pyrit.score.true_false.regex.path_traversal_output_scorer import PathTraversalOutputScorer
 from pyrit.score.true_false.regex.regex_scorer import RegexScorer
 from pyrit.score.true_false.regex.shell_command_output_scorer import ShellCommandOutputScorer
 from pyrit.score.true_false.regex.sql_injection_output_scorer import SQLInjectionOutputScorer
+from pyrit.score.true_false.regex.ssrf_output_scorer import SSRFOutputScorer
+from pyrit.score.true_false.regex.ssti_output_scorer import SSTIOutputScorer
 from pyrit.score.true_false.regex.static_prompt_injection_scorer import StaticPromptInjectionScorer
 from pyrit.score.true_false.regex.xss_output_scorer import XSSOutputScorer
+from pyrit.score.true_false.regex.xxe_output_scorer import XXEOutputScorer
 from pyrit.score.true_false.self_ask_category_scorer import ContentClassifierPaths, SelfAskCategoryScorer
 from pyrit.score.true_false.self_ask_general_true_false_scorer import SelfAskGeneralTrueFalseScorer
 from pyrit.score.true_false.self_ask_question_answer_scorer import SelfAskQuestionAnswerScorer
@@ -125,7 +129,6 @@ __all__ = [
     "AzureContentFilterScorer",
     "BatchScorer",
     "ContentClassifierPaths",
-    "ConsoleScorerPrinter",
     "ConversationScorer",
     "CredentialLeakScorer",
     "DecodingScorer",
@@ -143,6 +146,7 @@ __all__ = [
     "HumanLabeledDataset",
     "HumanLabeledEntry",
     "InsecureCodeScorer",
+    "LDAPInjectionOutputScorer",
     "LikertScaleEvalFiles",
     "LikertScalePaths",
     "MarkdownInjectionScorer",
@@ -152,6 +156,7 @@ __all__ = [
     "ObjectiveHumanLabeledEntry",
     "ObjectiveScorerEvaluator",
     "ObjectiveScorerMetrics",
+    "OpenRedirectOutputScorer",
     "PathTraversalOutputScorer",
     "PlagiarismMetric",
     "PlagiarismScorer",
@@ -181,6 +186,8 @@ __all__ = [
     "ScorerPrinter",
     "ShellCommandOutputScorer",
     "SQLInjectionOutputScorer",
+    "SSRFOutputScorer",
+    "SSTIOutputScorer",
     "StaticPromptInjectionScorer",
     "SubStringScorer",
     "TrueFalseCompositeScorer",
@@ -193,4 +200,5 @@ __all__ = [
     "VideoFloatScaleScorer",
     "VideoTrueFalseScorer",
     "XSSOutputScorer",
+    "XXEOutputScorer",
 ]
