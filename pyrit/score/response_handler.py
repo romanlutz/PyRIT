@@ -70,7 +70,7 @@ def _build_unvalidated_score(
 
     return UnvalidatedScore(
         raw_score_value=str(parsed_response[score_value_output_key]),
-        score_value_description=parsed_response.get(description_output_key),
+        score_value_description=parsed_response.get(description_output_key, ""),
         score_category=normalized_category,
         score_rationale=parsed_response[rationale_output_key],
         scorer_class_identifier=scorer_identifier,
