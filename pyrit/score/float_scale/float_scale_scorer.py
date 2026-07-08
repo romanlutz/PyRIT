@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from pyrit.models import (
     Message,
@@ -37,10 +37,6 @@ class FloatScaleScorer(Scorer):
     handling. Subclasses that need different semantics (e.g. a refusal-style
     "blocked = True") should override ``_score_piece_async`` or ``_build_fallback_score``.
     """
-
-    # Marks scores produced by this scorer as numeric so the shared LLM round-trip validates that
-    # the returned score value is parsable as a float. Float-scale scorers require this.
-    _score_value_is_numeric: ClassVar[bool] = True
 
     def __init__(self, *, validator: ScorerPromptValidator, chat_target: PromptTarget | None = None) -> None:
         """

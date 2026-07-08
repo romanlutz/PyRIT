@@ -679,6 +679,7 @@ class Scorer(Identifiable, abc.ABC):
         metadata_output_key: str = "metadata",
         category_output_key: str = "category",
         response_json_schema: JsonSchemaDefinition | None = None,
+        numeric_value: bool = False,
     ) -> UnvalidatedScore:
         """
         Send a request to a target, and take care of retries.
@@ -719,6 +720,9 @@ class Scorer(Identifiable, abc.ABC):
                 the scoring response. When provided, it is written to the request metadata; targets
                 that natively support JSON schemas enforce it, while others have it omitted by the
                 normalization pipeline. Defaults to None.
+            numeric_value (bool): When True, the response handler requires the parsed score value to
+                be parsable as a float and raises ``InvalidJsonException`` otherwise. Float-scale
+                scorers pass True. Defaults to False.
 
         Returns:
             UnvalidatedScore: The score object containing the response from the target LLM.
@@ -735,6 +739,8 @@ class Scorer(Identifiable, abc.ABC):
             description_output_key=description_output_key,
             metadata_output_key=metadata_output_key,
             category_output_key=category_output_key,
+            response_schema=response_json_schema,
+            numeric_value=numeric_value,
         )
 
         return await _run_llm_scoring_async(
@@ -748,8 +754,6 @@ class Scorer(Identifiable, abc.ABC):
             prepended_text=prepended_text_message_piece,
             category=category,
             objective=objective,
-            response_json_schema=response_json_schema,
-            numeric_value=getattr(self, "_score_value_is_numeric", False),
         )
 
     def _extract_objective_from_response(self, response: Message) -> str:
