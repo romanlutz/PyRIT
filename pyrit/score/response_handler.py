@@ -15,18 +15,30 @@ if TYPE_CHECKING:
     import uuid
     from collections.abc import Sequence
 
-    from pyrit.models import ComponentIdentifier
+    from pyrit.models import ComponentIdentifier, JsonSchemaDefinition
 
 
 class ResponseHandler(abc.ABC):
     """
-    Turns the raw text a scoring target returned into an ``UnvalidatedScore``.
+    Owns the response contract for a scoring target.
 
-    A ResponseHandler owns response parsing and nothing else: given the text produced by a
-    scoring LLM, it produces the unvalidated score object the scorer expects. It does not
-    perform the LLM round-trip, build the system prompt, or decide how the resulting score
-    branches. Different handlers implement different wire formats (e.g. JSON today).
+    A ResponseHandler owns two things and nothing else: the JSON schema (if any) the scoring
+    target should honor, and turning the raw text the target returns into an ``UnvalidatedScore``
+    (including any value validation, such as requiring a numeric score). It does not perform the
+    LLM round-trip, build the system prompt, or decide how the resulting score branches. Different
+    handlers implement different wire formats (e.g. JSON today).
     """
+
+    @property
+    def response_schema(self) -> JsonSchemaDefinition | None:
+        """
+        The JSON schema, if any, describing the response the target should return.
+
+        The LLM round-trip forwards this to the scoring target so targets that natively support
+        structured output can enforce it; targets that cannot have it omitted by normalization.
+        Handlers that do not constrain the response shape return None (the default).
+        """
+        return None
 
     @abstractmethod
     def parse(
@@ -64,7 +76,9 @@ class JsonSchemaResponseHandler(ResponseHandler):
 
     Reproduces PyRIT's historical scoring-response parsing: strip any markdown code fences,
     ``json.loads`` the text, then read the score value, rationale, optional description,
-    category, and metadata from configurable keys.
+    category, and metadata from configurable keys. It also owns the response contract: the
+    optional JSON schema handed to the target, and (when ``numeric_value`` is set) validating
+    that the parsed score value is numeric.
     """
 
     def __init__(
@@ -75,6 +89,8 @@ class JsonSchemaResponseHandler(ResponseHandler):
         description_output_key: str = "description",
         metadata_output_key: str = "metadata",
         category_output_key: str = "category",
+        response_schema: JsonSchemaDefinition | None = None,
+        numeric_value: bool = False,
     ) -> None:
         """
         Initialize the handler with the JSON keys to read from the response.
@@ -85,12 +101,24 @@ class JsonSchemaResponseHandler(ResponseHandler):
             description_output_key (str): Key holding the description. Defaults to "description".
             metadata_output_key (str): Key holding the metadata. Defaults to "metadata".
             category_output_key (str): Key holding the category. Defaults to "category".
+            response_schema (JsonSchemaDefinition | None): Optional JSON schema the scoring target
+                should honor. Exposed via ``response_schema`` and forwarded to the target by the
+                LLM round-trip. Defaults to None.
+            numeric_value (bool): When True, ``parse`` requires the parsed score value to be
+                parsable as a float and raises ``InvalidJsonException`` otherwise. Defaults to False.
         """
         self._score_value_output_key = score_value_output_key
         self._rationale_output_key = rationale_output_key
         self._description_output_key = description_output_key
         self._metadata_output_key = metadata_output_key
         self._category_output_key = category_output_key
+        self._response_schema = response_schema
+        self._numeric_value = numeric_value
+
+    @property
+    def response_schema(self) -> JsonSchemaDefinition | None:
+        """The configured JSON schema to forward to the scoring target, if any."""
+        return self._response_schema
 
     def parse(
         self,
@@ -121,7 +149,8 @@ class JsonSchemaResponseHandler(ResponseHandler):
         Raises:
             ValueError: If a category is present in both the response and the argument, or the
                 parsed category is not a string or a list of strings.
-            InvalidJsonException: If the response is not valid JSON or is missing a required key.
+            InvalidJsonException: If the response is not valid JSON, is missing a required key, or
+                (when this handler is numeric) the score value is not parsable as a float.
         """
         response_json = remove_markdown_json(response_text)
         try:
@@ -178,5 +207,15 @@ class JsonSchemaResponseHandler(ResponseHandler):
 
         except KeyError:
             raise InvalidJsonException(message=f"Invalid JSON response, missing Key: {response_json}") from None
+
+        if self._numeric_value:
+            try:
+                # A numeric handler requires the score value to be parsable as a float; a
+                # well-formed-but-non-numeric value is treated as an invalid response.
+                float(score.raw_score_value)
+            except ValueError:
+                raise InvalidJsonException(
+                    message=f"Invalid JSON response, score_value should be a float not this: {score.raw_score_value}"
+                ) from None
 
         return score

@@ -228,7 +228,7 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
         unvalidated_score = await _run_llm_scoring_async(
             chat_target=self._prompt_target,
             system_prompt=self._system_prompt,
-            response_handler=JsonSchemaResponseHandler(),
+            response_handler=JsonSchemaResponseHandler(response_schema=self._response_json_schema),
             value=scoring_value,
             data_type=scoring_data_type,
             scored_prompt_id=message_piece.id,
@@ -236,7 +236,6 @@ class SelfAskTrueFalseScorer(TrueFalseScorer):
             prepended_text=prepended_text,
             category=self._score_category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
         )
 
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")

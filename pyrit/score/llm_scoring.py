@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from pyrit.exceptions import InvalidJsonException, pyrit_json_retry
+from pyrit.exceptions import pyrit_json_retry
 from pyrit.models import JSON_SCHEMA_METADATA_KEY, Message, MessagePiece
 
 if TYPE_CHECKING:
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
     from pyrit.models import (
         ComponentIdentifier,
-        JsonSchemaDefinition,
         PromptDataType,
         UnvalidatedScore,
     )
@@ -22,6 +21,7 @@ if TYPE_CHECKING:
     from pyrit.score.response_handler import ResponseHandler
 
 
+@pyrit_json_retry
 async def _run_llm_scoring_async(
     *,
     chat_target: PromptTarget,
@@ -34,22 +34,29 @@ async def _run_llm_scoring_async(
     prepended_text: str | None = None,
     category: Sequence[str] | str | None = None,
     objective: str | None = None,
-    response_json_schema: JsonSchemaDefinition | None = None,
-    numeric_value: bool = False,
 ) -> UnvalidatedScore:
     """
-    Perform a single scoring round-trip against an LLM target and parse the result.
+    Perform a single scoring round-trip against an LLM target and delegate parsing.
 
-    This is the shared LLM evaluation mechanism: it sets the system prompt on the target,
-    sends the value to be scored, applies the standard JSON retry behavior, and delegates
-    parsing to ``response_handler``. It is intentionally stateless and independent of any
-    particular ``Scorer`` so that scorers can compose it without inheriting LLM machinery.
+    This is the shared LLM evaluation mechanism: it sets the system prompt on the target, sends
+    the value to be scored (forwarding ``response_handler.response_schema`` so targets that
+    support structured output can enforce it), applies the standard JSON retry behavior, and
+    delegates parsing and validation to ``response_handler``. It is intentionally stateless and
+    independent of any particular ``Scorer`` so that scorers can compose it without inheriting LLM
+    machinery.
+
+    The round-trip owns only the transport; the ``ResponseHandler`` owns the response contract —
+    the optional response schema and turning raw text into a validated ``UnvalidatedScore``.
+
+    This function is intentionally module-internal (underscore-prefixed): it is a composition
+    primitive with no public-API stability or deprecation contract. Scorers in this package call
+    it directly; external callers should compose scorers rather than this helper.
 
     Args:
         chat_target (PromptTarget): The target LLM to send the message to.
         system_prompt (str): The system-level prompt that guides the target LLM.
-        response_handler (ResponseHandler): Parser that turns the target's raw text into an
-            ``UnvalidatedScore``.
+        response_handler (ResponseHandler): Owns the response contract: supplies the optional
+            response schema and turns the target's raw text into an ``UnvalidatedScore``.
         value (str): The content to be scored (e.g. text, image path, audio path).
         data_type (PromptDataType): The data type of ``value`` (e.g. "text", "image_path").
         scored_prompt_id (str | uuid.UUID): The ID of the message piece being scored.
@@ -62,12 +69,6 @@ async def _run_llm_scoring_async(
             from the response; supplying both is an error. Defaults to None.
         objective (str | None): The objective associated with the score, used for
             contextualizing the result. Defaults to None.
-        response_json_schema (JsonSchemaDefinition | None): Optional JSON schema constraining the
-            response. Forwarded to the request metadata; targets that natively support JSON
-            schemas enforce it, others have it omitted by normalization. Defaults to None.
-        numeric_value (bool): When True, the parsed ``raw_score_value`` must be parsable as a
-            float; otherwise an ``InvalidJsonException`` is raised (without retrying). Defaults
-            to False.
 
     Returns:
         UnvalidatedScore: The parsed score, whose ``raw_score_value`` still needs to be
@@ -75,52 +76,9 @@ async def _run_llm_scoring_async(
 
     Raises:
         InvalidJsonException: If the response is not valid JSON, is missing required keys, or
-            (when ``numeric_value`` is True) the score value is not a float.
+            fails the handler's value validation.
         Exception: For other unexpected errors during scoring.
     """
-    score = await _send_and_parse_async(
-        chat_target=chat_target,
-        system_prompt=system_prompt,
-        response_handler=response_handler,
-        value=value,
-        data_type=data_type,
-        scored_prompt_id=scored_prompt_id,
-        scorer_identifier=scorer_identifier,
-        prepended_text=prepended_text,
-        category=category,
-        objective=objective,
-        response_json_schema=response_json_schema,
-    )
-
-    if numeric_value:
-        try:
-            # Raise an exception if the score value is not parsable as a float. This mirrors the
-            # historical float-scale behavior: the check runs outside the JSON retry, so a
-            # well-formed-but-non-numeric response is not retried.
-            float(score.raw_score_value)
-        except ValueError:
-            raise InvalidJsonException(
-                message=f"Invalid JSON response, score_value should be a float not this: {score.raw_score_value}"
-            ) from None
-
-    return score
-
-
-@pyrit_json_retry
-async def _send_and_parse_async(
-    *,
-    chat_target: PromptTarget,
-    system_prompt: str,
-    response_handler: ResponseHandler,
-    value: str,
-    data_type: PromptDataType,
-    scored_prompt_id: str | uuid.UUID,
-    scorer_identifier: ComponentIdentifier,
-    prepended_text: str | None = None,
-    category: Sequence[str] | str | None = None,
-    objective: str | None = None,
-    response_json_schema: JsonSchemaDefinition | None = None,
-) -> UnvalidatedScore:
     conversation_id = str(uuid.uuid4())
 
     chat_target.set_system_prompt(
@@ -128,10 +86,11 @@ async def _send_and_parse_async(
         conversation_id=conversation_id,
     )
     prompt_metadata: dict[str, Any] = {"response_format": "json"}
-    if response_json_schema is not None:
+    response_schema = response_handler.response_schema
+    if response_schema is not None:
         # Always forward the schema; the target's normalization pipeline omits it
         # when the target cannot natively enforce a JSON schema.
-        prompt_metadata[JSON_SCHEMA_METADATA_KEY] = response_json_schema
+        prompt_metadata[JSON_SCHEMA_METADATA_KEY] = response_schema
 
     # Build message pieces - prepended text context first (if provided), then the main message being scored
     message_pieces: list[MessagePiece] = []
