@@ -36,6 +36,7 @@ from pyrit.score.llm_scoring import _run_llm_scoring_async
 from pyrit.score.response_handler import JsonSchemaResponseHandler
 
 if TYPE_CHECKING:
+    import uuid
     from collections.abc import Sequence
 
     from pyrit.prompt_target import PromptTarget
@@ -669,7 +670,7 @@ class Scorer(Identifiable, abc.ABC):
         system_prompt: str,
         message_value: str,
         message_data_type: PromptDataType,
-        scored_prompt_id: str,
+        scored_prompt_id: str | uuid.UUID,
         prepended_text_message_piece: str | None = None,
         category: Sequence[str] | str | None = None,
         objective: str | None = None,
@@ -697,7 +698,7 @@ class Scorer(Identifiable, abc.ABC):
                 audio path).
             message_data_type (PromptDataType): The type of the data being sent in the message (e.g., "text",
                 "image_path", "audio_path").
-            scored_prompt_id (str): The ID of the scored prompt.
+            scored_prompt_id (str | uuid.UUID): The ID of the scored prompt.
             prepended_text_message_piece (str | None): Text context to prepend before the main
                 message_value. When provided, creates a multi-piece message with this text first, followed
                 by the message_value. Useful for adding objective/context when scoring non-text content.
