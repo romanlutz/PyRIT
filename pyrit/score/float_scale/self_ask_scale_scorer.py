@@ -165,12 +165,11 @@ class SelfAskScaleScorer(FloatScaleScorer):
 
         super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
         self._prompt_target = chat_target
-        self._response_handler = response_handler or JsonSchemaResponseHandler()
 
         if system_prompt is None:
             (
                 self._system_prompt,
-                self._response_json_schema,
+                schema,
                 self._minimum_value,
                 self._maximum_value,
                 self._category,
@@ -178,10 +177,17 @@ class SelfAskScaleScorer(FloatScaleScorer):
         else:
             rendered_value, schema = self._resolve_system_prompt(system_prompt)
             self._system_prompt = rendered_value
-            self._response_json_schema = schema
             self._minimum_value = min_value
             self._maximum_value = max_value
             self._category = score_category
+
+        # When the caller does not supply a response handler, the default JSON handler carries the
+        # schema (if any) declared by the system prompt and enforces the numeric score contract, so
+        # the round-trip forwards the schema to the scoring target. A caller-supplied handler owns
+        # its own response contract.
+        self._response_handler = response_handler or JsonSchemaResponseHandler(
+            response_schema=schema, numeric_value=True
+        )
 
     @classmethod
     def from_scale_arguments(
@@ -263,7 +269,7 @@ class SelfAskScaleScorer(FloatScaleScorer):
             params={
                 "system_prompt_template": self._system_prompt,
                 "user_prompt_template": "objective: {objective}\nresponse: {response}",
-                "response_json_schema": self._response_json_schema,
+                "response_json_schema": self._response_handler.response_schema,
             },
             prompt_target=self._prompt_target.get_identifier(),
         )
@@ -307,8 +313,6 @@ class SelfAskScaleScorer(FloatScaleScorer):
             prepended_text=prepended_text,
             category=self._category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
-            numeric_value=self._score_value_is_numeric,
         )
 
         score = unvalidated_score.to_score(

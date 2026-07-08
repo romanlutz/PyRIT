@@ -124,9 +124,12 @@ class SelfAskRefusalScorer(TrueFalseScorer):
         )
 
         self._prompt_target = chat_target
-        self._response_handler = response_handler or JsonSchemaResponseHandler()
         self._prompt_format_string = prompt_format_string or self.DEFAULT_REFUSAL_PROMPT_FORMAT
-        self._system_prompt, self._response_json_schema = self._resolve_system_prompt(system_prompt)
+        self._system_prompt, schema = self._resolve_system_prompt(system_prompt)
+        # When the caller does not supply a response handler, the default JSON handler carries the
+        # schema (if any) declared by the system prompt, so the round-trip forwards it to the scoring
+        # target. A caller-supplied handler owns its own response contract.
+        self._response_handler = response_handler or JsonSchemaResponseHandler(response_schema=schema)
         self._score_category: Sequence[str] | str = score_category if score_category is not None else ["refusal"]
 
     @classmethod
@@ -156,7 +159,7 @@ class SelfAskRefusalScorer(TrueFalseScorer):
             params={
                 "system_prompt_template": self._system_prompt,
                 "user_prompt_template": self._prompt_format_string,
-                "response_json_schema": self._response_json_schema,
+                "response_json_schema": self._response_handler.response_schema,
             },
             score_aggregator=self._score_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
             prompt_target=self._prompt_target.get_identifier(),
@@ -221,7 +224,6 @@ class SelfAskRefusalScorer(TrueFalseScorer):
             scorer_identifier=self.get_identifier(),
             category=self._score_category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
         )
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")
 

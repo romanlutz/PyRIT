@@ -226,7 +226,7 @@ def test_init_static_str_system_prompt(patch_central_database):
     )
 
     assert scorer._system_prompt == "a static classifier prompt"
-    assert scorer._response_json_schema is None
+    assert scorer._response_handler.response_schema is None
     assert scorer._score_category == ["harm"]
 
 
@@ -239,7 +239,7 @@ def test_init_static_seed_prompt_preserves_schema(patch_central_database):
     scorer = SelfAskTrueFalseScorer(chat_target=chat_target, system_prompt=seed_prompt, score_category=["harm"])
 
     assert scorer._system_prompt == "static seed prompt"
-    assert scorer._response_json_schema == {"type": "object"}
+    assert scorer._response_handler.response_schema == {"type": "object"}
 
 
 def test_init_default_system_prompt_uses_task_achieved(patch_central_database):
@@ -250,7 +250,7 @@ def test_init_default_system_prompt_uses_task_achieved(patch_central_database):
     scorer = SelfAskTrueFalseScorer(chat_target=chat_target)
 
     assert scorer._score_category == "task_achieved"
-    assert scorer._response_json_schema is not None
+    assert scorer._response_handler.response_schema is not None
     assert "# Instructions" in scorer._system_prompt
 
 
@@ -271,7 +271,7 @@ def test_init_templated_seed_prompt_from_separate_files(patch_central_database):
     assert scorer._score_category == ["grounded"]
     assert "# Instructions" in scorer._system_prompt
     # The schema embedded in the template survives model_copy during rendering.
-    assert scorer._response_json_schema is not None
+    assert scorer._response_handler.response_schema is not None
 
 
 async def test_init_scores_end_to_end(patch_central_database, scorer_true_false_response: Message):

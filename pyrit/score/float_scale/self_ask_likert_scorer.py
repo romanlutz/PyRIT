@@ -361,12 +361,17 @@ class SelfAskLikertScorer(FloatScaleScorer):
         super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
 
         self._prompt_target = chat_target
-        self._response_handler = response_handler or JsonSchemaResponseHandler()
         self._likert_scale: LikertScalePaths | None = None
 
         rendered_value, schema = self._resolve_system_prompt(system_prompt)
         self._system_prompt = rendered_value
-        self._response_json_schema = schema
+        # When the caller does not supply a response handler, the default JSON handler carries the
+        # schema (if any) declared by the system prompt and enforces the numeric score contract, so
+        # the round-trip forwards the schema to the scoring target. A caller-supplied handler owns
+        # its own response contract.
+        self._response_handler = response_handler or JsonSchemaResponseHandler(
+            response_schema=schema, numeric_value=True
+        )
         self._score_category = score_category
         self._min_scale_value = min_scale_value
         self._max_scale_value = max_scale_value
@@ -476,7 +481,7 @@ class SelfAskLikertScorer(FloatScaleScorer):
         return self._create_identifier(
             params={
                 "system_prompt_template": self._system_prompt,
-                "response_json_schema": self._response_json_schema,
+                "response_json_schema": self._response_handler.response_schema,
             },
             prompt_target=self._prompt_target.get_identifier(),
         )
@@ -577,8 +582,6 @@ class SelfAskLikertScorer(FloatScaleScorer):
             scorer_identifier=self.get_identifier(),
             category=self._score_category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
-            numeric_value=self._score_value_is_numeric,
         )
 
         score = unvalidated_score.to_score(

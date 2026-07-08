@@ -106,13 +106,16 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
         self._score_category = category
         self._min_value = min_value
         self._max_value = max_value
-        self._response_json_schema = response_json_schema
+        # A caller-supplied handler owns its own response contract; otherwise the default JSON
+        # handler carries the schema and enforces the numeric score contract for the round-trip.
         self._response_handler = response_handler or JsonSchemaResponseHandler(
             score_value_output_key=score_value_output_key,
             rationale_output_key=rationale_output_key,
             description_output_key=description_output_key,
             metadata_output_key=metadata_output_key,
             category_output_key=category_output_key,
+            response_schema=response_json_schema,
+            numeric_value=True,
         )
 
     def _build_identifier(self) -> ComponentIdentifier:
@@ -128,7 +131,7 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
                 "user_prompt_template": self._prompt_format_string,
                 "min_value": self._min_value,
                 "max_value": self._max_value,
-                "response_json_schema": self._response_json_schema,
+                "response_json_schema": self._response_handler.response_schema,
             },
             prompt_target=self._prompt_target.get_identifier(),
         )
@@ -171,8 +174,6 @@ class SelfAskGeneralFloatScaleScorer(FloatScaleScorer):
             scorer_identifier=self.get_identifier(),
             category=self._score_category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
-            numeric_value=self._score_value_is_numeric,
         )
 
         score = unvalidated.to_score(

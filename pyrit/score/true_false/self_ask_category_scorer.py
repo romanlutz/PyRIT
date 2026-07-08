@@ -157,8 +157,11 @@ class SelfAskCategoryScorer(TrueFalseScorer):
         )
 
         self._prompt_target = chat_target
-        self._response_handler = response_handler or JsonSchemaResponseHandler()
-        self._system_prompt, self._response_json_schema = self._resolve_system_prompt(system_prompt)
+        self._system_prompt, schema = self._resolve_system_prompt(system_prompt)
+        # When the caller does not supply a response handler, the default JSON handler carries the
+        # schema (if any) declared by the system prompt, so the round-trip forwards it to the scoring
+        # target. A caller-supplied handler owns its own response contract.
+        self._response_handler = response_handler or JsonSchemaResponseHandler(response_schema=schema)
 
     @classmethod
     def from_content_classifier(
@@ -225,7 +228,7 @@ class SelfAskCategoryScorer(TrueFalseScorer):
         return self._create_identifier(
             params={
                 "system_prompt_template": self._system_prompt,
-                "response_json_schema": self._response_json_schema,
+                "response_json_schema": self._response_handler.response_schema,
             },
             score_aggregator=self._score_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
             prompt_target=self._prompt_target.get_identifier(),
@@ -255,7 +258,6 @@ class SelfAskCategoryScorer(TrueFalseScorer):
             scored_prompt_id=message_piece.id,
             scorer_identifier=self.get_identifier(),
             objective=objective,
-            response_json_schema=self._response_json_schema,
         )
 
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")

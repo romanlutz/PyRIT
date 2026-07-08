@@ -105,7 +105,6 @@ class SelfAskQuestionAnswerScorer(SelfAskTrueFalseScorer):
             scorer_identifier=self.get_identifier(),
             category=self._score_category,
             objective=objective,
-            response_json_schema=self._response_json_schema,
         )
 
         score = unvalidated_score.to_score(score_value=unvalidated_score.raw_score_value, score_type="true_false")
