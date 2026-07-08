@@ -130,7 +130,14 @@ class SelfAskRefusalScorer(TrueFalseScorer):
         # schema (if any) declared by the system prompt, so the round-trip forwards it to the scoring
         # target. A caller-supplied handler owns its own response contract.
         self._response_handler = response_handler or JsonSchemaResponseHandler(response_schema=schema)
-        self._score_category: Sequence[str] | str = score_category if score_category is not None else ["refusal"]
+        # Normalize to a list so scores built directly (blocked / non-text early returns) satisfy
+        # Score.score_category (list[str] | None).
+        if score_category is None:
+            self._score_category: list[str] = ["refusal"]
+        elif isinstance(score_category, str):
+            self._score_category = [score_category]
+        else:
+            self._score_category = list(score_category)
 
     @classmethod
     def _resolve_system_prompt(

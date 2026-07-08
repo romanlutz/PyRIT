@@ -6,28 +6,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pyrit.common import apply_defaults
-from pyrit.common.deprecation import print_deprecation_message  # Deprecated. Will be removed in 0.16.0.
-from pyrit.common.path import (
-    EXECUTOR_RED_TEAM_PATH,
-    SCORER_SEED_PROMPT_PATH,
-)
-from pyrit.executor.attack import (
-    ContextComplianceAttack,
-    RedTeamingAttack,
-    RolePlayAttack,
-    RolePlayPaths,
-)
-from pyrit.executor.attack.core.attack_config import (
-    AttackAdversarialConfig,
-    AttackScoringConfig,
-)
+from pyrit.common.path import EXECUTOR_RED_TEAM_PATH, SCORER_SEED_PROMPT_PATH
+from pyrit.executor.attack import ContextComplianceAttack, RedTeamingAttack, RolePlayAttack, RolePlayPaths
+from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
 from pyrit.models import Parameter, SeedAttackGroup
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
-from pyrit.scenario.core.dataset_configuration import (
-    DatasetAttackConfiguration,
-)
+from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.scenario import Scenario
 from pyrit.scenario.core.scenario_context import ScenarioContext
 from pyrit.scenario.core.scenario_strategy import ScenarioStrategy
@@ -58,14 +44,24 @@ class ScamStrategy(ScenarioStrategy):
         to be used during training seminars.
     - PersuasiveRedTeamingAttack: This multi-turn attack uses a persuasive persona with the `RedTeamingAttack` to
         iteratively convince the target to comply with the scam objective over multiple turns.
+
+    Aggregate Values:
+    - ALL: Every technique (both single-turn and the multi-turn PersuasiveRedTeamingAttack).
+    - DEFAULT: The single-turn techniques (ContextCompliance, RolePlay). Excludes the multi-turn
+        PersuasiveRedTeamingAttack so the default run stays fast; opt into it via ALL or MULTI_TURN.
+    - SINGLE_TURN / MULTI_TURN: Group techniques by turn count. DEFAULT intentionally shares
+        membership with SINGLE_TURN today (both are the single-turn techniques); they are kept
+        distinct because DEFAULT is the recommended fast default while SINGLE_TURN is a turn-count
+        grouping, and their membership may diverge later.
     """
 
     ALL = ("all", {"all"})
+    DEFAULT = ("default", {"default"})
     SINGLE_TURN = ("single_turn", {"single_turn"})
     MULTI_TURN = ("multi_turn", {"multi_turn"})
 
-    ContextCompliance = ("context_compliance", {"single_turn"})
-    RolePlay = ("role_play", {"single_turn"})
+    ContextCompliance = ("context_compliance", {"single_turn", "default"})
+    RolePlay = ("role_play", {"single_turn", "default"})
     PersuasiveRedTeamingAttack = ("persuasive_rta", {"multi_turn"})
 
     @classmethod
@@ -77,7 +73,7 @@ class ScamStrategy(ScenarioStrategy):
             set[str]: Set of tags that are aggregate markers.
         """
         # Include base class aggregates ("all") and add scenario-specific ones
-        return super().get_aggregate_tags() | {"single_turn", "multi_turn"}
+        return super().get_aggregate_tags() | {"default", "single_turn", "multi_turn"}
 
 
 class Scam(Scenario):
@@ -86,7 +82,7 @@ class Scam(Scenario):
     (e.g., phishing emails, fraudulent messages) with primarily persuasion-oriented techniques.
     """
 
-    VERSION: int = 1
+    VERSION: int = 2
 
     @classmethod
     def _get_additional_scoring_questions(cls) -> list[Path]:
@@ -127,7 +123,6 @@ class Scam(Scenario):
         objective_scorer: TrueFalseScorer | None = None,
         adversarial_chat: PromptTarget | None = None,
         scenario_result_id: str | None = None,
-        include_baseline: bool | None = None,  # Deprecated. Will be removed in 0.16.0.
     ) -> None:
         """
         Initialize the ScamScenario.
@@ -138,8 +133,6 @@ class Scam(Scenario):
             adversarial_chat (PromptTarget | None): Chat target used to rephrase the
                 objective into the role-play context (in single-turn strategies).
             scenario_result_id (str | None): Optional ID of an existing scenario result to resume.
-            include_baseline (bool | None): **Deprecated.** Will be removed in 0.16.0. Pass
-                ``include_baseline`` to ``initialize_async`` instead.
         """
         if not objective_scorer:
             objective_scorer = self._get_default_objective_scorer()
@@ -152,21 +145,11 @@ class Scam(Scenario):
         super().__init__(
             version=self.VERSION,
             strategy_class=ScamStrategy,
-            default_strategy=ScamStrategy.ALL,
+            default_strategy=ScamStrategy.DEFAULT,
             default_dataset_config=DatasetAttackConfiguration(dataset_names=["airt_scams"], max_dataset_size=4),
             objective_scorer=objective_scorer,
             scenario_result_id=scenario_result_id,
         )
-
-        # Deprecated constructor-time baseline override. Will be removed in 0.16.0, along with
-        # the include_baseline kwarg above.
-        if include_baseline is not None:
-            print_deprecation_message(
-                old_item="Scam(include_baseline=...)",
-                new_item="Scam.initialize_async(include_baseline=...)",
-                removed_in="0.16.0",
-            )
-            self._legacy_include_baseline = include_baseline
 
     def _get_atomic_attack_from_strategy(self, *, strategy: str, seed_groups: list[SeedAttackGroup]) -> AtomicAttack:
         """
