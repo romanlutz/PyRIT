@@ -1039,11 +1039,26 @@ def test_validate_response_success_stop(target: OpenAIChatTarget, dummy_text_mes
     assert result is None
 
 
-def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece):
-    """Test _validate_response passes for valid length response."""
+def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog):
+    """Test _validate_response passes for a truncated response that still has content, and warns."""
     mock_response = create_mock_completion(content="Hello", finish_reason="length")
-    result = target._validate_response(mock_response, dummy_text_message_piece)
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(mock_response, dummy_text_message_piece)
     assert result is None
+    assert "finish_reason='length'" in caplog.text
+
+
+def test_validate_response_length_empty_returns_empty_response(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog
+):
+    """Test _validate_response returns a graceful empty response (no raise) when truncated before any output."""
+    mock_response = create_mock_completion(content="", finish_reason="length")
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(mock_response, dummy_text_message_piece)
+    assert isinstance(result, Message)
+    assert result.message_pieces[0].original_value == ""
+    assert result.message_pieces[0].response_error == "empty"
+    assert "finish_reason='length'" in caplog.text
 
 
 def test_validate_response_no_choices(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece):

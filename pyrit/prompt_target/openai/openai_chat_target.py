@@ -296,11 +296,16 @@ class OpenAIChatTarget(OpenAITarget):
             request: The original request MessagePiece.
 
         Returns:
-            None if valid, does not return Message for content filter (handled by _check_content_filter).
+            None when the response is valid and should be constructed normally. Returns an empty
+            response ``Message`` (with ``error="empty"``) when the response was truncated at the
+            token limit (``finish_reason="length"``) before producing any visible output, so the
+            run continues instead of raising. Content filter responses are handled separately by
+            ``_check_content_filter``.
 
         Raises:
             PyritException: For unexpected response structures or finish reasons.
-            EmptyResponseException: When the API returns an empty response.
+            EmptyResponseException: When the API returns an empty response that was not caused by
+                token-limit truncation.
         """
         # Check for missing choices
         if not hasattr(response, "choices") or not response.choices:
@@ -319,6 +324,25 @@ class OpenAIChatTarget(OpenAITarget):
 
         # Check for at least one valid response type
         has_content, has_audio, has_tool_calls = self._detect_response_content(choice.message)
+
+        # A "length" finish_reason means the model hit max_completion_tokens. Reasoning models spend
+        # tokens on hidden reasoning before emitting visible output, so a low limit can truncate the
+        # answer or leave it empty. This may be a deliberate configuration, so warn instead of raising.
+        if finish_reason == "length":
+            logger.warning(
+                "The response was truncated because it reached the token limit (finish_reason='length'). "
+                "Reasoning models consume tokens on hidden reasoning in addition to the visible answer, so a "
+                "low max_completion_tokens can truncate or empty the response. Increase max_completion_tokens "
+                "if you expected complete content."
+            )
+            if not (has_content or has_audio or has_tool_calls):
+                return construct_response_from_request(
+                    request=request,
+                    response_text_pieces=[""],
+                    response_type="text",
+                    error="empty",
+                )
+            return None
 
         if not (has_content or has_audio or has_tool_calls):
             logger.error("The chat returned an empty response (no content, audio, or tool_calls).")
