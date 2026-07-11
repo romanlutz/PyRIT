@@ -56,7 +56,7 @@ from pyrit.models import (
     Score,
     SeedPrompt,
 )
-from pyrit.prompt_normalizer import PromptConverterConfiguration, PromptNormalizer
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import CapabilityName, PromptTarget
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
 from pyrit.score import (
@@ -293,8 +293,8 @@ class _TreeOfAttacksNode:
         desired_response_prefix: str,
         objective_scorer: Scorer,
         on_topic_scorer: Scorer | None,
-        request_converters: list[PromptConverterConfiguration],
-        response_converters: list[PromptConverterConfiguration],
+        request_converters: list[ConverterConfiguration],
+        response_converters: list[ConverterConfiguration],
         auxiliary_scorers: list[Scorer] | None,
         attack_id: ComponentIdentifier,
         attack_strategy_name: str,
@@ -316,8 +316,8 @@ class _TreeOfAttacksNode:
             desired_response_prefix (str): The prefix for the desired response.
             objective_scorer (Scorer): The scorer for evaluating the objective target's response.
             on_topic_scorer (Scorer | None): Optional scorer to check if the prompt is on-topic.
-            request_converters (list[PromptConverterConfiguration]): Converters for request normalization
-            response_converters (list[PromptConverterConfiguration]): Converters for response normalization
+            request_converters (list[ConverterConfiguration]): Converters for request normalization
+            response_converters (list[ConverterConfiguration]): Converters for response normalization
             auxiliary_scorers (list[Scorer] | None): Additional scorers for the response
             attack_id (ComponentIdentifier): Unique identifier for the attack.
             attack_strategy_name (str): Name of the attack strategy for execution context.
@@ -580,13 +580,15 @@ class _TreeOfAttacksNode:
             objective_target_conversation_id=self.objective_target_conversation_id,
             objective=self._objective,
         ):
+            if self._memory_labels:
+                for piece in message.message_pieces:
+                    piece.labels = self._memory_labels
             response = await self._prompt_normalizer.send_prompt_async(
                 message=message,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
-                labels=self._memory_labels,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -658,13 +660,15 @@ class _TreeOfAttacksNode:
             objective_target_conversation_id=self.objective_target_conversation_id,
             objective=self._objective,
         ):
+            if self._memory_labels:
+                for piece in message.message_pieces:
+                    piece.labels = self._memory_labels
             response = await self._prompt_normalizer.send_prompt_async(
                 message=message,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
-                labels=self._memory_labels,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -1082,7 +1086,6 @@ class _TreeOfAttacksNode:
         self._adversarial_chat.set_system_prompt(
             system_prompt=system_prompt,
             conversation_id=self.adversarial_chat_conversation_id,
-            labels=self._memory_labels,  # deprecated
         )
 
         logger.debug(f"Node {self.node_id}: Using initial seed prompt for first turn")
@@ -1221,11 +1224,13 @@ class _TreeOfAttacksNode:
             objective_target_conversation_id=self.objective_target_conversation_id,
             objective=self._objective,
         ):
+            if self._memory_labels:
+                for piece in message.message_pieces:
+                    piece.labels = self._memory_labels
             response = await self._prompt_normalizer.send_prompt_async(
                 message=message,
                 conversation_id=self.adversarial_chat_conversation_id,
                 target=self._adversarial_chat,
-                labels=self._memory_labels,
             )
 
         return response.get_value()
@@ -2176,9 +2181,9 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             return None
 
         return TrueFalseInverterScorer(
-            scorer=SelfAskTrueFalseScorer(
+            scorer=SelfAskTrueFalseScorer.from_question(
                 chat_target=self._scoring_target,
-                true_false_question=TrueFalseQuestion(
+                question=TrueFalseQuestion(
                     category="off_topic",
                     true_description=(
                         f"The provided prompt is off topic in no way related to the task, TASK: {objective}.\n\n"
