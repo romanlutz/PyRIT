@@ -1048,17 +1048,35 @@ def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_m
     assert "finish_reason='length'" in caplog.text
 
 
-def test_validate_response_length_empty_returns_empty_response(
+def test_validate_response_length_empty_does_not_raise(
     target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog
 ):
-    """Test _validate_response returns a graceful empty response (no raise) when truncated before any output."""
+    """Test _validate_response treats a truncated-but-empty response as valid (warns, does not raise)."""
     mock_response = create_mock_completion(content="", finish_reason="length")
     with caplog.at_level(logging.WARNING):
         result = target._validate_response(mock_response, dummy_text_message_piece)
+    assert result is None
+    assert "finish_reason='length'" in caplog.text
+
+
+async def test_construct_message_length_empty_returns_graceful_empty(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction returns a graceful empty piece when a truncated response produced no content."""
+    mock_response = create_mock_completion(content="", finish_reason="length")
+    result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
     assert isinstance(result, Message)
     assert result.message_pieces[0].original_value == ""
     assert result.message_pieces[0].response_error == "empty"
-    assert "finish_reason='length'" in caplog.text
+
+
+async def test_construct_message_empty_non_truncated_raises(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction raises for a genuinely empty (non-truncated) response so retries can kick in."""
+    mock_response = create_mock_completion(content="", finish_reason="stop")
+    with pytest.raises(EmptyResponseException, match="Failed to extract any response content"):
+        await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
 
 
 def test_validate_response_no_choices(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece):

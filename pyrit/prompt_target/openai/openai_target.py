@@ -448,10 +448,8 @@ class OpenAITarget(PromptTarget):
             if self._check_content_filter(response):
                 return self._handle_content_filter_response(response, request_piece)
 
-            # Validate response via subclass implementation
-            error_message = self._validate_response(response, request_piece)
-            if error_message:
-                return error_message
+            # Validate response via subclass implementation (raises on invalid responses)
+            self._validate_response(response, request_piece)
 
             # Construct and return Message from validated response
             return await self._construct_message_from_response_async(response, request_piece)
@@ -604,24 +602,21 @@ class OpenAITarget(PromptTarget):
         """
         return None
 
-    def _validate_response(self, response: Any, request: MessagePiece) -> Message | None:
+    def _validate_response(self, response: Any, request: MessagePiece) -> None:
         """
-        Validate the response and return error Message if needed.
+        Validate the response, raising if it is invalid.
 
-        Override this method in subclasses that need custom response validation.
-        Default implementation returns None (no validation errors).
+        Override this method in subclasses that need custom response validation. Validation only
+        inspects the response; constructing the resulting Message is the responsibility of
+        ``_construct_message_from_response_async``. The default implementation is a no-op.
 
         Args:
             response: The response object from OpenAI SDK.
             request: The original request MessagePiece.
 
-        Returns:
-            Message | None: Error Message if validation fails, None otherwise.
-
         Raises:
             Various exceptions for validation failures.
         """
-        return None
 
     @abstractmethod
     def _set_openai_env_configuration_vars(self) -> None:

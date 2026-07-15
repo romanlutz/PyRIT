@@ -282,7 +282,7 @@ class OpenAIChatTarget(OpenAITarget):
             pass
         return None
 
-    def _validate_response(self, response: Any, request: MessagePiece) -> Message | None:
+    def _validate_response(self, response: Any, request: MessagePiece) -> None:
         """
         Validate a Chat Completions API response for errors.
 
@@ -291,16 +291,15 @@ class OpenAIChatTarget(OpenAITarget):
         - Invalid finish_reason
         - At least one valid response type (text content, audio, or tool_calls)
 
+        A ``finish_reason == "length"`` (token-limit truncation) response is treated as valid, with a
+        warning, so that ``_construct_message_from_response_async`` can preserve any partial content
+        or fall back to a graceful empty response. Genuinely empty responses (no truncation) are
+        raised so the retry logic can attempt to get a complete response. Content filter responses
+        are handled separately by ``_check_content_filter``.
+
         Args:
             response: The ChatCompletion response from OpenAI SDK.
             request: The original request MessagePiece.
-
-        Returns:
-            None when the response is valid and should be constructed normally. Returns an empty
-            response ``Message`` (with ``error="empty"``) when the response was truncated at the
-            token limit (``finish_reason="length"``) before producing any visible output, so the
-            run continues instead of raising. Content filter responses are handled separately by
-            ``_check_content_filter``.
 
         Raises:
             PyritException: For unexpected response structures or finish reasons.
@@ -322,12 +321,10 @@ class OpenAIChatTarget(OpenAITarget):
                 message=f"Unknown finish_reason {finish_reason} from response: {response.model_dump_json()}"
             )
 
-        # Check for at least one valid response type
-        has_content, has_audio, has_tool_calls = self._detect_response_content(choice.message)
-
         # A "length" finish_reason means the model hit max_completion_tokens. Reasoning models spend
         # tokens on hidden reasoning before emitting visible output, so a low limit can truncate the
-        # answer or leave it empty. This may be a deliberate configuration, so warn instead of raising.
+        # answer or leave it empty. This may be a deliberate configuration, so warn instead of raising
+        # and let construction preserve partial content or fall back to a graceful empty response.
         if finish_reason == "length":
             logger.warning(
                 "The response was truncated because it reached the token limit (finish_reason='length'). "
@@ -335,22 +332,16 @@ class OpenAIChatTarget(OpenAITarget):
                 "low max_completion_tokens can truncate or empty the response. Increase max_completion_tokens "
                 "if you expected complete content."
             )
-            if not (has_content or has_audio or has_tool_calls):
-                return construct_response_from_request(
-                    request=request,
-                    response_text_pieces=[""],
-                    response_type="text",
-                    error="empty",
-                )
-            return None
+            return
 
+        # Genuinely empty responses (no truncation) are usually a transient server-side issue; raise
+        # so the retry logic can attempt to get a complete response.
+        has_content, has_audio, has_tool_calls = self._detect_response_content(choice.message)
         if not (has_content or has_audio or has_tool_calls):
             logger.error("The chat returned an empty response (no content, audio, or tool_calls).")
             raise EmptyResponseException(
                 message="The chat returned an empty response (no content, audio, or tool_calls)."
             )
-
-        return None
 
     def _detect_response_content(self, message: Any) -> tuple[bool, bool, bool]:
         """
@@ -421,9 +412,12 @@ class OpenAIChatTarget(OpenAITarget):
             Message: Constructed message with one or more MessagePiece entries.
 
         Raises:
-            EmptyResponseException: If the response contains no content, audio, or tool calls.
+            EmptyResponseException: If a non-truncated response contains no content, audio, or tool
+                calls. A truncated (``finish_reason == "length"``) response with no content instead
+                yields a graceful empty piece so the run continues.
         """
-        message = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
         has_content, has_audio, has_tool_calls = self._detect_response_content(message)
 
         pieces: list[MessagePiece] = []
@@ -483,6 +477,16 @@ class OpenAIChatTarget(OpenAITarget):
                 pieces.append(tool_piece)
 
         if not pieces:
+            # A truncated (finish_reason == "length") response may legitimately produce no content;
+            # return a graceful empty piece so the run continues. Validation already raised for
+            # genuinely empty (non-truncated) responses.
+            if choice.finish_reason == "length":
+                return construct_response_from_request(
+                    request=request,
+                    response_text_pieces=[""],
+                    response_type="text",
+                    error="empty",
+                )
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata

@@ -497,7 +497,7 @@ class OpenAIResponseTarget(OpenAITarget):
         except (AttributeError, IndexError, TypeError):
             return None
 
-    def _validate_response(self, response: Any, request: MessagePiece) -> Message | None:
+    def _validate_response(self, response: Any, request: MessagePiece) -> None:
         """
         Validate a Response API response for errors.
 
@@ -507,16 +507,15 @@ class OpenAIResponseTarget(OpenAITarget):
         - Invalid status
         - Empty output
 
+        Truncation is treated as valid, with a warning, so that
+        ``_construct_message_from_response_async`` can preserve any completed output (reasoning,
+        partial text) or fall back to a graceful empty response. Genuinely empty responses (no
+        truncation) are raised so the retry logic can attempt to get a complete response. Content
+        filter responses are handled separately by ``_check_content_filter``.
+
         Args:
             response: The Response object from the OpenAI SDK.
             request: The original request MessagePiece.
-
-        Returns:
-            None when the response is valid and should be constructed normally. Returns a Message
-            (built from whatever completed output exists, with a graceful empty text piece when no
-            visible text was produced) when the response was truncated at the token limit, so the
-            run continues instead of raising. Content filter responses are handled separately by
-            ``_check_content_filter``.
 
         Raises:
             PyritException: For unexpected response structures or errors.
@@ -530,8 +529,8 @@ class OpenAIResponseTarget(OpenAITarget):
         # Truncation: the model hit max_output_tokens. Mirroring OpenAIChatTarget's handling of
         # finish_reason == "length", warn instead of raising so the run continues -- reasoning models
         # can spend the whole budget on hidden reasoning before emitting a visible answer, and a low
-        # limit may be a deliberate configuration. Preserve any completed output (reasoning, partial
-        # text) and fall back to a graceful empty response.
+        # limit may be a deliberate configuration. Construction preserves any completed output
+        # (reasoning, partial text) and falls back to a graceful empty response.
         if self._is_truncated_response(response):
             logger.warning(
                 "The response was truncated because it reached the token limit "
@@ -539,7 +538,7 @@ class OpenAIResponseTarget(OpenAITarget):
                 "hidden reasoning in addition to the visible answer, so a low max_output_tokens can "
                 "truncate or empty the response. Increase max_output_tokens if you expected complete content."
             )
-            return self._build_truncated_message(response=response, request=request)
+            return
 
         # Check status - should be "completed" for successful responses
         if response.status != "completed":
@@ -549,8 +548,6 @@ class OpenAIResponseTarget(OpenAITarget):
         if not response.output:
             logger.error("The response returned no valid output.")
             raise EmptyResponseException(message="The response returned an empty response.")
-
-        return None
 
     def _is_truncated_response(self, response: Any) -> bool:
         """
@@ -572,44 +569,14 @@ class OpenAIResponseTarget(OpenAITarget):
         reason = getattr(incomplete_details, "reason", None) if incomplete_details else None
         return reason == "max_output_tokens"
 
-    def _build_truncated_message(self, *, response: Any, request: MessagePiece) -> Message:
-        """
-        Build a Message from a truncated response, tolerating empty output sections.
-
-        Preserves the model's content pieces (reasoning and any partial visible text) and appends
-        a graceful empty text piece (``error="empty"``) when no visible text was produced, so the
-        run continues instead of raising. Partial tool/function-call sections are skipped because an
-        incomplete call must not re-enter the agentic loop.
-
-        Args:
-            response: A Response object from the OpenAI SDK.
-            request: The original request MessagePiece.
-
-        Returns:
-            Message: The preserved pieces plus, when no visible text exists, a graceful empty piece.
-        """
-        pieces: list[MessagePiece] = []
-        has_text = False
-        for section in getattr(response, "output", None) or []:
-            piece = self._parse_response_output_section(
-                section=section, message_piece=request, error=None, tolerate_empty=True
-            )
-            if piece is None or piece.original_value_data_type not in ("text", "reasoning"):
-                continue
-            pieces.append(piece)
-            if piece.original_value_data_type == "text" and piece.original_value:
-                has_text = True
-
-        if not has_text:
-            empty_piece = construct_response_from_request(
-                request=request, response_text_pieces=[""], response_type="text", error="empty"
-            ).message_pieces[0]
-            pieces.append(empty_piece)
-        return Message(message_pieces=pieces)
-
     async def _construct_message_from_response_async(self, response: Any, request: MessagePiece) -> Message:
         """
         Construct a Message from a Response API response.
+
+        For a truncated response (see ``_is_truncated_response``), empty output sections are
+        tolerated, partial tool/function calls are skipped so an incomplete call cannot re-enter the
+        agentic loop, and a graceful empty text piece is appended when no visible text was produced.
+        Reasoning and any partial text are always preserved.
 
         Args:
             response: The Response object from OpenAI SDK.
@@ -618,17 +585,36 @@ class OpenAIResponseTarget(OpenAITarget):
         Returns:
             Message: Constructed message with extracted content from output sections.
         """
+        truncated = self._is_truncated_response(response)
+
         # Extract and parse message pieces from validated output sections
         extracted_response_pieces: list[MessagePiece] = []
-        for section in response.output:
+        has_text = False
+        for section in getattr(response, "output", None) or []:
             piece = self._parse_response_output_section(
                 section=section,
                 message_piece=request,
                 error=None,  # error is already handled in validation
+                tolerate_empty=truncated,
             )
             if piece is None:
                 continue
+            # On truncation, keep only reasoning/text; a partial tool or function call must not
+            # re-enter the agentic loop.
+            if truncated and piece.original_value_data_type not in ("text", "reasoning"):
+                continue
             extracted_response_pieces.append(piece)
+            if piece.original_value_data_type == "text" and piece.original_value:
+                has_text = True
+
+        if truncated and not has_text:
+            empty_piece = construct_response_from_request(
+                request=request,
+                response_text_pieces=[""],
+                response_type="text",
+                error="empty",
+            ).message_pieces[0]
+            extracted_response_pieces.append(empty_piece)
 
         return Message(message_pieces=extracted_response_pieces)
 
