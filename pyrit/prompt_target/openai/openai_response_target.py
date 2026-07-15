@@ -25,6 +25,7 @@ from pyrit.models import (
     MessagePiece,
     PromptDataType,
     PromptResponseError,
+    construct_response_from_request,
 )
 from pyrit.prompt_target.common.json_response_config import _JsonResponseConfig
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
@@ -502,6 +503,7 @@ class OpenAIResponseTarget(OpenAITarget):
 
         Checks for:
         - Error responses (excluding content filtering which is checked separately)
+        - Truncation at the token limit (``max_output_tokens``), which is warned about, not raised
         - Invalid status
         - Empty output
 
@@ -510,16 +512,34 @@ class OpenAIResponseTarget(OpenAITarget):
             request: The original request MessagePiece.
 
         Returns:
-            None if valid, does not return Message for content filter (handled by _check_content_filter).
+            None when the response is valid and should be constructed normally. Returns a Message
+            (built from whatever completed output exists, with a graceful empty text piece when no
+            visible text was produced) when the response was truncated at the token limit, so the
+            run continues instead of raising. Content filter responses are handled separately by
+            ``_check_content_filter``.
 
         Raises:
             PyritException: For unexpected response structures or errors.
-            EmptyResponseException: When the API returns no valid output.
+            EmptyResponseException: When the API returns no valid output (and was not truncated).
         """
         # Check for error response - error is a ResponseError object or None
         # (content_filter is handled by _check_content_filter)
         if response.error is not None and response.error.code != "content_filter":
             raise PyritException(message=f"Response error: {response.error.code} - {response.error.message}")
+
+        # Truncation: the model hit max_output_tokens. Mirroring OpenAIChatTarget's handling of
+        # finish_reason == "length", warn instead of raising so the run continues -- reasoning models
+        # can spend the whole budget on hidden reasoning before emitting a visible answer, and a low
+        # limit may be a deliberate configuration. Preserve any completed output (reasoning, partial
+        # text) and fall back to a graceful empty response.
+        if self._is_truncated_response(response):
+            logger.warning(
+                "The response was truncated because it reached the token limit "
+                "(status='incomplete', reason='max_output_tokens'). Reasoning models consume tokens on "
+                "hidden reasoning in addition to the visible answer, so a low max_output_tokens can "
+                "truncate or empty the response. Increase max_output_tokens if you expected complete content."
+            )
+            return self._build_truncated_message(response=response, request=request)
 
         # Check status - should be "completed" for successful responses
         if response.status != "completed":
@@ -531,6 +551,61 @@ class OpenAIResponseTarget(OpenAITarget):
             raise EmptyResponseException(message="The response returned an empty response.")
 
         return None
+
+    def _is_truncated_response(self, response: Any) -> bool:
+        """
+        Return True if the response was cut off by the ``max_output_tokens`` limit.
+
+        The Responses API signals truncation via ``status == "incomplete"`` with
+        ``incomplete_details.reason == "max_output_tokens"`` (``content_filter`` is handled
+        separately by ``_check_content_filter``).
+
+        Args:
+            response: A Response object from the OpenAI SDK.
+
+        Returns:
+            bool: True if the response was truncated at the token limit, False otherwise.
+        """
+        if getattr(response, "status", None) != "incomplete":
+            return False
+        incomplete_details = getattr(response, "incomplete_details", None)
+        reason = getattr(incomplete_details, "reason", None) if incomplete_details else None
+        return reason == "max_output_tokens"
+
+    def _build_truncated_message(self, *, response: Any, request: MessagePiece) -> Message:
+        """
+        Build a Message from a truncated response, tolerating empty output sections.
+
+        Preserves the model's content pieces (reasoning and any partial visible text) and appends
+        a graceful empty text piece (``error="empty"``) when no visible text was produced, so the
+        run continues instead of raising. Partial tool/function-call sections are skipped because an
+        incomplete call must not re-enter the agentic loop.
+
+        Args:
+            response: A Response object from the OpenAI SDK.
+            request: The original request MessagePiece.
+
+        Returns:
+            Message: The preserved pieces plus, when no visible text exists, a graceful empty piece.
+        """
+        pieces: list[MessagePiece] = []
+        has_text = False
+        for section in getattr(response, "output", None) or []:
+            piece = self._parse_response_output_section(
+                section=section, message_piece=request, error=None, tolerate_empty=True
+            )
+            if piece is None or piece.original_value_data_type not in ("text", "reasoning"):
+                continue
+            pieces.append(piece)
+            if piece.original_value_data_type == "text" and piece.original_value:
+                has_text = True
+
+        if not has_text:
+            empty_piece = construct_response_from_request(
+                request=request, response_text_pieces=[""], response_type="text", error="empty"
+            ).message_pieces[0]
+            pieces.append(empty_piece)
+        return Message(message_pieces=pieces)
 
     async def _construct_message_from_response_async(self, response: Any, request: MessagePiece) -> Message:
         """
@@ -628,7 +703,12 @@ class OpenAIResponseTarget(OpenAITarget):
         return responses_to_return
 
     def _parse_response_output_section(
-        self, *, section: Any, message_piece: MessagePiece, error: PromptResponseError | None
+        self,
+        *,
+        section: Any,
+        message_piece: MessagePiece,
+        error: PromptResponseError | None,
+        tolerate_empty: bool = False,
     ) -> MessagePiece | None:
         """
         Parse model output sections, forwarding tool-calls for the agentic loop.
@@ -637,12 +717,15 @@ class OpenAIResponseTarget(OpenAITarget):
             section: The section object from OpenAI SDK (Pydantic model).
             message_piece: The original message piece.
             error: Any error information from OpenAI.
+            tolerate_empty: When True, empty sections return None instead of raising
+                EmptyResponseException. Used when constructing a truncated response.
 
         Returns:
             A MessagePiece for this section, or None to skip.
 
         Raises:
-            EmptyResponseException: If the section content is empty or invalid.
+            EmptyResponseException: If the section content is empty or invalid (and tolerate_empty
+                is False).
             ValueError: If the section type is unsupported.
         """
         section_type = section.type
@@ -652,6 +735,8 @@ class OpenAIResponseTarget(OpenAITarget):
         if section_type == MessagePieceType.MESSAGE:
             section_content = section.content
             if len(section_content) == 0:
+                if tolerate_empty:
+                    return None
                 raise EmptyResponseException(message="The chat returned an empty message section.")
             piece_value = section_content[0].text
 
@@ -706,6 +791,8 @@ class OpenAIResponseTarget(OpenAITarget):
                 raise ValueError(msg)
             piece_value = section.input
             if len(piece_value) == 0:
+                if tolerate_empty:
+                    return None
                 raise EmptyResponseException(message="The chat returned an empty message section.")
 
         else:
@@ -714,6 +801,8 @@ class OpenAIResponseTarget(OpenAITarget):
 
         # Handle empty response
         if not piece_value:
+            if tolerate_empty:
+                return None
             raise EmptyResponseException(message="The chat returned an empty response.")
 
         return MessagePiece(

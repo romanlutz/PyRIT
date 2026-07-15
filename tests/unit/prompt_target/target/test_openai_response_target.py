@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import json
+import logging
 import os
 from collections.abc import MutableSequence
 from tempfile import NamedTemporaryFile
@@ -1190,6 +1191,126 @@ def test_validate_response_empty_output(target: OpenAIResponseTarget, dummy_text
 
     with pytest.raises(EmptyResponseException, match="empty response"):
         target._validate_response(mock_response, dummy_text_message_piece)
+
+
+def _make_reasoning_section() -> MagicMock:
+    section = MagicMock()
+    section.type = "reasoning"
+    section.model_dump.return_value = {"type": "reasoning", "summary": []}
+    return section
+
+
+def _make_message_section(text: str) -> MagicMock:
+    section = MagicMock()
+    section.type = "message"
+    content_item = MagicMock()
+    content_item.text = text
+    section.content = [content_item]
+    return section
+
+
+def _make_empty_message_section() -> MagicMock:
+    section = MagicMock()
+    section.type = "message"
+    section.content = []
+    return section
+
+
+def _make_truncated_response(output: list) -> MagicMock:
+    mock_response = MagicMock()
+    mock_response.error = None
+    mock_response.status = "incomplete"
+    incomplete_details = MagicMock()
+    incomplete_details.reason = "max_output_tokens"
+    mock_response.incomplete_details = incomplete_details
+    mock_response.output = output
+    return mock_response
+
+
+def test_is_truncated_response_detects_max_output_tokens(target: OpenAIResponseTarget):
+    """_is_truncated_response is True only for incomplete status with a max_output_tokens reason."""
+    truncated = _make_truncated_response(output=[])
+    assert target._is_truncated_response(truncated) is True
+
+    content_filtered = _make_truncated_response(output=[])
+    content_filtered.incomplete_details.reason = "content_filter"
+    assert target._is_truncated_response(content_filtered) is False
+
+    completed = MagicMock()
+    completed.status = "completed"
+    assert target._is_truncated_response(completed) is False
+
+
+def test_validate_response_truncated_keeps_reasoning_and_empty_text(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece, caplog
+):
+    """Truncated response with reasoning but empty text: keep reasoning, add graceful empty text, warn."""
+    response = _make_truncated_response(output=[_make_reasoning_section(), _make_empty_message_section()])
+
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(response, dummy_text_message_piece)
+
+    assert isinstance(result, Message)
+    reasoning_pieces = [p for p in result.message_pieces if p.original_value_data_type == "reasoning"]
+    text_pieces = [p for p in result.message_pieces if p.original_value_data_type == "text"]
+    assert len(reasoning_pieces) == 1
+    assert len(text_pieces) == 1
+    assert text_pieces[0].original_value == ""
+    assert text_pieces[0].response_error == "empty"
+    assert "max_output_tokens" in caplog.text
+
+
+def test_validate_response_truncated_keeps_partial_text(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece, caplog
+):
+    """Truncated response with partial visible text keeps it (error=none), still warns, no empty piece added."""
+    response = _make_truncated_response(output=[_make_reasoning_section(), _make_message_section("Partial answer")])
+
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(response, dummy_text_message_piece)
+
+    assert isinstance(result, Message)
+    text_pieces = [p for p in result.message_pieces if p.original_value_data_type == "text"]
+    assert len(text_pieces) == 1
+    assert text_pieces[0].original_value == "Partial answer"
+    assert text_pieces[0].response_error == "none"
+    assert "max_output_tokens" in caplog.text
+
+
+def test_validate_response_truncated_empty_output_returns_graceful_empty(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece, caplog
+):
+    """Truncated response with no output returns a single graceful empty text piece, warns, does not raise."""
+    response = _make_truncated_response(output=[])
+
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(response, dummy_text_message_piece)
+
+    assert isinstance(result, Message)
+    assert len(result.message_pieces) == 1
+    assert result.message_pieces[0].original_value == ""
+    assert result.message_pieces[0].response_error == "empty"
+    assert "max_output_tokens" in caplog.text
+
+
+def test_validate_response_truncated_skips_partial_tool_call(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece, caplog
+):
+    """A partial function_call in a truncated response is skipped so it cannot re-enter the agentic loop."""
+    func_section = MagicMock()
+    func_section.type = "function_call"
+    func_section.call_id = "call_1"
+    func_section.name = "do_thing"
+    func_section.arguments = "{}"
+    response = _make_truncated_response(output=[_make_reasoning_section(), func_section])
+
+    with caplog.at_level(logging.WARNING):
+        result = target._validate_response(response, dummy_text_message_piece)
+
+    data_types = [p.original_value_data_type for p in result.message_pieces]
+    assert "function_call" not in data_types
+    assert "reasoning" in data_types
+    assert any(p.original_value_data_type == "text" and p.response_error == "empty" for p in result.message_pieces)
 
 
 async def test_construct_message_from_response(target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece):
