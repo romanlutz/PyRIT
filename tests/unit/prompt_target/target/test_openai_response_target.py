@@ -22,10 +22,8 @@ from pyrit.exceptions.exception_classes import (
     PyritException,
     RateLimitException,
 )
-from pyrit.identifiers import ComponentIdentifier
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.models import Message, MessagePiece
-from pyrit.models.json_response_config import _JsonResponseConfig
+from pyrit.models import JsonResponseConfig, Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import OpenAIResponseTarget, PromptTarget
 
 
@@ -88,7 +86,7 @@ def fake_construct_response_from_request(request, response_text_pieces):
 @pytest.fixture
 def sample_conversations() -> MutableSequence[MessagePiece]:
     conversations = get_sample_conversations()
-    return Message.flatten_to_message_pieces(conversations)
+    return flatten_to_message_pieces(conversations)
 
 
 @pytest.fixture
@@ -174,7 +172,7 @@ async def test_build_input_for_multi_modal(target: OpenAIResponseTarget):
         ),
     ]
     with patch(
-        "pyrit.common.data_url_converter.convert_local_image_to_data_url_async",
+        "pyrit.memory.storage.data_url_converter.convert_local_image_to_data_url_async",
         return_value="data:image/jpeg;base64,encoded_string",
     ):
         messages = await target._build_input_for_multi_modal_async(entries)
@@ -213,27 +211,27 @@ async def test_construct_request_body_includes_extra_body_params(
 
     request = Message(message_pieces=[dummy_text_message_piece])
 
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert body["key"] == "value"
 
 
 async def test_construct_request_body_json_object(target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece):
-    json_response_config = _JsonResponseConfig(enabled=True)
+    json_response_config = JsonResponseConfig(enabled=True)
     request = Message(message_pieces=[dummy_text_message_piece])
 
-    body = await target._construct_request_body(conversation=[request], json_config=json_response_config)
+    body = await target._construct_request_body_async(conversation=[request], json_config=json_response_config)
     assert body["text"] == {"format": {"type": "json_object"}}
 
 
 async def test_construct_request_body_json_schema(target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece):
     schema_object = {"type": "object", "properties": {"name": {"type": "string"}}}
-    json_response_config = _JsonResponseConfig.from_metadata(
+    json_response_config = JsonResponseConfig.from_metadata(
         metadata={"response_format": "json", "json_schema": schema_object}
     )
     request = Message(message_pieces=[dummy_text_message_piece])
 
-    body = await target._construct_request_body(conversation=[request], json_config=json_response_config)
+    body = await target._construct_request_body_async(conversation=[request], json_config=json_response_config)
     assert body["text"] == {
         "format": {
             "type": "json_schema",
@@ -249,8 +247,8 @@ async def test_construct_request_body_removes_empty_values(
 ):
     request = Message(message_pieces=[dummy_text_message_piece])
 
-    json_response_config = _JsonResponseConfig(enabled=False)
-    body = await target._construct_request_body(conversation=[request], json_config=json_response_config)
+    json_response_config = JsonResponseConfig(enabled=False)
+    body = await target._construct_request_body_async(conversation=[request], json_config=json_response_config)
     assert "max_completion_tokens" not in body
     assert "max_tokens" not in body
     assert "temperature" not in body
@@ -265,8 +263,8 @@ async def test_construct_request_body_serializes_text_message(
 ):
     request = Message(message_pieces=[dummy_text_message_piece])
 
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert body["input"][0]["content"][0]["text"] == "dummy text"
 
 
@@ -277,9 +275,9 @@ async def test_construct_request_body_serializes_complex_message(
     dummy_text_message_piece.conversation_id = image_piece.conversation_id
 
     request = Message(message_pieces=[dummy_text_message_piece, image_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
 
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     messages = body["input"][0]["content"]
     assert len(messages) == 2
     assert messages[0]["type"] == "input_text"
@@ -290,7 +288,7 @@ async def test_send_prompt_async_empty_response_adds_to_memory(
     openai_response_json: dict, target: OpenAIResponseTarget
 ):
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     target._memory = mock_memory
@@ -307,9 +305,6 @@ async def test_send_prompt_async_empty_response_adds_to_memory(
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -318,9 +313,6 @@ async def test_send_prompt_async_empty_response_adds_to_memory(
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
         ]
     )
@@ -329,12 +321,12 @@ async def test_send_prompt_async_empty_response_adds_to_memory(
     mock_response = create_mock_response(openai_response_json)
 
     with patch(
-        "pyrit.common.data_url_converter.convert_local_image_to_data_url_async",
+        "pyrit.memory.storage.data_url_converter.convert_local_image_to_data_url_async",
         return_value="data:image/jpeg;base64,encoded_string",
     ):
         target._async_client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
         target._memory = MagicMock(MemoryInterface)
-        target._memory.get_conversation.return_value = []
+        target._memory.get_conversation_messages.return_value = []
 
         with pytest.raises(EmptyResponseException):
             await target.send_prompt_async(message=message)
@@ -347,7 +339,7 @@ async def test_send_prompt_async_rate_limit_exception_adds_to_memory(
     target: OpenAIResponseTarget,
 ):
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     target._memory = mock_memory
@@ -361,13 +353,13 @@ async def test_send_prompt_async_rate_limit_exception_adds_to_memory(
 
     with pytest.raises(RateLimitException):
         await target.send_prompt_async(message=message)
-        target._memory.get_conversation.assert_called_once_with(conversation_id="123")
+        target._memory.get_conversation_messages.assert_called_once_with(conversation_id="123")
         target._memory.add_message_to_memory.assert_called_once_with(request=message)
 
 
 async def test_send_prompt_async_bad_request_error_adds_to_memory(target: OpenAIResponseTarget):
     mock_memory = MagicMock()
-    mock_memory.get_conversation.return_value = []
+    mock_memory.get_conversation_messages.return_value = []
     mock_memory.add_message_to_memory = AsyncMock()
 
     target._memory = mock_memory
@@ -383,7 +375,7 @@ async def test_send_prompt_async_bad_request_error_adds_to_memory(target: OpenAI
 
     with pytest.raises(BadRequestError):
         await target.send_prompt_async(message=message)
-        target._memory.get_conversation.assert_called_once_with(conversation_id="123")
+        target._memory.get_conversation_messages.assert_called_once_with(conversation_id="123")
         target._memory.add_message_to_memory.assert_called_once_with(request=message)
 
 
@@ -400,9 +392,6 @@ async def test_send_prompt_async(openai_response_json: dict, target: OpenAIRespo
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -411,16 +400,13 @@ async def test_send_prompt_async(openai_response_json: dict, target: OpenAIRespo
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
         ]
     )
     mock_response = create_mock_response(openai_response_json)
 
     with patch(
-        "pyrit.common.data_url_converter.convert_local_image_to_data_url_async",
+        "pyrit.memory.storage.data_url_converter.convert_local_image_to_data_url_async",
         return_value="data:image/jpeg;base64,encoded_string",
     ):
         target._async_client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
@@ -446,9 +432,6 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
                 converted_value="hello",
                 original_value_data_type="text",
                 converted_value_data_type="text",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
             MessagePiece(
                 role="user",
@@ -457,9 +440,6 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
                 converted_value=tmp_file_name,
                 original_value_data_type="image_path",
                 converted_value_data_type="image_path",
-                prompt_target_identifier=ComponentIdentifier(class_name="target-identifier", class_module="test"),
-                attack_identifier=ComponentIdentifier(class_name="test", class_module="test"),
-                labels={"test": "test"},
             ),
         ]
     )
@@ -468,12 +448,12 @@ async def test_send_prompt_async_empty_response_retries(openai_response_json: di
     mock_response = create_mock_response(openai_response_json)
 
     with patch(
-        "pyrit.common.data_url_converter.convert_local_image_to_data_url_async",
+        "pyrit.memory.storage.data_url_converter.convert_local_image_to_data_url_async",
         return_value="data:image/jpeg;base64,encoded_string",
     ):
         target._async_client.responses.create = AsyncMock(return_value=mock_response)  # type: ignore[method-assign]
         target._memory = MagicMock(MemoryInterface)
-        target._memory.get_conversation.return_value = []
+        target._memory.get_conversation_messages.return_value = []
 
         with pytest.raises(EmptyResponseException):
             await target.send_prompt_async(message=message)
@@ -627,7 +607,6 @@ def test_is_response_format_json_no_metadata(target: OpenAIResponseTarget):
         converted_value="Hello, how are you?",
         conversation_id="conversation_1",
         sequence=0,
-        prompt_metadata=None,
     )
 
     result = target.is_response_format_json(message_piece)
@@ -685,15 +664,16 @@ async def test_build_input_for_multi_modal_async_image_and_text(target: OpenAIRe
     assert result[0]["role"] == "user"
     assert result[0]["content"][0]["type"] == "input_text"
     assert result[0]["content"][1]["type"] == "input_image"
-    assert result[0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert result[0]["content"][1]["detail"] == "auto"
+    assert result[0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
 
 
 async def test_construct_request_body_filters_none(
     target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
 ):
     req = Message(message_pieces=[dummy_text_message_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[req], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[req], json_config=jrc)
     assert "max_output_tokens" not in body or body["max_output_tokens"] is None
     assert "temperature" not in body or body["temperature"] is None
     assert "top_p" not in body or body["top_p"] is None
@@ -754,7 +734,7 @@ async def test_build_input_for_multi_modal_async_filters_reasoning(target: OpenA
     ]
 
     # Patch image conversion (should not be called)
-    with patch("pyrit.common.data_url_converter.convert_local_image_to_data_url_async", new_callable=AsyncMock):
+    with patch("pyrit.memory.storage.data_url_converter.convert_local_image_to_data_url_async", new_callable=AsyncMock):
         result = await target._build_input_for_multi_modal_async(conversation)
 
     # Reasoning is now filtered out (not sent to API), so we have 3 items:
@@ -862,12 +842,10 @@ def test_make_tool_piece_serializes_output_and_sets_call_id(target: OpenAIRespon
         role="user",
         original_value="test",
         conversation_id="test-conv-123",
-        labels={"existing": "label"},
     )
     piece = target._make_tool_piece(out, call_id="tool-1", reference_piece=reference_piece)
     assert piece.original_value_data_type == "function_call_output"
     assert piece.conversation_id == "test-conv-123"
-    assert piece.labels["call_id"] == "tool-1"
     payload = json.loads(piece.original_value)
     assert payload["type"] == "function_call_output"
     assert payload["call_id"] == "tool-1"
@@ -883,14 +861,14 @@ async def test_execute_call_section_calls_registered_function(target: OpenAIResp
     target._custom_functions["add"] = add_fn
 
     section = {"type": "function_call", "name": "add", "arguments": json.dumps({"a": 2, "b": 3})}
-    result = await target._execute_call_section(section)
+    result = await target._execute_call_section_async(section)
     assert result == {"sum": 5}
 
 
 async def test_execute_call_section_missing_function_tolerant_mode(target: OpenAIResponseTarget):
     # default fail_on_missing_function=False
     section = {"type": "function_call", "name": "unknown_tool", "arguments": "{}"}
-    result = await target._execute_call_section(section)
+    result = await target._execute_call_section_async(section)
     assert result["error"] == "function_not_found"
     assert result["missing_function"] == "unknown_tool"
     assert "available_functions" in result
@@ -902,7 +880,7 @@ async def test_execute_call_section_malformed_arguments_tolerant_mode(target: Op
 
     target._custom_functions["echo"] = echo_fn
     section = {"type": "function_call", "name": "echo", "arguments": "{not-json"}
-    result = await target._execute_call_section(section)
+    result = await target._execute_call_section_async(section)
     assert result["error"] == "malformed_arguments"
     assert result["function"] == "echo"
     assert result["raw_arguments"] == "{not-json"
@@ -913,7 +891,7 @@ async def test_execute_call_section_missing_function_strict_mode(target: OpenAIR
     target._fail_on_missing_function = True
     section = {"type": "function_call", "name": "nope", "arguments": "{}"}
     with pytest.raises(KeyError, match="Function 'nope' is not registered"):
-        await target._execute_call_section(section)
+        await target._execute_call_section_async(section)
 
 
 async def test_send_prompt_async_agentic_loop_executes_function_and_returns_final_answer(target: OpenAIResponseTarget):
@@ -998,7 +976,7 @@ async def test_send_prompt_async_agentic_loop_executes_function_and_returns_fina
 
         # Verify intermediate messages were NOT persisted to memory by the target
         # (The normalizer will handle persistence when messages are returned)
-        all_messages = target._memory.get_conversation(conversation_id=shared_conversation_id)
+        all_messages = target._memory.get_conversation_messages(conversation_id=shared_conversation_id)
         assert len(all_messages) == 0, (
             f"Expected 0 messages in memory (target doesn't persist), got {len(all_messages)}"
         )
@@ -1221,7 +1199,7 @@ async def test_construct_message_from_response(target: OpenAIResponseTarget, dum
         )
         mock_parse.return_value = mock_piece
 
-        result = await target._construct_message_from_response(mock_response, dummy_text_message_piece)
+        result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
 
         assert isinstance(result, Message)
         assert len(result.message_pieces) == 1
@@ -1283,8 +1261,8 @@ async def test_construct_request_body_includes_reasoning_effort(
         reasoning_effort="medium",
     )
     request = Message(message_pieces=[dummy_text_message_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert body["reasoning"] == {"effort": "medium"}
 
 
@@ -1298,8 +1276,8 @@ async def test_construct_request_body_includes_reasoning_summary(
         reasoning_summary="detailed",
     )
     request = Message(message_pieces=[dummy_text_message_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert body["reasoning"] == {"summary": "detailed"}
 
 
@@ -1314,8 +1292,8 @@ async def test_construct_request_body_includes_reasoning_effort_and_summary(
         reasoning_summary="auto",
     )
     request = Message(message_pieces=[dummy_text_message_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert body["reasoning"] == {"effort": "high", "summary": "auto"}
 
 
@@ -1323,8 +1301,8 @@ async def test_construct_request_body_omits_reasoning_when_not_set(
     target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
 ):
     request = Message(message_pieces=[dummy_text_message_piece])
-    jrc = _JsonResponseConfig.from_metadata(metadata=None)
-    body = await target._construct_request_body(conversation=[request], json_config=jrc)
+    jrc = JsonResponseConfig.from_metadata(metadata=None)
+    body = await target._construct_request_body_async(conversation=[request], json_config=jrc)
     assert "reasoning" not in body
 
 

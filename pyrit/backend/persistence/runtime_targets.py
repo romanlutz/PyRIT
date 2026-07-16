@@ -9,10 +9,10 @@ the backend process exits (the in-memory ``TargetRegistry`` is process-local).
 This module persists their non-secret metadata to a JSON file and exposes
 helpers to append, remove, and load entries.
 
-Security policy: ``api_key`` values are **never** written to disk. At restart
-the standard ``api_key_environment_variable`` / Entra resolution is used to
-recover the credential. If neither path yields a key the restored target is
-flagged ``needs_reconfiguration`` in the UI instead of failing startup.
+Security policy: credential values are **never** written to disk. At restart
+the target's environment-variable / identity resolution is used to recover
+the credential. If neither path succeeds the restored target is flagged
+``needs_reconfiguration`` in the UI instead of failing startup.
 """
 
 import asyncio
@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,27 @@ _DEFAULT_FILE_NAME = "runtime_targets.json"
 _PYRIT_HOME_DIR = ".pyrit"
 _OVERRIDE_ENV_VAR = "PYRIT_RUNTIME_TARGETS_FILE"
 
-_SENSITIVE_KEYS: frozenset[str] = frozenset({"api_key"})
+_SENSITIVE_KEYS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "cookie",
+        "credential",
+        "password",
+        "proxy_authorization",
+        "sas_token",
+        "secret",
+        "token",
+    }
+)
+_SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
+    "_api_key",
+    "_credential",
+    "_password",
+    "_private_key",
+    "_secret",
+    "_token",
+)
 
 
 @dataclass
@@ -44,14 +64,14 @@ class RuntimeTargetEntry:
     Attributes:
         target_registry_name: The registry name assigned when the target was created.
         type: The target class name (matches ``CreateTargetRequest.type``).
-        auth_mode: ``"api_key"`` or ``"entra"``.
-        params: Constructor parameters with sensitive values (``api_key``) stripped.
+        auth_mode: ``"api_key"`` or ``"identity"``.
+        params: Constructor parameters with credential values stripped.
         created_at: ISO-8601 UTC timestamp of when the entry was persisted.
     """
 
     target_registry_name: str
     type: str
-    auth_mode: str
+    auth_mode: Literal["api_key", "identity"]
     params: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
 
@@ -59,22 +79,75 @@ class RuntimeTargetEntry:
         """Backfill ``created_at`` and strip any stray sensitive keys from params."""
         if not self.created_at:
             self.created_at = datetime.now(timezone.utc).isoformat()
-        # Defense in depth: strip secrets even if a caller bypasses sanitize_params.
-        for key in _SENSITIVE_KEYS:
-            self.params.pop(key, None)
+        self.params = sanitize_params(self.params)
 
 
 def sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
     """
-    Return a copy of ``params`` with sensitive keys (e.g. ``api_key``) removed.
+    Return a copy of ``params`` with credential-bearing keys removed.
 
     Args:
         params (dict[str, Any]): The constructor parameters from a create request.
 
     Returns:
-        dict[str, Any]: A shallow copy of ``params`` safe to persist to disk.
+        dict[str, Any]: A recursively sanitized copy safe to persist to disk.
     """
-    return {k: v for k, v in params.items() if k not in _SENSITIVE_KEYS}
+    sanitized: dict[str, Any] = {}
+    for key, value in params.items():
+        if _is_sensitive_key(key):
+            continue
+        if isinstance(value, dict):
+            sanitized[key] = sanitize_params(value)
+        elif isinstance(value, list):
+            sanitized[key] = [_sanitize_value(item) for item in value]
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def contains_sensitive_params(params: dict[str, Any]) -> bool:
+    """
+    Return whether a parameter tree contains an inline credential.
+
+    Args:
+        params (dict[str, Any]): Constructor parameters to inspect.
+
+    Returns:
+        bool: True when a credential-bearing key occurs at any depth.
+    """
+    return any(
+        (_is_sensitive_key(key) and value not in (None, "")) or _contains_sensitive_value(value)
+        for key, value in params.items()
+    )
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Return whether a parameter or header name conventionally carries a credential."""
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in _SENSITIVE_KEYS or normalized.endswith(_SENSITIVE_KEY_SUFFIXES)
+
+
+def _contains_sensitive_value(value: Any) -> bool:
+    """Return whether a nested JSON-compatible value contains a credential."""
+    if isinstance(value, dict):
+        return contains_sensitive_params(value)
+    if isinstance(value, list):
+        return any(_contains_sensitive_value(item) for item in value)
+    return False
+
+
+def _sanitize_value(value: Any) -> Any:
+    """
+    Recursively remove sensitive keys from a nested JSON-compatible value.
+
+    Returns:
+        Any: The sanitized value.
+    """
+    if isinstance(value, dict):
+        return sanitize_params(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    return value
 
 
 def _resolve_default_path() -> Path:
@@ -129,7 +202,7 @@ class RuntimeTargetStore:
 
     @property
     def path(self) -> Path:
-        """Return the resolved path the store writes to."""
+        """The resolved path the store writes to."""
         return self._path
 
     async def load_async(self) -> list[RuntimeTargetEntry]:
@@ -142,7 +215,7 @@ class RuntimeTargetStore:
             contains malformed JSON (a warning is logged in the malformed case).
         """
         async with self._lock:
-            return self._load_locked()
+            return await asyncio.to_thread(self._load_locked)
 
     async def append_async(self, entry: RuntimeTargetEntry) -> None:
         """
@@ -150,14 +223,11 @@ class RuntimeTargetStore:
         ``target_registry_name`` so callers can safely re-create a target.
 
         Args:
-            entry (RuntimeTargetEntry): The entry to persist. ``api_key`` is
-                stripped before write as defense in depth (``__post_init__``).
+            entry (RuntimeTargetEntry): The entry to persist. Credential values
+                are stripped before write as defense in depth (``__post_init__``).
         """
         async with self._lock:
-            entries = self._load_locked()
-            entries = [e for e in entries if e.target_registry_name != entry.target_registry_name]
-            entries.append(entry)
-            self._write_locked(entries)
+            await asyncio.to_thread(self._append_locked, entry)
 
     async def remove_async(self, target_registry_name: str) -> bool:
         """
@@ -170,12 +240,28 @@ class RuntimeTargetStore:
             bool: ``True`` if an entry was removed, ``False`` if no matching entry was found.
         """
         async with self._lock:
-            entries = self._load_locked()
-            filtered = [e for e in entries if e.target_registry_name != target_registry_name]
-            if len(filtered) == len(entries):
-                return False
-            self._write_locked(filtered)
-            return True
+            return await asyncio.to_thread(self._remove_locked, target_registry_name)
+
+    def _append_locked(self, entry: RuntimeTargetEntry) -> None:
+        """Append or replace an entry while the caller holds the async lock."""
+        entries = self._load_locked()
+        entries = [existing for existing in entries if existing.target_registry_name != entry.target_registry_name]
+        entries.append(entry)
+        self._write_locked(entries)
+
+    def _remove_locked(self, target_registry_name: str) -> bool:
+        """
+        Remove an entry while the caller holds the async lock.
+
+        Returns:
+            bool: True if an entry was removed, or False if it did not exist.
+        """
+        entries = self._load_locked()
+        filtered = [entry for entry in entries if entry.target_registry_name != target_registry_name]
+        if len(filtered) == len(entries):
+            return False
+        self._write_locked(filtered)
+        return True
 
     def _load_locked(self) -> list[RuntimeTargetEntry]:
         """
@@ -277,10 +363,13 @@ def _entry_from_dict(raw_entry: Any) -> RuntimeTargetEntry | None:
         logger.warning("Skipping runtime targets entry without required string fields: %r", raw_entry)
         return None
 
-    auth_mode = raw_entry.get("auth_mode", "api_key")
-    if auth_mode not in ("api_key", "entra"):
-        logger.warning("Skipping runtime targets entry with unknown auth_mode %r", auth_mode)
+    auth_mode_value = raw_entry.get("auth_mode", "api_key")
+    if auth_mode_value == "entra":
+        auth_mode_value = "identity"
+    if auth_mode_value not in ("api_key", "identity"):
+        logger.warning("Skipping runtime targets entry with unknown auth_mode %r", auth_mode_value)
         return None
+    auth_mode = cast("Literal['api_key', 'identity']", auth_mode_value)
 
     params = raw_entry.get("params") or {}
     if not isinstance(params, dict):

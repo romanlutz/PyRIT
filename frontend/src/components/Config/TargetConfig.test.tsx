@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
+import { makeTarget } from "@/test-utils/targetFixtures";
 import TargetConfig from "./TargetConfig";
 import { targetsApi } from "../../services/api";
 import type { TargetInstance } from "../../types";
@@ -77,18 +78,18 @@ const TestWrapper: React.FC<{ children: React.ReactNode }> = ({
 }) => <FluentProvider theme={webLightTheme}>{children}</FluentProvider>;
 
 const sampleTargets: TargetInstance[] = [
-  {
+  makeTarget({
     target_registry_name: "openai_chat_gpt4",
     target_type: "OpenAIChatTarget",
     endpoint: "https://api.openai.com",
     model_name: "gpt-4",
-  },
-  {
+  }),
+  makeTarget({
     target_registry_name: "openai_image_dalle",
     target_type: "OpenAIImageTarget",
     endpoint: "https://api.openai.com",
     model_name: "dall-e-3",
-  },
+  }),
 ];
 
 describe("TargetConfig", () => {
@@ -310,7 +311,7 @@ describe("TargetConfig", () => {
 
   it("should display target_specific_params like reasoning_effort", async () => {
     const targetsWithParams: TargetInstance[] = [
-      {
+      makeTarget({
         target_registry_name: "azure_responses",
         target_type: "OpenAIResponseTarget",
         endpoint: "https://api.openai.com",
@@ -320,7 +321,7 @@ describe("TargetConfig", () => {
           reasoning_summary: "auto",
           max_output_tokens: 4096,
         },
-      },
+      }),
     ];
 
     mockedTargetsApi.listTargets.mockResolvedValue({
@@ -345,12 +346,12 @@ describe("TargetConfig", () => {
 
   it("should show dash when no target_specific_params", async () => {
     const targetsNoParams: TargetInstance[] = [
-      {
+      makeTarget({
         target_registry_name: "simple_target",
         target_type: "TextTarget",
         endpoint: "http://localhost",
         model_name: "text",
-      },
+      }),
     ];
 
     mockedTargetsApi.listTargets.mockResolvedValue({
@@ -425,14 +426,14 @@ describe("TargetConfig", () => {
         .mockResolvedValueOnce({ items: [], pagination: { limit: 200, has_more: false } })
         .mockResolvedValueOnce({
           items: [
-            {
+            makeTarget({
               target_registry_name: "session-only-target",
               target_type: "OpenAIChatTarget",
               is_runtime: true,
               session_only: true,
               persist_hint:
                 "This target was created with an inline API key and will not survive a backend restart. To persist it, set the OPENAI_CHAT_KEY environment variable.",
-            },
+            }),
           ],
           pagination: { limit: 200, has_more: false },
         });
@@ -463,11 +464,11 @@ describe("TargetConfig", () => {
         .mockResolvedValueOnce({ items: [], pagination: { limit: 200, has_more: false } })
         .mockResolvedValueOnce({
           items: [
-            {
+            makeTarget({
               target_registry_name: "persistent-target",
               target_type: "TextTarget",
               is_runtime: true,
-            },
+            }),
           ],
           pagination: { limit: 200, has_more: false },
         });
@@ -489,6 +490,31 @@ describe("TargetConfig", () => {
         expect(screen.getByText("TextTarget")).toBeInTheDocument();
       });
       expect(screen.queryByText(/won.t survive a restart/i)).not.toBeInTheDocument();
+    });
+
+    it("clears a stale session-only notice after creating a persistent target", async () => {
+      mockedTargetsApi.listTargets.mockResolvedValue({
+        items: sampleTargets,
+        pagination: { limit: 200, has_more: false },
+      });
+
+      render(
+        <TestWrapper>
+          <TargetConfig {...defaultProps} />
+        </TestWrapper>
+      );
+
+      await screen.findByText("New Target");
+      await userEvent.click(screen.getByText("New Target"));
+      await userEvent.click(screen.getByTestId("dialog-create-session-only"));
+      expect(await screen.findByText(/won.t survive a restart/i)).toBeInTheDocument();
+
+      await userEvent.click(screen.getByText("New Target"));
+      await userEvent.click(screen.getByTestId("dialog-create"));
+
+      await waitFor(() => {
+        expect(screen.queryByText(/won.t survive a restart/i)).not.toBeInTheDocument();
+      });
     });
 
     it("dismisses the persist-hint MessageBar when the dismiss button is clicked", async () => {
@@ -526,13 +552,13 @@ describe("TargetConfig", () => {
   });
 
   describe("target deletion", () => {
-    const runtimeTarget: TargetInstance = {
+    const runtimeTarget: TargetInstance = makeTarget({
       target_registry_name: "runtime_openai",
       target_type: "OpenAIChatTarget",
       endpoint: "https://api.example.com",
       model_name: "gpt-4",
       is_runtime: true,
-    };
+    });
 
     // Dialog/MessageBar rendering is slow under parallel jest load; explicit
     // timeouts and `mockReset()` for queued mocks keep these flows reliable.

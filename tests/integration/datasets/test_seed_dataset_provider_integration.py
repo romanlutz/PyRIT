@@ -14,8 +14,7 @@ from pyrit.datasets.seed_datasets.remote import _SimpleSafetyTestsDataset, _XSTe
 from pyrit.datasets.seed_datasets.seed_metadata import (
     SeedDatasetFilter,
 )
-from pyrit.identifiers.component_identifier import ComponentIdentifier
-from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models import ComponentIdentifier, SeedDataset, SeedPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Smoke-test providers covering the three distinct fetch paths:
 #   - local YAML (no network)
 #   - remote URL-based (_fetch_from_url via GitHub)
-#   - remote HuggingFace (_fetch_from_huggingface)
+#   - remote HuggingFace (_fetch_from_huggingface_async)
 _all_providers = SeedDatasetProvider.get_all_providers()
 _SMOKE_PROVIDERS: list[tuple[str, type]] = [
     ("LocalDataset_access_shell_commands", _all_providers["LocalDataset_access_shell_commands"]),
@@ -39,17 +38,22 @@ class TestSeedDatasetSmoke:
     """
 
     @pytest.mark.parametrize("name,provider_cls", _SMOKE_PROVIDERS, ids=[p[0] for p in _SMOKE_PROVIDERS])
-    async def test_fetch_dataset_smoke(self, name, provider_cls):
+    async def test_fetch_dataset_smoke(self, name, provider_cls, caplog):
         """
         Verify that a representative provider can be fetched successfully.
 
         Covers one local, one URL-remote, and one HuggingFace-remote provider
         to catch regressions in each fetch path without downloading all 58 datasets.
+
+        Also fails if any harm category encountered in the real data is unknown
+        (i.e., falls back to OTHER with a warning), so missing mappings are caught
+        against live dataset contents.
         """
         logger.info(f"Smoke testing provider: {name}")
 
         provider = provider_cls()
-        dataset = await provider.fetch_dataset_async(cache=False)
+        with caplog.at_level(logging.WARNING, logger="pyrit.models.harm_category"):
+            dataset = await provider.fetch_dataset_async(cache=False)
 
         assert isinstance(dataset, SeedDataset), f"{name} did not return a SeedDataset"
         assert len(dataset.seeds) > 0, f"{name} returned an empty dataset"
@@ -60,6 +64,13 @@ class TestSeedDatasetSmoke:
             assert seed.dataset_name == dataset.dataset_name, (
                 f"Seed dataset_name mismatch in {name}: {seed.dataset_name} != {dataset.dataset_name}"
             )
+
+        unknown_warnings = [r for r in caplog.records if "Unknown harm category" in r.message]
+        assert not unknown_warnings, (
+            f"{name} produced unknown harm categories that mapped to OTHER:\n"
+            + "\n".join(f"  - {r.message}" for r in unknown_warnings)
+            + "\nAdd alias mappings in HarmCategory._initialize_aliases or pass alias_overrides in the loader."
+        )
 
         logger.info(f"Smoke test passed for {name} with {len(dataset.seeds)} seeds")
 
@@ -409,7 +420,7 @@ class TestEndToEndLocalDatasetWorkflow:
 
             # --- Step 3: User inspects metadata ---
             provider = matching_cls()
-            metadata = await provider._parse_metadata()
+            metadata = await provider._parse_metadata_async()
             assert metadata is not None
             assert metadata.harm_categories == {"cybercrime"}
 
@@ -606,13 +617,13 @@ class TestHarmbenchMetadataInScenario:
         from pyrit.datasets.seed_datasets.remote.harmbench_dataset import _HarmBenchDataset
 
         loader = _HarmBenchDataset()
-        metadata = await loader._parse_metadata()
+        metadata = await loader._parse_metadata_async()
 
         assert metadata is not None
         assert isinstance(metadata.tags, set)
         assert "default" in metadata.tags
         assert "safety" in metadata.tags
-        assert metadata.size == {"large"}
+        assert metadata.size == {"medium"}
         assert metadata.modalities == {"text"}
         assert isinstance(metadata.harm_categories, set)
         assert "cybercrime" in metadata.harm_categories
@@ -661,7 +672,7 @@ class TestHarmbenchMetadataInScenario:
         from pyrit.executor.attack.core.attack_config import AttackScoringConfig
         from pyrit.prompt_target import TextTarget
         from pyrit.scenario.scenarios.foundry.red_team_agent import (
-            FoundryStrategy,
+            FoundryTechnique,
             RedTeamAgent,
         )
         from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
@@ -677,7 +688,7 @@ class TestHarmbenchMetadataInScenario:
 
         # Mock scorer to avoid Azure dependency
         mock_scorer = MagicMock(spec=TrueFalseScorer)
-        mock_scorer.get_identifier.return_value = ComponentIdentifier.from_dict({"__type__": "MockScorer"})
+        mock_scorer.get_identifier.return_value = ComponentIdentifier.model_validate({"__type__": "MockScorer"})
 
         target = TextTarget()
         rta = RedTeamAgent(
@@ -688,12 +699,15 @@ class TestHarmbenchMetadataInScenario:
         # This is the critical call — it loads seed groups from memory
         # and builds atomic attacks. If metadata broke the pipeline,
         # this would raise ValueError about missing seed_groups.
-        await rta.initialize_async(
-            objective_target=target,
-            max_concurrency=1,
-            scenario_strategies=[FoundryStrategy.Base64],
-            include_baseline=False,
+        rta.set_params_from_args(
+            args={
+                "objective_target": target,
+                "max_concurrency": 1,
+                "scenario_techniques": [FoundryTechnique.Base64],
+                "include_baseline": False,
+            }
         )
+        await rta.initialize_async()
 
         # Verify the scenario got objectives from harmbench
         attacks = rta._atomic_attacks

@@ -3,6 +3,7 @@ import {
   tokens,
   Text,
   Button,
+  Link,
   Spinner,
   MessageBar,
   MessageBarBody,
@@ -33,50 +34,66 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
     targetName: string
     hint: string
   } | null>(null)
+  // Counter used to re-trigger the fetch effect from event handlers (Refresh,
+  // dialog close) without invoking setState synchronously in the effect body.
+  const [refetchCount, setRefetchCount] = useState(0)
 
   // Retry fetching targets a few times with backoff. The Vite dev proxy
   // returns 502 while the backend is still starting, so a single failed
   // request on initial page load would show a confusing error to the user.
-  const fetchTargets = useCallback(async () => {
+  useEffect(() => {
     const maxRetries = 3
-    setLoading(true)
-    setError(null)
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let cancelled = false
+
+    const attempt = async (n: number): Promise<void> => {
       try {
         const response = await targetsApi.listTargets(200)
+        if (cancelled) return
         setTargets(response.items)
+        setError(null)
         setLoading(false)
-        return
       } catch (err) {
-        if (attempt < maxRetries) {
-          // Wait before retrying (1s, 2s, 3s)
-          await new Promise(r => setTimeout(r, (attempt + 1) * 1000))
-        } else {
-          setError(toApiError(err).detail)
+        if (cancelled) return
+        if (n < maxRetries) {
+          await new Promise(r => setTimeout(r, (n + 1) * 1000))
+          if (cancelled) return
+          return attempt(n + 1)
         }
+        setError(toApiError(err).detail)
+        setLoading(false)
       }
     }
-    setLoading(false)
+
+    attempt(0)
+    return () => {
+      cancelled = true
+    }
+  }, [refetchCount])
+
+  const fetchTargets = useCallback(() => {
+    setLoading(true)
+    setError(null)
+    setRefetchCount(c => c + 1)
   }, [])
 
-  useEffect(() => {
+  const handleTargetCreated = useCallback((created: TargetInstance) => {
+    setDialogOpen(false)
+    setSessionOnlyNotice(null)
+    if (created.session_only && created.persist_hint) {
+      setSessionOnlyNotice({
+        targetName: created.target_registry_name,
+        hint: created.persist_hint,
+      })
+    }
     fetchTargets()
   }, [fetchTargets])
-
-  const handleTargetCreated = async (created: TargetInstance) => {
-    setDialogOpen(false)
-    if (created.session_only && created.persist_hint) {
-      setSessionOnlyNotice({ targetName: created.target_registry_name, hint: created.persist_hint })
-    }
-    await fetchTargets()
-  }
 
   const handleTargetDeleted = useCallback(async (targetRegistryName: string) => {
     await targetsApi.deleteTarget(targetRegistryName)
     if (activeTarget?.target_registry_name === targetRegistryName) {
       onClearActiveTarget?.()
     }
-    await fetchTargets()
+    fetchTargets()
   }, [activeTarget, fetchTargets, onClearActiveTarget])
 
   return (
@@ -152,9 +169,9 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
             to auto-populate targets from your <code>.env</code> and <code>.env.local</code> files.
             For example, add <code>airt</code> to the <code>initializers</code> list to register
             Azure OpenAI targets automatically. See the{' '}
-            <a href="https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example" target="_blank" rel="noopener noreferrer">
+            <Link href="https://github.com/microsoft/PyRIT/blob/main/.pyrit_conf_example" target="_blank" inline>
               .pyrit_conf_example
-            </a>{' '}
+            </Link>{' '}
             for details.
           </Text>
           <Button
@@ -180,6 +197,7 @@ export default function TargetConfig({ activeTarget, onSetActiveTarget, onClearA
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
         onCreated={handleTargetCreated}
+        existingTargets={targets}
       />
     </div>
   )

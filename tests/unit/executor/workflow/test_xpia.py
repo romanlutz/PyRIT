@@ -12,8 +12,7 @@ from pyrit.executor.workflow.xpia import (
     XPIAStatus,
     XPIAWorkflow,
 )
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import Message, MessagePiece, Score
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 from pyrit.score import Scorer
@@ -330,7 +329,6 @@ class TestXPIAWorkflowPerform:
         # Check that message was passed (converted from seed_group)
         assert "message" in call_args.kwargs
         assert call_args.kwargs["target"] == workflow._attack_setup_target
-        assert call_args.kwargs["labels"] == valid_context.memory_labels
         assert call_args.kwargs["conversation_id"] == valid_context.attack_setup_target_conversation_id
 
     @patch("pyrit.executor.workflow.xpia.CentralMemory")

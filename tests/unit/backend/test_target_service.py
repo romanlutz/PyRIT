@@ -17,16 +17,25 @@ from pyrit.backend.persistence.runtime_targets import (
     RuntimeTargetStore,
 )
 from pyrit.backend.services.target_service import TargetService, get_target_service
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.registry.object_registries import TargetRegistry
+from pyrit.models import ComponentIdentifier
+from pyrit.prompt_target import AzureBlobStorageTarget, PromptTarget, TargetCapabilities
+from pyrit.registry import TargetRegistry
+from unit.mocks import MockPromptTarget
 
 
 @pytest.fixture(autouse=True)
-def reset_registry():
-    """Reset the TargetRegistry singleton before each test."""
-    TargetRegistry.reset_instance()
-    yield
-    TargetRegistry.reset_instance()
+def reset_registry(tmp_path: Path):
+    """Reset registry state and isolate default runtime persistence for each test."""
+    TargetRegistry.reset_registry_singleton()
+    get_target_service.cache_clear()
+    default_store = RuntimeTargetStore(path=tmp_path / "default_runtime_targets.json")
+    with patch(
+        "pyrit.backend.services.target_service.get_runtime_target_store",
+        return_value=default_store,
+    ):
+        yield
+    get_target_service.cache_clear()
+    TargetRegistry.reset_registry_singleton()
 
 
 @pytest.fixture
@@ -53,6 +62,14 @@ def _mock_target_identifier(*, class_name: str = "MockTarget", **kwargs) -> Comp
     )
 
 
+def _mock_prompt_target(*, identifier: ComponentIdentifier | None = None) -> MagicMock:
+    """Create a MagicMock PromptTarget with an identifier and default capabilities."""
+    mock_target = MagicMock(spec=PromptTarget)
+    mock_target.get_identifier.return_value = identifier if identifier is not None else _mock_target_identifier()
+    mock_target.capabilities = TargetCapabilities()
+    return mock_target
+
+
 async def _test_token_provider() -> str:
     """Shared async token provider used in Entra authentication tests."""
     return "test-token"
@@ -75,15 +92,14 @@ class TestListTargets:
         service = TargetService()
 
         # Register a mock target
-        mock_target = MagicMock()
-        mock_target.get_identifier.return_value = _mock_target_identifier(endpoint="http://test")
-        service._registry.register_instance(mock_target, name="target-1")
+        mock_target = _mock_prompt_target(identifier=_mock_target_identifier(endpoint="http://test"))
+        service._registry.instances.register(mock_target, name="target-1")
 
         result = await service.list_targets_async()
 
         assert len(result.items) == 1
         assert result.items[0].target_registry_name == "target-1"
-        assert result.items[0].target_type == "MockTarget"
+        assert result.items[0].identifier.class_name == "MockTarget"
         assert result.pagination.has_more is False
 
     async def test_list_targets_paginates_with_limit(self) -> None:
@@ -91,9 +107,8 @@ class TestListTargets:
         service = TargetService()
 
         for i in range(5):
-            mock_target = MagicMock()
-            mock_target.get_identifier.return_value = _mock_target_identifier()
-            service._registry.register_instance(mock_target, name=f"target-{i}")
+            mock_target = _mock_prompt_target()
+            service._registry.instances.register(mock_target, name=f"target-{i}")
 
         result = await service.list_targets_async(limit=3)
 
@@ -107,9 +122,8 @@ class TestListTargets:
         service = TargetService()
 
         for i in range(5):
-            mock_target = MagicMock()
-            mock_target.get_identifier.return_value = _mock_target_identifier()
-            service._registry.register_instance(mock_target, name=f"target-{i}")
+            mock_target = _mock_prompt_target()
+            service._registry.instances.register(mock_target, name=f"target-{i}")
 
         first_page = await service.list_targets_async(limit=2)
         second_page = await service.list_targets_async(limit=2, cursor=first_page.pagination.next_cursor)
@@ -123,9 +137,8 @@ class TestListTargets:
         service = TargetService()
 
         for i in range(3):
-            mock_target = MagicMock()
-            mock_target.get_identifier.return_value = _mock_target_identifier()
-            service._registry.register_instance(mock_target, name=f"target-{i}")
+            mock_target = _mock_prompt_target()
+            service._registry.instances.register(mock_target, name=f"target-{i}")
 
         first_page = await service.list_targets_async(limit=2)
         last_page = await service.list_targets_async(limit=2, cursor=first_page.pagination.next_cursor)
@@ -150,21 +163,19 @@ class TestGetTarget:
         """Test that get_target returns target built from registry object."""
         service = TargetService()
 
-        mock_target = MagicMock()
-        mock_target.get_identifier.return_value = _mock_target_identifier()
-        service._registry.register_instance(mock_target, name="target-1")
+        mock_target = _mock_prompt_target()
+        service._registry.instances.register(mock_target, name="target-1")
 
         result = await service.get_target_async(target_registry_name="target-1")
 
         assert result is not None
         assert result.target_registry_name == "target-1"
-        assert result.target_type == "MockTarget"
+        assert result.identifier.class_name == "MockTarget"
 
     async def test_list_targets_includes_extra_params_in_target_specific(self) -> None:
         """Test that extra identifier params (reasoning_effort etc.) appear in target_specific_params."""
         service = TargetService()
 
-        mock_target = MagicMock()
         identifier = ComponentIdentifier(
             class_name="OpenAIResponseTarget",
             class_module="pyrit.prompt_target",
@@ -177,14 +188,14 @@ class TestGetTarget:
                 "max_output_tokens": 4096,
             },
         )
-        mock_target.get_identifier.return_value = identifier
-        service._registry.register_instance(mock_target, name="response-target")
+        mock_target = _mock_prompt_target(identifier=identifier)
+        service._registry.instances.register(mock_target, name="response-target")
 
         result = await service.list_targets_async()
 
         assert len(result.items) == 1
         target = result.items[0]
-        assert target.temperature == 1.0
+        assert target.identifier.temperature == 1.0
         assert target.target_specific_params is not None
         assert target.target_specific_params["reasoning_effort"] == "high"
         assert target.target_specific_params["reasoning_summary"] == "auto"
@@ -194,7 +205,6 @@ class TestGetTarget:
         """Test that get_target returns target_specific_params with extra identifier params."""
         service = TargetService()
 
-        mock_target = MagicMock()
         identifier = ComponentIdentifier(
             class_name="OpenAIChatTarget",
             class_module="pyrit.prompt_target",
@@ -205,8 +215,8 @@ class TestGetTarget:
                 "seed": 42,
             },
         )
-        mock_target.get_identifier.return_value = identifier
-        service._registry.register_instance(mock_target, name="chat-target")
+        mock_target = _mock_prompt_target(identifier=identifier)
+        service._registry.instances.register(mock_target, name="chat-target")
 
         result = await service.get_target_async(target_registry_name="chat-target")
 
@@ -230,12 +240,36 @@ class TestGetTargetObject:
     def test_get_target_object_returns_object_from_registry(self) -> None:
         """Test that get_target_object returns the actual target object."""
         service = TargetService()
-        mock_target = MagicMock()
-        service._registry.register_instance(mock_target, name="target-1")
+        mock_target = MagicMock(spec=PromptTarget)
+        service._registry.instances.register(mock_target, name="target-1")
 
         result = service.get_target_object(target_registry_name="target-1")
 
         assert result is mock_target
+
+
+class TestListTargetCatalog:
+    """Tests for TargetService.list_target_catalog_async method."""
+
+    async def test_catalog_returns_known_target_types(self) -> None:
+        """The catalog exposes constructible target classes from the registry."""
+        service = TargetService()
+
+        result = await service.list_target_catalog_async()
+
+        target_types = [item.target_type for item in result.items]
+        assert "OpenAIChatTarget" in target_types
+        assert "AzureMLChatTarget" in target_types
+
+    async def test_catalog_includes_declarative_auth_facts(self) -> None:
+        """Catalog entries surface the per-class auth facts the frontend needs."""
+        service = TargetService()
+
+        result = await service.list_target_catalog_async()
+
+        openai_entry = next(item for item in result.items if item.target_type == "OpenAIChatTarget")
+        assert "api_key" in openai_entry.supported_auth_modes
+        assert "identity" in openai_entry.supported_auth_modes
 
 
 class TestCreateTarget:
@@ -265,7 +299,7 @@ class TestCreateTarget:
         result = await service.create_target_async(request=request)
 
         assert result.target_registry_name is not None
-        assert result.target_type == "TextTarget"
+        assert result.identifier.class_name == "TextTarget"
 
     async def test_create_target_registers_in_registry(self, sqlite_instance) -> None:
         """Test that create_target registers object in registry."""
@@ -298,9 +332,9 @@ class TestCreateTarget:
 
             result = await service.create_target_async(request=request)
 
-            assert result.model_name == "claude-sonnet-4-6"
-            # underlying_model_name should be None since no underlying_model was passed
-            assert result.underlying_model_name is None
+            assert result.identifier.model_name == "claude-sonnet-4-6"
+            # underlying_model_name is empty since no underlying_model was passed
+            assert not result.identifier.underlying_model_name
 
     async def test_create_target_with_different_underlying_model(self, sqlite_instance) -> None:
         """Test that explicit underlying_model is used when it differs from model_name."""
@@ -318,295 +352,212 @@ class TestCreateTarget:
 
         result = await service.create_target_async(request=request)
 
-        assert result.model_name == "my-gpt4o-deployment"
-        assert result.underlying_model_name == "gpt-4o"
+        assert result.identifier.model_name == "my-gpt4o-deployment"
+        assert result.identifier.underlying_model_name == "gpt-4o"
 
 
 class TestCreateTargetEntraAuth:
-    """Test that creating targets with Entra auth mode properly authenticates and handles edge cases."""
+    """Entra auth at the service boundary: the service only omits the api_key and
+    confirms the target type supports Entra. Endpoint trust + token minting are the
+    target's job and are covered in the target-level tests (see
+    tests/unit/prompt_target/target/)."""
 
-    async def test_create_openai_target_with_entra_injects_token_provider(self, sqlite_instance) -> None:
-        """Entra auth path: api_key is replaced with the authentication callable"""
+    async def test_create_openai_target_with_entra_omits_key_and_target_mints_token(self, sqlite_instance) -> None:
+        """Entra path: the service omits the api_key so the target mints its own token."""
 
-        with patch(
-            "pyrit.backend.services.target_service.get_azure_openai_auth",
-            return_value=_test_token_provider,
-        ) as mock_get_auth:
-            service = TargetService()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_CHAT_KEY", None)
+            with patch(
+                "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
+                return_value=_test_token_provider,
+            ) as mock_get_auth:
+                service = TargetService()
 
-            request = CreateTargetRequest(
-                type="OpenAIChatTarget",
-                params={
-                    "endpoint": "https://test.openai.azure.com/",
-                    "model_name": "gpt-4o",
-                },
-                auth_mode="entra",
-            )
+                request = CreateTargetRequest(
+                    type="OpenAIChatTarget",
+                    params={
+                        "endpoint": "https://test.openai.azure.com/",
+                        "model_name": "gpt-4o",
+                    },
+                    auth_mode="identity",
+                )
 
-            result = await service.create_target_async(request=request)
+                result = await service.create_target_async(request=request)
 
-            mock_get_auth.assert_called_once_with("https://test.openai.azure.com/")
-            target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
-            assert target_obj is not None
-            # OpenAI target preserves async callables verbatim through ensure_async_token_provider.
-            assert target_obj._api_key is _test_token_provider  # type: ignore[attr-defined]
+                mock_get_auth.assert_called_once_with("https://test.openai.azure.com/")
+                target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
+                assert target_obj is not None
+                # OpenAI target preserves async callables verbatim through ensure_async_token_provider.
+                assert target_obj._api_key is _test_token_provider  # type: ignore[attr-defined]
 
-    async def test_create_openai_target_with_entra_drops_user_api_key(self, sqlite_instance) -> None:
-        """Any api_key supplied alongside auth_mode='entra' must be discarded."""
+    async def test_create_openai_target_with_identity_drops_user_api_key(self, sqlite_instance) -> None:
+        """Any api_key supplied alongside auth_mode='identity' must be discarded."""
 
-        with patch(
-            "pyrit.backend.services.target_service.get_azure_openai_auth",
-            return_value=_test_token_provider,
-        ):
-            service = TargetService()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_CHAT_KEY", None)
+            with patch(
+                "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
+                return_value=_test_token_provider,
+            ):
+                service = TargetService()
 
-            request = CreateTargetRequest(
-                type="OpenAIChatTarget",
-                params={
-                    "endpoint": "https://test.openai.azure.com/",
-                    "model_name": "gpt-4o",
-                    "api_key": "should-be-ignored",
-                },
-                auth_mode="entra",
-            )
+                request = CreateTargetRequest(
+                    type="OpenAIChatTarget",
+                    params={
+                        "endpoint": "https://test.openai.azure.com/",
+                        "model_name": "gpt-4o",
+                        "api_key": "should-be-ignored",
+                    },
+                    auth_mode="identity",
+                )
 
-            result = await service.create_target_async(request=request)
+                result = await service.create_target_async(request=request)
 
-            target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
-            assert target_obj is not None
-            assert target_obj._api_key is _test_token_provider  # type: ignore[attr-defined]
-            # The literal "should-be-ignored" string must never appear.
-            assert target_obj._api_key != "should-be-ignored"  # type: ignore[attr-defined]
+                target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
+                assert target_obj is not None
+                assert target_obj._api_key is _test_token_provider  # type: ignore[attr-defined]
+                # The literal "should-be-ignored" string must never appear.
+                assert target_obj._api_key != "should-be-ignored"  # type: ignore[attr-defined]
 
-    async def test_create_openai_target_with_entra_does_not_mutate_request_params(self, sqlite_instance) -> None:
+    async def test_create_openai_target_with_identity_does_not_mutate_request_params(self, sqlite_instance) -> None:
         """The CreateTargetRequest.params object must remain unchanged after creation."""
 
-        with patch(
-            "pyrit.backend.services.target_service.get_azure_openai_auth",
-            return_value=_test_token_provider,
-        ):
-            service = TargetService()
-
-            original_params = {
-                "endpoint": "https://test.openai.azure.com/",
-                "model_name": "gpt-4o",
-                "api_key": "original-key",
-            }
-            request = CreateTargetRequest(
-                type="OpenAIChatTarget",
-                params=dict(original_params),
-                auth_mode="entra",
-            )
-
-            await service.create_target_async(request=request)
-
-            # The caller's request.params must be unchanged after the call.
-            assert request.params == original_params
-
-    async def test_create_openai_target_with_entra_non_azure_endpoint_raises(self, sqlite_instance) -> None:
-        """Entra ID requires a known Azure OpenAI / AI Foundry hostname suffix."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            params={"endpoint": "https://api.openai.com/"},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="Azure endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_openai_target_with_entra_substring_lookalike_endpoint_raises(self, sqlite_instance) -> None:
-        """Substring 'azure' in the hostname must not be enough to pass Entra validation."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            # Hostname contains 'azure' but does NOT end with an approved suffix.
-            params={"endpoint": "https://evil-azure.example.com/"},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="Azure endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_openai_target_with_entra_missing_endpoint_raises(self, sqlite_instance) -> None:
-        """Entra ID for OpenAI must reject a missing endpoint with a clear error."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            params={},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_azureml_target_with_entra_injects_token_provider(self, sqlite_instance) -> None:
-        """AzureML Entra path: api_key is replaced with the ML scope token provider."""
-
-        with patch(
-            "pyrit.backend.services.target_service.get_azure_async_token_provider",
-            return_value=_test_token_provider,
-        ) as mock_get_provider:
-            service = TargetService()
-
-            request = CreateTargetRequest(
-                type="AzureMLChatTarget",
-                params={"endpoint": "https://my-aml.region.inference.ml.azure.com/score"},
-                auth_mode="entra",
-            )
-
-            result = await service.create_target_async(request=request)
-
-            mock_get_provider.assert_called_once_with("https://ml.azure.com/.default")
-            target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
-            assert target_obj is not None
-            # AzureMLChatTarget stores the provider on _api_key_provider; static _api_key is cleared.
-            assert target_obj._api_key_provider is _test_token_provider  # type: ignore[attr-defined]
-            assert target_obj._api_key == ""  # type: ignore[attr-defined]
-
-    async def test_create_azureml_target_with_entra_non_aml_endpoint_raises(self, sqlite_instance) -> None:
-        """Entra ID for AzureMLChatTarget requires a known AML hostname suffix."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="AzureMLChatTarget",
-            params={"endpoint": "https://example.com/score"},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="AML endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_azureml_target_with_entra_substring_lookalike_endpoint_raises(self, sqlite_instance) -> None:
-        """Substring 'inference.ml.azure.com' in the hostname must not be enough to pass AML validation."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="AzureMLChatTarget",
-            # Hostname contains the AML suffix as a substring but does NOT end with it.
-            params={"endpoint": "https://evil-inference.ml.azure.com.attacker.com/score"},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="AML endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_azureml_target_with_entra_missing_endpoint_raises(self, sqlite_instance) -> None:
-        """Entra ID for AzureMLChatTarget must reject a missing endpoint with a clear error."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="AzureMLChatTarget",
-            params={},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="endpoint"):
-            await service.create_target_async(request=request)
-
-    async def test_create_target_entra_unsupported_type_raises(self, sqlite_instance) -> None:
-        """Entra ID is only supported for OpenAI-family and AzureMLChatTarget."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="TextTarget",
-            params={},
-            auth_mode="entra",
-        )
-
-        with pytest.raises(ValueError, match="does not support Entra"):
-            await service.create_target_async(request=request)
-
-
-class TestCreateTargetApiKeyAuth:
-    """Test that auth_mode='api_key' strictly requires a key in params or environment."""
-
-    async def test_create_openai_target_api_key_mode_without_key_raises(self, sqlite_instance) -> None:
-        """Without an api_key (params or env), OpenAITarget would silently fall back to Entra;
-        the service must reject this so the user's explicit choice is honored."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            params={
-                "model_name": "gpt-4o",
-                "endpoint": "https://test.openai.azure.com/",
-            },
-            auth_mode="api_key",
-        )
-
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OPENAI_CHAT_KEY", None)
-            with pytest.raises(ValueError, match="auth_mode='api_key' requires an API key"):
+            with patch(
+                "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
+                return_value=_test_token_provider,
+            ):
+                service = TargetService()
+
+                original_params = {
+                    "endpoint": "https://test.openai.azure.com/",
+                    "model_name": "gpt-4o",
+                    "api_key": "original-key",
+                }
+                request = CreateTargetRequest(
+                    type="OpenAIChatTarget",
+                    params=dict(original_params),
+                    auth_mode="identity",
+                )
+
                 await service.create_target_async(request=request)
 
-    async def test_create_openai_target_api_key_mode_with_env_var_succeeds(self, sqlite_instance) -> None:
-        """An env-var-supplied key satisfies the api_key requirement."""
-        service = TargetService()
+                # The caller's request.params must be unchanged after the call.
+                assert request.params == original_params
 
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            params={
-                "model_name": "gpt-4o",
-                "endpoint": "https://test.openai.azure.com/",
-            },
-            auth_mode="api_key",
-        )
-
-        with patch.dict(os.environ, {"OPENAI_CHAT_KEY": "env-test-key"}):
-            result = await service.create_target_async(request=request)
-
-        assert result.target_type == "OpenAIChatTarget"
-
-    async def test_create_openai_target_api_key_mode_rejects_empty_key(self, sqlite_instance) -> None:
-        """An empty-string api_key counts as missing and must be rejected."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="OpenAIChatTarget",
-            params={
-                "model_name": "gpt-4o",
-                "endpoint": "https://test.openai.azure.com/",
-                "api_key": "",
-            },
-            auth_mode="api_key",
-        )
-
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("OPENAI_CHAT_KEY", None)
-            with pytest.raises(ValueError, match="auth_mode='api_key' requires an API key"):
-                await service.create_target_async(request=request)
-
-    async def test_create_azureml_target_api_key_mode_without_key_raises(self, sqlite_instance) -> None:
-        """AzureMLChatTarget in api_key mode also requires an explicit key."""
-        service = TargetService()
-
-        request = CreateTargetRequest(
-            type="AzureMLChatTarget",
-            params={"endpoint": "https://my-endpoint.eastus.inference.ml.azure.com/score"},
-            auth_mode="api_key",
-        )
+    async def test_create_azureml_target_with_identity_omits_key_and_target_mints_token(self, sqlite_instance) -> None:
+        """AzureML identity path: the service omits the key so the target mints the ML scope token."""
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AZURE_ML_KEY", None)
-            with pytest.raises(ValueError, match="auth_mode='api_key' requires an API key"):
+            with patch(
+                "pyrit.prompt_target.azure_ml_chat_target.get_azure_async_token_provider",
+                return_value=_test_token_provider,
+            ) as mock_get_provider:
+                service = TargetService()
+
+                request = CreateTargetRequest(
+                    type="AzureMLChatTarget",
+                    params={"endpoint": "https://my-aml.region.inference.ml.azure.com/score"},
+                    auth_mode="identity",
+                )
+
+                result = await service.create_target_async(request=request)
+
+                mock_get_provider.assert_called_once_with("https://ml.azure.com/.default")
+                target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
+                assert target_obj is not None
+                # AzureMLChatTarget stores the provider on _api_key_provider; static _api_key is cleared.
+                assert target_obj._api_key_provider is _test_token_provider  # type: ignore[attr-defined]
+                assert target_obj._api_key == ""  # type: ignore[attr-defined]
+
+    async def test_create_openai_target_with_identity_non_azure_endpoint_raises(self, sqlite_instance) -> None:
+        """The target (not the service) rejects an unrecognized endpoint under identity auth."""
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_CHAT_KEY", None)
+            service = TargetService()
+
+            request = CreateTargetRequest(
+                type="OpenAIChatTarget",
+                params={"endpoint": "https://api.openai.com/", "model_name": "gpt-4o"},
+                auth_mode="identity",
+            )
+
+            with pytest.raises(ValueError, match="non-Azure endpoints"):
                 await service.create_target_async(request=request)
 
-    async def test_create_text_target_api_key_mode_skips_validation(self, sqlite_instance) -> None:
-        """Targets without an api_key_environment_variable (e.g. TextTarget) are unaffected."""
+    async def test_create_target_identity_unsupported_type_raises(self, sqlite_instance) -> None:
+        """Identity-based auth is only supported for targets that declare it."""
         service = TargetService()
 
         request = CreateTargetRequest(
             type="TextTarget",
             params={},
-            auth_mode="api_key",
+            auth_mode="identity",
         )
 
-        result = await service.create_target_async(request=request)
-        assert result.target_type == "TextTarget"
+        with pytest.raises(ValueError, match="does not support identity-based authentication"):
+            await service.create_target_async(request=request)
+
+
+class TestCreateRoundRobinTarget:
+    """Service-level tests for building RoundRobinTarget through the registry.
+
+    The service passes ``targets`` (registry names) to ``registry.create_instance``;
+    the resolver turns the names into live target objects and RoundRobinTarget owns
+    its own construction validation (dedup, class/config consistency). Those rules
+    are covered in tests/unit/prompt_target/test_round_robin_target.py — here we only
+    exercise the service wiring.
+    """
+
+    async def test_create_round_robin_target_resolves_registry_names(self, sqlite_instance) -> None:
+        """RoundRobinTarget creation resolves registry names to live target objects."""
+        service = TargetService()
+
+        target_a = MockPromptTarget()
+        target_b = MockPromptTarget()
+        service._registry.instances.register(target_a, name="target-a")
+        service._registry.instances.register(target_b, name="target-b")
+
+        rr_request = CreateTargetRequest(
+            type="RoundRobinTarget",
+            params={"targets": ["target-a", "target-b"], "weights": [2, 1]},
+        )
+
+        result = await service.create_target_async(request=rr_request)
+
+        assert result.identifier.class_name == "RoundRobinTarget"
+        target_obj = service.get_target_object(target_registry_name=result.target_registry_name)
+        assert target_obj._targets == [target_a, target_b]
+        assert target_obj._weights == [2, 1]
+
+    async def test_create_round_robin_target_fewer_than_2_raises(self, sqlite_instance) -> None:
+        """A single inner target bubbles up RoundRobinTarget's own validation error."""
+        service = TargetService()
+
+        service._registry.instances.register(MockPromptTarget(), name="only-one")
+
+        rr_request = CreateTargetRequest(
+            type="RoundRobinTarget",
+            params={"targets": ["only-one"]},
+        )
+
+        with pytest.raises(ValueError, match="at least 2 targets"):
+            await service.create_target_async(request=rr_request)
+
+    async def test_create_round_robin_target_unknown_name_raises(self, sqlite_instance) -> None:
+        """A non-existent registry name is rejected by the resolver."""
+        service = TargetService()
+
+        rr_request = CreateTargetRequest(
+            type="RoundRobinTarget",
+            params={"targets": ["does-not-exist-a", "does-not-exist-b"]},
+        )
+
+        with pytest.raises(ValueError, match="not found"):
+            await service.create_target_async(request=rr_request)
 
 
 class TestTargetServiceSingleton:
@@ -666,27 +617,82 @@ class TestCreateTargetPersistence:
         assert "OPENAI_CHAT_KEY" in result.persist_hint
         assert result.is_runtime is True  # still deletable for this process
 
-    async def test_create_target_persist_hint_falls_back_when_no_env_var(
+    async def test_inline_api_key_recreation_removes_prior_persisted_entry(
         self,
         sqlite_instance,
         runtime_store: RuntimeTargetStore,
     ) -> None:
-        """For target classes with no known api_key env var, the hint is generic."""
         service = TargetService(runtime_store=runtime_store)
+        base_params = {
+            "model_name": "gpt-4o",
+            "endpoint": "https://test.openai.azure.com/",
+        }
 
-        # TextTarget accepts no api_key at all; force the path by patching
-        # _resolve_api_key_env_var to return None for any class.
-        with patch.object(service, "_get_target_class", wraps=service._get_target_class) as _:
-            request = CreateTargetRequest(
-                type="TextTarget",
-                params={"api_key": "shouldnt-matter"},
-                auth_mode="api_key",
+        with patch.dict(os.environ, {"OPENAI_CHAT_KEY": "environment-key"}):
+            persisted = await service.create_target_async(
+                request=CreateTargetRequest(type="OpenAIChatTarget", params=base_params)
             )
-            # TextTarget rejects unknown kwargs, so this would fail at construction.
-            # We assert the helper directly instead:
-            hint = TargetService._build_persist_hint(target_class=type("Stub", (), {}))
-            assert "inline API key" in hint
-            assert "OPENAI" not in hint  # no env var-specific text when class has none
+        session_only = await service.create_target_async(
+            request=CreateTargetRequest(
+                type="OpenAIChatTarget",
+                params={**base_params, "api_key": "inline-key"},
+            )
+        )
+
+        assert session_only.target_registry_name == persisted.target_registry_name
+        assert session_only.session_only is True
+        assert await runtime_store.load_async() == []
+
+    def test_create_target_persist_hint_falls_back_when_no_env_var(self) -> None:
+        """For target classes with no known api_key env var, the hint is generic."""
+        hint = TargetService._build_persist_hint(target_class=PromptTarget)
+        assert "inline API key or credential" in hint
+        assert "OPENAI" not in hint
+
+    async def test_create_target_with_inline_sas_token_is_session_only(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+        request = CreateTargetRequest(
+            type="AzureBlobStorageTarget",
+            params={
+                "container_url": "https://account.blob.core.windows.net/container",
+                "sas_token": "secret-sas-token",
+            },
+            auth_mode="api_key",
+        )
+
+        result = await service.create_target_async(request=request)
+
+        assert result.session_only is True
+        assert result.persist_hint is not None
+        assert "AZURE_STORAGE_ACCOUNT_SAS_TOKEN" in result.persist_hint
+        assert await runtime_store.load_async() == []
+
+    async def test_identity_mode_discards_inline_sas_token_before_persisting(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+        request = CreateTargetRequest(
+            type="AzureBlobStorageTarget",
+            params={
+                "container_url": "https://account.blob.core.windows.net/container",
+                "sas_token": "must-not-be-used-or-persisted",
+            },
+            auth_mode="identity",
+        )
+
+        result = await service.create_target_async(request=request)
+
+        live_target = service.get_target_object(target_registry_name=result.target_registry_name)
+        assert isinstance(live_target, AzureBlobStorageTarget)
+        assert live_target._sas_token is None
+        assert result.session_only is False
+        assert "must-not-be-used-or-persisted" not in runtime_store.path.read_text(encoding="utf-8")
 
     async def test_create_target_with_env_var_api_key_persists_sanitized_entry(
         self,
@@ -723,6 +729,34 @@ class TestCreateTargetPersistence:
         assert result.session_only is False
         assert result.persist_hint is None
 
+    async def test_create_target_with_identity_persists_without_api_key(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        service = TargetService(runtime_store=runtime_store)
+        request = CreateTargetRequest(
+            type="OpenAIChatTarget",
+            params={
+                "model_name": "gpt-4o",
+                "endpoint": "https://test.openai.azure.com/",
+            },
+            auth_mode="identity",
+        )
+
+        with patch(
+            "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
+            return_value=_test_token_provider,
+        ):
+            result = await service.create_target_async(request=request)
+
+        entries = await runtime_store.load_async()
+        assert len(entries) == 1
+        assert entries[0].auth_mode == "identity"
+        assert "api_key" not in entries[0].params
+        assert result.session_only is False
+        assert result.is_runtime is True
+
     async def test_create_target_marks_instance_as_runtime(
         self,
         sqlite_instance,
@@ -736,6 +770,9 @@ class TestCreateTargetPersistence:
         assert result.is_runtime is True
         assert result.needs_reconfiguration is False
         assert result.session_only is False
+        entries = await runtime_store.load_async()
+        assert len(entries) == 1
+        assert entries[0].type == "TextTarget"
 
     async def test_initializer_registered_targets_are_not_marked_runtime(
         self,
@@ -743,12 +780,13 @@ class TestCreateTargetPersistence:
     ) -> None:
         service = TargetService(runtime_store=runtime_store)
 
-        mock_target = MagicMock()
-        mock_target.get_identifier.return_value = ComponentIdentifier(
-            class_name="TextTarget",
-            class_module="pyrit.prompt_target",
+        mock_target = _mock_prompt_target(
+            identifier=ComponentIdentifier(
+                class_name="TextTarget",
+                class_module="pyrit.prompt_target",
+            )
         )
-        service._registry.register_instance(mock_target, name="initializer-target")
+        service._registry.instances.register(mock_target, name="initializer-target")
 
         result = await service.get_target_async(target_registry_name="initializer-target")
 
@@ -790,12 +828,13 @@ class TestDeleteTarget:
     ) -> None:
         service = TargetService(runtime_store=runtime_store)
 
-        mock_target = MagicMock()
-        mock_target.get_identifier.return_value = ComponentIdentifier(
-            class_name="TextTarget",
-            class_module="pyrit.prompt_target",
+        mock_target = _mock_prompt_target(
+            identifier=ComponentIdentifier(
+                class_name="TextTarget",
+                class_module="pyrit.prompt_target",
+            )
         )
-        service._registry.register_instance(mock_target, name="initializer-target")
+        service._registry.instances.register(mock_target, name="initializer-target")
 
         with pytest.raises(PermissionError, match="initializer"):
             await service.delete_target_async(target_registry_name="initializer-target")
@@ -856,9 +895,58 @@ class TestRestoreRuntimeTargets:
 
         result = await service.list_targets_async()
         assert len(result.items) == 1
-        assert result.items[0].target_type == "TextTarget"
+        assert result.items[0].identifier.class_name == "TextTarget"
         assert result.items[0].is_runtime is True
         assert result.items[0].needs_reconfiguration is False
+
+    async def test_restore_retries_composite_until_runtime_dependencies_exist(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        entries = [
+            RuntimeTargetEntry(
+                target_registry_name="round-robin",
+                type="RoundRobinTarget",
+                auth_mode="api_key",
+                params={"targets": ["text-a", "text-b"], "weights": [2, 1]},
+            ),
+            RuntimeTargetEntry(
+                target_registry_name="text-a",
+                type="OpenAIChatTarget",
+                auth_mode="api_key",
+                params={
+                    "endpoint": "https://test.openai.azure.com/",
+                    "model_name": "deployment-a",
+                    "underlying_model": "gpt-4o",
+                },
+            ),
+            RuntimeTargetEntry(
+                target_registry_name="text-b",
+                type="OpenAIChatTarget",
+                auth_mode="api_key",
+                params={
+                    "endpoint": "https://test.openai.azure.com/",
+                    "model_name": "deployment-b",
+                    "underlying_model": "gpt-4o",
+                },
+            ),
+        ]
+        for entry in entries:
+            await runtime_store.append_async(entry)
+        service = TargetService(runtime_store=runtime_store)
+
+        with patch.dict(os.environ, {"OPENAI_CHAT_KEY": "environment-key"}):
+            await service.restore_runtime_targets_async()
+
+        restored = await service.get_target_async(target_registry_name="round-robin")
+        assert restored is not None
+        assert restored.needs_reconfiguration is False
+        assert len(restored.inner_targets or []) == 2
+        assert {target.identifier.model_name for target in restored.inner_targets or []} == {
+            "deployment-a",
+            "deployment-b",
+        }
 
     async def test_restore_marks_target_needs_reconfiguration_on_missing_env_var(
         self,
@@ -872,7 +960,7 @@ class TestRestoreRuntimeTargets:
                 auth_mode="api_key",
                 params={
                     "model_name": "gpt-4o",
-                    "endpoint": "https://test.openai.azure.com/",
+                    "endpoint": "https://api.openai.com/",
                 },
             )
         )
@@ -906,12 +994,13 @@ class TestRestoreRuntimeTargets:
         )
         service = TargetService(runtime_store=runtime_store)
 
-        initializer_target = MagicMock()
-        initializer_target.get_identifier.return_value = ComponentIdentifier(
-            class_name="TextTarget",
-            class_module="pyrit.prompt_target",
+        initializer_target = _mock_prompt_target(
+            identifier=ComponentIdentifier(
+                class_name="TextTarget",
+                class_module="pyrit.prompt_target",
+            )
         )
-        service._registry.register_instance(initializer_target, name="text_target")
+        service._registry.instances.register(initializer_target, name="text_target")
 
         import logging
 
@@ -923,6 +1012,27 @@ class TestRestoreRuntimeTargets:
         # The runtime metadata must not have been populated for the conflicting name.
         assert "text_target" not in service._runtime_target_metadata
         assert any("initializer already registered" in r.getMessage() for r in caplog.records)
+        assert await runtime_store.load_async() == []
+
+    async def test_restore_is_idempotent_for_already_restored_runtime_target(
+        self,
+        sqlite_instance,
+        runtime_store: RuntimeTargetStore,
+    ) -> None:
+        entry = RuntimeTargetEntry(
+            target_registry_name="text-target-1",
+            type="TextTarget",
+            auth_mode="api_key",
+            params={},
+        )
+        await runtime_store.append_async(entry)
+        service = TargetService(runtime_store=runtime_store)
+
+        await service.restore_runtime_targets_async()
+        await service.restore_runtime_targets_async()
+
+        assert service.get_target_object(target_registry_name=entry.target_registry_name) is not None
+        assert await runtime_store.load_async() == [entry]
 
     async def test_broken_target_shows_up_in_list_targets(
         self,
@@ -936,7 +1046,7 @@ class TestRestoreRuntimeTargets:
                 auth_mode="api_key",
                 params={
                     "model_name": "gpt-4o",
-                    "endpoint": "https://test.openai.azure.com/",
+                    "endpoint": "https://api.openai.com/",
                 },
             )
         )
@@ -952,6 +1062,51 @@ class TestRestoreRuntimeTargets:
         assert item.target_registry_name == "broken-openai"
         assert item.needs_reconfiguration is True
         assert item.is_runtime is True
-        assert item.target_type == "OpenAIChatTarget"
-        assert item.endpoint == "https://test.openai.azure.com/"
-        assert item.model_name == "gpt-4o"
+        assert item.identifier.class_name == "OpenAIChatTarget"
+        assert item.identifier.endpoint == "https://api.openai.com/"
+        assert item.identifier.model_name == "gpt-4o"
+
+
+class TestFrontendBackendCompatibilitySync:
+    """Guard against drift between frontend isCompatible() and backend TARGET_EVAL_PARAMS.
+
+    The frontend pre-filters the Create RoundRobinTarget dropdown using a hardcoded
+    set of fields (target_type + TARGET_EVAL_PARAMS). If the backend adds a new
+    behavioral param, this test fails and reminds the developer to update
+    frontend/src/components/Config/CreateTargetDialog.tsx → isCompatible().
+    """
+
+    def test_target_eval_params_match_frontend_iscompatible(self) -> None:
+        """TARGET_EVAL_PARAMS must be exactly {underlying_model_name, temperature, top_p}.
+
+        If this fails, someone added or removed a param from TARGET_EVAL_PARAMS.
+        Update the frontend isCompatible() function in CreateTargetDialog.tsx
+        to check the same fields, then update the expected set here.
+        """
+        from pyrit.models import TARGET_EVAL_PARAMS
+
+        expected = {"underlying_model_name", "temperature", "top_p"}
+        assert expected == TARGET_EVAL_PARAMS, (
+            f"TARGET_EVAL_PARAMS changed to {TARGET_EVAL_PARAMS}. "
+            f"Update the frontend isCompatible() in CreateTargetDialog.tsx to match, "
+            f"then update this test's expected set."
+        )
+
+    def test_target_eval_param_fallbacks_match_frontend(self) -> None:
+        """TARGET_EVAL_PARAM_FALLBACKS must match the fallback rule implemented in
+        the frontend effectiveUnderlyingModel() helper in CreateTargetDialog.tsx.
+
+        If this fails, someone added or changed a fallback. Update
+        effectiveUnderlyingModel() (and any sibling resolvers) in
+        CreateTargetDialog.tsx so the frontend pre-filter agrees with what the
+        backend RoundRobinTarget._validate_behavioral_consistency check accepts,
+        then update this test's expected dict.
+        """
+        from pyrit.models import TARGET_EVAL_PARAM_FALLBACKS
+
+        expected = {"underlying_model_name": "model_name"}
+        assert expected == TARGET_EVAL_PARAM_FALLBACKS, (
+            f"TARGET_EVAL_PARAM_FALLBACKS changed to {TARGET_EVAL_PARAM_FALLBACKS}. "
+            f"Update effectiveUnderlyingModel() in CreateTargetDialog.tsx to match, "
+            f"then update this test's expected dict."
+        )

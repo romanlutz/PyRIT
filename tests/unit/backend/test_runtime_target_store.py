@@ -16,6 +16,7 @@ import pytest
 from pyrit.backend.persistence.runtime_targets import (
     RuntimeTargetEntry,
     RuntimeTargetStore,
+    contains_sensitive_params,
     sanitize_params,
 )
 
@@ -68,8 +69,16 @@ class TestRuntimeTargetEntry:
 class TestSanitizeParams:
     """sanitize_params helper."""
 
-    def test_removes_api_key_only(self) -> None:
-        result = sanitize_params({"endpoint": "https://x", "model_name": "gpt", "api_key": "k"})
+    def test_removes_sensitive_credentials(self) -> None:
+        result = sanitize_params(
+            {
+                "endpoint": "https://x",
+                "model_name": "gpt",
+                "api_key": "k",
+                "sas_token": "sas",
+                "hf_access_token": "hf",
+            }
+        )
         assert result == {"endpoint": "https://x", "model_name": "gpt"}
 
     def test_returns_shallow_copy(self) -> None:
@@ -77,6 +86,38 @@ class TestSanitizeParams:
         result = sanitize_params(original)
         result["endpoint"] = "https://changed"
         assert original["endpoint"] == "https://x"
+
+    def test_removes_nested_api_keys(self) -> None:
+        result = sanitize_params(
+            {
+                "headers": {"api_key": "nested-secret", "content_type": "application/json"},
+                "items": [{"api_key": "list-secret", "name": "safe"}],
+            }
+        )
+
+        assert result == {
+            "headers": {"content_type": "application/json"},
+            "items": [{"name": "safe"}],
+        }
+
+    def test_removes_sensitive_authorization_headers(self) -> None:
+        result = sanitize_params(
+            {
+                "headers": {
+                    "Authorization": "Bearer secret",
+                    "X-API-Key": "secret",
+                    "content_type": "application/json",
+                }
+            }
+        )
+
+        assert result == {"headers": {"content_type": "application/json"}}
+
+    def test_contains_sensitive_params_recurses_without_matching_token_counts(self) -> None:
+        assert contains_sensitive_params({"headers": {"Authorization": "Bearer secret"}}) is True
+        assert contains_sensitive_params({"items": [{"hf_access_token": "secret"}]}) is True
+        assert contains_sensitive_params({"api_key": ""}) is False
+        assert contains_sensitive_params({"max_new_tokens": 100, "skip_special_tokens": True}) is False
 
 
 class TestLoad:
@@ -212,7 +253,7 @@ class TestAppendAndRemove:
         second = RuntimeTargetEntry(
             target_registry_name="t-1",
             type="OpenAIChatTarget",
-            auth_mode="entra",
+            auth_mode="identity",
             params={"endpoint": "https://new"},
         )
 
@@ -221,7 +262,7 @@ class TestAppendAndRemove:
         loaded = await store.load_async()
 
         assert len(loaded) == 1
-        assert loaded[0].auth_mode == "entra"
+        assert loaded[0].auth_mode == "identity"
         assert loaded[0].params == {"endpoint": "https://new"}
 
     async def test_remove_unknown_is_noop(self, store: RuntimeTargetStore) -> None:
