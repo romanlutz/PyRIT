@@ -250,3 +250,90 @@ async def test_token_converter_encodes_letters():
     converter = TokenBijectionConverter(tokenizer=mock_tokenizer, seed=42)
     result = await converter.convert_async(prompt="hello")
     assert result.output_text != "hello"
+
+
+_PLAIN_VOCAB_WORDS = [
+    "cat", "dog", "fox", "run", "jump", "tree", "fish", "bird", "rock", "sand",
+    "moon", "star", "rain", "wind", "fire", "lake", "hill", "road", "farm", "town",
+    "book", "door", "hand", "face", "mind", "body", "soul", "hope", "love", "time",
+]
+
+
+def _mock_tokenizer(vocab: dict[str, int]):
+    return type("MockTokenizer", (), {"get_vocab": lambda self: vocab})()
+
+
+async def test_token_converter_delimits_encoded_units():
+    # Regression test: without a delimiter between mapped tokens, a multi-letter word
+    # collapses into an unsegmentable run-on string that the target model can't learn to
+    # produce or reliably decode.
+    mock_tokenizer = _mock_tokenizer({word: i for i, word in enumerate(_PLAIN_VOCAB_WORDS)})
+    converter = TokenBijectionConverter(tokenizer=mock_tokenizer, seed=42)
+
+    result = await converter.convert_async(prompt="hi")
+    expected = f"{converter.mapping['h']}-{converter.mapping['i']}"
+    assert result.output_text == expected
+
+
+async def test_token_converter_round_trip_multi_letter_word():
+    mock_tokenizer = _mock_tokenizer({word: i for i, word in enumerate(_PLAIN_VOCAB_WORDS)})
+    converter = TokenBijectionConverter(tokenizer=mock_tokenizer, seed=1)
+
+    original = "Hello, World!"
+    encoded = await converter.convert_async(prompt=original)
+    assert converter.decode(encoded.output_text) == original
+
+
+async def test_token_converter_preserves_word_boundaries_on_round_trip():
+    # Real spaces between words must survive distinctly from the hyphen delimiter
+    # used between per-letter code words within a single word.
+    mock_tokenizer = _mock_tokenizer({word: i for i, word in enumerate(_PLAIN_VOCAB_WORDS)})
+    converter = TokenBijectionConverter(tokenizer=mock_tokenizer, seed=7)
+
+    original = "hi there"
+    encoded = await converter.convert_async(prompt=original)
+    assert " " in encoded.output_text
+    assert converter.decode(encoded.output_text) == original
+
+
+def test_token_converter_excludes_sentencepiece_continuation_fragments():
+    # SentencePiece-style vocabs mark word-initial tokens with "▁"; bare tokens are
+    # mid-word continuation fragments and should never be selected as standalone "words".
+    vocab = {}
+    for i, word in enumerate(_PLAIN_VOCAB_WORDS):
+        vocab[f"▁{word}"] = i
+        vocab[f"{word}x"] = i + 1000  # continuation fragment, no marker
+
+    converter = TokenBijectionConverter(tokenizer=_mock_tokenizer(vocab), seed=42)
+
+    for token in converter.mapping.values():
+        assert not token.startswith("▁")
+        assert token in _PLAIN_VOCAB_WORDS
+
+
+def test_token_converter_excludes_gpt2_continuation_fragments():
+    # GPT-2/RoBERTa byte-level BPE marks word-initial tokens with "Ġ".
+    vocab = {}
+    for i, word in enumerate(_PLAIN_VOCAB_WORDS):
+        vocab[f"Ġ{word}"] = i
+        vocab[f"{word}y"] = i + 1000  # continuation fragment, no marker
+
+    converter = TokenBijectionConverter(tokenizer=_mock_tokenizer(vocab), seed=42)
+
+    for token in converter.mapping.values():
+        assert not token.startswith("Ġ")
+        assert token in _PLAIN_VOCAB_WORDS
+
+
+def test_token_converter_excludes_wordpiece_continuation_fragments():
+    # WordPiece (BERT) marks continuation pieces with "##"; unmarked tokens are standalone.
+    vocab = {}
+    for i, word in enumerate(_PLAIN_VOCAB_WORDS):
+        vocab[word] = i
+        vocab[f"##{word}"] = i + 1000  # continuation piece
+
+    converter = TokenBijectionConverter(tokenizer=_mock_tokenizer(vocab), seed=42)
+
+    for token in converter.mapping.values():
+        assert not token.startswith("##")
+        assert token in _PLAIN_VOCAB_WORDS

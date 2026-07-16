@@ -74,35 +74,35 @@ class TestBijectionAttackInitialization:
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestBijectionTeachingMessages:
-    def test_teaching_messages_length(self, mock_objective_target):
+    async def test_teaching_messages_length(self, mock_objective_target):
         attack = BijectionAttack(
             objective_target=mock_objective_target,
             num_teaching_shots=3,
         )
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
         assert len(messages) == 7
 
-    def test_teaching_messages_first_message_is_system(self, mock_objective_target):
+    async def test_teaching_messages_first_message_is_system(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
         assert messages[0].message_pieces[0].role == "system"
         assert "write every assistant response only in this secret code" in messages[0].message_pieces[0].original_value
 
-    def test_teaching_messages_alternate_roles(self, mock_objective_target):
+    async def test_teaching_messages_alternate_roles(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
         for i, message in enumerate(messages[1:], start=1):
             expected_role = "user" if i % 2 == 1 else "assistant"
             assert message.message_pieces[0].role == expected_role
 
-    def test_teaching_messages_fallback_to_user_when_system_prompt_unsupported(self, mock_objective_target):
+    async def test_teaching_messages_fallback_to_user_when_system_prompt_unsupported(self, mock_objective_target):
         mock_objective_target.capabilities = TargetCapabilities(supports_system_prompt=False)
         attack = BijectionAttack(
             objective_target=mock_objective_target,
             num_teaching_shots=3,
         )
 
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
 
         assert len(messages) == 6
         assert messages[0].message_pieces[0].role == "user"
@@ -111,32 +111,32 @@ class TestBijectionTeachingMessages:
         assert messages[1].message_pieces[0].role == "assistant"
         assert messages[2].message_pieces[0].role == "user"
 
-    def test_teaching_messages_fallback_with_zero_shots_keeps_setup(self, mock_objective_target):
+    async def test_teaching_messages_fallback_with_zero_shots_keeps_setup(self, mock_objective_target):
         mock_objective_target.capabilities = TargetCapabilities(supports_system_prompt=False)
         attack = BijectionAttack(
             objective_target=mock_objective_target,
             num_teaching_shots=0,
         )
 
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
 
         assert len(messages) == 1
         assert messages[0].message_pieces[0].role == "user"
         assert "write every assistant response only in this secret code" in messages[0].message_pieces[0].original_value
 
-    def test_teaching_messages_use_encoded_assistant_responses(self, mock_objective_target):
+    async def test_teaching_messages_use_encoded_assistant_responses(self, mock_objective_target):
         mapping = {
             letter: chr(((ord(letter) - ord("a") + 1) % 26) + ord("a")) for letter in "abcdefghijklmnopqrstuvwxyz"
         }
         converter = LetterBijectionConverter(mapping=mapping)
         attack = BijectionAttack(objective_target=mock_objective_target, bijection_converter=converter)
 
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
 
         assert messages[1].message_pieces[0].original_value == "the quick brown fox"
         assert messages[2].message_pieces[0].original_value == "uif rvjdl cspxo gpy"
 
-    def test_teaching_messages_cycle_examples(self, mock_objective_target):
+    async def test_teaching_messages_cycle_examples(self, mock_objective_target):
         attack = BijectionAttack(
             objective_target=mock_objective_target,
             bijection_converter=LetterBijectionConverter(
@@ -145,7 +145,7 @@ class TestBijectionTeachingMessages:
             num_teaching_shots=6,
         )
 
-        messages = attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages()
 
         assert messages[11].message_pieces[0].original_value == "the quick brown fox"
         assert messages[12].message_pieces[0].original_value == "the quick brown fox"
