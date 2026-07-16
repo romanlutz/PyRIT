@@ -80,13 +80,13 @@ class TestParseArgs:
         args = pyrit_scan.parse_args(["--list-datasets"])
         assert args.list_datasets is True
 
-    def test_parse_args_with_strategies(self):
-        args = pyrit_scan.parse_args(["test_scenario", "--strategies", "s1", "s2"])
-        assert args.scenario_strategies == ["s1", "s2"]
+    def test_parse_args_with_techniques(self):
+        args = pyrit_scan.parse_args(["test_scenario", "--techniques", "s1", "s2"])
+        assert args.scenario_techniques == ["s1", "s2"]
 
-    def test_parse_args_with_strategies_short_flag(self):
-        args = pyrit_scan.parse_args(["test_scenario", "-s", "s1", "s2"])
-        assert args.scenario_strategies == ["s1", "s2"]
+    def test_parse_args_with_techniques_short_flag(self):
+        args = pyrit_scan.parse_args(["test_scenario", "-t", "s1", "s2"])
+        assert args.scenario_techniques == ["s1", "s2"]
 
     def test_parse_args_with_max_concurrency(self):
         args = pyrit_scan.parse_args(["test_scenario", "--max-concurrency", "5"])
@@ -116,7 +116,7 @@ class TestParseArgs:
                 "INFO",
                 "--initializers",
                 "openai_target",
-                "--strategies",
+                "--techniques",
                 "base64",
                 "rot13",
                 "--max-concurrency",
@@ -130,7 +130,7 @@ class TestParseArgs:
         assert args.scenario_name == "encoding_scenario"
         assert args.log_level == logging.INFO
         assert args.initializers == ["openai_target"]
-        assert args.scenario_strategies == ["base64", "rot13"]
+        assert args.scenario_techniques == ["base64", "rot13"]
         assert args.max_concurrency == 10
         assert args.max_retries == 5
 
@@ -258,9 +258,9 @@ def _mock_api_client():
         scenario_name="test_scenario",
         scenario_type="X",
         description="",
-        default_strategy="",
-        aggregate_strategies=[],
-        all_strategies=[],
+        default_technique="",
+        aggregate_techniques=[],
+        all_techniques=[],
         default_datasets=[],
         supported_parameters=[],
     )
@@ -271,7 +271,7 @@ def _mock_api_client():
         status=ScenarioRunState.CREATED,
         created_at=now,
         updated_at=now,
-        strategies_used=[],
+        techniques_used=[],
         total_attacks=0,
         completed_attacks=0,
         objective_achieved_rate=0,
@@ -283,7 +283,7 @@ def _mock_api_client():
         status=ScenarioRunState.COMPLETED,
         created_at=now,
         updated_at=now,
-        strategies_used=[],
+        techniques_used=[],
         total_attacks=5,
         completed_attacks=5,
         objective_achieved_rate=40,
@@ -624,7 +624,7 @@ class TestBuildRunRequest:
                 {"name": "openai_target", "args": {"model": "gpt-4"}},
                 "datasets",
             ],
-            scenario_strategies=None,
+            scenario_techniques=None,
             max_concurrency=None,
             max_retries=None,
             dataset_names=None,
@@ -640,7 +640,7 @@ class TestBuildRunRequest:
         parsed = Namespace(
             target="t",
             initializers=None,
-            scenario_strategies=["s1"],
+            scenario_techniques=["s1"],
             max_concurrency=3,
             max_retries=2,
             dataset_names=["d1"],
@@ -649,7 +649,7 @@ class TestBuildRunRequest:
             memory_labels='{"key":"value"}',
         )
         request = pyrit_scan._build_run_request(parsed_args=parsed, scenario_name="s")
-        assert request.strategies == ["s1"]
+        assert request.techniques == ["s1"]
         assert request.max_concurrency == 3
         assert request.max_retries == 2
         assert request.dataset_names == ["d1"]
@@ -660,7 +660,7 @@ class TestBuildRunRequest:
         parsed = Namespace(
             target="t",
             initializers=None,
-            scenario_strategies=None,
+            scenario_techniques=None,
             max_concurrency=None,
             max_retries=None,
             dataset_names=None,
@@ -675,7 +675,7 @@ class TestBuildRunRequest:
         parsed = Namespace(
             target="t",
             initializers=None,
-            scenario_strategies=None,
+            scenario_techniques=None,
             max_concurrency=None,
             max_retries=None,
             dataset_names=None,
@@ -690,7 +690,7 @@ class TestBuildRunRequest:
         parsed = Namespace(
             target=None,
             initializers=None,
-            scenario_strategies=None,
+            scenario_techniques=None,
             max_concurrency=None,
             max_retries=None,
             dataset_names=None,
@@ -958,18 +958,18 @@ class TestMainExtraPaths:
                 scenario_name="alt_a",
                 scenario_type="X",
                 description="",
-                default_strategy="",
-                aggregate_strategies=[],
-                all_strategies=[],
+                default_technique="",
+                aggregate_techniques=[],
+                all_techniques=[],
                 default_datasets=[],
             ),
             RegisteredScenario(
                 scenario_name="alt_b",
                 scenario_type="X",
                 description="",
-                default_strategy="",
-                aggregate_strategies=[],
-                all_strategies=[],
+                default_technique="",
+                aggregate_techniques=[],
+                all_techniques=[],
                 default_datasets=[],
             ),
         ]
@@ -1145,9 +1145,9 @@ class TestScenarioParamFlow:
                 scenario_name="foo",
                 scenario_type="X",
                 description="",
-                default_strategy="",
-                aggregate_strategies=[],
-                all_strategies=[],
+                default_technique="",
+                aggregate_techniques=[],
+                all_techniques=[],
                 default_datasets=[],
             )
         ]
@@ -1155,9 +1155,9 @@ class TestScenarioParamFlow:
             scenario_name="foo",
             scenario_type="X",
             description="",
-            default_strategy="",
-            aggregate_strategies=[],
-            all_strategies=[],
+            default_technique="",
+            aggregate_techniques=[],
+            all_techniques=[],
             default_datasets=[],
             supported_parameters=typed_params,
         )
@@ -1273,3 +1273,64 @@ class TestScenarioParamFlow:
         assert parsed.scenario_name == "foo"
         assert parsed.target == "t"
         assert parsed._unknown_args == ["--max-turns", "7"]
+
+
+class TestPollStreamsRetryWarnings:
+    """The poll loop should stream retry warnings as attack results land."""
+
+    async def test_poll_prints_retry_warnings_once(self, capsys):
+        from datetime import datetime, timezone
+
+        from pyrit.models import ScenarioRunState
+        from pyrit.models.catalog import AttackRetrySummary, ScenarioRunSummary
+        from pyrit.models.retry_event import RetryEvent
+
+        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        retry = RetryEvent(
+            attempt_number=3,
+            exception_type="RateLimitError",
+            exception_message="429 Too Many Requests",
+            component_role="objective_scorer",
+            component_name="TrueFalseScorer",
+            endpoint="https://ep/",
+        )
+
+        def _summary(*, status, with_retry):
+            return ScenarioRunSummary(
+                scenario_result_id="sr-1",
+                scenario_name="s",
+                scenario_version=0,
+                status=status,
+                created_at=now,
+                updated_at=now,
+                techniques_used=["a"],
+                total_attacks=1,
+                completed_attacks=1,
+                objective_achieved_rate=0,
+                attack_retries=(
+                    [AttackRetrySummary(attack_result_id="ar-1", atomic_attack_name="baseline", retries=[retry])]
+                    if with_retry
+                    else []
+                ),
+            )
+
+        client = MagicMock()
+        # First poll: retry present but still running. Second poll: same retry, terminal.
+        client.get_scenario_run_async = AsyncMock(
+            side_effect=[
+                _summary(status=ScenarioRunState.IN_PROGRESS, with_retry=True),
+                _summary(status=ScenarioRunState.COMPLETED, with_retry=True),
+            ]
+        )
+
+        with patch("asyncio.sleep", new=AsyncMock(return_value=None)):
+            final = await pyrit_scan._poll_until_terminal_async(
+                client=client, scenario_result_id="sr-1", total_techniques=1
+            )
+
+        assert final.status == ScenarioRunState.COMPLETED
+        out = capsys.readouterr().out
+        # The warning is printed exactly once despite appearing in both polls.
+        assert out.count("retry #3") == 1
+        assert "RateLimitError" in out
+        assert "endpoint https://ep/" in out

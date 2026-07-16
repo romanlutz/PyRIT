@@ -15,6 +15,7 @@ ARCHITECTURE:
 - AI-generated attacks may have multiple related conversations
 """
 
+import logging
 import mimetypes
 import uuid
 from collections.abc import Sequence
@@ -44,6 +45,8 @@ from pyrit.backend.models.attacks import (
     CreateAttackResponse,
     CreateConversationRequest,
     CreateConversationResponse,
+    MessagePieceRequest,
+    PrependedMessageRequest,
     UpdateAttackRequest,
     UpdateMainConversationRequest,
     UpdateMainConversationResponse,
@@ -66,7 +69,9 @@ from pyrit.models import (
     MessagePiece,
     PromptDataType,
 )
-from pyrit.prompt_normalizer import PromptConverterConfiguration, PromptNormalizer
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
+
+logger = logging.getLogger(__name__)
 
 
 class AttackService:
@@ -344,11 +349,21 @@ class AttackService:
         # Store in memory
         self._memory.add_attack_results_to_memory(attack_results=[attack_result])
 
-        # Store prepended conversation messages if provided
-        if request.prepended_conversation:
+        # Store prepended conversation messages if provided. A system_prompt is lowered to a
+        # single system-role message at the front, composing with any prepended_conversation.
+        prepended = list(request.prepended_conversation or [])
+        if request.system_prompt:
+            prepended.insert(
+                0,
+                PrependedMessageRequest(
+                    role="system",
+                    pieces=[MessagePieceRequest(original_value=request.system_prompt)],
+                ),
+            )
+        if prepended:
             await self._store_prepended_messages_async(
                 conversation_id=conversation_id,
-                prepended=request.prepended_conversation,
+                prepended=prepended,
                 labels=labels,
                 target_identifier=target_identifier,
             )
@@ -623,13 +638,31 @@ class AttackService:
 
         if request.send:
             assert target_registry_name is not None  # validated above
-            await self._send_and_store_message_async(
-                conversation_id=msg_conversation_id,
-                target_registry_name=target_registry_name,
-                request=request,
-                sequence=sequence,
-                labels=attack_labels,
-            )
+            try:
+                await self._send_and_store_message_async(
+                    conversation_id=msg_conversation_id,
+                    target_registry_name=target_registry_name,
+                    request=request,
+                    sequence=sequence,
+                    labels=attack_labels,
+                )
+            except Exception:
+                # PromptNormalizer persists a full error piece (response_error +
+                # traceback) to memory *before* re-raising. Surface that stored
+                # piece inline so the send (POST) response matches the
+                # conversation-reload (GET) view instead of collapsing to a
+                # generic 500. If no new error piece was stored (the failure
+                # happened before the send, e.g. target lookup), re-raise so the
+                # route still reports a real error.
+                prior_ids = {p.id for p in existing}
+                current_pieces = self._memory.get_message_pieces(conversation_id=msg_conversation_id)
+                if not any(p.id not in prior_ids and p.has_error() for p in current_pieces):
+                    raise
+                logger.exception(
+                    "Send failed for attack '%s' conversation '%s'; surfacing stored error piece.",
+                    attack_result_id,
+                    msg_conversation_id,
+                )
         else:
             existing_metadata = self._memory._get_conversation(conversation_id=msg_conversation_id)
             await self._store_message_only_async(
@@ -1143,19 +1176,19 @@ class AttackService:
                 vp.prompt_metadata["video_id"] = video_id
                 return
 
-    def _get_converter_configs(self, request: AddMessageRequest) -> list[PromptConverterConfiguration]:
+    def _get_converter_configs(self, request: AddMessageRequest) -> list[ConverterConfiguration]:
         """
         Get converter configurations if needed.
 
         Returns:
-            List of PromptConverterConfiguration for the converters.
+            List of ConverterConfiguration for the converters.
         """
         has_preconverted = any(p.converted_value is not None for p in request.pieces)
         if has_preconverted or not request.converter_ids:
             return []
 
         converters = get_converter_service().get_converter_objects_for_ids(converter_ids=request.converter_ids)
-        return PromptConverterConfiguration.from_converters(converters=converters)
+        return ConverterConfiguration.from_converters(converters=converters)
 
 
 # ============================================================================
