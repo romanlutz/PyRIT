@@ -140,7 +140,7 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - New Datasets can be added in the dataset module.
 - Datasets should never be retrieved from SeedDatasetProviders; SeedDatasetProviders should load into memory, and then components retrieve from memory
 - Most components should always work with seeds passed directly in (except scenarios which may package them from memory). Never use SeedDatasetProviders, file paths, etc. Either pass the seed as an argument or retrieve from memory.
-- There is a Seed hierarchy and the right types should be used (SeedObjective, SeedPrompt, SimulatedSeedPrompt, SeedAttackGroup, ...)
+- There is a Seed hierarchy and the right types should be used (SeedObjective, SeedPrompt, SimulatedSeedPrompt, AttackSeedGroup, ...)
 - **Does not own**: a dataset defines and holds seeds; it doesn't package them for an attack. Specifically not:
   - selecting or combining which seeds an attack uses (that's a scenario / attack technique)
   - rendering or parameterizing prompts at send time (converters / normalizers)
@@ -197,12 +197,12 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - Executors should use scoring and target capabilities implicitly. Executors should support multi-modal.
 - Compound attacks are possible, combining different attacks in different ways.
 - **Does not own**: packaging the attack. Those are passed in as configuration by the **attack technique**, not assembled here:
-  - prepended / system prompts, role-play framing, the converter stack, or dataset selection (e.g. `RolePlayAttack` building its own prompt scaffolding is attack-technique work bleeding into the executor)
+  - prepended / system prompts, role-play framing, the converter stack, or dataset selection (e.g. if an executor assembles its own prompt scaffolding for a simulated conversation, that is attack-technique work bleeding into the executor)
   - branching on raw responses (use a scorer), constructing its own components (use the registry), or formatting / persisting results (output / memory)
 
 **Framework Plans**:
 
-- We need to move some older attacks that don't belong here. Many (FlipAttack) should just be attack techniques
+- We need to move some older attacks that don't belong here. Many should just be attack techniques
 - There are potential ways we could combine different algorithms. Are Crescendo and TAP ultimately the same?
 - We need to support target capabilities more implicitly
 - Other executors, like benchmarks, need better end-to-end support; potentially including an `ExpectedResult` seed and associated scorers.
@@ -231,7 +231,7 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - Targets should use message_normalizer along with TargetConfiguration to transform `Messages` into formats that target supports.
 - Because targets are so varied, it is reasonable to return multiple tool calls, or none at all.
 - One attack can have many targets (and in fact, converters and scorers can also use targets to convert/score the prompt).
-- **Does not own**: what to send or what to do with the response. A target sends a prepared `Message` and returns a response — it doesn't convert prompts (converters), score (scorers), manage the conversation or decide the next turn (attacks), or apply attack logic. Its retries stay at the target layer (e.g. `RateLimitException`).
+- **Does not own**: what to send or what to do with the response. A target sends a prepared `Message` and returns a response — it doesn't convert prompts (converters), score (scorers), manage the conversation or decide the next turn (attacks), apply attack logic, or persist prompts and responses to memory (the `prompt_normalizer` owns that). Its retries stay at the target layer (e.g. `RateLimitException`).
 
 **Framework Plans**:
 
@@ -310,7 +310,7 @@ The below talks about responsibilities of most modules in the PyRIT library
 
 **Responsibility**: Reshape prompts and conversations so components and targets can interoperate. There are two distinct modules:
 
-- **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply.
+- **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). It is the single component that writes each request and response to memory; targets never persist on their own. `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply.
 - **`message_normalizer`** reshapes multi-message conversation payloads into the structure a given model expects — for example, handling system-message behavior (keep / squash / ignore), history squashing, and tokenizer chat templates.
 
 ## [Output](./output/0_output)

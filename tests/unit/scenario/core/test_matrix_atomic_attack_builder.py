@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyrit.models import SeedAttackGroup, SeedObjective
+from pyrit.models import AttackSeedGroup, SeedObjective
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.scenario.core.matrix_atomic_attack_builder import (
@@ -44,12 +44,16 @@ def _mock_factory(*, name: str, seed_technique=None, adversarial_chat=None) -> M
     factory.name = name
     factory.seed_technique = seed_technique
     factory.adversarial_chat = adversarial_chat
+    # Mirror the real factory: with no simulated-conversation seed, resolution returns
+    # whatever adversarial_chat was baked (possibly None). Tests that exercise the
+    # simulated-conversation lazy path override this return value explicitly.
+    factory.resolve_adversarial_chat.return_value = adversarial_chat
     factory.create.return_value = MagicMock(name=f"{name}_technique")
     return factory
 
 
-def _seed_group(*, objective: str) -> SeedAttackGroup:
-    return SeedAttackGroup(seeds=[SeedObjective(value=objective)])
+def _seed_group(*, objective: str) -> AttackSeedGroup:
+    return AttackSeedGroup(seeds=[SeedObjective(value=objective)])
 
 
 def _builder() -> MatrixAtomicAttackBuilder:
@@ -170,6 +174,21 @@ class TestMatrixAdversarialForwarding:
         assert "adversarial_chat" not in factory.create.call_args.kwargs
         assert result[0]._adversarial_chat is baked
 
+    def test_no_target_axis_stamps_factory_resolved_adversarial_chat(self):
+        # A simulated-conversation technique with no baked adversarial_chat resolves the
+        # default lazily via factory.resolve_adversarial_chat(); the builder must stamp that
+        # onto the AtomicAttack so seed-group expansion has an adversarial chat to use.
+        builder = _builder()
+        resolved = MagicMock(spec=PromptTarget)
+        factory = _mock_factory(name="tech")
+        factory.resolve_adversarial_chat.return_value = resolved
+        result = builder.build(
+            technique_factories={"tech": factory},
+            dataset_groups={"ds": [_seed_group(objective="o1")]},
+        )
+        assert "adversarial_chat" not in factory.create.call_args.kwargs
+        assert result[0]._adversarial_chat is resolved
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestMatrixCustomCallbacks:
@@ -206,7 +225,7 @@ class TestMatrixSeedTechniqueFiltering:
     def test_incompatible_pair_is_skipped(self):
         builder = _builder()
         factory = _mock_factory(name="tech", seed_technique=MagicMock())
-        with patch.object(SeedAttackGroup, "filter_compatible", return_value=[]):
+        with patch.object(AttackSeedGroup, "filter_compatible", return_value=[]):
             result = builder.build(
                 technique_factories={"tech": factory},
                 dataset_groups={"ds": [_seed_group(objective="o1")]},
@@ -219,7 +238,7 @@ class TestMatrixSeedTechniqueFiltering:
         factory = _mock_factory(name="tech", seed_technique=MagicMock())
         kept = _seed_group(objective="keep")
         dropped = _seed_group(objective="drop")
-        with patch.object(SeedAttackGroup, "filter_compatible", return_value=[kept]):
+        with patch.object(AttackSeedGroup, "filter_compatible", return_value=[kept]):
             result = builder.build(
                 technique_factories={"tech": factory},
                 dataset_groups={"ds": [kept, dropped]},

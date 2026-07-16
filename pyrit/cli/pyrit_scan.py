@@ -102,12 +102,12 @@ Examples:
 
   # Run rapid response with specific datasets and concurrency
   pyrit_scan airt.rapid_response --target openai_chat
-    --techniques role_play --dataset-names airt_hate
+    --techniques role_play_movie_script --dataset-names airt_hate
     --max-dataset-size 5 --max-concurrency 4
 
   # Attach registered converters to a technique (repeatable, applied in order)
   pyrit_scan airt.rapid_response --target openai_chat
-    --techniques role_play:converter.translation_spanish:converter.leetspeak
+    --techniques role_play_movie_script:converter.translation_spanish:converter.leetspeak
 
   # Run multi-turn red team agent with labels for tracking
   pyrit_scan airt.red_team_agent --target openai_chat
@@ -682,8 +682,10 @@ async def _poll_until_terminal_async(
 
     terminal_states = {ScenarioRunState.COMPLETED, ScenarioRunState.FAILED, ScenarioRunState.CANCELLED}
 
+    seen_retry_attack_ids: set[str] = set()
     while True:
         run = await client.get_scenario_run_async(scenario_result_id=scenario_result_id)
+        _output.print_scenario_retry_warnings(run=run, seen_attack_ids=seen_retry_attack_ids)
         _output.print_scenario_run_progress(run=run, total_techniques=total_techniques)
         if run.status in terminal_states:
             return run
