@@ -29,6 +29,7 @@ from pyrit.prompt_target.common.target_capabilities import (
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.target_requirements import CHAT_TARGET_REQUIREMENTS, TargetRequirements
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
+from pyrit.prompt_target.common.white_box_target import WhiteBoxInputs, WhiteBoxTarget
 from pyrit.prompt_target.gandalf_target import GandalfLevel, GandalfTarget
 from pyrit.prompt_target.http_target.http_target import HTTPTarget
 from pyrit.prompt_target.http_target.http_target_callback_functions import (
@@ -55,11 +56,14 @@ from pyrit.prompt_target.websocket_copilot_target import WebSocketCopilotTarget
 
 if TYPE_CHECKING:
     from pyrit.prompt_target.hugging_face.hugging_face_chat_target import HuggingFaceChatTarget
+    from pyrit.prompt_target.hugging_face.hugging_face_vision_target import HuggingFaceVisionTarget
 
 # Lazy imports for modules with heavy third-party dependencies (PEP 562).
 # HuggingFaceChatTarget imports `transformers` which adds ~4s to startup.
+# HuggingFaceVisionTarget additionally imports `torch` at module load.
 _LAZY_IMPORTS: dict[str, str] = {
     "HuggingFaceChatTarget": "pyrit.prompt_target.hugging_face.hugging_face_chat_target",
+    "HuggingFaceVisionTarget": "pyrit.prompt_target.hugging_face.hugging_face_vision_target",
 }
 
 
@@ -87,6 +91,7 @@ __all__ = [
     "HTTPTarget",
     "HTTPXAPITarget",
     "HuggingFaceChatTarget",
+    "HuggingFaceVisionTarget",
     "limit_requests_per_minute",
     "LiteLLMChatTarget",
     "OpenAICompletionTarget",
@@ -112,4 +117,6 @@ __all__ = [
     "discover_target_capabilities_async",
     "get_known_capabilities",
     "WebSocketCopilotTarget",
+    "WhiteBoxInputs",
+    "WhiteBoxTarget",
 ]

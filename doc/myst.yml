@@ -111,6 +111,7 @@ project:
             - file: code/executor/gcg/0_gcg.ipynb
               children:
                 - file: code/executor/gcg/1_gcg_azure_ml.ipynb
+            - file: code/executor/multimodal_pgd/0_multimodal_pgd_azure_ml.ipynb
         - file: code/targets/0_prompt_targets.md
           children:
             - file: code/targets/1_openai_chat_target.ipynb

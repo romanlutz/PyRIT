@@ -89,6 +89,15 @@ _PROMPT_TARGET_FORBIDDEN = [
     "transformers",
 ]
 
+# Heavy modules that the cheap multimodal_pgd / white-box surfaces must not load.
+# The config / manifest / data helpers and the WhiteBoxTarget Protocol are usable
+# on installs without the `multimodal_pgd` extra, so importing them must stay
+# torch-free (torch is only pulled in when the generator / vision target run).
+_MULTIMODAL_PGD_FORBIDDEN = [
+    "torch",
+    "transformers",
+]
+
 
 class TestImportGuards:
     """Verify heavy modules are not eagerly loaded at key import points."""
@@ -132,4 +141,33 @@ class TestImportGuards:
         assert not loaded, (
             f"PromptTarget base class loaded ML modules: {loaded}. "
             f"Ensure heavy subclass imports use __getattr__ lazy loading in __init__.py."
+        )
+
+    def test_white_box_target_protocol_does_not_load_torch(self):
+        """
+        The WhiteBoxTarget Protocol + WhiteBoxInputs container must import without
+        torch/transformers so consumers can type against them on a base install.
+        """
+        loaded = _check_forbidden_imports(
+            import_statement="from pyrit.prompt_target import WhiteBoxInputs, WhiteBoxTarget",
+            forbidden=_MULTIMODAL_PGD_FORBIDDEN,
+        )
+        assert not loaded, f"WhiteBoxTarget surface loaded heavy modules: {loaded}."
+
+    def test_multimodal_pgd_cheap_symbols_do_not_load_torch(self):
+        """
+        The multimodal_pgd config / manifest / data helpers are torch-free so they
+        work on installs without the `multimodal_pgd` extra. Importing them (which
+        runs the package __init__) must not eagerly pull in torch/transformers.
+        """
+        loaded = _check_forbidden_imports(
+            import_statement=(
+                "from pyrit.executor.promptgen.multimodal_pgd import "
+                "MultiModalPGDConfig, PGDManifestEntry, load_behaviors"
+            ),
+            forbidden=_MULTIMODAL_PGD_FORBIDDEN,
+        )
+        assert not loaded, (
+            f"multimodal_pgd cheap symbols loaded heavy modules: {loaded}. "
+            f"Keep torch-dependent imports behind the PEP 562 lazy __getattr__."
         )

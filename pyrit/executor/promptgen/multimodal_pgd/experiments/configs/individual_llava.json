@@ -1,0 +1,24 @@
+{
+  "model": {
+    "vlm_id": "llava-hf/llava-1.5-7b-hf",
+    "device": "cuda:0",
+    "dtype": "float16"
+  },
+  "algorithm": {
+    "num_steps": 500,
+    "step_size": 0.00784313725490196,
+    "epsilon": 0.06274509803921569,
+    "stop_loss": 0.05,
+    "random_seed": 42
+  },
+  "variant": {
+    "kind": "eps_bounded",
+    "patch_fraction": 0.2
+  },
+  "output": {
+    "result_prefix": "results/pgd_llava",
+    "manifest_path": "",
+    "verbose": true
+  },
+  "hf_token": null
+}

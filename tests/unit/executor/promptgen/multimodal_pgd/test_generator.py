@@ -1,0 +1,214 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+"""Unit tests for :class:`MultiModalPGDGenerator` lifecycle, identity, and validation.
+
+The heavy ``run_pgd`` loop and the image cache are patched so these tests exercise the
+strategy plumbing (target ownership, manifest wiring, teardown) without a real VLM.
+"""
+
+from __future__ import annotations
+
+import types
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import PIL.Image
+import pytest
+
+torch = pytest.importorskip("torch", reason="multimodal_pgd extra (torch) not installed")
+
+generator_mod = pytest.importorskip(
+    "pyrit.executor.promptgen.multimodal_pgd.generator",
+    reason="multimodal_pgd optional dependencies (torch) not installed",
+)
+MultiModalPGDGenerator = generator_mod.MultiModalPGDGenerator
+MultiModalPGDContext = generator_mod.MultiModalPGDContext
+
+from pyrit.executor.promptgen.multimodal_pgd.config import (  # noqa: E402
+    MultiModalPGDAlgorithmConfig,
+    MultiModalPGDModelConfig,
+    MultiModalPGDVariantConfig,
+    PGDVariant,
+)
+
+
+class FakeWhiteBoxTarget:
+    """A caller-owned white-box target stub that records resource release."""
+
+    vlm_id = "fake/vlm-1.0"
+    device = "cpu"
+
+    def __init__(self) -> None:
+        self.released = False
+
+    def preprocess(self, *, behavior, image):  # pragma: no cover - patched out via run_pgd
+        raise AssertionError("run_pgd should be patched in these tests")
+
+    def compute_loss(self, *, inputs, target_text):  # pragma: no cover
+        raise AssertionError("run_pgd should be patched in these tests")
+
+    def to_pil(self, *, inputs):  # pragma: no cover
+        raise AssertionError("run_pgd should be patched in these tests")
+
+    def release_white_box_resources(self) -> None:
+        self.released = True
+
+
+def _fake_core_result() -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        image=PIL.Image.new("RGB", (4, 4), (10, 20, 30)),
+        loss_history=[1.0, 0.4],
+        final_loss=0.4,
+        step_count=2,
+        succeeded=True,
+    )
+
+
+def _patched_perform_dependencies():
+    """Patch the image cache + manifest writer used inside ``_perform_async``."""
+    return (
+        patch.object(generator_mod, "fetch_and_cache_image_async", new=AsyncMock(return_value="/cache/pgd.png")),
+        patch.object(generator_mod, "append_manifest_entry", new=MagicMock()),
+        patch.object(generator_mod, "run_pgd", new=MagicMock(return_value=_fake_core_result())),
+    )
+
+
+# ---------------------------------------------------------------------------
+# __init__
+# ---------------------------------------------------------------------------
+
+
+def test_init_requires_exactly_one_of_target_or_model() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        MultiModalPGDGenerator()
+    with pytest.raises(ValueError, match="exactly one"):
+        MultiModalPGDGenerator(target=FakeWhiteBoxTarget(), model=MultiModalPGDModelConfig(vlm_id="a/b"))
+
+
+def test_init_with_target_does_not_own_it() -> None:
+    gen = MultiModalPGDGenerator(target=FakeWhiteBoxTarget())
+    assert gen._owns_target is False
+
+
+def test_init_with_model_owns_target() -> None:
+    gen = MultiModalPGDGenerator(model=MultiModalPGDModelConfig(vlm_id="llava-hf/llava-1.5-7b-hf"))
+    assert gen._owns_target is True
+
+
+# ---------------------------------------------------------------------------
+# identifier / helpers
+# ---------------------------------------------------------------------------
+
+
+def test_build_identifier_exposes_hyperparameters() -> None:
+    gen = MultiModalPGDGenerator(
+        model=MultiModalPGDModelConfig(vlm_id="llava-hf/llava-1.5-7b-hf"),
+        algorithm=MultiModalPGDAlgorithmConfig(num_steps=17, step_size=0.1, epsilon=0.2, stop_loss=0.01),
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.PATCH, patch_fraction=0.3),
+    )
+    ident = gen._build_identifier()
+    assert ident.params["vlm_id"] == "llava-hf/llava-1.5-7b-hf"
+    assert ident.params["variant"] == "patch"
+    assert ident.params["patch_fraction"] == 0.3
+    assert ident.params["num_steps"] == 17
+
+
+def test_slugify_replaces_path_and_punctuation() -> None:
+    assert MultiModalPGDGenerator._slugify("llava-hf/llava-1.5-7b-hf") == "llava_hf_llava_1_5_7b_hf"
+
+
+def test_resolve_manifest_path_uses_explicit_value() -> None:
+    from pyrit.executor.promptgen.multimodal_pgd.config import MultiModalPGDOutputConfig
+
+    gen = MultiModalPGDGenerator(
+        target=FakeWhiteBoxTarget(),
+        output=MultiModalPGDOutputConfig(manifest_path="/tmp/m.jsonl"),
+    )
+    assert gen._resolve_manifest_path() == "/tmp/m.jsonl"
+
+
+# ---------------------------------------------------------------------------
+# _validate_context
+# ---------------------------------------------------------------------------
+
+
+def test_validate_context_requires_behavior() -> None:
+    gen = MultiModalPGDGenerator(target=FakeWhiteBoxTarget())
+    with pytest.raises(ValueError, match="behavior"):
+        gen._validate_context(context=MultiModalPGDContext(behavior="", target_text="t", seed_image_path="s.png"))
+
+
+def test_validate_context_requires_target_text() -> None:
+    gen = MultiModalPGDGenerator(target=FakeWhiteBoxTarget())
+    with pytest.raises(ValueError, match="target_text"):
+        gen._validate_context(context=MultiModalPGDContext(behavior="b", target_text="", seed_image_path="s.png"))
+
+
+def test_validate_context_requires_seed_image_for_bounded_variant() -> None:
+    gen = MultiModalPGDGenerator(target=FakeWhiteBoxTarget())
+    with pytest.raises(ValueError, match="seed_image_path"):
+        gen._validate_context(context=MultiModalPGDContext(behavior="b", target_text="t", seed_image_path=""))
+
+
+def test_validate_context_allows_missing_seed_for_blank_variant() -> None:
+    gen = MultiModalPGDGenerator(
+        target=FakeWhiteBoxTarget(),
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    gen._validate_context(context=MultiModalPGDContext(behavior="b", target_text="t", seed_image_path=""))
+
+
+# ---------------------------------------------------------------------------
+# execute_async lifecycle
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_async_does_not_release_caller_target() -> None:
+    target = FakeWhiteBoxTarget()
+    gen = MultiModalPGDGenerator(
+        target=target,
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch as mock_append, run_patch:
+        result = await gen.execute_async(behavior="carrier", target_text="Sure, here is", behavior_id="beh_1")
+
+    assert result.image_path == "/cache/pgd.png"
+    assert result.final_loss == 0.4
+    assert result.step_count == 2
+    assert result.succeeded is True
+    assert result.vlm_id == "fake/vlm-1.0"
+    assert result.variant == "blank_image"
+    assert result.manifest_entry is not None
+    assert result.manifest_entry.behavior_id == "beh_1"
+    mock_append.assert_called_once()
+    assert target.released is False
+
+
+async def test_execute_async_releases_owned_target() -> None:
+    built_target = FakeWhiteBoxTarget()
+    gen = MultiModalPGDGenerator(
+        model=MultiModalPGDModelConfig(vlm_id="fake/vlm-1.0"),
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch, run_patch, patch.object(gen, "_build_target", return_value=built_target):
+        await gen.execute_async(behavior="carrier", target_text="Sure, here is")
+
+    assert built_target.released is True
+
+
+async def test_execute_async_releases_owned_target_on_failure() -> None:
+    built_target = FakeWhiteBoxTarget()
+    gen = MultiModalPGDGenerator(
+        model=MultiModalPGDModelConfig(vlm_id="fake/vlm-1.0"),
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    with (
+        patch.object(generator_mod, "run_pgd", side_effect=RuntimeError("boom")),
+        patch.object(gen, "_build_target", return_value=built_target),
+    ):
+        with pytest.raises(Exception, match="boom"):
+            await gen.execute_async(behavior="carrier", target_text="Sure, here is")
+
+    assert built_target.released is True

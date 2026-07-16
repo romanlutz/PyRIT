@@ -5317,6 +5317,11 @@ huggingface = [
 litellm = [
     { name = "litellm" },
 ]
+multimodal-pgd = [
+    { name = "accelerate" },
+    { name = "azure-ai-ml" },
+    { name = "torch" },
+]
 opencv = [
     { name = "opencv-python" },
 ]
@@ -5359,6 +5364,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", marker = "extra == 'all'", specifier = ">=1.7.0" },
     { name = "accelerate", marker = "extra == 'gcg'", specifier = ">=1.7.0" },
+    { name = "accelerate", marker = "extra == 'multimodal-pgd'", specifier = ">=1.7.0" },
     { name = "aiofiles", specifier = ">=24,<26" },
     { name = "alembic", specifier = ">=1.16.0" },
     { name = "appdirs", specifier = ">=1.4.0" },
@@ -5367,6 +5373,7 @@ requires-dist = [
     { name = "azure-ai-contentsafety", specifier = ">=1.0.0" },
     { name = "azure-ai-ml", marker = "extra == 'all'", specifier = ">=1.32.0" },
     { name = "azure-ai-ml", marker = "extra == 'gcg'", specifier = ">=1.32.0" },
+    { name = "azure-ai-ml", marker = "extra == 'multimodal-pgd'", specifier = ">=1.32.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'all'", specifier = ">=1.44.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'speech'", specifier = ">=1.44.0" },
     { name = "azure-core", specifier = ">=1.38.0" },
@@ -5422,13 +5429,14 @@ requires-dist = [
     { name = "torch", marker = "extra == 'all'", specifier = ">=2.7.0" },
     { name = "torch", marker = "extra == 'gcg'", specifier = ">=2.7.0" },
     { name = "torch", marker = "extra == 'huggingface'", specifier = ">=2.7.0" },
+    { name = "torch", marker = "extra == 'multimodal-pgd'", specifier = ">=2.7.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", specifier = ">=5.0.0rc3" },
     { name = "treelib", specifier = ">=1.7.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=14.0" },
 ]
-provides-extras = ["huggingface", "gcg", "playwright", "fairness-bias", "opencv", "speech", "litellm", "all"]
+provides-extras = ["huggingface", "gcg", "multimodal-pgd", "playwright", "fairness-bias", "opencv", "speech", "litellm", "all"]
 
 [package.metadata.requires-dev]
 dev = [
