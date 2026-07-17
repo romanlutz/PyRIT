@@ -21,8 +21,9 @@ ENV VIRTUAL_ENV="/opt/venv"
 
 WORKDIR /app
 
-# Install PyRIT with the multimodal_pgd extra (torch + accelerate) to get all
-# dependencies needed to run the Multimodal PGD experiment entry point.
+# Install PyRIT with the gradient extra (torch + accelerate + friends) to get
+# all dependencies needed to run the white-box gradient experiments — GCG suffix
+# optimization and Multimodal PGD image perturbation.
 COPY pyproject.toml MANIFEST.in README.md LICENSE /app/
 COPY pyrit/ /app/pyrit/
-RUN uv pip install -e ".[multimodal_pgd]"
+RUN uv pip install -e ".[gradient]"

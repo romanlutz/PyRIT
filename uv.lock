@@ -5298,13 +5298,14 @@ all = [
     { name = "opencv-python" },
     { name = "playwright" },
     { name = "pyarrow", marker = "python_full_version >= '3.14'" },
+    { name = "sentencepiece" },
     { name = "spacy" },
     { name = "torch" },
 ]
 fairness-bias = [
     { name = "spacy" },
 ]
-gcg = [
+gradient = [
     { name = "accelerate" },
     { name = "azure-ai-ml" },
     { name = "pyarrow", marker = "python_full_version >= '3.14'" },
@@ -5316,11 +5317,6 @@ huggingface = [
 ]
 litellm = [
     { name = "litellm" },
-]
-multimodal-pgd = [
-    { name = "accelerate" },
-    { name = "azure-ai-ml" },
-    { name = "torch" },
 ]
 opencv = [
     { name = "opencv-python" },
@@ -5363,8 +5359,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'all'", specifier = ">=1.7.0" },
-    { name = "accelerate", marker = "extra == 'gcg'", specifier = ">=1.7.0" },
-    { name = "accelerate", marker = "extra == 'multimodal-pgd'", specifier = ">=1.7.0" },
+    { name = "accelerate", marker = "extra == 'gradient'", specifier = ">=1.7.0" },
     { name = "aiofiles", specifier = ">=24,<26" },
     { name = "alembic", specifier = ">=1.16.0" },
     { name = "appdirs", specifier = ">=1.4.0" },
@@ -5372,8 +5367,7 @@ requires-dist = [
     { name = "av", specifier = ">=14.0.0" },
     { name = "azure-ai-contentsafety", specifier = ">=1.0.0" },
     { name = "azure-ai-ml", marker = "extra == 'all'", specifier = ">=1.32.0" },
-    { name = "azure-ai-ml", marker = "extra == 'gcg'", specifier = ">=1.32.0" },
-    { name = "azure-ai-ml", marker = "extra == 'multimodal-pgd'", specifier = ">=1.32.0" },
+    { name = "azure-ai-ml", marker = "extra == 'gradient'", specifier = ">=1.32.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'all'", specifier = ">=1.44.0" },
     { name = "azure-cognitiveservices-speech", marker = "extra == 'speech'", specifier = ">=1.44.0" },
     { name = "azure-core", specifier = ">=1.38.0" },
@@ -5408,7 +5402,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'all'", specifier = ">=1.49.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.49.0" },
     { name = "pyarrow", marker = "python_full_version >= '3.14' and extra == 'all'", specifier = ">=22.0.0" },
-    { name = "pyarrow", marker = "python_full_version >= '3.14' and extra == 'gcg'", specifier = ">=22.0.0" },
+    { name = "pyarrow", marker = "python_full_version >= '3.14' and extra == 'gradient'", specifier = ">=22.0.0" },
     { name = "pydantic", specifier = ">=2.11.5" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
     { name = "pyodbc", specifier = ">=5.1.0" },
@@ -5418,7 +5412,8 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.4.4" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "segno", specifier = ">=1.6.6" },
-    { name = "sentencepiece", marker = "extra == 'gcg'", specifier = ">=0.2.0" },
+    { name = "sentencepiece", marker = "extra == 'all'", specifier = ">=0.2.0" },
+    { name = "sentencepiece", marker = "extra == 'gradient'", specifier = ">=0.2.0" },
     { name = "spacy", marker = "extra == 'all'", specifier = ">=3.8.13,!=3.8.14" },
     { name = "spacy", marker = "extra == 'fairness-bias'", specifier = ">=3.8.13,!=3.8.14" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
@@ -5427,16 +5422,15 @@ requires-dist = [
     { name = "termcolor", specifier = ">=2.4.0" },
     { name = "tinytag", specifier = ">=2.2.1" },
     { name = "torch", marker = "extra == 'all'", specifier = ">=2.7.0" },
-    { name = "torch", marker = "extra == 'gcg'", specifier = ">=2.7.0" },
+    { name = "torch", marker = "extra == 'gradient'", specifier = ">=2.7.0" },
     { name = "torch", marker = "extra == 'huggingface'", specifier = ">=2.7.0" },
-    { name = "torch", marker = "extra == 'multimodal-pgd'", specifier = ">=2.7.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", specifier = ">=5.0.0rc3" },
     { name = "treelib", specifier = ">=1.7.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", specifier = ">=14.0" },
 ]
-provides-extras = ["huggingface", "gcg", "multimodal-pgd", "playwright", "fairness-bias", "opencv", "speech", "litellm", "all"]
+provides-extras = ["huggingface", "gradient", "playwright", "fairness-bias", "opencv", "speech", "litellm", "all"]
 
 [package.metadata.requires-dev]
 dev = [

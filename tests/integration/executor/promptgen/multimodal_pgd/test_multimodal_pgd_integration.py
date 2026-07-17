@@ -17,7 +17,7 @@ from pathlib import Path
 import PIL.Image
 import pytest
 
-torch = pytest.importorskip("torch", reason="multimodal_pgd extra (torch) not installed")
+torch = pytest.importorskip("torch", reason="gradient extra (torch) not installed")
 
 from pyrit.executor.promptgen.multimodal_pgd.config import (  # noqa: E402
     MultiModalPGDAlgorithmConfig,

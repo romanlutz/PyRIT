@@ -65,8 +65,8 @@ ml_client = MLClient(AzureCliCredential(), subscription_id, resource_group, work
 
 # %% [markdown]
 # To install the dependencies needed to run GCG, we create an AML environment from a
-# [Dockerfile](https://github.com/microsoft/PyRIT/blob/main/pyrit/executor/promptgen/gcg/src/Dockerfile). The Dockerfile uses
-# an NVIDIA CUDA base image with Python 3.11 and installs PyRIT with the `gcg` extra.
+# [Dockerfile](https://github.com/microsoft/PyRIT/blob/main/pyrit/executor/promptgen/src/Dockerfile). The Dockerfile uses
+# an NVIDIA CUDA base image with Python 3.11 and installs PyRIT with the `gradient` extra.
 
 # %%
 from pathlib import Path
@@ -76,14 +76,14 @@ from azure.ai.ml.entities import BuildContext, Environment
 from pyrit.common.path import HOME_PATH
 
 # Configure the AML environment — build context is the repo root so the Dockerfile
-# can COPY pyproject.toml and pyrit/ for pip install -e ".[gcg]"
+# can COPY pyproject.toml and pyrit/ for pip install -e ".[gradient]"
 env_docker_context = Environment(
     build=BuildContext(
         path=Path(HOME_PATH),
-        dockerfile_path="pyrit/executor/promptgen/gcg/src/Dockerfile",
+        dockerfile_path="pyrit/executor/promptgen/src/Dockerfile",
     ),
     name="pyrit-gcg",
-    description="PyRIT GCG environment: CUDA 12.1 + Python 3.11 + pip install -e .[gcg]",
+    description="PyRIT GCG environment: CUDA 12.1 + Python 3.11 + pip install -e .[gradient]",
     tags={"Owner": os.environ.get("USER", "unknown")},
 )
 

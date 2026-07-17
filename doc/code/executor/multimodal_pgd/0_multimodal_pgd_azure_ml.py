@@ -82,9 +82,9 @@ ml_client = MLClient(AzureCliCredential(), subscription_id, resource_group, work
 
 # %% [markdown]
 # We build the environment from a
-# [Dockerfile](https://github.com/microsoft/PyRIT/blob/main/pyrit/executor/promptgen/multimodal_pgd/src/Dockerfile)
+# [Dockerfile](https://github.com/microsoft/PyRIT/blob/main/pyrit/executor/promptgen/src/Dockerfile)
 # that uses an NVIDIA CUDA base image with Python 3.11 and installs PyRIT with the
-# `multimodal_pgd` extra (torch + accelerate). The build context is the repo root so
+# `gradient` extra (torch + accelerate). The build context is the repo root so
 # the Dockerfile can `COPY pyproject.toml` and `pyrit/` for the editable install.
 
 # %%
@@ -97,10 +97,10 @@ from pyrit.common.path import HOME_PATH
 env_docker_context = Environment(
     build=BuildContext(
         path=Path(HOME_PATH),
-        dockerfile_path="pyrit/executor/promptgen/multimodal_pgd/src/Dockerfile",
+        dockerfile_path="pyrit/executor/promptgen/src/Dockerfile",
     ),
     name="pyrit-multimodal-pgd",
-    description="PyRIT Multimodal PGD environment: CUDA 12.1 + Python 3.11 + pip install -e .[multimodal_pgd]",
+    description="PyRIT Multimodal PGD environment: CUDA 12.1 + Python 3.11 + pip install -e .[gradient]",
     tags={"Owner": os.environ.get("USER", "unknown")},
 )
 

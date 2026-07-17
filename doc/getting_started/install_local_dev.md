@@ -135,7 +135,7 @@ uv sync --extra huggingface
 uv sync --extra all
 
 # Multiple extras (dev dependencies are always included automatically)
-uv sync --extra playwright --extra gcg
+uv sync --extra playwright --extra gradient
 ```
 
 ### Development Workflow

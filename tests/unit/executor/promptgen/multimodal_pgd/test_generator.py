@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import PIL.Image
 import pytest
 
-torch = pytest.importorskip("torch", reason="multimodal_pgd extra (torch) not installed")
+torch = pytest.importorskip("torch", reason="gradient extra (torch) not installed")
 
 generator_mod = pytest.importorskip(
     "pyrit.executor.promptgen.multimodal_pgd.generator",

@@ -21,7 +21,7 @@ hard-coded per model. ``epsilon`` / ``step_size`` for downstream attacks are
 expressed in the processor's **normalized** ``pixel_values`` space (the differentiable
 model input).
 
-Requires the ``multimodal_pgd`` (or any torch-bearing) extra; ``torch`` and
+Requires the ``gradient`` (or any torch-bearing) extra; ``torch`` and
 ``transformers`` vision auto-classes are imported at module load.
 """
 

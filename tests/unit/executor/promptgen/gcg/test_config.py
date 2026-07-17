@@ -3,7 +3,7 @@
 
 """Unit tests for the GCGConfig dataclass family.
 
-The config module is pure stdlib so it works without the gcg extra installed.
+The config module is pure stdlib so it works without the gradient extra installed.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-torch = pytest.importorskip("torch", reason="multimodal_pgd extra (torch) not installed")
+torch = pytest.importorskip("torch", reason="gradient extra (torch) not installed")
 
 from pyrit.executor.promptgen.multimodal_pgd.attack.variants import (  # noqa: E402
     BlankImageVariant,
