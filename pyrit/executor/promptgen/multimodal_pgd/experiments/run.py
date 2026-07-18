@@ -24,7 +24,6 @@ Heavy imports (torch via the generator) are deferred into ``_main_async`` so
 
 import argparse
 import asyncio
-import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -97,22 +96,20 @@ async def _main_async(config_path: str, data_path: str, output_dir: str | None =
     from pyrit.memory import CentralMemory
     from pyrit.prompt_target.hugging_face.hugging_face_vision_target import HuggingFaceVisionTarget
     from pyrit.setup import IN_MEMORY, initialize_pyrit_async
-    from pyrit.setup.initialization import _load_environment_files
 
-    _load_environment_files(env_files=None)
-
-    # The generator caches perturbed PNGs through CentralMemory's seed-prompt cache,
-    # so memory must be initialized before any run. Route the cache at the output
-    # directory (when provided) so the PNGs land in the AzureML output mount next to
-    # the manifest instead of an ephemeral compute-local path.
+    # initialize_pyrit_async loads the environment files (.env / .env.local) up front,
+    # so env vars such as HUGGINGFACE_TOKEN are available to the target below without a
+    # separate load step. It also stands up CentralMemory, which the generator uses to
+    # cache perturbed PNGs through its seed-prompt cache, so it must run before any
+    # optimization. Route that cache at the output directory (when provided) so the PNGs
+    # land in the AzureML output mount next to the manifest instead of an ephemeral
+    # compute-local path.
     await initialize_pyrit_async(memory_db_type=IN_MEMORY, load_defaults=False)
     if output_dir is not None:
         CentralMemory.get_memory_instance().results_path = output_dir
 
     config = MultiModalPGDConfig.from_json_file(config_path)
     data = MultiModalPGDDataConfig.from_json_file(data_path)
-    if config.hf_token is None:
-        config.hf_token = os.environ.get("HUGGINGFACE_TOKEN")
 
     output = _resolve_output(output=config.output, output_dir=output_dir)
     if not output.manifest_path:

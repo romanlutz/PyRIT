@@ -66,7 +66,6 @@ async def test_main_async_loads_model_once_and_releases(tmp_path: Path) -> None:
         patch(_VISION_TARGET_PATH, fake_target_cls),
         patch(_GENERATOR_PATH, fake_generator_cls),
         patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
-        patch("pyrit.setup.initialization._load_environment_files", new=MagicMock()),
     ):
         await run_module._main_async(str(config_path), str(data_path), output_dir=None)
 
@@ -94,7 +93,6 @@ async def test_main_async_releases_target_even_when_a_run_fails(tmp_path: Path) 
         patch(_VISION_TARGET_PATH, MagicMock(return_value=fake_target)),
         patch(_GENERATOR_PATH, MagicMock(return_value=fake_generator)),
         patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
-        patch("pyrit.setup.initialization._load_environment_files", new=MagicMock()),
     ):
         with pytest.raises(RuntimeError, match="boom"):
             await run_module._main_async(str(config_path), str(data_path), output_dir=None)
@@ -114,7 +112,6 @@ async def test_main_async_routes_results_path_to_output_dir(tmp_path: Path) -> N
         patch(_VISION_TARGET_PATH, MagicMock(return_value=MagicMock())),
         patch(_GENERATOR_PATH, MagicMock(return_value=fake_generator)),
         patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
-        patch("pyrit.setup.initialization._load_environment_files", new=MagicMock()),
         patch("pyrit.memory.CentralMemory") as mock_central_memory,
     ):
         mock_central_memory.get_memory_instance.return_value = fake_memory
