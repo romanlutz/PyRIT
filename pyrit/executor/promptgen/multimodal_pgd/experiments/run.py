@@ -25,6 +25,7 @@ Heavy imports (torch via the generator) are deferred into ``_main_async`` so
 import argparse
 import asyncio
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -94,6 +95,7 @@ def _resolve_output(*, output: MultiModalPGDOutputConfig, output_dir: str | None
 async def _main_async(config_path: str, data_path: str, output_dir: str | None = None) -> None:
     from pyrit.executor.promptgen.multimodal_pgd.generator import MultiModalPGDGenerator
     from pyrit.memory import CentralMemory
+    from pyrit.prompt_target.hugging_face.hugging_face_vision_target import HuggingFaceVisionTarget
     from pyrit.setup import IN_MEMORY, initialize_pyrit_async
     from pyrit.setup.initialization import _load_environment_files
 
@@ -114,25 +116,38 @@ async def _main_async(config_path: str, data_path: str, output_dir: str | None =
 
     output = _resolve_output(output=config.output, output_dir=output_dir)
     if not output.manifest_path:
-        timestamp = __import__("time").strftime("%Y%m%d-%H%M%S")
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
         prefix = output.result_prefix or "multimodal_pgd"
         output = replace(output, manifest_path=f"{prefix}_manifest_{timestamp}.jsonl")
 
-    generator = MultiModalPGDGenerator(
-        model=config.model,
-        algorithm=config.algorithm,
-        variant=config.variant,
-        output=output,
+    # Load the VLM once and share it across every behavior. Passing a pre-built
+    # ``target`` (rather than the ``model`` config) makes the generator treat the
+    # model as externally owned, so it is loaded a single time here instead of being
+    # reloaded and released on each ``execute_async`` — matching the GCG runner's
+    # single-load batch pattern. We own the target, so we release it at the end.
+    target = HuggingFaceVisionTarget(
+        model_id=config.model.vlm_id,
+        device=config.model.device,
+        dtype=config.model.dtype,
         hf_token=config.hf_token,
     )
-    behaviors = load_behaviors(data=data)
-    for row in behaviors:
-        await generator.execute_async(
-            behavior=row.behavior,
-            target_text=row.target_text,
-            seed_image_path=row.seed_image_path,
-            behavior_id=row.behavior_id,
+    try:
+        generator = MultiModalPGDGenerator(
+            target=target,
+            algorithm=config.algorithm,
+            variant=config.variant,
+            output=output,
         )
+        behaviors = load_behaviors(data=data)
+        for row in behaviors:
+            await generator.execute_async(
+                behavior=row.behavior,
+                target_text=row.target_text,
+                seed_image_path=row.seed_image_path,
+                behavior_id=row.behavior_id,
+            )
+    finally:
+        target.release_white_box_resources()
 
 
 if __name__ == "__main__":
