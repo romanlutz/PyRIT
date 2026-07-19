@@ -37,6 +37,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_VALID_FINISH_REASONS: frozenset[str] = frozenset({"stop", "length", "content_filter", "tool_calls"})
 
 
+def get_finish_reason(*, response: Any) -> Any:
+    """
+    Extract the first choice's ``finish_reason`` from a Chat Completions response.
+
+    Args:
+        response (Any): The Chat Completions response object.
+
+    Returns:
+        Any: The first choice's ``finish_reason``, or None when absent.
+    """
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    return getattr(choice, "finish_reason", None) if choice is not None else None
+
+
 def detect_response_content(message: Any) -> tuple[bool, bool, bool]:
     """
     Detect which content types are present in a Chat Completions ``message``.

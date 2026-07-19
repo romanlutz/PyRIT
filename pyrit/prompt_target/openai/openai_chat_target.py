@@ -28,6 +28,7 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     capture_token_usage,
     detect_response_content,
     extract_partial_content,
+    get_finish_reason,
     is_content_filter_response,
     save_audio_response_async,
     validate_chat_completion_response,
@@ -311,8 +312,7 @@ class OpenAIChatTarget(OpenAITarget):
         # the whole budget on hidden reasoning before emitting a visible answer, and a low limit may be
         # deliberate, so warn instead of raising and let construction preserve any partial content or
         # fall back to a graceful empty response.
-        choice = response.choices[0] if getattr(response, "choices", None) else None
-        if choice is not None and getattr(choice, "finish_reason", None) == "length":
+        if get_finish_reason(response=response) == "length":
             logger.warning(
                 "The response was truncated because it reached the token limit (finish_reason='length'). "
                 "Reasoning models consume tokens on hidden reasoning in addition to the visible answer, so a "
@@ -396,8 +396,7 @@ class OpenAIChatTarget(OpenAITarget):
             # A truncated (finish_reason == "length") response may legitimately produce no content;
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
-            choice = response.choices[0] if getattr(response, "choices", None) else None
-            if choice is not None and getattr(choice, "finish_reason", None) == "length":
+            if get_finish_reason(response=response) == "length":
                 return construct_response_from_request(
                     request=request,
                     response_text_pieces=[""],
