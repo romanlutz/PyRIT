@@ -14,7 +14,6 @@ from pyrit.models import (
     JsonResponseConfig,
     Message,
     MessagePiece,
-    construct_response_from_request,
 )
 from pyrit.prompt_target.common.chat_completions_message_builder import (
     build_multimodal_chat_messages_async,
@@ -24,6 +23,7 @@ from pyrit.prompt_target.common.chat_completions_message_builder import (
     should_skip_audio_piece,
 )
 from pyrit.prompt_target.common.chat_completions_response_parser import (
+    build_empty_response_for_truncated_completion,
     build_response_pieces_async,
     capture_token_usage,
     detect_response_content,
@@ -396,13 +396,9 @@ class OpenAIChatTarget(OpenAITarget):
             # A truncated (finish_reason == "length") response may legitimately produce no content;
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
-            if get_finish_reason(response=response) == "length":
-                return construct_response_from_request(
-                    request=request,
-                    response_text_pieces=[""],
-                    response_type="text",
-                    error="empty",
-                )
+            truncated_empty_response = build_empty_response_for_truncated_completion(response=response, request=request)
+            if truncated_empty_response is not None:
+                return truncated_empty_response
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata

@@ -23,6 +23,7 @@ from pyrit.prompt_target.common.chat_completions_message_builder import (
 from pyrit.prompt_target.common.chat_completions_response_parser import (
     _build_audio_pieces_async,
     build_content_filter_message,
+    build_empty_response_for_truncated_completion,
     build_response_pieces_async,
     capture_token_usage,
     extract_partial_content,
@@ -150,6 +151,29 @@ def test_get_finish_reason_returns_none_without_reason():
     resp.choices = [MagicMock()]
     del resp.choices[0].finish_reason
     assert get_finish_reason(response=resp) is None
+
+
+def test_build_empty_response_for_truncated_completion_returns_empty_message():
+    request = _request_piece("ask")
+    result = build_empty_response_for_truncated_completion(
+        response=_mock_response(content="", finish_reason="length"),
+        request=request,
+    )
+
+    assert result is not None
+    assert len(result.message_pieces) == 1
+    assert result.message_pieces[0].converted_value == ""
+    assert result.message_pieces[0].converted_value_data_type == "text"
+    assert result.message_pieces[0].response_error == "empty"
+
+
+def test_build_empty_response_for_truncated_completion_returns_none_for_non_truncated_response():
+    result = build_empty_response_for_truncated_completion(
+        response=_mock_response(content="", finish_reason="stop"),
+        request=_request_piece("ask"),
+    )
+
+    assert result is None
 
 
 def test_capture_token_usage_populates_metadata():
