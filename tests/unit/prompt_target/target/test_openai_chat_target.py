@@ -1064,15 +1064,27 @@ def test_is_truncated_response_detects_length_finish_reason(target: OpenAIChatTa
     assert target._is_truncated_response(create_mock_completion(content="hi", finish_reason="stop")) is False
 
 
-async def test_construct_message_length_empty_returns_graceful_empty(
+async def test_construct_message_length_empty_returns_graceful_empty_and_captures_usage(
     target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
 ):
-    """Test construction returns a graceful empty piece when a truncated response produced no content."""
+    """Test construction returns a graceful empty piece with usage captured for truncated empty responses."""
     mock_response = create_mock_completion(content="", finish_reason="length")
+    mock_response.usage = MagicMock()
+    mock_response.usage.prompt_tokens = 10
+    mock_response.usage.completion_tokens = 20
+    mock_response.usage.total_tokens = 30
+    mock_response.usage.completion_tokens_details.reasoning_tokens = 100
+
     result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
+
     assert isinstance(result, Message)
-    assert result.message_pieces[0].original_value == ""
-    assert result.message_pieces[0].response_error == "empty"
+    piece = result.message_pieces[0]
+    assert piece.original_value == ""
+    assert piece.response_error == "empty"
+    assert piece.prompt_metadata["token_usage_input_tokens"] == 10
+    assert piece.prompt_metadata["token_usage_output_tokens"] == 20
+    assert piece.prompt_metadata["token_usage_total_tokens"] == 30
+    assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 100
 
 
 async def test_construct_message_empty_non_truncated_raises(

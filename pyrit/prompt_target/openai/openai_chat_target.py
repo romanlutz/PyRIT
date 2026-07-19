@@ -412,7 +412,9 @@ class OpenAIChatTarget(OpenAITarget):
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
             if self._is_truncated_response(response):
-                return build_empty_response_for_truncated_completion(request=request)
+                empty_message = build_empty_response_for_truncated_completion(request=request)
+                capture_token_usage(pieces=empty_message.message_pieces, response=response)
+                return empty_message
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata
