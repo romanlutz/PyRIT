@@ -1058,6 +1058,12 @@ def test_validate_response_length_empty_does_not_raise(
     assert "finish_reason='length'" in caplog.text
 
 
+def test_is_truncated_response_detects_length_finish_reason(target: OpenAIChatTarget):
+    """_is_truncated_response is True only when the completion stopped on the token limit."""
+    assert target._is_truncated_response(create_mock_completion(content="", finish_reason="length")) is True
+    assert target._is_truncated_response(create_mock_completion(content="hi", finish_reason="stop")) is False
+
+
 async def test_construct_message_length_empty_returns_graceful_empty(
     target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
 ):

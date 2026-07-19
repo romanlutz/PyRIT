@@ -312,7 +312,7 @@ class OpenAIChatTarget(OpenAITarget):
         # the whole budget on hidden reasoning before emitting a visible answer, and a low limit may be
         # deliberate, so warn instead of raising and let construction preserve any partial content or
         # fall back to a graceful empty response.
-        if get_finish_reason(response=response) == "length":
+        if self._is_truncated_response(response):
             logger.warning(
                 "The response was truncated because it reached the token limit (finish_reason='length'). "
                 "Reasoning models consume tokens on hidden reasoning in addition to the visible answer, so a "
@@ -324,6 +324,21 @@ class OpenAIChatTarget(OpenAITarget):
         # Genuinely empty responses (no truncation) raise so the retry logic can attempt to get a
         # complete response.
         validate_chat_completion_response(response=response)
+
+    def _is_truncated_response(self, response: Any) -> bool:
+        """
+        Return True if the response was cut off by the token limit.
+
+        The Chat Completions API signals token-limit truncation via ``finish_reason == "length"``
+        on the first choice.
+
+        Args:
+            response: A ChatCompletion response from the OpenAI SDK.
+
+        Returns:
+            bool: True if the response was truncated at the token limit, False otherwise.
+        """
+        return get_finish_reason(response=response) == "length"
 
     def _detect_response_content(self, message: Any) -> tuple[bool, bool, bool]:
         """
@@ -396,9 +411,8 @@ class OpenAIChatTarget(OpenAITarget):
             # A truncated (finish_reason == "length") response may legitimately produce no content;
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
-            truncated_empty_response = build_empty_response_for_truncated_completion(response=response, request=request)
-            if truncated_empty_response is not None:
-                return truncated_empty_response
+            if self._is_truncated_response(response):
+                return build_empty_response_for_truncated_completion(request=request)
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata

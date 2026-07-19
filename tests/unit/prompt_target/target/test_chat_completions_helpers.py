@@ -155,25 +155,13 @@ def test_get_finish_reason_returns_none_without_reason():
 
 def test_build_empty_response_for_truncated_completion_returns_empty_message():
     request = _request_piece("ask")
-    result = build_empty_response_for_truncated_completion(
-        response=_mock_response(content="", finish_reason="length"),
-        request=request,
-    )
+    result = build_empty_response_for_truncated_completion(request=request)
 
     assert result is not None
     assert len(result.message_pieces) == 1
     assert result.message_pieces[0].converted_value == ""
     assert result.message_pieces[0].converted_value_data_type == "text"
     assert result.message_pieces[0].response_error == "empty"
-
-
-def test_build_empty_response_for_truncated_completion_returns_none_for_non_truncated_response():
-    result = build_empty_response_for_truncated_completion(
-        response=_mock_response(content="", finish_reason="stop"),
-        request=_request_piece("ask"),
-    )
-
-    assert result is None
 
 
 def test_capture_token_usage_populates_metadata():
