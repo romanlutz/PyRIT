@@ -1268,6 +1268,7 @@ async def test_construct_message_truncated_keeps_reasoning_and_empty_text(
     assert len(text_pieces) == 1
     assert text_pieces[0].original_value == ""
     assert text_pieces[0].response_error == "empty"
+    assert result.message_pieces[0].prompt_metadata["truncated"] is True
 
 
 async def test_construct_message_truncated_keeps_partial_text(
@@ -1282,6 +1283,7 @@ async def test_construct_message_truncated_keeps_partial_text(
     assert len(text_pieces) == 1
     assert text_pieces[0].original_value == "Partial answer"
     assert text_pieces[0].response_error == "none"
+    assert result.message_pieces[0].prompt_metadata["truncated"] is True
 
 
 async def test_construct_message_truncated_empty_output_returns_graceful_empty(
@@ -1295,6 +1297,7 @@ async def test_construct_message_truncated_empty_output_returns_graceful_empty(
     assert len(result.message_pieces) == 1
     assert result.message_pieces[0].original_value == ""
     assert result.message_pieces[0].response_error == "empty"
+    assert result.message_pieces[0].prompt_metadata["truncated"] is True
 
 
 async def test_construct_message_truncated_skips_partial_tool_call(
@@ -1319,6 +1322,7 @@ async def test_construct_message_truncated_skips_partial_tool_call(
 async def test_construct_message_from_response(target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece):
     """Test _construct_message_from_response parses output sections."""
     mock_response = MagicMock()
+    mock_response.status = "completed"
     mock_response.output = [{"type": "message", "content": [{"type": "text", "text": "Hello from Response API"}]}]
 
     # Mock the _parse_response_output_section method
@@ -1335,6 +1339,7 @@ async def test_construct_message_from_response(target: OpenAIResponseTarget, dum
 
         assert isinstance(result, Message)
         assert len(result.message_pieces) == 1
+        assert "truncated" not in result.message_pieces[0].prompt_metadata
         mock_parse.assert_called_once()
 
 

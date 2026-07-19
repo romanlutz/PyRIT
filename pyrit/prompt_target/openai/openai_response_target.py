@@ -593,7 +593,8 @@ class OpenAIResponseTarget(OpenAITarget):
             request: The original request MessagePiece.
 
         Returns:
-            Message: Constructed message with extracted content from output sections.
+            Message: Constructed message with extracted content from output sections. Truncated responses set
+                ``prompt_metadata["truncated"] = True`` on the first piece.
         """
         truncated = self._is_truncated_response(response)
 
@@ -625,6 +626,9 @@ class OpenAIResponseTarget(OpenAITarget):
                 error="empty",
             ).message_pieces[0]
             extracted_response_pieces.append(empty_piece)
+
+        if truncated and extracted_response_pieces:
+            extracted_response_pieces[0].prompt_metadata["truncated"] = True
 
         return Message(message_pieces=extracted_response_pieces)
 

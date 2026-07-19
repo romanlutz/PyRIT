@@ -402,23 +402,28 @@ class OpenAIChatTarget(OpenAITarget):
         Raises:
             EmptyResponseException: If a non-truncated response contains no content, audio, or tool
                 calls. A truncated (``finish_reason == "length"``) response with no content instead
-                yields a graceful empty piece so the run continues.
+                yields a graceful empty piece so the run continues. Truncated responses set
+                ``prompt_metadata["truncated"] = True`` on the first piece.
         """
         audio_format = self._audio_response_config.audio_format if self._audio_response_config else "wav"
+        truncated = self._is_truncated_response(response)
         pieces = await build_response_pieces_async(response=response, request=request, audio_format=audio_format)
 
         if not pieces:
             # A truncated (finish_reason == "length") response may legitimately produce no content;
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
-            if self._is_truncated_response(response):
+            if truncated:
                 empty_message = build_empty_response_for_truncated_completion(request=request)
                 capture_token_usage(pieces=empty_message.message_pieces, response=response)
+                empty_message.message_pieces[0].prompt_metadata["truncated"] = True
                 return empty_message
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata
         capture_token_usage(pieces=pieces, response=response)
+        if truncated:
+            pieces[0].prompt_metadata["truncated"] = True
 
         return Message(message_pieces=pieces)
 

@@ -1085,6 +1085,20 @@ async def test_construct_message_length_empty_returns_graceful_empty_and_capture
     assert piece.prompt_metadata["token_usage_output_tokens"] == 20
     assert piece.prompt_metadata["token_usage_total_tokens"] == 30
     assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 100
+    assert piece.prompt_metadata["truncated"] is True
+
+
+async def test_construct_message_length_with_content_sets_truncated_metadata(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece
+):
+    """Test construction preserves partial content and marks token-limit truncation."""
+    mock_response = create_mock_completion(content="Partial answer", finish_reason="length")
+
+    result = await target._construct_message_from_response_async(mock_response, dummy_text_message_piece)
+
+    piece = result.message_pieces[0]
+    assert piece.original_value == "Partial answer"
+    assert piece.prompt_metadata["truncated"] is True
 
 
 async def test_construct_message_empty_non_truncated_raises(
@@ -2094,6 +2108,7 @@ async def test_construct_message_from_response_captures_token_usage(
     assert piece.prompt_metadata["token_usage_total_tokens"] == 30
     assert piece.prompt_metadata["token_usage_cached_tokens"] == 5
     assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 7
+    assert "truncated" not in piece.prompt_metadata
 
 
 async def test_construct_message_from_response_no_usage_no_metadata(
