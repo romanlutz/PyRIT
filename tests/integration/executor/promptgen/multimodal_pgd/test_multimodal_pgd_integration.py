@@ -179,7 +179,31 @@ async def test_gpu_single_pgd_step_against_real_llava(tmp_path: Path, patch_cent
 
 @pytest.mark.gpu
 @pytest.mark.run_only_if_all_tests
-async def test_gpu_vision_target_dual_surface(tmp_path: Path, patch_central_database) -> None:
+async def test_gpu_single_pgd_step_against_real_qwen2_5_vl(tmp_path: Path, patch_central_database) -> None:
+    """One real PGD step against Qwen2.5-VL-7B, whose patch-flattened pixel layout
+    exercises the dynamic-resolution ``compute_loss`` + ``to_pil`` path. CUDA only."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device required for the real-VLM smoke test")
+
+    seed_path = tmp_path / "seed.png"
+    PIL.Image.new("RGB", (392, 392), (128, 128, 128)).save(seed_path)
+
+    generator = MultiModalPGDGenerator(
+        model=MultiModalPGDModelConfig(vlm_id="Qwen/Qwen2.5-VL-7B-Instruct", device="cuda:0"),
+        algorithm=MultiModalPGDAlgorithmConfig(num_steps=1, stop_loss=-1.0),
+        output=MultiModalPGDOutputConfig(manifest_path=str(tmp_path / "manifest.jsonl"), verbose=False),
+    )
+
+    result = await generator.execute_async(
+        behavior="Describe the image.",
+        target_text="Sure, here is",
+        behavior_id="gpu_smoke_qwen",
+        seed_image_path=str(seed_path),
+    )
+
+    assert Path(result.image_path).exists()
+    assert result.step_count == 1
+    assert PIL.Image.open(result.image_path).size == (392, 392)
     """The same HuggingFaceVisionTarget instance must serve send + compute_loss."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required for the real-VLM dual-surface test")

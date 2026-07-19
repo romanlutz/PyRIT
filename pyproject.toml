@@ -116,6 +116,11 @@ gradient = [
     "pyarrow>=22.0.0; python_version >= '3.14'",
     "sentencepiece>=0.2.0",
     "torch>=2.7.0",
+    # Dynamic-resolution VLM processors (e.g. Qwen2.5-VL's Qwen2VLVideoProcessor)
+    # import torchvision at preprocess time; the white-box PGD path needs it to
+    # load those models. LLaVA-1.5 does not, but keeping it here makes the gradient
+    # extra model-agnostic.
+    "torchvision>=0.22.0",
 ]
 playwright = [
     "flask>=3.1.3",
@@ -160,6 +165,7 @@ all = [
     "sentencepiece>=0.2.0",
     "spacy>=3.8.13,!=3.8.14",  # 3.8.14 missing cp314 wheels
     "torch>=2.7.0",
+    "torchvision>=0.22.0",  # dynamic-resolution VLM processors (Qwen2.5-VL); see gradient extra
 ]
 
 [project.scripts]

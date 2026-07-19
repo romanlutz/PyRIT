@@ -56,6 +56,59 @@ _TEXT_IMAGE_INPUT = frozenset({frozenset({"text"}), frozenset({"image_path"}), f
 _TEXT_OUTPUT = frozenset({frozenset({"text"})})
 
 
+def _reconstruct_image_from_flattened_patches(
+    *,
+    pixel_values: torch.Tensor,
+    image_grid_thw: torch.Tensor,
+    patch_size: int,
+    temporal_patch_size: int,
+    merge_size: int,
+    num_channels: int,
+) -> torch.Tensor:
+    """
+    Invert the Qwen2-VL patchify to recover a ``[C, H, W]`` normalized image.
+
+    Qwen2-VL-style processors flatten an image into
+    ``[grid_t*grid_h*grid_w, num_channels*temporal_patch_size*patch_size**2]`` patch
+    rows (plus an ``image_grid_thw``) instead of a dense ``[C, H, W]`` tensor. This
+    reverses the exact reshape/permute the image processor applies so a perturbed
+    ``pixel_values`` can be rendered back to a PNG. Only single still images
+    (``grid_t == 1``, one grid row) are supported.
+
+    Args:
+        pixel_values (torch.Tensor): The flattened ``[num_patches, patch_dim]`` tensor.
+        image_grid_thw (torch.Tensor): The ``[1, 3]`` grid ``(t, h, w)`` in patch units.
+        patch_size (int): Spatial patch size.
+        temporal_patch_size (int): Temporal patch size (frames folded per patch).
+        merge_size (int): Spatial merge factor.
+        num_channels (int): Number of image channels.
+
+    Returns:
+        torch.Tensor: The reconstructed ``[C, H, W]`` tensor in normalized model space.
+
+    Raises:
+        ValueError: If more than one image or a temporal (video) grid is present.
+    """
+    if image_grid_thw.shape[0] != 1:
+        raise ValueError(
+            f"Expected a single image grid, got {image_grid_thw.shape[0]} rows. "
+            "Rendering a PNG is only supported for a single perturbed image."
+        )
+    grid_t, grid_h, grid_w = (int(x) for x in image_grid_thw[0].tolist())
+    if grid_t != 1:
+        raise ValueError(f"Only still images (grid_t == 1) can be rendered, got grid_t={grid_t}.")
+
+    merged_h, merged_w = grid_h // merge_size, grid_w // merge_size
+    # Split the flattened rows/features back into the (grid, merge, patch) axes the
+    # processor collapsed, drop the duplicated temporal frame, then regroup into [C, H, W].
+    reshaped = pixel_values.reshape(
+        merged_h, merged_w, merge_size, merge_size, num_channels, temporal_patch_size, patch_size, patch_size
+    )
+    frame = reshaped[:, :, :, :, :, 0, :, :]  # [merged_h, merged_w, mh, mw, C, ph, pw]
+    image = frame.permute(4, 0, 2, 5, 1, 3, 6).contiguous()  # [C, merged_h, mh, ph, merged_w, mw, pw]
+    return image.reshape(num_channels, grid_h * patch_size, grid_w * patch_size)
+
+
 class HuggingFaceVisionTarget(PromptTarget):
     """
     A locally-loaded HuggingFace VLM exposing black-box and white-box surfaces.
@@ -244,11 +297,18 @@ class HuggingFaceVisionTarget(PromptTarget):
         full_attention = torch.cat([attention_mask, torch.ones_like(target_ids)], dim=1)
         labels = torch.cat([torch.full_like(prompt_ids, -100), target_ids], dim=1)
 
-        extras = {
-            key: value
-            for key, value in inputs.model_inputs.items()
-            if key not in ("input_ids", "attention_mask", "pixel_values")
-        }
+        prompt_length = prompt_ids.shape[1]
+        target_length = target_ids.shape[1]
+        extras: dict[str, Any] = {}
+        for key, value in inputs.model_inputs.items():
+            if key in ("input_ids", "attention_mask", "pixel_values"):
+                continue
+            # Token-aligned extras (e.g. Qwen2-VL's mm_token_type_ids) must grow to cover the
+            # appended target tokens, which are text (type 0), so the model's mRoPE and image
+            # placeholder masks stay valid. Non-token tensors (image_grid_thw) pass through.
+            if torch.is_tensor(value) and value.dim() >= 1 and value.shape[-1] == prompt_length:
+                value = torch.cat([value, value.new_zeros((*value.shape[:-1], target_length))], dim=-1)
+            extras[key] = value
 
         outputs = self.model(
             input_ids=full_ids,
@@ -264,9 +324,11 @@ class HuggingFaceVisionTarget(PromptTarget):
         Denormalize ``inputs.pixel_values`` back into a viewable RGB image.
 
         Uses the processor's ``image_mean`` / ``image_std`` to invert normalization.
-        Supports the standard fixed-resolution ``[N, C, H, W]`` / ``[C, H, W]``
-        layouts (e.g. LLaVA-1.5); dynamic-tiling layouts that cannot be reshaped to a
-        single image raise ``ValueError``.
+        Supports the fixed-resolution ``[N, C, H, W]`` / ``[C, H, W]`` layouts (e.g.
+        LLaVA-1.5) and the patch-flattened dynamic-resolution layout used by the
+        Qwen2-VL family (a 2D ``pixel_values`` plus ``image_grid_thw``), which is
+        rebuilt into ``[C, H, W]`` before denormalizing. Layouts that cannot be
+        reshaped to a single still image raise ``ValueError``.
 
         Args:
             inputs (WhiteBoxInputs): Inputs holding the (possibly perturbed)
@@ -282,17 +344,29 @@ class HuggingFaceVisionTarget(PromptTarget):
         import PIL.Image
 
         self._ensure_loaded()
+        image_processor = self._processor.image_processor
         pixel_values = inputs.pixel_values.detach().to(torch.float32).cpu()
-        if pixel_values.dim() == 4:
+
+        image_grid_thw = inputs.model_inputs.get("image_grid_thw")
+        if pixel_values.dim() == 2 and image_grid_thw is not None:
+            pixel_values = _reconstruct_image_from_flattened_patches(
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw.detach().cpu(),
+                patch_size=int(getattr(image_processor, "patch_size", 14)),
+                temporal_patch_size=int(getattr(image_processor, "temporal_patch_size", 2)),
+                merge_size=int(getattr(image_processor, "merge_size", 2)),
+                num_channels=len(image_processor.image_mean),
+            )
+        elif pixel_values.dim() == 4:
             pixel_values = pixel_values[0]
+
         if pixel_values.dim() != 3:
             raise ValueError(
-                f"to_pil expects a [C, H, W] or [N, C, H, W] pixel_values tensor, got shape "
-                f"{tuple(inputs.pixel_values.shape)}. This model uses a non-image pixel layout that "
-                "cannot be rendered back to a single PNG."
+                f"to_pil expects a [C, H, W] / [N, C, H, W] tensor, or a 2D patch-flattened tensor "
+                f"with image_grid_thw, got shape {tuple(inputs.pixel_values.shape)}. This model uses a "
+                "pixel layout that cannot be rendered back to a single PNG."
             )
 
-        image_processor = self._processor.image_processor
         mean = torch.tensor(image_processor.image_mean, dtype=torch.float32).view(-1, 1, 1)
         std = torch.tensor(image_processor.image_std, dtype=torch.float32).view(-1, 1, 1)
         denormalized = (pixel_values * std + mean).clamp(0.0, 1.0)
