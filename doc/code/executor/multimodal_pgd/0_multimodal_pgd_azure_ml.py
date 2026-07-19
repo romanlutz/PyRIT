@@ -127,8 +127,10 @@ ml_client.environments.create_or_update(env_docker_context)
 # images the job can read.
 #
 # A GPU instance with >= 24 GB of vRAM is recommended (e.g. `Standard_NC24ads_A100_v4`).
-# If you hit out-of-memory errors, lower `algorithm.num_steps`, use a smaller model,
-# or reduce `data.n_behaviors`.
+# The `compute` below points at `gcg-gpu-a100`, the same A100 pool the
+# [GCG AML notebook](../gcg/1_gcg_azure_ml.ipynb) uses; change it to any GPU compute
+# target in your workspace. If you hit out-of-memory errors, lower `algorithm.num_steps`,
+# use a smaller model, or reduce `data.n_behaviors`.
 
 # %%
 import tempfile
@@ -179,7 +181,7 @@ job = command(
     outputs={"results": Output(type="uri_folder")},
     environment=f"{env_docker_context.name}:{env_docker_context.version}",
     environment_variables={"HUGGINGFACE_TOKEN": os.environ.get("HUGGINGFACE_TOKEN", "")},
-    compute="pgd-gpu-a100",
+    compute="gcg-gpu-a100",
     display_name="multimodal_pgd_image_generation",
     description="Generate adversarial images using Multimodal PGD on LLaVA-1.5.",
     tags={"Owner": os.environ.get("USER", "unknown")},
