@@ -12,6 +12,7 @@ from typing import (
     cast,
 )
 
+from openai.types.responses import Response
 from openai.types.shared import ReasoningEffort
 
 from pyrit.exceptions import (
@@ -558,7 +559,7 @@ class OpenAIResponseTarget(OpenAITarget):
             logger.error("The response returned no valid output.")
             raise EmptyResponseException(message="The response returned an empty response.")
 
-    def _is_truncated_response(self, response: Any) -> bool:
+    def _is_truncated_response(self, response: Response) -> bool:
         """
         Return True if the response was cut off by the ``max_output_tokens`` limit.
 
@@ -572,10 +573,10 @@ class OpenAIResponseTarget(OpenAITarget):
         Returns:
             bool: True if the response was truncated at the token limit, False otherwise.
         """
-        if getattr(response, "status", None) != "incomplete":
+        if response.status != "incomplete":
             return False
-        incomplete_details = getattr(response, "incomplete_details", None)
-        reason = getattr(incomplete_details, "reason", None) if incomplete_details else None
+        incomplete_details = response.incomplete_details
+        reason = incomplete_details.reason if incomplete_details else None
         return reason == "max_output_tokens"
 
     async def _construct_message_from_response_async(self, response: Any, request: MessagePiece) -> Message:
