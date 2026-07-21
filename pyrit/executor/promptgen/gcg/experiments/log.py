@@ -2,8 +2,9 @@
 # Licensed under the MIT license.
 
 import logging
-import subprocess as sp
 from typing import Any
+
+from pyrit.executor.promptgen.core.experiment_log import get_gpu_memory, log_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -45,35 +46,6 @@ def log_train_goals(*, train_goals: list[str]) -> None:
     logger.info(f"Training goals ({len(train_goals)}): {train_goals}")
 
 
-def get_gpu_memory() -> dict[str, int]:
-    """
-    Query free GPU memory via nvidia-smi.
-
-    Returns:
-        dict[str, int]: Mapping of GPU identifiers to free memory in MiB.
-    """
-    command = "nvidia-smi --query-gpu=memory.free --format=csv"
-    memory_free_info = sp.check_output(command.split()).decode("ascii").split("\n")[:-1][1:]
-    memory_free_values = {f"gpu{i + 1}_free_memory": int(val.split()[0]) for i, val in enumerate(memory_free_info)}
-    memory_free_string = ", ".join(f"{val} MiB" for val in memory_free_values.values())
-    logger.info(f"Free GPU memory:\n{memory_free_string}")
-    return memory_free_values
-
-
-def log_gpu_memory(*, step: int) -> None:
-    """
-    Log free GPU memory via Python logging.
-
-    Args:
-        step (int): The current training step number.
-    """
-    try:
-        memory_values = get_gpu_memory()
-        logger.info(f"Step {step} GPU memory: {memory_values}")
-    except Exception:
-        logger.debug("Could not query GPU memory (nvidia-smi not available)")
-
-
 def log_loss(*, step: int, loss: float) -> None:
     """
     Log training loss via Python logging.
@@ -97,3 +69,13 @@ def log_table_summary(*, losses: list[float], controls: list[str], n_steps: int)
     logger.info(f"Training complete ({n_steps} steps). Final loss: {losses[-1] if losses else 'N/A'}")
     if controls:
         logger.info(f"Final control: {controls[-1]}")
+
+
+__all__ = [
+    "get_gpu_memory",
+    "log_gpu_memory",
+    "log_loss",
+    "log_params",
+    "log_table_summary",
+    "log_train_goals",
+]

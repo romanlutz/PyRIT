@@ -90,28 +90,28 @@ class TestGpuMemoryLogging:
     uses stdlib imports, so these tests run in any CI environment.
     """
 
-    @patch("pyrit.executor.promptgen.gcg.experiments.log.sp")
+    @patch("pyrit.executor.promptgen.core.experiment_log.sp")
     def test_get_gpu_memory_parses_nvidia_smi(self, mock_sp: MagicMock) -> None:
         """Should parse nvidia-smi output into a dict of GPU -> free memory."""
         mock_sp.check_output.return_value = b"memory.free [MiB]\n8000 MiB\n16000 MiB\n"
         result = get_gpu_memory()
         assert result == {"gpu1_free_memory": 8000, "gpu2_free_memory": 16000}
 
-    @patch("pyrit.executor.promptgen.gcg.experiments.log.sp")
+    @patch("pyrit.executor.promptgen.core.experiment_log.sp")
     def test_get_gpu_memory_single_gpu(self, mock_sp: MagicMock) -> None:
         """Should handle single GPU output."""
         mock_sp.check_output.return_value = b"memory.free [MiB]\n24000 MiB\n"
         result = get_gpu_memory()
         assert result == {"gpu1_free_memory": 24000}
 
-    @patch("pyrit.executor.promptgen.gcg.experiments.log.sp")
+    @patch("pyrit.executor.promptgen.core.experiment_log.sp")
     def test_log_gpu_memory_logs_via_logging(self, mock_sp: MagicMock) -> None:
         """Should log GPU memory info without error on the success path."""
         mock_sp.check_output.return_value = b"memory.free [MiB]\n8000 MiB\n16000 MiB\n"
         # Should not raise
         log_gpu_memory(step=5)
 
-    @patch("pyrit.executor.promptgen.gcg.experiments.log.sp")
+    @patch("pyrit.executor.promptgen.core.experiment_log.sp")
     def test_log_gpu_memory_swallows_nvidia_smi_failure(self, mock_sp: MagicMock) -> None:
         """Should swallow exceptions when nvidia-smi is not available.
 
@@ -123,7 +123,7 @@ class TestGpuMemoryLogging:
         # Must not raise
         log_gpu_memory(step=5)
 
-    @patch("pyrit.executor.promptgen.gcg.experiments.log.sp")
+    @patch("pyrit.executor.promptgen.core.experiment_log.sp")
     def test_get_gpu_memory_handles_nvidia_smi_failure(self, mock_sp: MagicMock) -> None:
         """`get_gpu_memory` itself should propagate the exception (only
         `log_gpu_memory` is expected to swallow it)."""

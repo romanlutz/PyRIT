@@ -33,10 +33,9 @@ silence the warning emitted on import::
     warnings.filterwarnings("ignore", category=ExperimentalWarning)
 """
 
-import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from pyrit.exceptions import ExperimentalWarning
+from pyrit.executor.promptgen.core.lazy_exports import build_lazy_exports, warn_experimental
 from pyrit.executor.promptgen.gcg.config import (
     GCGAlgorithmConfig,
     GCGConfig,
@@ -46,14 +45,7 @@ from pyrit.executor.promptgen.gcg.config import (
     GCGStrategyConfig,
 )
 
-warnings.warn(
-    "pyrit.executor.promptgen.gcg is experimental: APIs may change in any release "
-    "without a deprecation cycle. Pin pyrit to a specific version if you depend "
-    "on this module. To silence: "
-    "warnings.filterwarnings('ignore', category=pyrit.exceptions.ExperimentalWarning).",
-    ExperimentalWarning,
-    stacklevel=2,
-)
+warn_experimental(module_name=__name__)
 
 # Torch-dependent symbols are exposed lazily via PEP 562 __getattr__ so that
 # `from pyrit.executor.promptgen.gcg import GCGConfig` works on installs that
@@ -103,19 +95,7 @@ if TYPE_CHECKING:
     GCG = GCGGenerator
 
 
-def __getattr__(name: str) -> Any:
-    if name in _LAZY_IMPORTS:
-        import importlib
-
-        module_name, attr = _LAZY_IMPORTS[name]
-        value = getattr(importlib.import_module(module_name), attr)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(set(list(globals().keys()) + list(_LAZY_IMPORTS.keys())))
+__getattr__, __dir__ = build_lazy_exports(module_globals=globals(), lazy_imports=_LAZY_IMPORTS)
 
 
 __all__ = [

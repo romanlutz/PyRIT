@@ -45,7 +45,7 @@ from pyrit.models.target.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
-from pyrit.prompt_target.common.white_box_target import WhiteBoxInputs
+from pyrit.prompt_target.common.white_box_target import WhiteBoxInputs, WhiteBoxTarget
 
 if TYPE_CHECKING:
     import PIL.Image
@@ -109,7 +109,7 @@ def _reconstruct_image_from_flattened_patches(
     return image.reshape(num_channels, grid_h * patch_size, grid_w * patch_size)
 
 
-class HuggingFaceVisionTarget(PromptTarget):
+class HuggingFaceVisionTarget(PromptTarget, WhiteBoxTarget):
     """
     A locally-loaded HuggingFace VLM exposing black-box and white-box surfaces.
 
