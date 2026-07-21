@@ -373,6 +373,90 @@ class HuggingFaceVisionTarget(PromptTarget):
         array = (denormalized.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
         return PIL.Image.fromarray(array)
 
+    def clamp_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        """
+        Project normalized ``pixel_values`` onto the displayable ``[0, 1]`` image range.
+
+        PGD optimizes in the processor's normalized space, but ``to_pil`` clamps the
+        denormalized image to ``[0, 1]`` before writing a PNG. Clamping every step keeps
+        the optimized tensor on the renderable manifold so the loss reflects the image
+        actually saved and queried back, not an out-of-gamut tensor that rendering
+        discards. Handles both the fixed-resolution ``[C, H, W]`` / ``[N, C, H, W]``
+        layout and the Qwen2-VL patch-flattened ``[num_patches, C*T*P*P]`` layout, where
+        the channel is the slowest-varying axis within each patch row.
+
+        Args:
+            inputs (WhiteBoxInputs): Model inputs whose ``pixel_values`` tensor is projected.
+
+        Returns:
+            torch.Tensor: A detached ``pixel_values`` tensor clamped into each channel's
+            displayable bound, matching the input shape and normalization.
+        """
+        self._ensure_loaded()
+        image_processor = self._processor.image_processor
+        pixel_values = inputs.pixel_values.detach()
+
+        mean = torch.tensor(image_processor.image_mean, dtype=pixel_values.dtype, device=pixel_values.device)
+        std = torch.tensor(image_processor.image_std, dtype=pixel_values.dtype, device=pixel_values.device)
+        low = (0.0 - mean) / std
+        high = (1.0 - mean) / std
+        num_channels = mean.shape[0]
+
+        if pixel_values.dim() == 2:
+            # Qwen2-VL flattened [num_patches, C*T*P*P]: the channel occupies the slowest
+            # axis, so each channel spans a contiguous block of columns.
+            channels_per_column = pixel_values.shape[1] // num_channels
+            column_channel = torch.arange(pixel_values.shape[1], device=pixel_values.device) // channels_per_column
+            low = low[column_channel]
+            high = high[column_channel]
+        else:
+            broadcast_shape = [1] * pixel_values.dim()
+            broadcast_shape[-3] = num_channels
+            low = low.view(broadcast_shape)
+            high = high.view(broadcast_shape)
+
+        return torch.maximum(torch.minimum(pixel_values, high), low)
+
+    def quantize_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        """
+        Snap ``inputs.pixel_values`` to the deployed 8-bit image via a straight-through estimator.
+
+        PGD minimizes the loss on the *continuous* normalized ``pixel_values``, but the
+        artifact that actually ships is an 8-bit PNG that the model re-preprocesses at
+        inference. Any degree of freedom the optimizer exploits that the render round-trip
+        discards — 1/255 quantization noise, or a Qwen2-VL image's duplicated temporal
+        patches diverging when only slot 0 is rendered — leaves a near-zero training loss
+        that the shipped image no longer reproduces. This method returns exactly the pixels
+        the model will see at deployment by running the real ``to_pil`` -> ``image_processor``
+        round-trip, so quantization, temporal re-duplication, and any resize are all folded
+        in. The rounding is non-differentiable, so a straight-through estimator makes the
+        forward value the deployed tensor while the backward pass is identity w.r.t. the
+        input, letting the optimizer descend the *deployed* image's loss.
+
+        Args:
+            inputs (WhiteBoxInputs): Model inputs whose ``pixel_values`` leaf (with any
+                layout metadata) is projected to its deployed 8-bit form.
+
+        Returns:
+            torch.Tensor: A ``pixel_values`` tensor whose forward value equals the
+            re-preprocessed 8-bit image and whose gradient flows straight through to the
+            input, matching the input shape and normalization.
+
+        Raises:
+            ValueError: If the re-preprocessed tensor's shape does not match the input.
+        """
+        self._ensure_loaded()
+        pixel_values = inputs.pixel_values
+        rendered = self.to_pil(inputs=inputs)
+        reprocessed = self._processor.image_processor(images=rendered, return_tensors="pt")
+        deployed = reprocessed["pixel_values"].to(device=pixel_values.device, dtype=pixel_values.dtype)
+        if deployed.shape != pixel_values.shape:
+            raise ValueError(
+                f"quantize_to_displayable: re-preprocessed pixel_values shape {tuple(deployed.shape)} "
+                f"does not match the optimized tensor shape {tuple(pixel_values.shape)}."
+            )
+        return pixel_values + (deployed - pixel_values).detach()
+
     def release_white_box_resources(self) -> None:
         """Free the loaded model and empty the CUDA cache, if any."""
         self.model = None
@@ -415,15 +499,7 @@ class HuggingFaceVisionTarget(PromptTarget):
             image = PIL.Image.open(image_pieces[0].converted_value).convert("RGB")
 
         prompt_text = self._build_prompt_text(behavior=prompt, has_image=image is not None)
-        processor_kwargs: dict[str, Any] = {"text": prompt_text, "return_tensors": "pt"}
-        if image is not None:
-            processor_kwargs["images"] = image
-        encoded = self._processor(**processor_kwargs).to(self.device)
-
-        input_length = encoded["input_ids"].shape[-1]
-        with torch.no_grad():
-            generated = self.model.generate(**encoded, max_new_tokens=self._max_new_tokens, do_sample=False)
-        response_text = self._processor.tokenizer.decode(generated[0][input_length:], skip_special_tokens=True).strip()
+        response_text = self._generate_text(behavior=prompt, image=image, prompt_text=prompt_text)
 
         if not response_text:
             raise EmptyResponseException
@@ -434,6 +510,48 @@ class HuggingFaceVisionTarget(PromptTarget):
             prompt_metadata={"model_id": self.model_id, "device": self.device},
         )
         return [response]
+
+    def generate_response(self, *, behavior: str, image: PIL.Image.Image) -> str:
+        """
+        Greedily decode the model's black-box reply to ``behavior`` paired with ``image``.
+
+        Synchronous companion to the white-box gradient surface (``preprocess`` /
+        ``compute_loss`` / ``to_pil``): after an image attack perturbs ``pixel_values`` and
+        renders the result to PIL, callers pass it here to check whether the model now
+        actually emits the target string. Unlike ``send_prompt_async`` this returns the raw
+        decoded text without wrapping it in a ``Message`` or touching memory.
+
+        Args:
+            behavior (str): The benign carrier prompt sent alongside the image.
+            image (PIL.Image.Image): The image to send (typically the perturbed result).
+
+        Returns:
+            str: The model's greedily-decoded response text (possibly empty).
+        """
+        self._ensure_loaded()
+        return self._generate_text(behavior=behavior, image=image)
+
+    def _generate_text(self, *, behavior: str, image: PIL.Image.Image | None, prompt_text: str | None = None) -> str:
+        """
+        Greedy-decode the model's reply to ``behavior`` (+ optional ``image``).
+
+        Shared core of the black-box send path and the white-box verification helper;
+        assumes the processor + model are already loaded.
+
+        Returns:
+            str: The decoded, stripped response text.
+        """
+        if prompt_text is None:
+            prompt_text = self._build_prompt_text(behavior=behavior, has_image=image is not None)
+        processor_kwargs: dict[str, Any] = {"text": prompt_text, "return_tensors": "pt"}
+        if image is not None:
+            processor_kwargs["images"] = image
+        encoded = self._processor(**processor_kwargs).to(self.device)
+
+        input_length = encoded["input_ids"].shape[-1]
+        with torch.no_grad():
+            generated = self.model.generate(**encoded, max_new_tokens=self._max_new_tokens, do_sample=False)
+        return self._processor.tokenizer.decode(generated[0][input_length:], skip_special_tokens=True).strip()
 
     # ------------------------------------------------------------------- internals
 

@@ -12,6 +12,7 @@ from pyrit.executor.promptgen.multimodal_pgd.targets import (
     augment_target,
     contract_target,
     default_affirmative_target,
+    response_matches_target,
     shorten_target,
 )
 
@@ -43,3 +44,17 @@ def test_augment_target_contracts_when_rng_high() -> None:
     rng = random.Random()
     rng.random = lambda: 0.9  # type: ignore[method-assign]
     assert augment_target(target="Sure, here is a plan", rng=rng) == "Sure, here's a plan"
+
+
+def test_response_matches_target_prefix_case_and_whitespace_insensitive() -> None:
+    assert response_matches_target(
+        response="  SURE,   here is\nthe plan to do the thing.", target_text="Sure, here is the plan"
+    )
+
+
+def test_response_matches_target_false_when_not_prefix() -> None:
+    assert not response_matches_target(response="I can't help with that.", target_text="Sure, here is the plan")
+
+
+def test_response_matches_target_false_on_empty_target() -> None:
+    assert not response_matches_target(response="Sure, here is the plan", target_text="   ")

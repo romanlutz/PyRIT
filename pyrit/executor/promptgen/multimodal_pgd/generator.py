@@ -47,7 +47,9 @@ from pyrit.executor.promptgen.multimodal_pgd.config import (
     MultiModalPGDVariantConfig,
 )
 from pyrit.executor.promptgen.multimodal_pgd.manifest import PGDManifestEntry, append_manifest_entry
+from pyrit.executor.promptgen.multimodal_pgd.targets import response_matches_target
 from pyrit.models import ComponentIdentifier, Identifiable
+from pyrit.prompt_target.common.white_box_target import SupportsResponseGeneration
 
 if TYPE_CHECKING:
     import PIL.Image
@@ -96,6 +98,12 @@ class MultiModalPGDResult(PromptGeneratorStrategyResult):
         succeeded (bool): Whether the run reached ``final_loss <= stop_loss``.
         vlm_id (str): HuggingFace id of the VLM the image was crafted against.
         variant (str): PGD variant value used.
+        deployed_loss (float | None): Loss recomputed on the reloaded 8-bit PNG, or
+            ``None`` when the recomputation was skipped or failed.
+        model_response (str | None): The VLM's reply to the crafted image, or ``None``
+            when verification was skipped.
+        target_emitted (bool | None): Whether ``model_response`` begins with the target
+            string, or ``None`` when verification was skipped.
         manifest_entry (PGDManifestEntry | None): The manifest row written for the run.
         manifest_path (str | None): Path of the JSONL manifest the row was appended to.
         memory_labels (dict[str, str]): Echo of the labels passed via the context.
@@ -108,6 +116,9 @@ class MultiModalPGDResult(PromptGeneratorStrategyResult):
     succeeded: bool = False
     vlm_id: str = ""
     variant: str = ""
+    deployed_loss: float | None = None
+    model_response: str | None = None
+    target_emitted: bool | None = None
     manifest_entry: PGDManifestEntry | None = None
     manifest_path: str | None = None
     memory_labels: dict[str, str] = Field(default_factory=dict)
@@ -251,6 +262,14 @@ class MultiModalPGDGenerator(
             log_prefix="MultiModalPGD",
         )
 
+        model_response, target_emitted = await self._verify_async(
+            target=target, image=core.image, behavior=context.behavior, target_text=context.target_text
+        )
+
+        deployed_loss = await self._deployed_loss_async(
+            target=target, image=core.image, behavior=context.behavior, target_text=context.target_text
+        )
+
         entry = PGDManifestEntry(
             id=filename[:-4],
             behavior_id=behavior_id,
@@ -265,7 +284,10 @@ class MultiModalPGDGenerator(
             step_size=self._algorithm.step_size,
             stop_loss=self._algorithm.stop_loss,
             succeeded_stop_criterion=core.succeeded,
+            deployed_loss=deployed_loss,
             seed_image_path=context.seed_image_path,
+            model_response=model_response,
+            target_emitted=target_emitted,
         )
         await asyncio.to_thread(append_manifest_entry, entry=entry, path=manifest_path)
 
@@ -277,10 +299,71 @@ class MultiModalPGDGenerator(
             succeeded=core.succeeded,
             vlm_id=vlm_id,
             variant=variant_value,
+            deployed_loss=deployed_loss,
+            model_response=model_response,
+            target_emitted=target_emitted,
             manifest_entry=entry,
             manifest_path=manifest_path,
             memory_labels=dict(context.memory_labels),
         )
+
+    async def _verify_async(
+        self, *, target: Any, image: PIL.Image.Image, behavior: str, target_text: str
+    ) -> tuple[str | None, bool | None]:
+        """
+        Feed the crafted image back through the target and check for the target string.
+
+        Returns ``(None, None)`` when verification is disabled or the target cannot
+        generate responses, so the optimization outcome is never blocked on it.
+
+        Returns:
+            tuple[str | None, bool | None]: The model's reply and whether it begins with
+            ``target_text``.
+        """
+        if not self._output.verify_response or not isinstance(target, SupportsResponseGeneration):
+            return None, None
+        try:
+            model_response = await asyncio.to_thread(target.generate_response, behavior=behavior, image=image)
+        except Exception as e:  # verification is best-effort; never fail the run over it
+            self._logger.warning(f"Response verification failed: {e}")
+            return None, None
+        return model_response, response_matches_target(response=model_response, target_text=target_text)
+
+    async def _deployed_loss_async(
+        self, *, target: Any, image: PIL.Image.Image, behavior: str, target_text: str
+    ) -> float | None:
+        """
+        Recompute the loss on the reloaded 8-bit PNG as an honesty check on ``final_loss``.
+
+        The optimizer already scores a straight-through quantized tensor, so this should
+        track ``final_loss`` closely; a large gap flags a remaining optimize-vs-deploy
+        mismatch. Best-effort: returns ``None`` on any failure so the run is never blocked.
+
+        Returns:
+            float | None: The loss measured on the re-preprocessed image, or ``None``.
+        """
+        try:
+            return await asyncio.to_thread(
+                self._deployed_loss, target=target, image=image, behavior=behavior, target_text=target_text
+            )
+        except Exception as e:  # honesty metric is best-effort; never fail the run over it
+            self._logger.warning(f"Deployed-loss recomputation failed: {e}")
+            return None
+
+    @staticmethod
+    def _deployed_loss(*, target: Any, image: PIL.Image.Image, behavior: str, target_text: str) -> float:
+        """
+        Re-preprocess ``image`` and compute the loss on the exact pixels that ship.
+
+        Returns:
+            float: The loss measured on the reloaded 8-bit image.
+        """
+        import torch
+
+        inputs = target.preprocess(behavior=behavior, image=image)
+        with torch.no_grad():
+            loss = target.compute_loss(inputs=inputs, target_text=target_text)
+        return float(loss.detach().item())
 
     async def _teardown_async(self, *, context: MultiModalPGDContext) -> None:
         """Release the target only when the generator constructed (owns) it."""

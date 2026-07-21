@@ -168,11 +168,15 @@ class MultiModalPGDOutputConfig:
             path. The log filename is ``{result_prefix}_{YYYYMMDD-HHMMSS}.json``.
         manifest_path (str): Explicit manifest file path. When empty a default of
             ``{result_prefix}_manifest_{YYYYMMDD-HHMMSS}.jsonl`` is used.
+        verify_response (bool): After crafting each image, feed it back through the
+            target (when it supports generation) and record the reply + whether it
+            begins with the target string. Defaults to True.
         verbose (bool): Verbose progress logging during the run. Defaults to True.
     """
 
     result_prefix: str = ""
     manifest_path: str = ""
+    verify_response: bool = True
     verbose: bool = True
 
 

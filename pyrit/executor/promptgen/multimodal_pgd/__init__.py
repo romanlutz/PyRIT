@@ -62,6 +62,7 @@ from pyrit.executor.promptgen.multimodal_pgd.manifest import (
 from pyrit.executor.promptgen.multimodal_pgd.targets import (
     augment_target,
     default_affirmative_target,
+    response_matches_target,
 )
 
 warnings.warn(
@@ -129,5 +130,6 @@ __all__ = [
     "default_affirmative_target",
     "load_behaviors",
     "read_manifest",
+    "response_matches_target",
     "write_manifest",
 ]

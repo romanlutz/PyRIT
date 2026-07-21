@@ -37,7 +37,7 @@ config.to_json_file("inputs/config.json")
 python -m pyrit.executor.promptgen.gcg.experiments.run --config inputs/config.json
 ```
 
-The notebook at `doc/code/executor/gcg/1_gcg_azure_ml.py` builds a config
+The notebook at `doc/code/executor/promptgen/2_gcg_azure_ml.py` builds a config
 locally, ships it to Azure ML as a job input, and the AML job invokes `run.py`
 with the path to the deserialized JSON.
 

@@ -138,9 +138,85 @@ class WhiteBoxTarget(Protocol):
         """
         ...
 
+    def clamp_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        """
+        Project ``inputs.pixel_values`` onto the renderable-image manifold.
+
+        Image attacks optimize in the processor's *normalized* pixel space, but only
+        values whose denormalized form lies in the displayable ``[0, 1]`` range
+        survive ``to_pil`` (which clamps there before writing a PNG). A gradient step
+        can push pixels out of that gamut; without a per-step projection the loss ends
+        up measured on a tensor that rendering silently discards, so the saved image no
+        longer reproduces the optimized behavior. Implementations clamp each element to
+        its channel's displayable bound and return a detached tensor in the same
+        normalized space and layout as the input.
+
+        Args:
+            inputs (WhiteBoxInputs): Model inputs holding the ``pixel_values`` tensor
+                (and any layout metadata) to project.
+
+        Returns:
+            torch.Tensor: A detached ``pixel_values`` tensor on the displayable
+            manifold, matching the input shape and normalization.
+        """
+        ...
+
+    def quantize_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        """
+        Snap ``inputs.pixel_values`` to the deployed 8-bit image, keeping gradients.
+
+        The attack optimizes continuous normalized pixels, but the artifact it ships is
+        an 8-bit PNG: ``to_pil`` rounds every denormalized channel to ``uint8`` and the
+        model re-preprocesses *that* image at inference. A continuous solution with near
+        zero loss can therefore stop working once shipped, because ~1/255 rounding noise
+        (and any other preprocessing the render round-trip re-applies, e.g. tying a
+        Qwen2-VL image's duplicated temporal patches) knocks a sharp, non-robust
+        perturbation out of its basin. Implementations return the exact pixels the model
+        will see at deployment — ``preprocess(to_pil(inputs))`` — in the forward pass while
+        passing gradients straight through (identity backward), so ``compute_loss`` scores
+        the shipped image and the optimizer drives the *deployed* loss down.
+
+        Args:
+            inputs (WhiteBoxInputs): Model inputs holding the ``pixel_values`` tensor
+                (and any layout metadata) to quantize.
+
+        Returns:
+            torch.Tensor: A ``pixel_values`` tensor whose forward value equals the
+            re-preprocessed 8-bit image but whose gradient flows straight through to the
+            input, matching the input shape and normalization.
+        """
+        ...
+
     def release_white_box_resources(self) -> None:
         """Release any GPU / model resources held for the white-box surface."""
         ...
 
 
-__all__ = ["WhiteBoxInputs", "WhiteBoxTarget"]
+@runtime_checkable
+class SupportsResponseGeneration(Protocol):
+    """
+    Optional capability: greedily generate the model's reply to a (behavior, image) pair.
+
+    A white-box target that ALSO implements this lets an attack driver verify a crafted
+    image *functionally* — feeding the perturbed image back through the model and checking
+    whether it now emits the intended target string — instead of trusting the optimization
+    loss alone. It is kept separate from ``WhiteBoxTarget`` so a target can expose gradients
+    without necessarily supporting generation, and so lightweight test doubles opt in
+    explicitly (an ``isinstance`` check gates the verification step).
+    """
+
+    def generate_response(self, *, behavior: str, image: PIL.Image.Image) -> str:
+        """
+        Greedily decode the model's reply to ``behavior`` paired with ``image``.
+
+        Args:
+            behavior (str): The benign carrier prompt sent alongside the image.
+            image (PIL.Image.Image): The image to send (typically the attack result).
+
+        Returns:
+            str: The model's decoded response text (possibly empty).
+        """
+        ...
+
+
+__all__ = ["SupportsResponseGeneration", "WhiteBoxInputs", "WhiteBoxTarget"]

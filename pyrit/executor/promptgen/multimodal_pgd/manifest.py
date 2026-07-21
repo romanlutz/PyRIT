@@ -10,7 +10,7 @@ downstream ``VisualPromptInjection`` scenario reads this manifest via a
 ``_PGDPrecomputedDataset`` loader (which lives in the scenario package, not here)
 and maps each row to an image+text seed prompt.
 
-Manifest schema (``schema_version`` 1), one JSON object per line::
+Manifest schema (``schema_version`` 3), one JSON object per line::
 
     {
       "id": "pgd_llava_1_5_7b_advbench_001_eps_bounded",
@@ -22,20 +22,32 @@ Manifest schema (``schema_version`` 1), one JSON object per line::
       "variant": "eps_bounded",              # one of eps_bounded | blank_image | patch
       "num_steps_run": 487,
       "final_loss": 0.034,
+      "deployed_loss": 0.036,                # loss recomputed on the reloaded 8-bit PNG
       "epsilon": 0.0627,
       "step_size": 0.00784,
       "stop_loss": 0.05,
       "succeeded_stop_criterion": true,
       "seed_image_path": ".../cats/cat_001.png",
+      "model_response": "Sure, here is how to ...",  # null when verification skipped
+      "target_emitted": true,                # null when verification skipped
       "generated_at": "2026-05-30T18:00:00Z",
       "pyrit_version": "0.14.0",
-      "schema_version": 1,
+      "schema_version": 3,
       "transfer_eval_results": null           # reserved for a future cross-VLM ASR runner
     }
 
 Notes:
 - All paths are absolute on the writer machine; a reader is expected to rewrite them
   relative to its local cache root.
+- ``final_loss`` is measured during optimization on the deployed 8-bit image (the loop
+  scores a straight-through quantized tensor). ``deployed_loss`` re-measures the loss on
+  the PNG after it is rendered and re-preprocessed from scratch; the two should agree
+  closely, and a large gap flags a remaining optimize-vs-deploy mismatch. ``deployed_loss``
+  is ``null`` when the recomputation was skipped or failed.
+- ``model_response`` / ``target_emitted`` record a *functional* check: the crafted image
+  is fed back through the VLM and the reply is compared to ``target_text``. Both are
+  ``null`` when verification was disabled or the target cannot generate responses;
+  ``succeeded_stop_criterion`` still reflects only the optimization loss.
 - ``transfer_eval_results`` is reserved as ``null`` in v1; future versions can fill it
   with ``[{target_vlm_id, attack_success_rate, scorer_id}, ...]``.
 - ``read_manifest`` warns (rather than fails) on unknown ``schema_version`` values so
@@ -55,7 +67,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 def _utc_now_iso() -> str:
@@ -88,15 +100,22 @@ class PGDManifestEntry:
         vlm_id (str): HuggingFace id of the VLM the image was crafted against.
         variant (str): PGD variant value (``eps_bounded`` | ``blank_image`` | ``patch``).
         num_steps_run (int): Number of optimization steps actually executed.
-        final_loss (float): Loss at the final step.
+        final_loss (float): Loss at the final step, scored on the deployed 8-bit image.
         epsilon (float): Epsilon bound used (normalized model space).
         step_size (float): Per-step gradient-sign step size used.
         stop_loss (float): Early-stop threshold that was configured.
         succeeded_stop_criterion (bool): Whether the run hit ``final_loss <= stop_loss``.
+        deployed_loss (float | None): Loss recomputed on the PNG after it is rendered and
+            re-preprocessed from scratch; should closely track ``final_loss``. ``None`` when
+            the recomputation was skipped or failed.
         seed_image_path (str): Absolute path to the seed image (empty for blank-image).
+        model_response (str | None): The VLM's decoded reply when the crafted image is
+            fed back through it. ``None`` when verification was skipped.
+        target_emitted (bool | None): Whether ``model_response`` begins with
+            ``target_text``. ``None`` when verification was skipped.
         generated_at (str): ISO 8601 UTC timestamp of when the row was produced.
         pyrit_version (str): PyRIT version that produced the row.
-        schema_version (int): Manifest schema version. Currently ``1``.
+        schema_version (int): Manifest schema version. Currently ``3``.
         transfer_eval_results (list[dict[str, Any]] | None): Reserved for future
             cross-VLM transfer-attack evaluation results. ``None`` in v1.
     """
@@ -114,7 +133,10 @@ class PGDManifestEntry:
     step_size: float
     stop_loss: float
     succeeded_stop_criterion: bool
+    deployed_loss: float | None = None
     seed_image_path: str = ""
+    model_response: str | None = None
+    target_emitted: bool | None = None
     generated_at: str = field(default_factory=_utc_now_iso)
     pyrit_version: str = field(default_factory=_pyrit_version)
     schema_version: int = SCHEMA_VERSION

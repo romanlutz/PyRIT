@@ -68,6 +68,17 @@ class TinyWhiteBoxTarget:
         arr = inputs.pixel_values.detach().clamp(0, 1)[0].permute(1, 2, 0).mul(255).to(torch.uint8).numpy()
         return PIL.Image.fromarray(arr)
 
+    def clamp_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        return inputs.pixel_values.detach().clamp(0.0, 1.0)
+
+    def quantize_to_displayable(self, *, inputs: WhiteBoxInputs) -> torch.Tensor:
+        pixel_values = inputs.pixel_values
+        rendered = self.to_pil(inputs=inputs)
+        deployed = self.preprocess(behavior="", image=rendered).pixel_values.to(
+            device=pixel_values.device, dtype=pixel_values.dtype
+        )
+        return pixel_values + (deployed - pixel_values).detach()
+
     def release_white_box_resources(self) -> None:
         self.released = True
 
@@ -100,6 +111,10 @@ async def test_eps_bounded_pipeline_writes_manifest_and_png(tmp_path: Path, patc
     assert result.step_count == 25
     assert result.final_loss < result.loss_history[0]
     assert result.variant == "eps_bounded"
+    # The deployed-loss honesty metric re-scores the shipped image and should match final_loss,
+    # which is itself measured on the quantized (deployed) pixels.
+    assert result.deployed_loss is not None
+    assert result.deployed_loss == pytest.approx(result.final_loss, abs=1e-5)
 
     entries = read_manifest(path=manifest_path)
     assert len(entries) == 1
@@ -107,6 +122,7 @@ async def test_eps_bounded_pipeline_writes_manifest_and_png(tmp_path: Path, patc
     assert entries[0].image_path == result.image_path
     assert entries[0].variant == "eps_bounded"
     assert entries[0].vlm_id == "tiny/whitebox-1.0"
+    assert entries[0].deployed_loss == result.deployed_loss
 
 
 @pytest.mark.run_only_if_all_tests

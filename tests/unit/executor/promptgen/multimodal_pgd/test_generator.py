@@ -30,10 +30,16 @@ from pyrit.executor.promptgen.multimodal_pgd.config import (  # noqa: E402
     MultiModalPGDVariantConfig,
     PGDVariant,
 )
+from pyrit.prompt_target.common.white_box_target import WhiteBoxInputs  # noqa: E402
 
 
 class FakeWhiteBoxTarget:
-    """A caller-owned white-box target stub that records resource release."""
+    """A caller-owned white-box target stub that records resource release.
+
+    ``run_pgd`` is patched out in these tests, so ``preprocess`` / ``compute_loss`` are
+    exercised only by the best-effort deployed-loss recomputation and return trivial
+    tensors rather than raising.
+    """
 
     vlm_id = "fake/vlm-1.0"
     device = "cpu"
@@ -41,17 +47,40 @@ class FakeWhiteBoxTarget:
     def __init__(self) -> None:
         self.released = False
 
-    def preprocess(self, *, behavior, image):  # pragma: no cover - patched out via run_pgd
-        raise AssertionError("run_pgd should be patched in these tests")
+    def preprocess(self, *, behavior, image):
+        import torch
 
-    def compute_loss(self, *, inputs, target_text):  # pragma: no cover
-        raise AssertionError("run_pgd should be patched in these tests")
+        return WhiteBoxInputs(pixel_values=torch.zeros(1, 3, 2, 2))
+
+    def compute_loss(self, *, inputs, target_text):
+        import torch
+
+        return torch.tensor(0.25)
 
     def to_pil(self, *, inputs):  # pragma: no cover
         raise AssertionError("run_pgd should be patched in these tests")
 
+    def clamp_to_displayable(self, *, inputs):
+        return inputs.pixel_values
+
+    def quantize_to_displayable(self, *, inputs):
+        return inputs.pixel_values
+
     def release_white_box_resources(self) -> None:
         self.released = True
+
+
+class FakeVerifyingTarget(FakeWhiteBoxTarget):
+    """A white-box target that also supports response generation (verification)."""
+
+    def __init__(self, *, response: str) -> None:
+        super().__init__()
+        self._response = response
+        self.generate_calls: list = []
+
+    def generate_response(self, *, behavior, image):
+        self.generate_calls.append((behavior, image))
+        return self._response
 
 
 def _fake_core_result() -> types.SimpleNamespace:
@@ -179,8 +208,10 @@ async def test_execute_async_does_not_release_caller_target() -> None:
     assert result.succeeded is True
     assert result.vlm_id == "fake/vlm-1.0"
     assert result.variant == "blank_image"
+    assert result.deployed_loss == 0.25
     assert result.manifest_entry is not None
     assert result.manifest_entry.behavior_id == "beh_1"
+    assert result.manifest_entry.deployed_loss == 0.25
     mock_append.assert_called_once()
     assert target.released is False
 
@@ -212,3 +243,72 @@ async def test_execute_async_releases_owned_target_on_failure() -> None:
             await gen.execute_async(behavior="carrier", target_text="Sure, here is")
 
     assert built_target.released is True
+
+
+# ---------------------------------------------------------------------------
+# response verification
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_async_verifies_response_when_supported() -> None:
+    target = FakeVerifyingTarget(response="Sure, here is the plan")
+    gen = MultiModalPGDGenerator(
+        target=target,
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch, run_patch:
+        result = await gen.execute_async(behavior="carrier", target_text="Sure, here is the plan", behavior_id="beh_1")
+
+    assert result.model_response == "Sure, here is the plan"
+    assert result.target_emitted is True
+    assert result.manifest_entry is not None
+    assert result.manifest_entry.model_response == "Sure, here is the plan"
+    assert result.manifest_entry.target_emitted is True
+    assert len(target.generate_calls) == 1
+
+
+async def test_execute_async_verification_records_miss() -> None:
+    target = FakeVerifyingTarget(response="I cannot help with that.")
+    gen = MultiModalPGDGenerator(
+        target=target,
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch, run_patch:
+        result = await gen.execute_async(behavior="carrier", target_text="Sure, here is the plan")
+
+    assert result.model_response == "I cannot help with that."
+    assert result.target_emitted is False
+
+
+async def test_execute_async_skips_verification_when_target_unsupported() -> None:
+    target = FakeWhiteBoxTarget()  # no generate_response
+    gen = MultiModalPGDGenerator(
+        target=target,
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch, run_patch:
+        result = await gen.execute_async(behavior="carrier", target_text="Sure, here is", behavior_id="b")
+
+    assert result.model_response is None
+    assert result.target_emitted is None
+
+
+async def test_execute_async_verification_can_be_disabled() -> None:
+    from pyrit.executor.promptgen.multimodal_pgd.config import MultiModalPGDOutputConfig
+
+    target = FakeVerifyingTarget(response="Sure, here is the plan")
+    gen = MultiModalPGDGenerator(
+        target=target,
+        variant=MultiModalPGDVariantConfig(kind=PGDVariant.BLANK_IMAGE),
+        output=MultiModalPGDOutputConfig(verify_response=False),
+    )
+    cache_patch, manifest_patch, run_patch = _patched_perform_dependencies()
+    with cache_patch, manifest_patch, run_patch:
+        result = await gen.execute_async(behavior="carrier", target_text="Sure, here is the plan")
+
+    assert result.model_response is None
+    assert result.target_emitted is None
+    assert target.generate_calls == []

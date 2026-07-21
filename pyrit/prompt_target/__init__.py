@@ -29,7 +29,11 @@ from pyrit.prompt_target.common.target_capabilities import (
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.target_requirements import CHAT_TARGET_REQUIREMENTS, TargetRequirements
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
-from pyrit.prompt_target.common.white_box_target import WhiteBoxInputs, WhiteBoxTarget
+from pyrit.prompt_target.common.white_box_target import (
+    SupportsResponseGeneration,
+    WhiteBoxInputs,
+    WhiteBoxTarget,
+)
 from pyrit.prompt_target.gandalf_target import GandalfLevel, GandalfTarget
 from pyrit.prompt_target.http_target.http_target import HTTPTarget
 from pyrit.prompt_target.http_target.http_target_callback_functions import (
@@ -117,6 +121,7 @@ __all__ = [
     "discover_target_capabilities_async",
     "get_known_capabilities",
     "WebSocketCopilotTarget",
+    "SupportsResponseGeneration",
     "WhiteBoxInputs",
     "WhiteBoxTarget",
 ]

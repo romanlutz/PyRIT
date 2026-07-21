@@ -11,7 +11,9 @@ behavior), matching the GCG runner's single-load batch pattern.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -53,13 +55,27 @@ def _write_configs(tmp_path: Path, *, n_behaviors: int) -> tuple[Path, Path]:
     return config_path, data_path
 
 
+def _fake_result(*, result_id: str, loss_history: list[float]) -> SimpleNamespace:
+    """Minimal stand-in for MultiModalPGDResult with the fields the curves sidecar reads."""
+    return SimpleNamespace(
+        manifest_entry=SimpleNamespace(id=result_id),
+        vlm_id=_VLM_ID,
+        variant="blank_image",
+        step_count=len(loss_history),
+        final_loss=loss_history[-1] if loss_history else float("nan"),
+        succeeded=bool(loss_history) and loss_history[-1] <= 0.05,
+        target_emitted=(bool(loss_history) and loss_history[-1] <= 0.05) or None,
+        loss_history=loss_history,
+    )
+
+
 async def test_main_async_loads_model_once_and_releases(tmp_path: Path) -> None:
     config_path, data_path = _write_configs(tmp_path, n_behaviors=2)
 
     fake_target = MagicMock()
     fake_target_cls = MagicMock(return_value=fake_target)
     fake_generator = MagicMock()
-    fake_generator.execute_async = AsyncMock()
+    fake_generator.execute_async = AsyncMock(return_value=_fake_result(result_id="pgd_0", loss_history=[0.5, 0.1]))
     fake_generator_cls = MagicMock(return_value=fake_generator)
 
     with (
@@ -80,6 +96,29 @@ async def test_main_async_loads_model_once_and_releases(tmp_path: Path) -> None:
     # One optimization per behavior; the runner-owned target is released once.
     assert fake_generator.execute_async.await_count == 2
     fake_target.release_white_box_resources.assert_called_once()
+
+
+async def test_main_async_seed_image_overrides_every_behavior(tmp_path: Path) -> None:
+    config_path, data_path = _write_configs(tmp_path, n_behaviors=2)
+
+    fake_generator = MagicMock()
+    fake_generator.execute_async = AsyncMock(
+        side_effect=[
+            _fake_result(result_id="pgd_0", loss_history=[0.5, 0.1]),
+            _fake_result(result_id="pgd_1", loss_history=[0.5, 0.1]),
+        ]
+    )
+
+    with (
+        patch(_VISION_TARGET_PATH, MagicMock(return_value=MagicMock())),
+        patch(_GENERATOR_PATH, MagicMock(return_value=fake_generator)),
+        patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
+    ):
+        await run_module._main_async(str(config_path), str(data_path), output_dir=None, seed_image="/mnt/seed.png")
+
+    # The shipped seed image is applied to every behavior, overriding any CSV seed path.
+    seed_paths = [call.kwargs["seed_image_path"] for call in fake_generator.execute_async.await_args_list]
+    assert seed_paths == ["/mnt/seed.png", "/mnt/seed.png"]
 
 
 async def test_main_async_releases_target_even_when_a_run_fails(tmp_path: Path) -> None:
@@ -105,7 +144,7 @@ async def test_main_async_routes_results_path_to_output_dir(tmp_path: Path) -> N
     out_dir = tmp_path / "results"
 
     fake_generator = MagicMock()
-    fake_generator.execute_async = AsyncMock()
+    fake_generator.execute_async = AsyncMock(return_value=_fake_result(result_id="pgd_0", loss_history=[0.9, 0.5, 0.1]))
     fake_memory = MagicMock()
 
     with (
@@ -131,3 +170,62 @@ def test_resolve_output_roots_prefix_and_manifest_under_dir() -> None:
 def test_resolve_output_none_returns_original_unchanged() -> None:
     output = MultiModalPGDOutputConfig(result_prefix="pgd")
     assert run_module._resolve_output(output=output, output_dir=None) is output
+
+
+def test_loss_curves_path_swaps_manifest_marker() -> None:
+    resolved = run_module._loss_curves_path(manifest_path="/mnt/out/pgd_manifest_20260101-000000.jsonl")
+    assert Path(resolved) == Path("/mnt/out/pgd_loss_curves_20260101-000000.jsonl")
+
+
+def test_loss_curves_path_fallback_when_no_marker() -> None:
+    resolved = run_module._loss_curves_path(manifest_path="/mnt/out/custom.jsonl")
+    assert Path(resolved) == Path("/mnt/out/custom_loss_curves.jsonl")
+
+
+async def test_main_async_writes_loss_curves_sidecar(tmp_path: Path) -> None:
+    config_path, data_path = _write_configs(tmp_path, n_behaviors=2)
+    out_dir = tmp_path / "results"
+    histories = [[0.9, 0.4, 0.05], [1.2, 0.7, 0.6, 0.55]]
+
+    fake_generator = MagicMock()
+    fake_generator.execute_async = AsyncMock(
+        side_effect=[
+            _fake_result(result_id="pgd_0", loss_history=histories[0]),
+            _fake_result(result_id="pgd_1", loss_history=histories[1]),
+        ]
+    )
+
+    with (
+        patch(_VISION_TARGET_PATH, MagicMock(return_value=MagicMock())),
+        patch(_GENERATOR_PATH, MagicMock(return_value=fake_generator)),
+        patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
+        patch("pyrit.memory.CentralMemory"),
+    ):
+        await run_module._main_async(str(config_path), str(data_path), output_dir=str(out_dir))
+
+    curves_files = list(out_dir.glob("*_loss_curves_*.jsonl"))
+    assert len(curves_files) == 1
+    rows = [json.loads(line) for line in curves_files[0].read_text(encoding="utf-8").splitlines()]
+    # One JSONL row per behavior, preserving order and the full per-step trajectory.
+    assert [row["id"] for row in rows] == ["pgd_0", "pgd_1"]
+    assert [row["loss_history"] for row in rows] == histories
+    assert [row["num_steps_run"] for row in rows] == [3, 4]
+    assert rows[0]["succeeded"] is True
+    assert rows[1]["succeeded"] is False
+
+
+async def test_main_async_skips_loss_curves_without_output_dir(tmp_path: Path) -> None:
+    config_path, data_path = _write_configs(tmp_path, n_behaviors=1)
+
+    fake_generator = MagicMock()
+    fake_generator.execute_async = AsyncMock(return_value=_fake_result(result_id="pgd_0", loss_history=[0.5, 0.1]))
+
+    with (
+        patch(_VISION_TARGET_PATH, MagicMock(return_value=MagicMock())),
+        patch(_GENERATOR_PATH, MagicMock(return_value=fake_generator)),
+        patch("pyrit.setup.initialize_pyrit_async", new=AsyncMock()),
+    ):
+        await run_module._main_async(str(config_path), str(data_path), output_dir=None)
+
+    # No output mount -> no sidecar written anywhere under the tmp tree.
+    assert list(tmp_path.rglob("*_loss_curves*.jsonl")) == []

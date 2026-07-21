@@ -85,7 +85,10 @@ def run_pgd(
         log_every (int): Step interval for progress logging when ``verbose``.
 
     Returns:
-        PGDCoreResult: The perturbed image plus loss history and stop status.
+        PGDCoreResult: The perturbed image plus loss history and stop status. ``final_loss``
+        is re-measured on the shipped image's deployed (quantized) form after the last step,
+        so it reflects exactly what the saved PNG reproduces; ``loss_history`` holds the
+        per-step pre-update losses.
 
     Raises:
         RuntimeError: If ``compute_loss`` yields no gradient w.r.t. ``pixel_values``.
@@ -93,9 +96,9 @@ def run_pgd(
     inputs = target.preprocess(behavior=behavior, image=seed_image)
     base = inputs.pixel_values.detach()
     pixel_values = variant.initial_pixel_values(base=base, rng=rng)
+    pixel_values = target.clamp_to_displayable(inputs=inputs.with_pixel_values(pixel_values))
 
     loss_history: list[float] = []
-    final_loss = float("nan")
     succeeded = False
     steps_run = 0
 
@@ -105,7 +108,10 @@ def run_pgd(
         if pixel_values.grad is not None:
             pixel_values.grad = None
 
-        loss = target.compute_loss(inputs=inputs.with_pixel_values(pixel_values), target_text=target_text)
+        # Score the loss on the deployed 8-bit image (via a straight-through estimator) so the
+        # optimizer descends what actually ships, not a continuous tensor rendering discards.
+        deployed_pixels = target.quantize_to_displayable(inputs=inputs.with_pixel_values(pixel_values))
+        loss = target.compute_loss(inputs=inputs.with_pixel_values(deployed_pixels), target_text=target_text)
         loss.backward()
 
         grad = pixel_values.grad
@@ -117,7 +123,6 @@ def run_pgd(
 
         loss_value = float(loss.detach().item())
         loss_history.append(loss_value)
-        final_loss = loss_value
         steps_run = step + 1
 
         with torch.no_grad():
@@ -128,6 +133,7 @@ def run_pgd(
                 step_size=step_size,
                 epsilon=epsilon,
             )
+            pixel_values = target.clamp_to_displayable(inputs=inputs.with_pixel_values(pixel_values))
 
         if verbose and (step % log_every == 0 or steps_run == num_steps):
             logger.info("PGD step %d/%d loss=%.6f", steps_run, num_steps, loss_value)
@@ -136,7 +142,17 @@ def run_pgd(
             succeeded = True
             break
 
-    image = target.to_pil(inputs=inputs.with_pixel_values(pixel_values.detach()))
+    # Ship the fully-perturbed image and report its true deployed loss: re-score the final
+    # pixels through the same straight-through quantization so final_loss matches what the PNG
+    # will reproduce, closing the optimize-vs-deploy gap the loss curve is measured against.
+    pixel_values = pixel_values.detach()
+    with torch.no_grad():
+        deployed_final = target.quantize_to_displayable(inputs=inputs.with_pixel_values(pixel_values))
+        final_loss = float(
+            target.compute_loss(inputs=inputs.with_pixel_values(deployed_final), target_text=target_text).item()
+        )
+
+    image = target.to_pil(inputs=inputs.with_pixel_values(pixel_values))
     return PGDCoreResult(
         image=image,
         loss_history=loss_history,

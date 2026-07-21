@@ -95,3 +95,16 @@ def test_read_manifest_warns_on_schema_drift(tmp_path, caplog) -> None:
 
     assert len(entries) == 1
     assert any("schema_version" in record.message for record in caplog.records)
+
+
+def test_verification_fields_default_to_none() -> None:
+    entry = _make_entry()
+    assert entry.model_response is None
+    assert entry.target_emitted is None
+
+
+def test_verification_fields_round_trip() -> None:
+    entry = _make_entry(model_response="Sure, here is the plan", target_emitted=True)
+    restored = PGDManifestEntry.from_dict(json.loads(entry.to_json_line()))
+    assert restored.model_response == "Sure, here is the plan"
+    assert restored.target_emitted is True

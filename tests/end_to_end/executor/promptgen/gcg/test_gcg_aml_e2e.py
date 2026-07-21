@@ -3,7 +3,7 @@
 
 """End-to-end test for the GCG Azure ML pipeline.
 
-Executes `doc/code/executor/gcg/1_gcg_azure_ml.py` directly as a Python
+Executes `doc/code/executor/promptgen/2_gcg_azure_ml.py` directly as a Python
 script (the jupytext percent-format `# %%` markers are plain comments, so the
 file is valid Python). After the notebook submits the AML job, this test
 polls until the job reaches a terminal state and asserts success.
@@ -55,7 +55,7 @@ _REQUIRED_ENV_VARS = (
     "AZURE_ML_WORKSPACE_NAME",
     "HUGGINGFACE_TOKEN",
 )
-_NOTEBOOK_PATH = Path(HOME_PATH) / "doc" / "code" / "executor" / "gcg" / "1_gcg_azure_ml.py"
+_NOTEBOOK_PATH = Path(HOME_PATH) / "doc" / "code" / "executor" / "promptgen" / "2_gcg_azure_ml.py"
 _DEFAULT_MAX_WAIT_SECONDS = 5400  # 90 minutes
 _POLL_INTERVAL_SECONDS = 30
 _TERMINAL_STATES = {"Completed", "Failed", "Canceled", "CancelRequested"}
