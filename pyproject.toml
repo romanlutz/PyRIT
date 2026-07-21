@@ -104,9 +104,9 @@ dev = [
 huggingface = [
     "torch>=2.7.0",
 ]
-# White-box gradient attacks: GCG (suffix optimization) and Multimodal PGD
+# White-box gradient attacks: GCG (suffix optimization) and PGD
 # (image perturbation). Both load local open-weight models via torch/transformers
-# to compute gradients. See pyrit/executor/promptgen/{gcg,multimodal_pgd}/.
+# to compute gradients. See pyrit/executor/promptgen/{gcg,pgd}/.
 gradient = [
     "accelerate>=1.7.0",
     "azure-ai-ml>=1.32.0",

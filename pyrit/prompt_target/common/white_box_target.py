@@ -10,7 +10,7 @@ so that lightweight test doubles can satisfy the gradient surface without
 implementing the full asynchronous ``PromptTarget`` send flow.
 
 The module imports cleanly without ``torch`` / ``PIL``: those are referenced only
-under ``TYPE_CHECKING``. Consumers (e.g. the multimodal PGD generator) type their
+under ``TYPE_CHECKING``. Consumers (e.g. the PGD generator) type their
 dependency on the ``WhiteBoxTarget`` Protocol, so importing this module never pulls
 in the heavy machine-learning stack.
 """
@@ -76,7 +76,7 @@ class WhiteBoxTarget(Protocol):
     A concrete user-facing class typically inherits ``PromptTarget`` for the
     black-box ``send_prompt_async`` flow AND implements this Protocol for the
     white-box gradient flow, against the same in-process model object. Consumers
-    such as the multimodal PGD generator depend on this Protocol rather than on any
+    such as the PGD generator depend on this Protocol rather than on any
     concrete target class.
     """
 

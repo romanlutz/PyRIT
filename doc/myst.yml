@@ -111,7 +111,7 @@ project:
               children:
                 - file: code/executor/promptgen/1_gcg.ipynb
                 - file: code/executor/promptgen/2_gcg_azure_ml.ipynb
-                - file: code/executor/promptgen/3_multimodal_pgd_azure_ml.ipynb
+                - file: code/executor/promptgen/3_pgd_azure_ml.ipynb
         - file: code/targets/0_prompt_targets.md
           children:
             - file: code/targets/1_openai_chat_target.ipynb

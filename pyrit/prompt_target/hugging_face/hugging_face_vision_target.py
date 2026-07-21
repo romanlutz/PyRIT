@@ -12,7 +12,7 @@ the same in-process model:
   text (+ optional image) prompt, like ``HuggingFaceChatTarget`` but multimodal.
 - **White-box** (``WhiteBoxTarget`` Protocol): ``preprocess`` / ``compute_loss`` /
   ``to_pil`` / ``release_white_box_resources`` provide the differentiable gradient
-  path that image attacks such as Multimodal PGD optimize against.
+  path that image attacks such as PGD optimize against.
 
 The class is intentionally model-agnostic: model-specific behavior (image-token
 expansion, extra processor tensors like ``image_grid_thw`` / ``image_sizes``,

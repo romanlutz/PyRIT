@@ -23,7 +23,7 @@ WORKDIR /app
 
 # Install PyRIT with the gradient extra (torch + accelerate + friends) to get
 # all dependencies needed to run the white-box gradient experiments — GCG suffix
-# optimization and Multimodal PGD image perturbation.
+# optimization and PGD image perturbation.
 COPY pyproject.toml MANIFEST.in README.md LICENSE /app/
 COPY pyrit/ /app/pyrit/
 RUN uv pip install -e ".[gradient]"

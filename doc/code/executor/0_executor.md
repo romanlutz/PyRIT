@@ -47,7 +47,7 @@ as it goes.
 - **[Prompt Generator](promptgen/0_promptgen.ipynb)** — produces attack prompts (e.g. fuzzing,
   Anecdoctor) to augment datasets; some generate from a model alone, others probe a target to evolve
   effective prompts. The white-box generators live here too: [GCG](promptgen/1_gcg.ipynb) (crafts
-  adversarial suffixes) and [Multimodal PGD](promptgen/3_multimodal_pgd_azure_ml.ipynb) (crafts
+  adversarial suffixes) and [PGD](promptgen/3_pgd_azure_ml.ipynb) (crafts
   adversarial images).
 
 **[Attack Configuration](3_attack_configuration.ipynb)** isn't an executor — it's the cross-cutting
