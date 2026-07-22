@@ -36,8 +36,7 @@ export default function TourTooltip({
       <FluentProvider theme={isDarkMode ? webDarkTheme : webLightTheme}>
         <div className={styles.wrapper}>
           <div className={styles.container}>
-            {/* Close (X) button — top-right, hidden on last step */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '-8px', marginTop: '-4px' }}>
+            <div className={styles.closeRow}>
               {!isLastStep && (
                 <Button
                   {...closeProps}
@@ -53,8 +52,14 @@ export default function TourTooltip({
               {step.content}
             </Text>
 
-            {/* Footer: step counter + buttons, offset right to leave room for mascot */}
-            <div className={styles.footer} style={{ paddingLeft: '72px' }}>
+            <div className={styles.footer}>
+              <img
+                src="/roakey_guide.png"
+                alt=""
+                className={styles.mascot}
+                data-testid="tour-mascot"
+              />
+
               <Text className={styles.stepCounter} size={200}>
                 {index + 1} of {size}
               </Text>
@@ -80,9 +85,6 @@ export default function TourTooltip({
               </div>
             </div>
           </div>
-
-          {/* Roakey presenting the content — overlaps bottom-left of the card */}
-          <img src="/roakey_guide.png" alt="" className={styles.mascot} />
         </div>
       </FluentProvider>
     </div>

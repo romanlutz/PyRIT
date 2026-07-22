@@ -52,6 +52,18 @@ describe('useTour', () => {
     expect(result.current.tourProps.stepIndex).toBe(0)
   })
 
+  it('keeps tooltips within the viewport across both positioning axes', () => {
+    const { result } = renderHook(() => useTour(onNavigate, true, 'home'))
+
+    expect(result.current.tourProps.floatingOptions).toEqual({
+      hideArrow: true,
+      shiftOptions: {
+        crossAxis: true,
+        padding: 12,
+      },
+    })
+  })
+
   it('startTour navigates to home and defers step when on a different view', () => {
     const { result, rerender } = renderHook(
       ({ currentView }) => useTour(onNavigate, true, currentView),

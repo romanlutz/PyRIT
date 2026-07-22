@@ -1,35 +1,38 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
 
 export const useTourTooltipStyles = makeStyles({
-  // Outer wrapper: provides space for the mascot to overflow below the card
   wrapper: {
+    boxSizing: 'border-box',
     display: 'flex',
     flexDirection: 'column',
-    maxWidth: '420px',
+    width: '420px',
+    maxWidth: `calc(100vw - ${tokens.spacingHorizontalXXL})`,
     position: 'relative',
   },
   container: {
+    boxSizing: 'border-box',
     backgroundColor: tokens.colorNeutralBackground1,
     border: `1px solid ${tokens.colorNeutralStroke1}`,
     borderRadius: tokens.borderRadiusLarge,
     boxShadow: tokens.shadow16,
     padding: tokens.spacingHorizontalL,
-    // Leave space at bottom-left for the mascot to overlap
-    paddingBottom: tokens.spacingVerticalXXL,
     display: 'flex',
     flexDirection: 'column',
     gap: tokens.spacingVerticalM,
+    minWidth: 0,
   },
-  // Mascot positioned at bottom-left, overlapping the card edge
+  closeRow: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    marginBottom: `calc(${tokens.spacingVerticalS} * -1)`,
+    marginTop: `calc(${tokens.spacingVerticalXS} * -1)`,
+  },
   mascot: {
-    position: 'absolute',
-    bottom: '-40px',
-    left: '-20px',
-    width: '90px',
-    height: '90px',
+    width: '72px',
+    height: '72px',
+    flexShrink: 0,
     objectFit: 'contain',
     pointerEvents: 'none',
-    zIndex: 1,
   },
   content: {
     color: tokens.colorNeutralForeground1,
@@ -39,15 +42,21 @@ export const useTourTooltipStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: tokens.spacingHorizontalS,
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+    minWidth: 0,
   },
   stepCounter: {
     color: tokens.colorNeutralForeground3,
     whiteSpace: 'nowrap',
+    marginRight: 'auto',
   },
   actions: {
     display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
     gap: tokens.spacingHorizontalS,
     marginLeft: 'auto',
+    minWidth: 0,
   },
 })
