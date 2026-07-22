@@ -6,11 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyrit.exceptions import PyritException
+from pyrit.models import MessagePiece
 from pyrit.prompt_target.common.utils import (
+    build_empty_truncated_response,
     limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
 )
+
+
+def _request_piece(text="ask"):
+    return MessagePiece(role="user", conversation_id="c", original_value=text, original_value_data_type="text")
 
 
 def test_validate_temperature_none():
@@ -102,3 +108,14 @@ async def test_limit_requests_per_minute_zero_rpm():
         result = await decorated(mock_self, message="test")
         mock_sleep.assert_not_called()
     assert result == "response"
+
+
+def test_build_empty_truncated_response_returns_empty_message():
+    request = _request_piece("ask")
+    result = build_empty_truncated_response(request=request)
+
+    assert result is not None
+    assert len(result.message_pieces) == 1
+    assert result.message_pieces[0].converted_value == ""
+    assert result.message_pieces[0].converted_value_data_type == "text"
+    assert result.message_pieces[0].response_error == "empty"

@@ -54,29 +54,6 @@ def get_finish_reason(*, response: ChatCompletion) -> str | None:
     return response.choices[0].finish_reason
 
 
-def build_empty_response_for_truncated_completion(*, request: MessagePiece) -> Message:
-    """
-    Build a graceful empty response for a token-limit-truncated Chat Completions response.
-
-    A truncated response (``finish_reason == "length"``) may legitimately contain no visible
-    content. Callers gate this on their own truncation check (for example a target's
-    ``_is_truncated_response``); returning an empty ``error="empty"`` text response lets the run
-    continue instead of raising.
-
-    Args:
-        request (MessagePiece): The originating request piece.
-
-    Returns:
-        Message: An empty text response marked with ``error="empty"``.
-    """
-    return construct_response_from_request(
-        request=request,
-        response_text_pieces=[""],
-        response_type="text",
-        error="empty",
-    )
-
-
 def detect_response_content(message: Any) -> tuple[bool, bool, bool]:
     """
     Detect which content types are present in a Chat Completions ``message``.

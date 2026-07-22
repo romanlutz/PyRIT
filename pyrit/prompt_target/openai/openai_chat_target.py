@@ -26,7 +26,6 @@ from pyrit.prompt_target.common.chat_completions_message_builder import (
     should_skip_audio_piece,
 )
 from pyrit.prompt_target.common.chat_completions_response_parser import (
-    build_empty_response_for_truncated_completion,
     build_response_pieces_async,
     capture_token_usage,
     detect_response_content,
@@ -39,6 +38,7 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
+    build_empty_truncated_response,
     limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
@@ -375,7 +375,7 @@ class OpenAIChatTarget(OpenAITarget):
             prefer_transcript_for_history=prefer_transcript_for_history,
         )
 
-    async def _construct_message_from_response_async(self, response: Any, request: MessagePiece) -> Message:
+    async def _construct_message_from_response_async(self, response: ChatCompletion, request: MessagePiece) -> Message:
         """
         Construct a Message from a ChatCompletion response.
 
@@ -406,7 +406,7 @@ class OpenAIChatTarget(OpenAITarget):
             # return a graceful empty piece so the run continues. Validation already raised for
             # genuinely empty (non-truncated) responses.
             if truncated:
-                empty_message = build_empty_response_for_truncated_completion(request=request)
+                empty_message = build_empty_truncated_response(request=request)
                 capture_token_usage(pieces=empty_message.message_pieces, response=response)
                 empty_message.message_pieces[0].prompt_metadata["truncated"] = True
                 return empty_message

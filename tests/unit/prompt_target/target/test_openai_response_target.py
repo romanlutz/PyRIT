@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import MutableSequence
 from tempfile import NamedTemporaryFile
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from pyrit.exceptions.exception_classes import (
 from pyrit.memory.memory_interface import MemoryInterface
 from pyrit.models import JsonResponseConfig, Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import OpenAIResponseTarget, PromptTarget
+from pyrit.prompt_target.openai.openai_response_target import token_usage_from_responses
 
 
 def create_mock_response(response_dict: dict = None) -> MagicMock:
@@ -51,6 +53,7 @@ def create_mock_response(response_dict: dict = None) -> MagicMock:
     # Set attributes based on response_dict to match OpenAI SDK Response type
     mock_response.error = response_dict.get("error")  # Should be None for successful responses
     mock_response.status = response_dict.get("status")  # Should be "completed" for successful responses
+    mock_response.usage = response_dict.get("usage")  # Optional usage payload (None when absent)
 
     # Mock the output sections with Pydantic-style attribute access
     if "output" in response_dict:
@@ -1333,6 +1336,86 @@ async def test_construct_message_from_response(target: OpenAIResponseTarget, dum
         assert len(result.message_pieces) == 1
         assert "truncated" not in result.message_pieces[0].prompt_metadata
         mock_parse.assert_called_once()
+
+
+def _make_usage(
+    *,
+    input_tokens: int | None = 11,
+    output_tokens: int | None = 22,
+    total_tokens: int | None = 33,
+    reasoning_tokens: int | None = 7,
+    cached_tokens: int | None = 3,
+    cache_write_tokens: int | None = 2,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        input_tokens_details=SimpleNamespace(cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens),
+        output_tokens_details=SimpleNamespace(reasoning_tokens=reasoning_tokens),
+    )
+
+
+def test_token_usage_from_responses_maps_fields():
+    """token_usage_from_responses maps the Responses usage shape onto TokenUsage."""
+    result = token_usage_from_responses(_make_usage())
+
+    assert result.input_tokens == 11
+    assert result.output_tokens == 22
+    assert result.total_tokens == 33
+    assert result.reasoning_tokens == 7
+    assert result.cached_tokens == 3
+    assert result.extra == {"cache_write_tokens": 2}
+
+
+def test_token_usage_from_responses_ignores_missing_and_non_int():
+    """Missing details objects and non-integer counts are dropped rather than stored as zero."""
+    usage = SimpleNamespace(input_tokens=5, output_tokens=None, input_tokens_details=None, output_tokens_details=None)
+
+    result = token_usage_from_responses(usage)
+
+    assert result.input_tokens == 5
+    assert result.output_tokens is None
+    assert result.total_tokens is None
+    assert result.reasoning_tokens is None
+    assert result.cached_tokens is None
+    assert result.extra == {}
+
+
+async def test_construct_message_captures_token_usage(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
+):
+    """A completed response records token-usage counts in the first piece's metadata."""
+    response = MagicMock()
+    response.status = "completed"
+    response.output = [_make_message_section("Answer")]
+    response.usage = _make_usage()
+
+    result = await target._construct_message_from_response_async(response, dummy_text_message_piece)
+
+    metadata = result.message_pieces[0].prompt_metadata
+    assert metadata["token_usage_input_tokens"] == 11
+    assert metadata["token_usage_output_tokens"] == 22
+    assert metadata["token_usage_total_tokens"] == 33
+    assert metadata["token_usage_reasoning_tokens"] == 7
+    assert metadata["token_usage_cached_tokens"] == 3
+    assert metadata["token_usage_cache_write_tokens"] == 2
+
+
+async def test_construct_message_truncated_captures_token_usage(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
+):
+    """Usage is captured on the truncated path too, alongside the truncated marker."""
+    response = _make_truncated_response(output=[_make_reasoning_section(), _make_empty_message_section()])
+    response.usage = _make_usage()
+
+    result = await target._construct_message_from_response_async(response, dummy_text_message_piece)
+
+    metadata = result.message_pieces[0].prompt_metadata
+    assert metadata["truncated"] is True
+    assert metadata["token_usage_input_tokens"] == 11
+    assert metadata["token_usage_output_tokens"] == 22
+    assert metadata["token_usage_reasoning_tokens"] == 7
 
 
 # ── Reasoning effort / summary tests ───────────────────────────────────────
