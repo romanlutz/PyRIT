@@ -739,7 +739,7 @@ class OpenAIResponseTarget(OpenAITarget):
             if len(section_content) == 0:
                 if tolerate_empty:
                     return None
-                raise EmptyResponseException(message="The chat returned an empty message section.")
+                raise EmptyResponseException(message="The response returned an empty message section.")
             piece_value = section_content[0].text
 
         elif section_type == MessagePieceType.REASONING:
@@ -795,7 +795,7 @@ class OpenAIResponseTarget(OpenAITarget):
             if len(piece_value) == 0:
                 if tolerate_empty:
                     return None
-                raise EmptyResponseException(message="The chat returned an empty message section.")
+                raise EmptyResponseException(message="The response returned an empty message section.")
 
         else:
             # Other possible types are not yet handled in PyRIT
@@ -805,7 +805,7 @@ class OpenAIResponseTarget(OpenAITarget):
         if not piece_value:
             if tolerate_empty:
                 return None
-            raise EmptyResponseException(message="The chat returned an empty response.")
+            raise EmptyResponseException(message="The response returned an empty response.")
 
         return MessagePiece(
             role="assistant",
