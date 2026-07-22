@@ -1211,7 +1211,7 @@ def _make_empty_message_section() -> MagicMock:
     return section
 
 
-def _make_truncated_response(output: list) -> MagicMock:
+def _make_truncated_response(output: list | None) -> MagicMock:
     mock_response = MagicMock()
     mock_response.error = None
     mock_response.status = "incomplete"
@@ -1286,6 +1286,20 @@ async def test_construct_message_truncated_empty_output_returns_graceful_empty(
 ):
     """Truncated response with no output yields a single graceful empty text piece (does not raise)."""
     response = _make_truncated_response(output=[])
+
+    result = await target._construct_message_from_response_async(response, dummy_text_message_piece)
+
+    assert len(result.message_pieces) == 1
+    assert result.message_pieces[0].original_value == ""
+    assert result.message_pieces[0].response_error == "empty"
+    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+
+
+async def test_construct_message_truncated_none_output_returns_graceful_empty(
+    target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
+):
+    """Truncated response whose output is None still yields a graceful empty piece (does not raise)."""
+    response = _make_truncated_response(output=None)
 
     result = await target._construct_message_from_response_async(response, dummy_text_message_piece)
 

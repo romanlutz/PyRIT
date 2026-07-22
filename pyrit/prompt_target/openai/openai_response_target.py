@@ -651,10 +651,12 @@ class OpenAIResponseTarget(OpenAITarget):
         """
         truncated = self._is_truncated_response(response)
 
-        # Extract and parse message pieces from validated output sections
+        # Extract and parse message pieces from validated output sections. A truncated response
+        # skips the empty-output guard in _validate_response, so ``output`` is falsy-guarded here to
+        # keep the graceful-empty fallback working even if the section list is missing.
         extracted_response_pieces: list[MessagePiece] = []
         has_text = False
-        for section in response.output:
+        for section in response.output or []:
             piece = self._parse_response_output_section(
                 section=section,
                 message_piece=request,
