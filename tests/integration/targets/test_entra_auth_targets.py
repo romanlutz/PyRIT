@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from pyrit.auth import (
     get_azure_openai_auth,
@@ -91,6 +92,15 @@ async def test_openai_image_target_entra_auth(sqlite_instance, endpoint, model_n
 
 # Path to sample image file for image editing tests
 SAMPLE_IMAGE_FILE = HOME_PATH / "assets" / "pyrit_architecture.png"
+
+
+@pytest.fixture
+def video_reference_image(tmp_path: Path) -> Path:
+    output_path = tmp_path / "video_reference.jpg"
+    with Image.open(SAMPLE_IMAGE_FILE) as source_image:
+        with source_image.resize((1280, 720)).convert("RGB") as resized_image:
+            resized_image.save(output_path, format="JPEG")
+    return output_path
 
 
 async def test_openai_image_editing_single_image_entra_auth(sqlite_instance):
@@ -354,10 +364,10 @@ async def test_video_target_entra_auth(sqlite_instance):
 
 async def test_video_target_remix_entra_auth(sqlite_instance):
     """Test video remix mode with Entra authentication."""
-    endpoint = os.environ["OPENAI_VIDEO_ENDPOINT"]
+    endpoint = os.environ["AZURE_OPENAI_VIDEO_ENDPOINT"]
     target = OpenAIVideoTarget(
         endpoint=endpoint,
-        model_name=os.environ["OPENAI_VIDEO_MODEL"],
+        model_name=os.environ["AZURE_OPENAI_VIDEO_MODEL"],
         api_key=get_azure_openai_auth(endpoint),
         n_seconds=4,
     )
@@ -383,6 +393,48 @@ async def test_video_target_remix_entra_auth(sqlite_instance):
     )
     remix_result = await target.send_prompt_async(message=Message(message_pieces=[remix_piece]))
     assert remix_result[0].message_pieces[0].response_error == "none"
+
+
+@pytest.mark.run_only_if_all_tests
+async def test_video_target_image_to_video_entra_auth(
+    sqlite_instance: SQLiteMemory, video_reference_image: Path
+) -> None:
+    endpoint = os.environ["AZURE_OPENAI_VIDEO_ENDPOINT"]
+    target = OpenAIVideoTarget(
+        endpoint=endpoint,
+        model_name=os.environ["AZURE_OPENAI_VIDEO_MODEL"],
+        api_key=get_azure_openai_auth(endpoint),
+        resolution_dimensions="1280x720",
+        n_seconds=4,
+    )
+
+    conversation_id = str(uuid.uuid4())
+    message = Message(
+        message_pieces=[
+            MessagePiece(
+                role="user",
+                original_value="Animate this image with gentle motion",
+                original_value_data_type="text",
+                conversation_id=conversation_id,
+            ),
+            MessagePiece(
+                role="user",
+                original_value=str(video_reference_image),
+                original_value_data_type="image_path",
+                conversation_id=conversation_id,
+            ),
+        ]
+    )
+
+    result = await target.send_prompt_async(message=message)
+
+    assert len(result) == 1
+    response_piece = result[0].message_pieces[0]
+    assert response_piece.response_error == "none", f"Image-to-video failed: {response_piece.converted_value}"
+
+    video_path = Path(response_piece.converted_value)
+    assert video_path.exists(), f"Video file not found: {video_path}"
+    assert video_path.is_file()
 
 
 async def test_prompt_shield_target_entra_auth(sqlite_instance):
