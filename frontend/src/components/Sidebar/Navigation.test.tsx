@@ -3,7 +3,7 @@
  * Licensed under the MIT license.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ThemeProvider, useTheme } from "../../hooks/useTheme";
 import Navigation from "./Navigation";
@@ -30,6 +30,19 @@ describe("Navigation", () => {
   it("renders the home button", () => {
     renderWithProvider(<Navigation {...defaultProps} />);
     expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+  });
+
+  it("exposes one labelled primary navigation landmark and the current page", () => {
+    renderWithProvider(<Navigation {...defaultProps} />);
+
+    const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
+    expect(screen.getAllByRole("navigation")).toHaveLength(1);
+    expect(
+      within(navigation).getByRole("button", { name: "Chat", current: "page" })
+    ).toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: "Home" })).not.toHaveAttribute(
+      "aria-current"
+    );
   });
 
   it("calls onNavigate with 'home' when home button is clicked", async () => {

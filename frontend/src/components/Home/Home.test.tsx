@@ -64,8 +64,27 @@ describe("Home", () => {
 
   it("renders the welcome hero", async () => {
     render(<TestWrapper><Home {...defaultProps} /></TestWrapper>);
-    expect(screen.getByText(/welcome to co-pyrit/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 1, name: /welcome to co-pyrit/i })
+    ).toBeInTheDocument();
     await waitFor(() => expect(mockListAttacks).toHaveBeenCalled());
+  });
+
+  it("renders a coherent page, section, and operation heading hierarchy", async () => {
+    mockListAttacks.mockResolvedValue({
+      items: [makeAttack()],
+      pagination: { has_more: false, next_cursor: null },
+    });
+
+    render(<TestWrapper><Home {...defaultProps} /></TestWrapper>);
+
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+    ).toEqual(["Labels", "Target", "Recent operations"]);
+    expect(
+      await screen.findByRole("heading", { level: 3, name: "op_alpha" })
+    ).toBeInTheDocument();
   });
 
   it("shows an empty target hint when no target is set", async () => {

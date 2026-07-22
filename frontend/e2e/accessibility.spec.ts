@@ -1,5 +1,58 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { makeTarget } from "./_targets";
+
+async function mockSemanticApis(page: Page): Promise<void> {
+  await page.route(/\/api\/.*/, async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    let body: unknown = {};
+
+    if (pathname === "/api/health") {
+      body = { status: "healthy" };
+    } else if (pathname === "/api/version") {
+      body = { version: "0.0.0-test", default_labels: {} };
+    } else if (pathname === "/api/targets") {
+      body = {
+        items: [],
+        pagination: { limit: 200, has_more: false, next_cursor: null, prev_cursor: null },
+      };
+    } else if (pathname === "/api/attacks/attack-options") {
+      body = { attack_types: ["SingleTurnAttack"] };
+    } else if (pathname === "/api/attacks/converter-options") {
+      body = { converter_types: [] };
+    } else if (pathname === "/api/labels") {
+      body = {
+        source: "attacks",
+        labels: { operator: ["alice"], operation: ["Semantic audit"] },
+      };
+    } else if (pathname === "/api/attacks") {
+      body = {
+        items: [
+          {
+            attack_result_id: "semantic-attack",
+            conversation_id: "semantic-conversation",
+            attack_type: "SingleTurnAttack",
+            target: { target_type: "OpenAIChatTarget", model_name: "gpt-4o" },
+            converters: [],
+            outcome: "success",
+            last_message_preview: "Semantic test response",
+            message_count: 2,
+            related_conversation_ids: [],
+            labels: { operator: "alice", operation: "Semantic audit" },
+            created_at: "2026-07-22T09:00:00.000Z",
+            updated_at: "2026-07-22T11:30:00.000Z",
+          },
+        ],
+        pagination: { limit: 25, has_more: false, next_cursor: null, prev_cursor: null },
+      };
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+}
 
 test.describe("Accessibility", () => {
   test.beforeEach(async ({ page }) => {
@@ -59,6 +112,64 @@ test.describe("Accessibility", () => {
     // Theme toggle button (now a menu trigger with "Theme: <mode>" title)
     const themeBtn = page.getByTitle(/^Theme:/);
     await expect(themeBtn).toBeVisible();
+  });
+
+  test("should expose one page heading and current primary navigation item on every route", async ({ page }) => {
+    await mockSemanticApis(page);
+    const routes = [
+      { path: "/", heading: "Welcome to Co-PyRIT", currentPage: "Home" },
+      { path: "/chat", heading: "Chat", currentPage: "Chat" },
+      { path: "/history", heading: "Attack History", currentPage: "Attack History" },
+      { path: "/config", heading: "Target Configuration", currentPage: "Configuration" },
+    ];
+
+    for (const route of routes) {
+      await page.goto(route.path);
+
+      const main = page.getByRole("main");
+      await expect(main.getByRole("heading", { level: 1, name: route.heading })).toHaveCount(1);
+      await expect(main.getByRole("heading", { level: 1 })).toHaveCount(1);
+
+      const navigation = page.getByRole("navigation", { name: "Primary navigation" });
+      await expect(page.getByRole("navigation")).toHaveCount(1);
+      await expect(navigation.getByRole("button", { name: route.currentPage })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+      await expect(navigation.locator('[aria-current="page"]')).toHaveCount(1);
+    }
+  });
+
+  test("should expose coherent Home headings and keep the Chat heading out of layout", async ({ page }) => {
+    await mockSemanticApis(page);
+    await page.goto("/");
+    await expect(page.getByRole("heading", { level: 3, name: "Semantic audit" })).toBeVisible();
+
+    const homeHeadings = await page.getByRole("main").locator("h1, h2, h3").evaluateAll(
+      (headings) => headings.map((heading) => ({
+        level: Number(heading.tagName.slice(1)),
+        name: heading.textContent?.trim(),
+      })),
+    );
+    expect(homeHeadings).toEqual([
+      { level: 1, name: "Welcome to Co-PyRIT" },
+      { level: 2, name: "Labels" },
+      { level: 2, name: "Target" },
+      { level: 2, name: "Recent operations" },
+      { level: 3, name: "Semantic audit" },
+    ]);
+
+    await page.goto("/chat");
+    const main = page.getByRole("main");
+    const chatHeading = main.getByRole("heading", { level: 1, name: "Chat" });
+    const headingBox = await chatHeading.boundingBox();
+    const mainBox = await main.boundingBox();
+    const chatAreaBox = await page.getByTestId("chat-area").boundingBox();
+
+    expect(headingBox).not.toBeNull();
+    expect(headingBox?.width).toBeLessThanOrEqual(1);
+    expect(headingBox?.height).toBeLessThanOrEqual(1);
+    expect(chatAreaBox).toEqual(mainBox);
   });
 
   test("should restore focus to Feedback after closing its dialog with Escape", async ({ page }) => {

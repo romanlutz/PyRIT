@@ -73,6 +73,21 @@ describe("TargetConfig", () => {
     jest.clearAllMocks();
   });
 
+  it("should render one page-level heading", () => {
+    mockedTargetsApi.listTargets.mockReturnValue(new Promise(() => {}));
+
+    render(
+      <TestWrapper>
+        <TargetConfig {...defaultProps} />
+      </TestWrapper>
+    );
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Target Configuration" })
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
   it("should show loading state initially", () => {
     mockedTargetsApi.listTargets.mockReturnValue(new Promise(() => {})); // never resolves
 
