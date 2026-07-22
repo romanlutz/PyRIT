@@ -173,6 +173,45 @@ test.describe("Accessibility", () => {
     const table = page.getByRole("table");
     await expect(table).toBeVisible();
   });
+
+  test("should expose a named target type filter and preserve filtering", async ({ page }) => {
+    await page.route(/\/api\/targets/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            makeTarget({
+              target_registry_name: "a11y-chat-target",
+              target_type: "OpenAIChatTarget",
+              endpoint: "https://chat.test",
+              model_name: "gpt-4o",
+            }),
+            makeTarget({
+              target_registry_name: "a11y-image-target",
+              target_type: "OpenAIImageTarget",
+              endpoint: "https://image.test",
+              model_name: "dall-e-3",
+            }),
+          ],
+          pagination: { limit: 200, has_more: false, next_cursor: null, prev_cursor: null },
+        }),
+      });
+    });
+
+    await page.getByTitle("Configuration").click();
+    await expect(page.getByText("Target Configuration")).toBeVisible();
+
+    const typeFilter = page.getByRole("combobox", {
+      name: "Filter by type",
+      exact: true,
+    });
+    await expect(typeFilter).toBeVisible();
+    await typeFilter.selectOption("OpenAIChatTarget");
+
+    await expect(page.getByText("gpt-4o")).toBeVisible();
+    await expect(page.getByText("dall-e-3")).toBeHidden();
+  });
 });
 
 test.describe("Visual Consistency", () => {

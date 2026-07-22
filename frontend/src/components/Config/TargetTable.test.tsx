@@ -1,5 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
+import userEvent from '@testing-library/user-event'
 import { makeTarget } from '@/test-utils/targetFixtures'
 import TargetTable from './TargetTable'
 import type { TargetInstance } from '../../types'
@@ -300,7 +301,8 @@ describe('TargetTable', () => {
     expect(modelText).toHaveStyle({ textDecoration: 'underline dotted' })
   })
 
-  it('should filter targets by type when filter is selected', () => {
+  it('should expose a labeled type filter and filter targets when selected', async () => {
+    const user = userEvent.setup()
     render(
       <TestWrapper>
         <TargetTable {...defaultProps} />
@@ -311,28 +313,28 @@ describe('TargetTable', () => {
     expect(screen.getByText('gpt-4')).toBeInTheDocument()
     expect(screen.getByText('dall-e-3')).toBeInTheDocument()
 
-    // Filter to OpenAIChatTarget
-    const select = screen.getByRole('combobox')
-    fireEvent.change(select, { target: { value: 'OpenAIChatTarget' } })
+    const select = screen.getByRole('combobox', { name: 'Filter by type' })
+    await user.selectOptions(select, 'OpenAIChatTarget')
 
     expect(screen.getByText('gpt-4')).toBeInTheDocument()
     expect(screen.queryByText('dall-e-3')).not.toBeInTheDocument()
   })
 
-  it('should show all targets when filter is cleared', () => {
+  it('should show all targets when filter is cleared', async () => {
+    const user = userEvent.setup()
     render(
       <TestWrapper>
         <TargetTable {...defaultProps} />
       </TestWrapper>
     )
 
-    const select = screen.getByRole('combobox')
+    const select = screen.getByRole('combobox', { name: 'Filter by type' })
 
     // Filter then clear
-    fireEvent.change(select, { target: { value: 'OpenAIChatTarget' } })
+    await user.selectOptions(select, 'OpenAIChatTarget')
     expect(screen.queryByText('dall-e-3')).not.toBeInTheDocument()
 
-    fireEvent.change(select, { target: { value: '' } })
+    await user.selectOptions(select, '')
     expect(screen.getByText('dall-e-3')).toBeInTheDocument()
   })
 
