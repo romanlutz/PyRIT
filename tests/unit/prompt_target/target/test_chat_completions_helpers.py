@@ -146,13 +146,6 @@ def test_get_finish_reason_returns_none_without_choices():
     assert get_finish_reason(response=resp) is None
 
 
-def test_get_finish_reason_returns_none_without_reason():
-    resp = MagicMock()
-    resp.choices = [MagicMock()]
-    del resp.choices[0].finish_reason
-    assert get_finish_reason(response=resp) is None
-
-
 def test_build_empty_response_for_truncated_completion_returns_empty_message():
     request = _request_piece("ask")
     result = build_empty_response_for_truncated_completion(request=request)

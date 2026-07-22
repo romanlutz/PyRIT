@@ -16,6 +16,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from openai.types.chat import ChatCompletion
+
 from pyrit.exceptions import (
     EmptyResponseException,
     PyritException,
@@ -37,18 +39,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_VALID_FINISH_REASONS: frozenset[str] = frozenset({"stop", "length", "content_filter", "tool_calls"})
 
 
-def get_finish_reason(*, response: Any) -> Any:
+def get_finish_reason(*, response: ChatCompletion) -> str | None:
     """
     Extract the first choice's ``finish_reason`` from a Chat Completions response.
 
     Args:
-        response (Any): The Chat Completions response object.
+        response (ChatCompletion): The Chat Completions response object.
 
     Returns:
-        Any: The first choice's ``finish_reason``, or None when absent.
+        str | None: The first choice's ``finish_reason``, or None when there are no choices.
     """
-    choice = response.choices[0] if getattr(response, "choices", None) else None
-    return getattr(choice, "finish_reason", None) if choice is not None else None
+    if not response.choices:
+        return None
+    return response.choices[0].finish_reason
 
 
 def build_empty_response_for_truncated_completion(*, request: MessagePiece) -> Message:

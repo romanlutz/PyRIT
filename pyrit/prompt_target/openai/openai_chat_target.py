@@ -5,6 +5,8 @@ import logging
 from collections.abc import MutableSequence
 from typing import Any
 
+from openai.types.chat import ChatCompletion
+
 from pyrit.common import forward_init_parameters
 from pyrit.exceptions import (
     EmptyResponseException,
@@ -273,7 +275,7 @@ class OpenAIChatTarget(OpenAITarget):
         """
         return extract_partial_content(response)
 
-    def _validate_response(self, response: Any, request: MessagePiece) -> None:
+    def _validate_response(self, response: ChatCompletion, request: MessagePiece) -> None:
         """
         Validate a Chat Completions API response for errors.
 
@@ -315,7 +317,7 @@ class OpenAIChatTarget(OpenAITarget):
         # complete response.
         validate_chat_completion_response(response=response)
 
-    def _is_truncated_response(self, response: Any) -> bool:
+    def _is_truncated_response(self, response: ChatCompletion) -> bool:
         """
         Return True if the response was cut off by the token limit.
 
