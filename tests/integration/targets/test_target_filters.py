@@ -15,7 +15,7 @@ from pyrit.prompt_target import (
 
 _AZURE_KEY_AUTH_DISABLED_REASON = (
     "Azure key-based (local) auth is disabled in our tenant; "
-    "covered by the Entra-auth tests (test_entra_auth_targets.py)."
+    "covered by the Entra-auth tests (test_targets_and_secrets.py)."
 )
 
 
