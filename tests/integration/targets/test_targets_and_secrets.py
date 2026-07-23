@@ -996,10 +996,12 @@ async def test_video_target_remix_entra_auth(sqlite_instance):
         converted_value="A bird flying over a lake",
     )
     result = await target.send_prompt_async(message=Message(message_pieces=[text_piece]))
+    assert len(result) == 1
     response_piece = result[0].message_pieces[0]
     assert response_piece.response_error == "none"
+    assert response_piece.prompt_metadata is not None
     video_id = response_piece.prompt_metadata.get("video_id")
-    assert video_id
+    assert video_id, "Response must include video_id in prompt_metadata for chaining"
 
     # Remix
     remix_piece = MessagePiece(
@@ -1009,7 +1011,13 @@ async def test_video_target_remix_entra_auth(sqlite_instance):
         prompt_metadata={"video_id": video_id},
     )
     remix_result = await target.send_prompt_async(message=Message(message_pieces=[remix_piece]))
-    assert remix_result[0].message_pieces[0].response_error == "none"
+    assert len(remix_result) == 1
+    remix_response = remix_result[0].message_pieces[0]
+    assert remix_response.response_error == "none"
+
+    remix_path = Path(remix_response.converted_value)
+    assert remix_path.exists(), f"Remixed video file not found: {remix_path}"
+    assert remix_path.is_file()
 
 
 @pytest.mark.run_only_if_all_tests
