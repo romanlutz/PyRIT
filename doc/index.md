@@ -64,7 +64,146 @@ Evaluate AI responses with true/false, Likert scale, classification, and custom 
 
 ---
 
-## Getting Started
++++ { "kind": "justified" }
+
+Builders, contributors, consumers
+
+## Ecosystem
+
+PyRIT is part of a growing community of GenAI security tools, programs, and research. Whether you're shipping AI products, hunting vulnerabilities, or studying the space, here's where to plug in.
+
+### 🧩 Built on PyRIT
+
+:::::{grid} 1 1 2 2
+
+::::{card}
+:link: https://github.com/microsoft/RAMPART
+
+:::{image} assets/ecosystem/rampart.svg
+:alt: RAMPART
+:class: ecosystem-logo
+:::
+
+**RAMPART** (Microsoft)
+
+Pytest-native safety & security testing for agentic AI. Turn red-team findings into repeatable CI regression tests on top of PyRIT.
+::::
+
+::::{card}
+:link: https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/ai-red-teaming-agent
+
+:::{image} assets/ecosystem/azure-foundry.svg
+:alt: Azure AI Foundry
+:class: ecosystem-logo
+:::
+
+**AI Red Teaming Agent** (Azure AI Foundry)
+
+Managed Azure service that runs PyRIT-powered scans against models and agents deployed in Foundry — easy to get started, Foundry provides attack data and model as well as scoring.
+::::
+
+:::::
+
+### 🤝 Programs & benchmarks
+
+:::::{grid} 1 1 3 3
+
+::::{card}
+:link: https://0din.ai/
+
+:::{image} assets/ecosystem/0din.png
+:alt: 0DIN
+:class: ecosystem-logo ecosystem-logo-mono-light
+:::
+
+**0DIN** (Mozilla)
+
+AI Bug Bounty and Security Research Program providing AI threat feeds and security tools.
+::::
+
+::::{card}
+:link: https://www.microsoft.com/en-us/msrc
+
+:::{image} assets/ecosystem/msrc.svg
+:alt: MSRC
+:class: ecosystem-logo
+:::
+
+**MSRC** (Microsoft)
+
+Found an AI-related vulnerability in a Microsoft product? Report it to the Microsoft Security Response Center for coordinated disclosure.
+::::
+
+::::{card}
+:link: https://github.com/mlcommons/jailbreak-taxonomy
+
+:::{image} assets/ecosystem/mlcommons.svg
+:alt: MLCommons
+:class: ecosystem-logo ecosystem-logo-xl ecosystem-logo-mono-dark
+:::
+
+**MLCommons** (Jailbreak Benchmark)
+
+MLCommons' AI Risk & Reliability group is building a continuously refreshed jailbreak benchmark, organized by its Jailbreak Taxonomy. PyRIT's attack libraries and prompt converters provide the implementation framework.
+::::
+
+:::::
+
+### 📚 From the Microsoft AI Red Team
+
+Guidance, methodology, threat models, and tooling references for AI red teaming — straight from the team that builds PyRIT. Browse the full [Microsoft AI Red Team hub on Microsoft Learn](https://learn.microsoft.com/en-us/security/ai-red-team/), the [bibliography](bibliography), or pick a paper:
+
+:::::{grid} 1 2 3 3
+
+::::{card}
+:link: https://arxiv.org/abs/2501.07238
+
+:::{image} assets/ecosystem/papers/lessons.png
+:alt: Lessons from Red Teaming 100 Generative AI Products
+:class: ecosystem-paper-thumb
+:::
+
+**Lessons from Red Teaming 100 Generative AI Products**
+
+Bullwinkel et al., 2025
+::::
+
+::::{card}
+:link: https://arxiv.org/abs/2410.02828
+
+:::{image} assets/ecosystem/papers/pyrit.png
+:alt: PyRIT paper
+:class: ecosystem-paper-thumb
+:::
+
+**PyRIT: A Framework for Security Risk Identification and Red Teaming in Generative AI Systems**
+
+Lopez et al., 2024
+::::
+
+::::{card}
+:link: https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/bade/documents/products-and-services/en-us/security/Taxonomy-of-Failure-Modes-in-Agentic-AI-Systems-v2-0.pdf
+
+:::{image} assets/ecosystem/papers/agentic-taxonomy.png
+:alt: Taxonomy of Failure Modes in Agentic AI Systems
+:class: ecosystem-paper-thumb
+:::
+
+**Taxonomy of Failure Modes in Agentic AI Systems**
+
+Microsoft AI Red Team, 2026 (v2.0)
+::::
+
+:::::
+
+---
+
++++ { "kind": "justified" }
+
+Getting Started
+
+## Setup and Installation
+
 1. Install PyRIT and verify installation.\
 For more details and alternative installation methods, see the [Install PyRIT](getting_started/install) page
 ```bash
@@ -156,7 +295,7 @@ await printer.print_conversation_async(result=result)
 ```
 
 ![framework-demo](framework-demo.png)
-:::
 
 For more details, see the [Framework](code/framework) page.
+:::
 ::::
