@@ -79,18 +79,18 @@ class TestBijectionTeachingMessages:
             objective_target=mock_objective_target,
             num_teaching_shots=3,
         )
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
         assert len(messages) == 7
 
     async def test_teaching_messages_first_message_is_system(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
         assert messages[0].message_pieces[0].role == "system"
         assert "write every assistant response only in this secret code" in messages[0].message_pieces[0].original_value
 
     async def test_teaching_messages_alternate_roles(self, mock_objective_target):
         attack = BijectionAttack(objective_target=mock_objective_target)
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
         for i, message in enumerate(messages[1:], start=1):
             expected_role = "user" if i % 2 == 1 else "assistant"
             assert message.message_pieces[0].role == expected_role
@@ -102,7 +102,7 @@ class TestBijectionTeachingMessages:
             num_teaching_shots=3,
         )
 
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
 
         assert len(messages) == 6
         assert messages[0].message_pieces[0].role == "user"
@@ -118,7 +118,7 @@ class TestBijectionTeachingMessages:
             num_teaching_shots=0,
         )
 
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
 
         assert len(messages) == 1
         assert messages[0].message_pieces[0].role == "user"
@@ -131,7 +131,7 @@ class TestBijectionTeachingMessages:
         converter = LetterBijectionConverter(mapping=mapping)
         attack = BijectionAttack(objective_target=mock_objective_target, bijection_converter=converter)
 
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
 
         assert messages[1].message_pieces[0].original_value == "the quick brown fox"
         assert messages[2].message_pieces[0].original_value == "uif rvjdl cspxo gpy"
@@ -145,7 +145,7 @@ class TestBijectionTeachingMessages:
             num_teaching_shots=6,
         )
 
-        messages = await attack._build_teaching_messages()
+        messages = await attack._build_teaching_messages_async()
 
         assert messages[11].message_pieces[0].original_value == "the quick brown fox"
         assert messages[12].message_pieces[0].original_value == "the quick brown fox"

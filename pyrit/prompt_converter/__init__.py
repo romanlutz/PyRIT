@@ -32,7 +32,7 @@ from pyrit.prompt_converter.bijection_converter import (
     BijectionConverter,
     DigitBijectionConverter,
     LetterBijectionConverter,
-    TokenBijectionConverter
+    TokenBijectionConverter,
 )
 from pyrit.prompt_converter.bin_ascii_converter import BinAsciiConverter
 from pyrit.prompt_converter.binary_converter import BinaryConverter

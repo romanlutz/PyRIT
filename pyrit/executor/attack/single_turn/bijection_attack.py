@@ -102,7 +102,7 @@ class BijectionAttack(PromptSendingAttack):
         bijection_cfg = PromptConverterConfiguration.from_converters(converters=[self._bijection_converter])
         self._request_converters = bijection_cfg + self._request_converters
 
-    async def _build_teaching_messages(self) -> list[Message]:
+    async def _build_teaching_messages_async(self) -> list[Message]:
         """
         Build teaching demonstration messages that teach the target the secret mapping.
 
@@ -158,7 +158,7 @@ class BijectionAttack(PromptSendingAttack):
             context (SingleTurnAttackContext): The attack context containing attack parameters.
         """
         context.conversation_id = str(uuid.uuid4())
-        context.prepended_conversation = await self._build_teaching_messages()
+        context.prepended_conversation = await self._build_teaching_messages_async()
 
         await self._conversation_manager.initialize_context_async(
             context=context,
