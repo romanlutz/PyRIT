@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from openai import APIStatusError, BadRequestError, ContentFilterFinishReasonError, RateLimitError
-from openai.types.chat import ChatCompletion
+from openai.types.chat import ChatCompletion, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
 from unit.mocks import (
     get_image_message_piece,
     get_sample_conversations,
@@ -537,6 +538,43 @@ async def test_send_prompt_async_content_filter_200(target: OpenAIChatTarget):
     assert len(response[0].message_pieces) == 1
     assert response[0].message_pieces[0].response_error == "blocked"
     assert response[0].message_pieces[0].converted_value_data_type == "error"
+    assert response[0].message_pieces[0].structured_refusal is None
+
+
+async def test_send_prompt_async_structured_refusal(target: OpenAIChatTarget):
+    refusal = "I cannot assist with that request."
+    completion = ChatCompletion(
+        id="refusal-completion",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                logprobs=None,
+                message=ChatCompletionMessage(
+                    content=None,
+                    refusal=refusal,
+                    role="assistant",
+                ),
+            )
+        ],
+        created=0,
+        model="gpt-test",
+        object="chat.completion",
+    )
+    target._async_client.chat.completions.create = AsyncMock(return_value=completion)  # type: ignore[method-assign]
+    message = Message(
+        message_pieces=[MessagePiece(role="user", conversation_id="refusal-conversation", original_value="Hello")]
+    )
+
+    response = await target.send_prompt_async(message=message)
+
+    assert len(response) == 1
+    assert len(response[0].message_pieces) == 1
+    refusal_piece = response[0].message_pieces[0]
+    assert refusal_piece.original_value_data_type == "error"
+    assert refusal_piece.response_error == "blocked"
+    assert json.loads(refusal_piece.original_value)["message"] == refusal
+    assert refusal_piece.structured_refusal == refusal
 
 
 def test_validate_request_unsupported_data_types(target: OpenAIChatTarget):
@@ -741,7 +779,7 @@ def test_no_key_recognized_azure_endpoint_auto_mints_entra(patch_central_databas
     with (
         patch.dict(os.environ, {}, clear=True),
         patch(
-            "pyrit.prompt_target.openai.openai_target.get_azure_openai_auth",
+            "pyrit.auth.openai_auth.get_azure_openai_auth",
             return_value=_provider,
         ) as mock_get_auth,
     ):
@@ -1041,7 +1079,9 @@ def test_validate_response_success_stop(target: OpenAIChatTarget, dummy_text_mes
     assert result is None
 
 
-def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog):
+def test_validate_response_success_length(
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog: pytest.LogCaptureFixture
+):
     """Test _validate_response passes for a truncated response that still has content, and warns."""
     mock_response = create_mock_completion(content="Hello", finish_reason="length")
     with caplog.at_level(logging.WARNING):
@@ -1051,7 +1091,7 @@ def test_validate_response_success_length(target: OpenAIChatTarget, dummy_text_m
 
 
 def test_validate_response_length_empty_does_not_raise(
-    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog
+    target: OpenAIChatTarget, dummy_text_message_piece: MessagePiece, caplog: pytest.LogCaptureFixture
 ):
     """Test _validate_response treats a truncated-but-empty response as valid (warns, does not raise)."""
     mock_response = create_mock_completion(content="", finish_reason="length")

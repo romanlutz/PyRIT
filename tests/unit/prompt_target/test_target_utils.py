@@ -15,7 +15,7 @@ from pyrit.prompt_target.common.utils import (
 )
 
 
-def _request_piece(text="ask"):
+def _request_piece(text: str = "ask") -> MessagePiece:
     return MessagePiece(role="user", conversation_id="c", original_value=text, original_value_data_type="text")
 
 
