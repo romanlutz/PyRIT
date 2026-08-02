@@ -6,10 +6,11 @@ import {
   MessageBar,
   MessageBarBody,
 } from '@fluentui/react-components'
-import { ArrowSyncRegular } from '@fluentui/react-icons'
+import { ArrowSyncRegular, ChatRegular, SettingsRegular } from '@fluentui/react-icons'
 import { attacksApi, labelsApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
-import type { AttackSummary } from '../../types'
+import type { AttackSummary, TargetInstance } from '../../types'
+import type { ViewName } from '../Sidebar/Navigation'
 import type { HistoryFilters } from './historyFilters'
 import { useAttackHistoryStyles } from './AttackHistory.styles'
 import HistoryFiltersBar from './HistoryFiltersBar'
@@ -20,6 +21,8 @@ interface AttackHistoryProps {
   onOpenAttack: (attackResultId: string) => void
   filters: HistoryFilters
   onFiltersChange: (filters: HistoryFilters) => void
+  activeTarget: TargetInstance | null
+  onNavigate: (view: ViewName) => void
 }
 
 const PAGE_SIZE = 25
@@ -44,7 +47,13 @@ function buildListParams(filters: HistoryFilters, pageCursor: string | undefined
   return params
 }
 
-export default function AttackHistory({ onOpenAttack, filters, onFiltersChange }: AttackHistoryProps) {
+export default function AttackHistory({
+  onOpenAttack,
+  filters,
+  onFiltersChange,
+  activeTarget,
+  onNavigate,
+}: AttackHistoryProps) {
   const styles = useAttackHistoryStyles()
   const [attacks, setAttacks] = useState<AttackSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -230,8 +239,20 @@ export default function AttackHistory({ onOpenAttack, filters, onFiltersChange }
             <Text size={200}>
               {hasActiveFilters
                 ? 'Try adjusting your filters.'
-                : 'Run an attack to see it here.'}
+                : activeTarget
+                  ? 'Start an attack to see it here.'
+                  : 'Configure a target before starting an attack.'}
             </Text>
+            {!hasActiveFilters && (
+              <Button
+                className={styles.touchTargetHeight}
+                appearance="primary"
+                icon={activeTarget ? <ChatRegular /> : <SettingsRegular />}
+                onClick={() => onNavigate(activeTarget ? 'chat' : 'config')}
+              >
+                {activeTarget ? 'Start attack' : 'Configure target'}
+              </Button>
+            )}
           </div>
         ) : (
           <AttackTable attacks={attacks} onOpenAttack={onOpenAttack} formatDate={formatDate} />

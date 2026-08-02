@@ -399,6 +399,8 @@ function App() {
                     onOpenAttack={handleOpenAttack}
                     filters={historyFilters}
                     onFiltersChange={handleFiltersChange}
+                    activeTarget={activeTarget}
+                    onNavigate={handleNavigate}
                   />
                 }
               />
