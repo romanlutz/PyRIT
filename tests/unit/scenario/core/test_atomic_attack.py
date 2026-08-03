@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.executor.attack import AttackExecutor, AttackStrategy
+from pyrit.executor.attack import AttackExecutor, AttackParameters, AttackStrategy
 from pyrit.executor.attack.core import AttackExecutorResult
 from pyrit.models import (
     AtomicAttackIdentifier,
@@ -313,6 +313,24 @@ class TestAtomicAttackExecution:
             call_kwargs = mock_exec.call_args.kwargs
             assert "seed_groups" in call_kwargs
             assert call_kwargs["seed_groups"] == sample_seed_groups
+
+    async def test_run_async_supplies_technique_materializer_for_default_mapper(
+        self, mock_attack, sample_seed_groups, sample_attack_results
+    ):
+        """Default parameter mapping receives technique-owned runtime materialization."""
+        mock_attack.params_type = AttackParameters
+        atomic_attack = AtomicAttack(
+            attack_technique=AttackTechnique(attack=mock_attack),
+            seed_groups=sample_seed_groups,
+            atomic_attack_name="Test Attack Run",
+        )
+
+        with patch.object(AttackExecutor, "execute_attack_from_seed_groups_async", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = wrap_results(sample_attack_results)
+
+            await atomic_attack.run_async()
+
+        assert callable(mock_exec.call_args.kwargs["seed_group_materializer"])
 
     async def test_run_async_passes_attack_execute_params(self, mock_attack, sample_seed_groups, sample_attack_results):
         """Test that attack execute parameters are passed to the executor."""

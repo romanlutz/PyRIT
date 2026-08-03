@@ -8,7 +8,7 @@ This is the new, cleaner design that leverages the params_type architecture.
 """
 
 import asyncio
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -173,6 +173,7 @@ class AttackExecutor:
         seed_groups: Sequence[AttackSeedGroup],
         adversarial_chat: "PromptTarget | None" = None,
         objective_scorer: "TrueFalseScorer | None" = None,
+        seed_group_materializer: Callable[..., Awaitable[AttackSeedGroup]] | None = None,
         field_overrides: Sequence[dict[str, Any]] | None = None,
         return_partial_on_failure: bool = False,
         attribution: AttackResultAttribution | None = None,
@@ -192,6 +193,8 @@ class AttackExecutor:
                 SeedSimulatedConversation configurations.
             objective_scorer: Optional scorer for evaluating simulated conversations.
                 Required when seed groups contain SeedSimulatedConversation configurations.
+            seed_group_materializer: Optional attack-technique callback that replaces
+                runtime seed configuration before parameter mapping.
             field_overrides: Optional per-seed-group field overrides. If provided,
                 must match the length of seed_groups. Each dict is passed to
                 from_seed_group() as overrides.
@@ -223,12 +226,13 @@ class AttackExecutor:
 
         params_type = attack.params_type
 
-        # Build params list using from_seed_group_async with concurrency control
-        # This can take time if the SeedSimulatedConversation generation is included
+        # Materialize technique seeds and build params under the same concurrency budget.
         semaphore = self._get_semaphore()
 
         async def build_params_async(i: int, sg: AttackSeedGroup) -> AttackParameters:
             async with semaphore:
+                if seed_group_materializer is not None:
+                    sg = await seed_group_materializer(seed_group=sg)
                 combined_overrides = dict(broadcast_fields)
                 if field_overrides is not None:
                     combined_overrides.update(field_overrides[i])

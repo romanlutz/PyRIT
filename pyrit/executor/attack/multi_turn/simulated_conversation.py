@@ -10,6 +10,7 @@ against a simulated (compliant) target before executing the actual attack.
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,7 @@ from pyrit.executor.attack.core.attack_config import (
 from pyrit.executor.attack.multi_turn.red_teaming import RedTeamingAttack
 from pyrit.memory import CentralMemory
 from pyrit.message_normalizer import ConversationContextNormalizer
-from pyrit.models import Message, SeedPrompt, SeedSimulatedConversation
+from pyrit.models import AttackSeedGroup, Message, SeedPrompt, SeedSimulatedConversation
 from pyrit.prompt_normalizer import PromptNormalizer
 
 if TYPE_CHECKING:
@@ -34,6 +35,57 @@ if TYPE_CHECKING:
     from pyrit.score import TrueFalseScorer
 
 logger = logging.getLogger(__name__)
+
+
+async def materialize_simulated_conversation_async(
+    *,
+    seed_group: AttackSeedGroup,
+    adversarial_chat: PromptTarget | None,
+    objective_scorer: TrueFalseScorer | None,
+) -> AttackSeedGroup:
+    """
+    Replace a simulated-conversation seed with the prompts it generates.
+
+    Args:
+        seed_group: Attack seed group containing the simulation configuration.
+        adversarial_chat: Target used to generate the simulated conversation.
+        objective_scorer: Scorer used to evaluate the simulated conversation.
+
+    Returns:
+        A new attack seed group containing generated prompts instead of the
+        ``SeedSimulatedConversation`` configuration.
+
+    Raises:
+        ValueError: If a required runtime dependency is missing.
+    """
+    config = seed_group.simulated_conversation_config
+    if config is None:
+        return seed_group
+    if adversarial_chat is None:
+        raise ValueError("adversarial_chat is required when seed_group has a simulated conversation config")
+    if objective_scorer is None:
+        raise ValueError("objective_scorer is required when seed_group has a simulated conversation config")
+
+    simulated_prompts = await generate_simulated_conversation_async(
+        objective=seed_group.objective.value,
+        adversarial_chat=adversarial_chat,
+        objective_scorer=objective_scorer,
+        num_turns=config.num_turns,
+        starting_sequence=config.sequence,
+        adversarial_chat_system_prompt_path=config.adversarial_chat_system_prompt_path,
+        simulated_target_system_prompt_path=config.simulated_target_system_prompt_path,
+        next_message_system_prompt_path=config.next_message_system_prompt_path,
+    )
+    materialized_seeds = [
+        copy.deepcopy(seed) for seed in seed_group.seeds if not isinstance(seed, SeedSimulatedConversation)
+    ]
+    materialized_prompts = copy.deepcopy(simulated_prompts)
+    for prompt in materialized_prompts:
+        prompt.harm_categories = list(dict.fromkeys([*(prompt.harm_categories or []), *(config.harm_categories or [])]))
+    materialized_seeds.extend(materialized_prompts)
+    for seed in materialized_seeds:
+        seed.prompt_group_id = None
+    return AttackSeedGroup(seeds=materialized_seeds)
 
 
 async def generate_simulated_conversation_async(

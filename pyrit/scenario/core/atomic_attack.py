@@ -16,6 +16,7 @@ have a common interface for scenarios.
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from pyrit.common.utils import to_sha256
@@ -321,6 +322,16 @@ class AtomicAttack:
             else:
                 execution_seed_groups = self._seed_groups
 
+            seed_group_materializer = None
+            params_type = technique.attack.params_type
+            supports_materialization = getattr(params_type, "supports_simulated_conversation_materialization", None)
+            if isinstance(params_type, type) and callable(supports_materialization) and supports_materialization():
+                seed_group_materializer = partial(
+                    technique.materialize_seed_group_async,
+                    adversarial_chat=self._adversarial_chat,
+                    objective_scorer=self._objective_scorer,
+                )
+
             # Build attribution when this atomic attack is being executed inside
             # a Scenario. The same attribution object is stamped on every
             # per-task AttackContext; per-task identity is reconstructed from
@@ -338,6 +349,7 @@ class AtomicAttack:
                 seed_groups=execution_seed_groups,
                 adversarial_chat=self._adversarial_chat,
                 objective_scorer=self._objective_scorer,
+                seed_group_materializer=seed_group_materializer,
                 memory_labels=self._memory_labels,
                 return_partial_on_failure=return_partial_on_failure,
                 attribution=attribution,

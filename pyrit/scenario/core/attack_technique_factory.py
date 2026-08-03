@@ -255,8 +255,8 @@ class AttackTechniqueFactory(Identifiable):
         seeds: list[Any] = [simulated_conversation]
         if final_user_message is not None:
             # Append the fixed final turn immediately after the simulated conversation's
-            # sequence range so it is extracted as the next_message (see
-            # AttackParameters.from_seed_group_async).
+            # sequence range so it is extracted as the next_message after the
+            # technique materializes its simulated conversation.
             seeds.append(
                 SeedPrompt(
                     value=final_user_message,

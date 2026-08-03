@@ -13,16 +13,20 @@ from pyrit.executor.attack import AttackConverterConfig, RTASystemPromptPaths
 from pyrit.executor.attack.multi_turn.simulated_conversation import (
     _generate_next_message_async,
     generate_simulated_conversation_async,
+    materialize_simulated_conversation_async,
 )
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
+    AttackSeedGroup,
     ComponentIdentifier,
     Message,
     MessagePiece,
     NextMessageSystemPromptPaths,
     Score,
+    SeedObjective,
     SeedPrompt,
+    SeedSimulatedConversation,
     SimulatedTargetSystemPromptPaths,
 )
 from pyrit.prompt_normalizer import PromptNormalizer
@@ -133,6 +137,42 @@ class TestGenerateSimulatedConversationAsync:
                 adversarial_chat_system_prompt_path=adversarial_system_prompt_path,
                 num_turns=0,
             )
+
+    @patch("pyrit.executor.attack.multi_turn.simulated_conversation.generate_simulated_conversation_async")
+    async def test_replaces_config_and_preserves_static_seeds(
+        self,
+        mock_generate: AsyncMock,
+        mock_adversarial_chat: MagicMock,
+        mock_objective_scorer: MagicMock,
+        adversarial_system_prompt_path: Path,
+    ) -> None:
+        config = SeedSimulatedConversation(
+            num_turns=1,
+            adversarial_chat_system_prompt_path=adversarial_system_prompt_path,
+            harm_categories=["simulation-category"],
+        )
+        final_prompt = SeedPrompt(value="continue", role="user", sequence=2, harm_categories=["static-category"])
+        seed_group = AttackSeedGroup(
+            seeds=[SeedObjective(value="objective"), config, final_prompt],
+        )
+        mock_generate.return_value = [
+            SeedPrompt(value="opening", role="user", sequence=0),
+            SeedPrompt(value="reply", role="assistant", sequence=1),
+        ]
+
+        result = await materialize_simulated_conversation_async(
+            seed_group=seed_group,
+            adversarial_chat=mock_adversarial_chat,
+            objective_scorer=mock_objective_scorer,
+        )
+
+        assert not result.has_simulated_conversation
+        assert seed_group.has_simulated_conversation
+        assert [prompt.value for prompt in result.prompts] == ["opening", "reply", "continue"]
+        assert result.objective.value == "objective"
+        assert sorted(result.harm_categories) == ["simulation-category", "static-category"]
+        assert result.seeds[0].prompt_group_id != seed_group.seeds[0].prompt_group_id
+        assert mock_generate.call_args.kwargs["num_turns"] == 1
 
     async def test_raises_error_for_negative_turns(
         self,

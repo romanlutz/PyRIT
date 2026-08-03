@@ -7,10 +7,10 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from pyrit.models import AttackSeedGroup, Message, SeedGroup
+from pyrit.common.deprecation import print_deprecation_message
+from pyrit.models import AttackSeedGroup, Message
 
 if TYPE_CHECKING:
-    from pyrit.models import SeedUnion
     from pyrit.prompt_target import PromptTarget
     from pyrit.score import TrueFalseScorer
 
@@ -79,6 +79,23 @@ class AttackParameters:
         return "\n".join(lines)
 
     @classmethod
+    def supports_simulated_conversation_materialization(cls) -> bool:
+        """
+        Whether attack-technique materialization can run before this mapper.
+
+        Parameter types that override ``from_seed_group_async`` keep their existing
+        seed contract by default. They can override this method to opt in.
+
+        Returns:
+            True when this type uses the default seed-group mapper.
+        """
+        mapper_owner = next(
+            (base for base in cls.__mro__ if "from_seed_group_async" in base.__dict__),
+            None,
+        )
+        return mapper_owner is AttackParameters
+
+    @classmethod
     async def from_seed_group_async(
         cls: type[AttackParamsT],
         *,
@@ -110,11 +127,6 @@ class AttackParameters:
             ValueError: If overrides contain invalid fields, or if seed_group has simulated
                 conversation but adversarial_chat/scorer not provided.
         """
-        # Import here to avoid circular imports
-        from pyrit.executor.attack.multi_turn.simulated_conversation import (
-            generate_simulated_conversation_async,
-        )
-
         if not isinstance(seed_group, AttackSeedGroup):
             raise TypeError(
                 f"seed_group must be a AttackSeedGroup, got {type(seed_group).__name__}. "
@@ -146,41 +158,23 @@ class AttackParameters:
         if "targeted_harm_categories" in valid_fields:
             params["targeted_harm_categories"] = list(seed_group.harm_categories)
 
-        # Determine which group to use for extracting prepended_conversation/next_message
-        extraction_group: SeedGroup = seed_group
-
-        # Handle simulated conversation generation if configured
+        extraction_group = seed_group
         if seed_group.has_simulated_conversation:
-            simulated_conversation_config = seed_group.simulated_conversation_config
-            assert simulated_conversation_config is not None  # Guaranteed by has_simulated_conversation
-
-            if adversarial_chat is None:
-                raise ValueError("adversarial_chat is required when seed_group has a simulated conversation config")
-            if objective_scorer is None:
-                raise ValueError("objective_scorer is required when seed_group has a simulated conversation config")
-
-            # Generate the simulated conversation - returns list[SeedPrompt]
-            simulated_prompts = await generate_simulated_conversation_async(
-                objective=seed_group.objective.value,
-                adversarial_chat=adversarial_chat,
-                objective_scorer=objective_scorer,
-                num_turns=simulated_conversation_config.num_turns,
-                starting_sequence=simulated_conversation_config.sequence,
-                adversarial_chat_system_prompt_path=simulated_conversation_config.adversarial_chat_system_prompt_path,
-                simulated_target_system_prompt_path=simulated_conversation_config.simulated_target_system_prompt_path,
-                next_message_system_prompt_path=simulated_conversation_config.next_message_system_prompt_path,
+            from pyrit.executor.attack.multi_turn.simulated_conversation import (
+                materialize_simulated_conversation_async,
             )
 
-            # Merge simulated prompts with existing static prompts from the seed_group
-            all_prompts: list[SeedUnion] = [*seed_group.prompts, *simulated_prompts]
+            print_deprecation_message(
+                old_item="AttackParameters.from_seed_group_async with SeedSimulatedConversation",
+                new_item="AttackTechnique.materialize_seed_group_async",
+                removed_in="1.3.0",
+            )
+            extraction_group = await materialize_simulated_conversation_async(
+                seed_group=seed_group,
+                adversarial_chat=adversarial_chat,
+                objective_scorer=objective_scorer,
+            )
 
-            # Create a temporary prompts-only SeedGroup for extraction
-            # This group contains only prompts (no objective, no simulated config)
-            # and will use the standard sequence-based logic for prepended_conversation/next_message
-            if all_prompts:
-                extraction_group = SeedGroup(seeds=all_prompts)
-
-        # Use extraction_group properties for prepended_conversation/next_message
         if "next_message" in valid_fields:
             params["next_message"] = extraction_group.next_message
 
@@ -249,6 +243,7 @@ class AttackParameters:
         # Access via __dict__ to get the classmethod descriptor and extract __func__.
         _classmethod_descriptor = cls.__dict__["from_seed_group_async"]
         original_method = _classmethod_descriptor.__func__
+        supports_materialization = cls.supports_simulated_conversation_materialization()
 
         async def from_seed_group_wrapper_async(
             c: Any, /, *, seed_group: Any, adversarial_chat: Any = None, objective_scorer: Any = None, **ov: Any
@@ -258,5 +253,12 @@ class AttackParameters:
             )
 
         new_cls.from_seed_group_async = classmethod(from_seed_group_wrapper_async)  # type: ignore[ty:unresolved-attribute]
+
+        def _supports_simulated_conversation_materialization(_c: Any) -> bool:
+            return supports_materialization
+
+        new_cls.supports_simulated_conversation_materialization = classmethod(  # type: ignore[ty:unresolved-attribute]
+            _supports_simulated_conversation_materialization
+        )
 
         return new_cls  # type: ignore[ty:invalid-return-type]

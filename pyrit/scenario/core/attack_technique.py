@@ -15,7 +15,9 @@ from pyrit.models import AttackTechniqueIdentifier, ComponentIdentifier, Identif
 
 if TYPE_CHECKING:
     from pyrit.executor.attack import AttackStrategy
-    from pyrit.models import AttackTechniqueSeedGroup
+    from pyrit.models import AttackSeedGroup, AttackTechniqueSeedGroup
+    from pyrit.prompt_target import PromptTarget
+    from pyrit.score import TrueFalseScorer
 
 
 class AttackTechnique(Identifiable):
@@ -47,6 +49,34 @@ class AttackTechnique(Identifiable):
     def seed_technique(self) -> AttackTechniqueSeedGroup | None:
         """The optional technique seed group."""
         return self._seed_technique
+
+    async def materialize_seed_group_async(
+        self,
+        *,
+        seed_group: AttackSeedGroup,
+        adversarial_chat: PromptTarget | None,
+        objective_scorer: TrueFalseScorer | None,
+    ) -> AttackSeedGroup:
+        """
+        Materialize runtime conversation scaffolding configured by this technique.
+
+        Args:
+            seed_group: The objective and merged technique seeds to materialize.
+            adversarial_chat: Target used to generate simulated conversation turns.
+            objective_scorer: Scorer used to evaluate simulated conversation turns.
+
+        Returns:
+            A new seed group with simulated-conversation configuration replaced by prompts.
+        """
+        from pyrit.executor.attack.multi_turn.simulated_conversation import (
+            materialize_simulated_conversation_async,
+        )
+
+        return await materialize_simulated_conversation_async(
+            seed_group=seed_group,
+            adversarial_chat=adversarial_chat,
+            objective_scorer=objective_scorer,
+        )
 
     def _build_identifier(self) -> ComponentIdentifier:
         """

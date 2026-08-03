@@ -356,6 +356,31 @@ class TestExecuteAttackFromSeedGroupsAsync:
         context = attack.execute_with_context_async.call_args.kwargs["context"]
         assert context.params.memory_labels == {"broadcast": "value"}
 
+    async def test_materializes_seed_group_before_parameter_mapping(self):
+        """Technique-owned materialization runs before the parameter mapper."""
+        attack = create_mock_attack()
+        attack.execute_with_context_async.return_value = create_attack_result("Test")
+        source = create_seed_group("Test objective")
+        materialized = AttackSeedGroup(
+            seeds=[
+                SeedObjective(value="Test objective"),
+                SeedPrompt(value="materialized prompt", role="user"),
+            ]
+        )
+        materializer = AsyncMock(return_value=materialized)
+
+        executor = AttackExecutor()
+        await executor.execute_attack_from_seed_groups_async(
+            attack=attack,
+            seed_groups=[source],
+            seed_group_materializer=materializer,
+        )
+
+        materializer.assert_awaited_once_with(seed_group=source)
+        context = attack.execute_with_context_async.call_args.kwargs["context"]
+        assert context.params.next_message is not None
+        assert context.params.next_message.get_value() == "materialized prompt"
+
     async def test_passes_adversarial_chat_and_objective_scorer(self):
         """Test that adversarial_chat and objective_scorer are passed to from_seed_group_async."""
         attack = create_mock_attack()

@@ -3,11 +3,13 @@
 
 """Tests for the AttackTechnique class."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pyrit.executor.attack import AttackStrategy
-from pyrit.models import AttackTechniqueSeedGroup, ComponentIdentifier, SeedPrompt
+from pyrit.models import AttackSeedGroup, AttackTechniqueSeedGroup, ComponentIdentifier, SeedObjective, SeedPrompt
+from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.attack_technique import AttackTechnique
+from pyrit.score import TrueFalseScorer
 
 
 def _make_technique_seeds() -> AttackTechniqueSeedGroup:
@@ -59,6 +61,37 @@ class TestAttackTechniqueProperties:
         technique = AttackTechnique(attack=mock_attack, seed_technique=seed_technique)
 
         assert technique.seed_technique is technique.seed_technique
+
+    @patch(
+        "pyrit.executor.attack.multi_turn.simulated_conversation.materialize_simulated_conversation_async",
+        new_callable=AsyncMock,
+    )
+    async def test_materialize_seed_group_delegates_runtime_scaffolding(
+        self,
+        mock_materialize: AsyncMock,
+    ) -> None:
+        attack = MagicMock(spec=AttackStrategy)
+        technique = AttackTechnique(attack=attack)
+        seed_group = AttackSeedGroup(seeds=[SeedObjective(value="objective")])
+        materialized = AttackSeedGroup(
+            seeds=[SeedObjective(value="objective"), SeedPrompt(value="generated", role="user")]
+        )
+        adversarial_chat = MagicMock(spec=PromptTarget)
+        objective_scorer = MagicMock(spec=TrueFalseScorer)
+        mock_materialize.return_value = materialized
+
+        result = await technique.materialize_seed_group_async(
+            seed_group=seed_group,
+            adversarial_chat=adversarial_chat,
+            objective_scorer=objective_scorer,
+        )
+
+        assert result is materialized
+        mock_materialize.assert_awaited_once_with(
+            seed_group=seed_group,
+            adversarial_chat=adversarial_chat,
+            objective_scorer=objective_scorer,
+        )
 
 
 class TestAttackTechniqueIdentifier:

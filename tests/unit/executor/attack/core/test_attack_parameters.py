@@ -219,11 +219,12 @@ class TestFromSeedGroupAsyncWithSimulatedConversation:
         """Test that simulated conversation is generated when config is present."""
         mock_generate.return_value = mock_simulated_result
 
-        await AttackParameters.from_seed_group_async(
-            seed_group=seed_group_with_simulated_conv,
-            adversarial_chat=mock_adversarial_chat,
-            objective_scorer=mock_objective_scorer,
-        )
+        with pytest.deprecated_call(match="AttackTechnique.materialize_seed_group_async"):
+            await AttackParameters.from_seed_group_async(
+                seed_group=seed_group_with_simulated_conv,
+                adversarial_chat=mock_adversarial_chat,
+                objective_scorer=mock_objective_scorer,
+            )
 
         mock_generate.assert_called_once()
         call_kwargs = mock_generate.call_args.kwargs
@@ -231,6 +232,31 @@ class TestFromSeedGroupAsyncWithSimulatedConversation:
         assert call_kwargs["adversarial_chat"] == mock_adversarial_chat
         assert call_kwargs["objective_scorer"] == mock_objective_scorer
         assert call_kwargs["num_turns"] == 3
+
+    def test_custom_mapper_does_not_opt_in_to_pre_materialization(self) -> None:
+        """Overrides retain their existing seed contract unless they explicitly opt in."""
+
+        class CustomParameters(AttackParameters):
+            @classmethod
+            async def from_seed_group_async(
+                cls,
+                *,
+                seed_group: AttackSeedGroup,
+                **overrides: object,
+            ) -> "CustomParameters":
+                return await super().from_seed_group_async(seed_group=seed_group, **overrides)
+
+        class DerivedCustomParameters(CustomParameters):
+            pass
+
+        ExcludedParameters = AttackParameters.excluding("next_message")  # noqa: N806
+        CustomExcludedParameters = CustomParameters.excluding("next_message")  # noqa: N806
+
+        assert AttackParameters.supports_simulated_conversation_materialization()
+        assert not CustomParameters.supports_simulated_conversation_materialization()
+        assert not DerivedCustomParameters.supports_simulated_conversation_materialization()
+        assert ExcludedParameters.supports_simulated_conversation_materialization()
+        assert not CustomExcludedParameters.supports_simulated_conversation_materialization()
 
     @patch("pyrit.executor.attack.multi_turn.simulated_conversation.generate_simulated_conversation_async")
     async def test_uses_generated_prepended_messages(
