@@ -7,9 +7,11 @@ import logging
 import re
 import uuid
 import weakref
-from collections.abc import Iterator, MutableSequence, Sequence
+from collections.abc import Iterator, Mapping, MutableSequence, Sequence
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, TypeVar
 
 from sqlalchemy import MetaData, and_, func, not_, or_, select
@@ -115,6 +117,50 @@ class AttackResultsKeysetCursor(NamedTuple):
             timestamp=result.timestamp,
             attack_result_id=result.attack_result_id,
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MessagePieceQuery:
+    """
+    Immutable filters for a message-piece query.
+
+    Sequence and mapping inputs are defensively copied into immutable containers so a
+    query cannot change while its database conditions are being assembled or executed.
+    """
+
+    _SEQUENCE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "prompt_ids",
+        "original_values",
+        "converted_values",
+        "converted_value_sha256",
+        "identifier_filters",
+    )
+
+    role: str | None = None
+    conversation_id: str | uuid.UUID | None = None
+    prompt_ids: Sequence[str | uuid.UUID] | None = None
+    labels: Mapping[str, str] | None = None
+    prompt_metadata: Mapping[str, str | int] | None = None
+    sent_after: datetime | None = None
+    sent_before: datetime | None = None
+    original_values: Sequence[str] | None = None
+    converted_values: Sequence[str] | None = None
+    data_type: str | None = None
+    not_data_type: str | None = None
+    converted_value_sha256: Sequence[str] | None = None
+    identifier_filters: Sequence[IdentifierFilter] | None = None
+
+    def __post_init__(self) -> None:
+        """Snapshot mutable sequence and mapping inputs."""
+        for field_name in self._SEQUENCE_FIELDS:
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, tuple(value))
+
+        for field_name in ("labels", "prompt_metadata"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, MappingProxyType(dict(value)))
 
 
 class MemoryInterface(abc.ABC):
@@ -1827,56 +1873,123 @@ class MemoryInterface(abc.ABC):
             Exception: If there is an error retrieving the prompts,
                 an exception is logged and an empty list is returned.
         """
-        if prompt_ids is not None and len(prompt_ids) == 0:
+        query = MessagePieceQuery(
+            role=role,
+            conversation_id=conversation_id,
+            prompt_ids=prompt_ids,
+            labels=labels,
+            prompt_metadata=prompt_metadata,
+            sent_after=sent_after,
+            sent_before=sent_before,
+            original_values=original_values,
+            converted_values=converted_values,
+            data_type=data_type,
+            not_data_type=not_data_type,
+            converted_value_sha256=converted_value_sha256,
+            identifier_filters=identifier_filters,
+        )
+        return self.query_message_pieces(query=query)
+
+    def query_message_pieces(self, *, query: MessagePieceQuery) -> Sequence[MessagePiece]:
+        """
+        Retrieve message pieces matching an immutable query.
+
+        Args:
+            query (MessagePieceQuery): Filters to apply.
+
+        Returns:
+            Sequence[MessagePiece]: Message pieces matching the query.
+        """
+        if self._message_piece_query_has_empty_lookup(query=query):
             return []
 
         try:
-            conditions: list[Any] = []
-            if role:
-                conditions.append(PromptMemoryEntry.role == role)
-            if conversation_id:
-                conditions.append(PromptMemoryEntry.conversation_id == str(conversation_id))
-            if labels:
-                conditions.extend(self._get_message_pieces_memory_label_conditions(memory_labels=labels))
-            if prompt_metadata:
-                conditions.extend(self._get_message_pieces_prompt_metadata_conditions(prompt_metadata=prompt_metadata))
-            if sent_after:
-                conditions.append(PromptMemoryEntry.timestamp >= sent_after)
-            if sent_before:
-                conditions.append(PromptMemoryEntry.timestamp <= sent_before)
-            if data_type:
-                conditions.append(PromptMemoryEntry.converted_value_data_type == data_type)
-            if not_data_type:
-                conditions.append(PromptMemoryEntry.converted_value_data_type != not_data_type)
-            if identifier_filters:
-                conditions.extend(
-                    self._build_message_piece_identifier_conditions(identifier_filters=identifier_filters)
-                )
-
-            # Identify list parameters that may need batching
-            list_params: list[tuple[InstrumentedAttribute[Any], Sequence[Any], str]] = []
-            if prompt_ids:
-                list_params.append((PromptMemoryEntry.id, [str(pi) for pi in prompt_ids], "id"))
-            if original_values:
-                list_params.append((PromptMemoryEntry.original_value, list(original_values), "original_value"))
-            if converted_values:
-                list_params.append((PromptMemoryEntry.converted_value, list(converted_values), "converted_value"))
-            if converted_value_sha256:
-                list_params.append(
-                    (PromptMemoryEntry.converted_value_sha256, list(converted_value_sha256), "converted_value_sha256")
-                )
-
-            memory_entries = self._query_with_list_params(
+            entries = self._query_with_list_params(
                 PromptMemoryEntry,
-                conditions=conditions,
-                list_params=list_params,
+                conditions=self._build_message_piece_conditions(query=query),
+                list_params=self._build_message_piece_list_params(query=query),
                 join_scores=True,
             )
-            message_pieces = [memory_entry.get_message_piece() for memory_entry in memory_entries]
-            return sort_message_pieces(message_pieces=message_pieces)
+            pieces = [entry.get_message_piece() for entry in entries]
+            return sort_message_pieces(message_pieces=pieces)
         except Exception as e:
             logger.exception(f"Failed to retrieve prompts with error {e}")
             raise
+
+    @staticmethod
+    def _message_piece_query_has_empty_lookup(*, query: MessagePieceQuery) -> bool:
+        """Return whether an explicitly empty prompt ID lookup must produce no results."""
+        return query.prompt_ids is not None and len(query.prompt_ids) == 0
+
+    def _build_message_piece_conditions(self, *, query: MessagePieceQuery) -> list[Any]:
+        """
+        Build backend-neutral and backend-specific conditions for a message-piece query.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions for the query.
+        """
+        conditions = self._build_message_piece_scalar_conditions(query=query)
+        if query.labels:
+            conditions.extend(self._get_message_pieces_memory_label_conditions(memory_labels=dict(query.labels)))
+        if query.prompt_metadata:
+            conditions.extend(
+                self._get_message_pieces_prompt_metadata_conditions(prompt_metadata=dict(query.prompt_metadata))
+            )
+        if query.identifier_filters:
+            conditions.extend(
+                self._build_message_piece_identifier_conditions(identifier_filters=query.identifier_filters)
+            )
+        return conditions
+
+    @staticmethod
+    def _build_message_piece_scalar_conditions(*, query: MessagePieceQuery) -> list[Any]:
+        """
+        Build conditions for scalar message-piece columns.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions for populated scalar filters.
+        """
+        conditions: list[Any] = []
+        if query.role:
+            conditions.append(PromptMemoryEntry.role == query.role)
+        if query.conversation_id:
+            conditions.append(PromptMemoryEntry.conversation_id == str(query.conversation_id))
+        if query.sent_after:
+            conditions.append(PromptMemoryEntry.timestamp >= query.sent_after)
+        if query.sent_before:
+            conditions.append(PromptMemoryEntry.timestamp <= query.sent_before)
+        if query.data_type:
+            conditions.append(PromptMemoryEntry.converted_value_data_type == query.data_type)
+        if query.not_data_type:
+            conditions.append(PromptMemoryEntry.converted_value_data_type != query.not_data_type)
+        return conditions
+
+    @staticmethod
+    def _build_message_piece_list_params(
+        *, query: MessagePieceQuery
+    ) -> list[tuple[InstrumentedAttribute[Any], Sequence[Any], str]]:
+        """
+        Build list filters while preserving the existing batching attributes.
+
+        Returns:
+            list[tuple[InstrumentedAttribute[Any], Sequence[Any], str]]: List filters for query execution.
+        """
+        list_params: list[tuple[InstrumentedAttribute[Any], Sequence[Any], str]] = []
+        if query.prompt_ids:
+            list_params.append((PromptMemoryEntry.id, [str(prompt_id) for prompt_id in query.prompt_ids], "id"))
+        if query.original_values:
+            list_params.append((PromptMemoryEntry.original_value, list(query.original_values), "original_value"))
+        if query.converted_values:
+            list_params.append((PromptMemoryEntry.converted_value, list(query.converted_values), "converted_value"))
+        if query.converted_value_sha256:
+            list_params.append(
+                (
+                    PromptMemoryEntry.converted_value_sha256,
+                    list(query.converted_value_sha256),
+                    "converted_value_sha256",
+                )
+            )
+        return list_params
 
     def duplicate_messages(self, *, messages: Sequence[Message]) -> tuple[str, Sequence[MessagePiece]]:
         """

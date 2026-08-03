@@ -4,7 +4,9 @@
 
 import uuid
 from collections.abc import MutableSequence, Sequence
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -12,7 +14,7 @@ import pytest
 from unit.mocks import get_mock_target
 
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.memory import MemoryInterface, PromptMemoryEntry
+from pyrit.memory import MemoryInterface, MessagePieceQuery, PromptMemoryEntry
 from pyrit.memory.memory_models import (
     ConverterIdentifierEntry,
     PromptConverterIdentifierEntry,
@@ -178,6 +180,162 @@ def test_get_message_pieces_empty_prompt_ids_returns_empty(sqlite_instance: Memo
     sqlite_instance.add_message_pieces_to_memory(message_pieces=[piece])
 
     assert sqlite_instance.get_message_pieces(prompt_ids=[]) == []
+
+
+def test_message_piece_query_snapshots_mutable_inputs():
+    prompt_ids: list[str] = ["prompt-1"]
+    original_values = ["original"]
+    converted_values = ["converted"]
+    hashes = ["hash"]
+    labels = {"operation": "op-1"}
+    prompt_metadata: dict[str, str | int] = {"attempt": 1}
+    identifier_filters = [
+        IdentifierFilter(
+            identifier_type=IdentifierType.CONVERTER,
+            property_path="$.hash",
+            value="converter-hash",
+        )
+    ]
+
+    query = MessagePieceQuery(
+        prompt_ids=prompt_ids,
+        original_values=original_values,
+        converted_values=converted_values,
+        converted_value_sha256=hashes,
+        labels=labels,
+        prompt_metadata=prompt_metadata,
+        identifier_filters=identifier_filters,
+    )
+    prompt_ids.append("prompt-2")
+    original_values.append("other-original")
+    converted_values.append("other-converted")
+    hashes.append("other-hash")
+    labels["operation"] = "op-2"
+    prompt_metadata["attempt"] = 2
+    identifier_filters.clear()
+
+    assert query.prompt_ids == ("prompt-1",)
+    assert query.original_values == ("original",)
+    assert query.converted_values == ("converted",)
+    assert query.converted_value_sha256 == ("hash",)
+    assert query.labels == {"operation": "op-1"}
+    assert query.prompt_metadata == {"attempt": 1}
+    assert len(query.identifier_filters or ()) == 1
+    assert isinstance(query.labels, MappingProxyType)
+    assert isinstance(query.prompt_metadata, MappingProxyType)
+    with pytest.raises(FrozenInstanceError):
+        query.role = "assistant"
+
+
+def test_get_message_pieces_forwards_complete_query(sqlite_instance: MemoryInterface):
+    conversation_id = uuid4()
+    prompt_id = uuid4()
+    sent_after = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    sent_before = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    identifier_filter = IdentifierFilter(
+        identifier_type=IdentifierType.CONVERTER,
+        property_path="$.hash",
+        value="converter-hash",
+    )
+
+    with patch.object(sqlite_instance, "query_message_pieces", return_value=[]) as query_mock:
+        result = sqlite_instance.get_message_pieces(
+            role="assistant",
+            conversation_id=conversation_id,
+            prompt_ids=[prompt_id],
+            labels={"operation": "op-1"},
+            prompt_metadata={"attempt": 1},
+            sent_after=sent_after,
+            sent_before=sent_before,
+            original_values=["original"],
+            converted_values=["converted"],
+            data_type="text",
+            not_data_type="error",
+            converted_value_sha256=["hash"],
+            identifier_filters=[identifier_filter],
+        )
+
+    assert result == []
+    forwarded = query_mock.call_args.kwargs["query"]
+    assert forwarded == MessagePieceQuery(
+        role="assistant",
+        conversation_id=conversation_id,
+        prompt_ids=[prompt_id],
+        labels={"operation": "op-1"},
+        prompt_metadata={"attempt": 1},
+        sent_after=sent_after,
+        sent_before=sent_before,
+        original_values=["original"],
+        converted_values=["converted"],
+        data_type="text",
+        not_data_type="error",
+        converted_value_sha256=["hash"],
+        identifier_filters=[identifier_filter],
+    )
+
+
+def test_query_message_pieces_matches_wrapper(sqlite_instance: MemoryInterface):
+    conversation_id = str(uuid4())
+    pieces = [
+        MessagePiece(
+            conversation_id=conversation_id,
+            role="user",
+            original_value="matching",
+            converted_value="converted matching",
+            converted_value_data_type="text",
+            prompt_metadata={"attempt": 1},
+        ),
+        MessagePiece(
+            conversation_id=conversation_id,
+            role="assistant",
+            original_value="not matching",
+            converted_value="converted not matching",
+            converted_value_data_type="text",
+            prompt_metadata={"attempt": 2},
+        ),
+    ]
+    sqlite_instance.add_message_pieces_to_memory(message_pieces=pieces)
+
+    query = MessagePieceQuery(
+        role="user",
+        conversation_id=conversation_id,
+        original_values=["matching"],
+        data_type="text",
+        prompt_metadata={"attempt": 1},
+    )
+    direct = sqlite_instance.query_message_pieces(query=query)
+    wrapped = sqlite_instance.get_message_pieces(
+        role="user",
+        conversation_id=conversation_id,
+        original_values=["matching"],
+        data_type="text",
+        prompt_metadata={"attempt": 1},
+    )
+
+    assert [piece.id for piece in direct] == [piece.id for piece in wrapped]
+
+
+def test_query_message_pieces_preserves_empty_filter_interactions(sqlite_instance: MemoryInterface):
+    piece = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="stored",
+        converted_value="stored",
+    )
+    sqlite_instance.add_message_pieces_to_memory(message_pieces=[piece])
+
+    assert sqlite_instance.query_message_pieces(query=MessagePieceQuery(prompt_ids=[], role="user")) == []
+    results = sqlite_instance.query_message_pieces(
+        query=MessagePieceQuery(
+            labels={},
+            prompt_metadata={},
+            original_values=[],
+            converted_values=[],
+            converted_value_sha256=[],
+            identifier_filters=[],
+        )
+    )
+    assert [result.id for result in results] == [piece.id]
 
 
 def test_duplicate_memory(sqlite_instance: MemoryInterface):

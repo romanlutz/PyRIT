@@ -12,7 +12,7 @@ from sqlalchemy import inspect, text
 
 from pyrit.common.singleton import Singleton
 from pyrit.converter.base64_converter import Base64Converter
-from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, PromptMemoryEntry
+from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, MessagePieceQuery, PromptMemoryEntry
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import Conversation, MessagePiece
 from pyrit.prompt_target.text_target import TextTarget
@@ -194,6 +194,32 @@ def test_get_all_memory(
     # Fetch all entries
     all_entries = memory_interface.get_message_pieces()
     assert len(all_entries) == 3
+
+
+def test_query_message_pieces_uses_azure_backend_hooks(uninitialized_memory_interface: AzureSQLMemory):
+    query = MessagePieceQuery(
+        labels={"operation": "test_op"},
+        prompt_metadata={"attempt": 1},
+    )
+
+    with (
+        patch.object(
+            uninitialized_memory_interface,
+            "_get_message_pieces_memory_label_conditions",
+            wraps=uninitialized_memory_interface._get_message_pieces_memory_label_conditions,
+        ) as labels_mock,
+        patch.object(
+            uninitialized_memory_interface,
+            "_get_message_pieces_prompt_metadata_conditions",
+            wraps=uninitialized_memory_interface._get_message_pieces_prompt_metadata_conditions,
+        ) as metadata_mock,
+        patch.object(uninitialized_memory_interface, "_query_with_list_params", return_value=[]),
+    ):
+        results = uninitialized_memory_interface.query_message_pieces(query=query)
+
+    assert results == []
+    assert labels_mock.call_args.kwargs == {"memory_labels": {"operation": "test_op"}}
+    assert metadata_mock.call_args.kwargs == {"prompt_metadata": {"attempt": 1}}
 
 
 def test_get_memories_with_json_properties(memory_interface: AzureSQLMemory):
