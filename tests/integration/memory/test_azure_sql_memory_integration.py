@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 from sqlalchemy.exc import SQLAlchemyError
 
-from pyrit.memory import AzureSQLMemory
+from pyrit.memory import AzureSQLMemory, SeedQuery
 from pyrit.memory.memory_models import (
     AttackResultEntry,
     PromptMemoryEntry,
@@ -264,6 +264,11 @@ async def test_get_seeds_with_metadata_filter(azuresql_instance: AzureSQLMemory)
     result2 = azuresql_instance.get_seeds(metadata={"key1": value2, "key2": value1}, added_by=test_id)
     assert len(result2) == 1
     assert result2[0].metadata == {"key1": value2, "key2": value1}
+
+    direct_result = azuresql_instance.query_seeds(
+        query=SeedQuery(metadata={"key1": value2, "key2": value1}, added_by=test_id)
+    )
+    assert [seed.id for seed in direct_result] == [sp2.id]
 
     # Clean up using public API
     with closing(azuresql_instance.get_session()) as session:

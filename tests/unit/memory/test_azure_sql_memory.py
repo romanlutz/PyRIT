@@ -12,7 +12,7 @@ from sqlalchemy import inspect, text
 
 from pyrit.common.singleton import Singleton
 from pyrit.converter.base64_converter import Base64Converter
-from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, PromptMemoryEntry
+from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, PromptMemoryEntry, SeedQuery
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import Conversation, MessagePiece
 from pyrit.prompt_target.text_target import TextTarget
@@ -30,6 +30,21 @@ def memory_interface() -> Generator[AzureSQLMemory, None, None]:
 @pytest.fixture
 def uninitialized_memory_interface() -> AzureSQLMemory:
     return object.__new__(AzureSQLMemory)
+
+
+def test_query_seeds_uses_azure_metadata_hook(uninitialized_memory_interface: AzureSQLMemory) -> None:
+    with (
+        patch.object(
+            uninitialized_memory_interface,
+            "_get_seed_metadata_conditions",
+            wraps=uninitialized_memory_interface._get_seed_metadata_conditions,
+        ) as metadata_hook,
+        patch.object(uninitialized_memory_interface, "_query_entries", return_value=[]),
+    ):
+        result = uninitialized_memory_interface.query_seeds(query=SeedQuery(metadata={"key": 1}))
+
+    assert result == []
+    metadata_hook.assert_called_once_with(metadata={"key": 1})
 
 
 @pytest.fixture

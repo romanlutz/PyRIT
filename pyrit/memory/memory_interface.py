@@ -7,9 +7,11 @@ import logging
 import re
 import uuid
 import weakref
-from collections.abc import Iterator, MutableSequence, Sequence
+from collections.abc import Iterator, Mapping, MutableSequence, Sequence
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, TypeVar
 
 from sqlalchemy import MetaData, and_, func, not_, or_, select
@@ -115,6 +117,51 @@ class AttackResultsKeysetCursor(NamedTuple):
             timestamp=result.timestamp,
             attack_result_id=result.attack_result_id,
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SeedQuery:
+    """
+    Immutable filters for a seed query.
+
+    Sequence and mapping inputs are defensively copied into immutable containers so a
+    query cannot change while its database conditions are being assembled or executed.
+    """
+
+    _SEQUENCE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "value_sha256",
+        "data_types",
+        "harm_categories",
+        "authors",
+        "groups",
+        "parameters",
+        "prompt_group_ids",
+    )
+
+    value: str | None = None
+    value_sha256: Sequence[str] | None = None
+    dataset_name: str | None = None
+    dataset_name_pattern: str | None = None
+    data_types: Sequence[str] | None = None
+    harm_categories: Sequence[str] | None = None
+    added_by: str | None = None
+    authors: Sequence[str] | None = None
+    groups: Sequence[str] | None = None
+    source: str | None = None
+    seed_type: SeedType | None = None
+    parameters: Sequence[str] | None = None
+    metadata: Mapping[str, str | int] | None = None
+    prompt_group_ids: Sequence[uuid.UUID] | None = None
+
+    def __post_init__(self) -> None:
+        """Snapshot mutable sequence and mapping inputs."""
+        for field_name in self._SEQUENCE_FIELDS:
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, tuple(value))
+
+        if self.metadata is not None:
+            object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 class MemoryInterface(abc.ABC):
@@ -2192,43 +2239,44 @@ class MemoryInterface(abc.ABC):
         Returns:
             Sequence[SeedPrompt]: A list of prompts matching the criteria.
         """
-        conditions = []
+        query = SeedQuery(
+            value=value,
+            value_sha256=value_sha256,
+            dataset_name=dataset_name,
+            dataset_name_pattern=dataset_name_pattern,
+            data_types=data_types,
+            harm_categories=harm_categories,
+            added_by=added_by,
+            authors=authors,
+            groups=groups,
+            source=source,
+            seed_type=seed_type,
+            parameters=parameters,
+            metadata=metadata,
+            prompt_group_ids=prompt_group_ids,
+        )
+        return MemoryInterface._execute_seed_query(self, query=query)
 
-        # Apply filters for non-list fields
-        if value:
-            conditions.append(SeedEntry.value.contains(value))
-        if value_sha256:
-            conditions.append(SeedEntry.value_sha256.in_(value_sha256))
-        if dataset_name:
-            conditions.append(SeedEntry.dataset_name == dataset_name)
-        elif dataset_name_pattern:
-            conditions.append(SeedEntry.dataset_name.like(dataset_name_pattern))
-        if prompt_group_ids:
-            conditions.append(SeedEntry.prompt_group_id.in_(prompt_group_ids))
-        if data_types:
-            data_type_conditions = SeedEntry.data_type.in_(data_types)
-            conditions.append(data_type_conditions)
-        if added_by:
-            conditions.append(SeedEntry.added_by == added_by)
-        if source:
-            conditions.append(SeedEntry.source == source)
+    def query_seeds(self, *, query: SeedQuery) -> Sequence[Seed]:
+        """
+        Retrieve seeds matching an immutable query.
 
-        # Handle seed_type filtering
-        if seed_type == "objective":
-            conditions.append(SeedEntry.seed_type == "objective")
-        elif seed_type is not None:
-            conditions.append(SeedEntry.seed_type == seed_type)
+        Args:
+            query (SeedQuery): Filters to apply.
 
-        self._add_list_conditions(field=SeedEntry.harm_categories, values=harm_categories, conditions=conditions)
-        self._add_list_conditions(field=SeedEntry.authors, values=authors, conditions=conditions)
-        self._add_list_conditions(field=SeedEntry.groups, values=groups, conditions=conditions)
+        Returns:
+            Sequence[Seed]: Seeds matching the query.
+        """
+        return MemoryInterface._execute_seed_query(self, query=query)
 
-        if parameters:
-            self._add_list_conditions(field=SeedEntry.parameters, values=parameters, conditions=conditions)
+    def _execute_seed_query(self, *, query: SeedQuery) -> Sequence[Seed]:
+        """
+        Execute a seed query through the existing backend extension points.
 
-        if metadata:
-            conditions.append(self._get_seed_metadata_conditions(metadata=metadata))
-
+        Returns:
+            Sequence[Seed]: Seeds matching the query.
+        """
+        conditions = MemoryInterface._build_seed_conditions(self, query=query)
         try:
             memory_entries: Sequence[SeedEntry] = self._query_entries(
                 SeedEntry,
@@ -2236,8 +2284,65 @@ class MemoryInterface(abc.ABC):
             )
             return [memory_entry.get_seed() for memory_entry in memory_entries]
         except Exception as e:
-            logger.exception(f"Failed to retrieve prompts with dataset name {dataset_name} with error {e}")
+            logger.exception(f"Failed to retrieve prompts with dataset name {query.dataset_name} with error {e}")
             raise
+
+    def _build_seed_conditions(self, *, query: SeedQuery) -> list[Any]:
+        """
+        Build scalar, substring-list, and backend-specific metadata conditions.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions for populated filters.
+        """
+        conditions = MemoryInterface._build_seed_scalar_conditions(query=query)
+        conditions.extend(MemoryInterface._build_seed_exact_list_conditions(query=query))
+        self._add_list_conditions(field=SeedEntry.harm_categories, values=query.harm_categories, conditions=conditions)
+        self._add_list_conditions(field=SeedEntry.authors, values=query.authors, conditions=conditions)
+        self._add_list_conditions(field=SeedEntry.groups, values=query.groups, conditions=conditions)
+        self._add_list_conditions(field=SeedEntry.parameters, values=query.parameters, conditions=conditions)
+        if query.metadata:
+            conditions.append(self._get_seed_metadata_conditions(metadata=dict(query.metadata)))
+        return conditions
+
+    @staticmethod
+    def _build_seed_scalar_conditions(*, query: SeedQuery) -> list[Any]:
+        """
+        Build conditions for scalar seed columns.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions for populated scalar filters.
+        """
+        conditions: list[Any] = []
+        if query.value:
+            conditions.append(SeedEntry.value.contains(query.value))
+        if query.dataset_name:
+            conditions.append(SeedEntry.dataset_name == query.dataset_name)
+        elif query.dataset_name_pattern:
+            conditions.append(SeedEntry.dataset_name.like(query.dataset_name_pattern))
+        if query.added_by:
+            conditions.append(SeedEntry.added_by == query.added_by)
+        if query.source:
+            conditions.append(SeedEntry.source == query.source)
+        if query.seed_type is not None:
+            conditions.append(SeedEntry.seed_type == query.seed_type)
+        return conditions
+
+    @staticmethod
+    def _build_seed_exact_list_conditions(*, query: SeedQuery) -> list[Any]:
+        """
+        Build conditions for exact-match sequence filters.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions for populated exact-match sequence filters.
+        """
+        conditions: list[Any] = []
+        if query.value_sha256:
+            conditions.append(SeedEntry.value_sha256.in_(query.value_sha256))
+        if query.prompt_group_ids:
+            conditions.append(SeedEntry.prompt_group_id.in_(query.prompt_group_ids))
+        if query.data_types:
+            conditions.append(SeedEntry.data_type.in_(query.data_types))
+        return conditions
 
     def _add_list_conditions(
         self, field: InstrumentedAttribute[Any], conditions: list[Any], values: Sequence[str] | None = None

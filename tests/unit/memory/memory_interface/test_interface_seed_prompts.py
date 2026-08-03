@@ -4,13 +4,15 @@
 import os
 import tempfile
 from collections.abc import Sequence
+from dataclasses import FrozenInstanceError
+from inspect import Parameter, signature
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from pyrit.memory import MemoryInterface
+from pyrit.memory import MemoryInterface, SeedQuery
 from pyrit.models import MessagePiece, SeedDataset, SeedGroup, SeedObjective, SeedPrompt
 
 
@@ -19,6 +21,156 @@ def assert_original_value_in_list(original_value: str, message_pieces: Sequence[
         if piece.original_value == original_value:
             return True
     raise AssertionError(f"Original value {original_value} not found in list")
+
+
+def test_seed_query_is_keyword_only_and_snapshots_mutable_inputs() -> None:
+    hashes = ["hash-1"]
+    metadata = {"key": "value"}
+    query = SeedQuery(value_sha256=hashes, metadata=metadata)
+
+    hashes.append("hash-2")
+    metadata["key"] = "changed"
+
+    assert signature(SeedQuery).parameters["value"].kind is Parameter.KEYWORD_ONLY
+    assert query.value_sha256 == ("hash-1",)
+    assert query.metadata == {"key": "value"}
+    with pytest.raises(FrozenInstanceError):
+        query.value = "changed"
+
+
+def test_get_seeds_forwards_complete_immutable_query(sqlite_instance: MemoryInterface) -> None:
+    prompt_group_id = uuid4()
+    with patch.object(MemoryInterface, "_execute_seed_query", return_value=[]) as execute_seed_query:
+        result = sqlite_instance.get_seeds(
+            value="value",
+            value_sha256=["hash"],
+            dataset_name="dataset",
+            dataset_name_pattern="data%",
+            data_types=["text"],
+            harm_categories=["harm"],
+            added_by="user",
+            authors=["author"],
+            groups=["group"],
+            source="source",
+            seed_type="objective",
+            parameters=["parameter"],
+            metadata={"key": 1},
+            prompt_group_ids=[prompt_group_id],
+        )
+
+    assert result == []
+    execute_seed_query.assert_called_once()
+    assert execute_seed_query.call_args.args == (sqlite_instance,)
+    assert execute_seed_query.call_args.kwargs["query"] == SeedQuery(
+        value="value",
+        value_sha256=["hash"],
+        dataset_name="dataset",
+        dataset_name_pattern="data%",
+        data_types=["text"],
+        harm_categories=["harm"],
+        added_by="user",
+        authors=["author"],
+        groups=["group"],
+        source="source",
+        seed_type="objective",
+        parameters=["parameter"],
+        metadata={"key": 1},
+        prompt_group_ids=[prompt_group_id],
+    )
+
+
+def test_get_seeds_ignores_subclass_query_seeds_name_collision(sqlite_instance: MemoryInterface) -> None:
+    with patch.object(sqlite_instance, "query_seeds", side_effect=TypeError("legacy signature")):
+        assert sqlite_instance.get_seeds() == []
+
+
+async def test_query_seeds_matches_get_seeds(sqlite_instance: MemoryInterface) -> None:
+    seeds = [
+        SeedObjective(
+            value="matching objective",
+            dataset_name="dataset",
+            harm_categories=["harm"],
+            authors=["author"],
+            groups=["group"],
+            source="source",
+            metadata={"key": 1},
+        ),
+        SeedPrompt(value="other prompt", dataset_name="other", data_type="text"),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="user")
+
+    query = SeedQuery(
+        value="matching",
+        dataset_name="dataset",
+        harm_categories=["harm"],
+        added_by="user",
+        authors=["author"],
+        groups=["group"],
+        source="source",
+        seed_type="objective",
+        metadata={"key": 1},
+    )
+    direct_result = sqlite_instance.query_seeds(query=query)
+    wrapper_result = sqlite_instance.get_seeds(
+        value="matching",
+        dataset_name="dataset",
+        harm_categories=["harm"],
+        added_by="user",
+        authors=["author"],
+        groups=["group"],
+        source="source",
+        seed_type="objective",
+        metadata={"key": 1},
+    )
+
+    assert direct_result == wrapper_result
+
+
+async def test_query_seeds_preserves_empty_filters_and_exact_name_precedence(
+    sqlite_instance: MemoryInterface,
+) -> None:
+    seeds = [
+        SeedPrompt(value="exact", dataset_name="dataset_exact", data_type="text"),
+        SeedPrompt(value="pattern", dataset_name="dataset_pattern", data_type="text"),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="user")
+
+    all_results = sqlite_instance.query_seeds(
+        query=SeedQuery(
+            value_sha256=[],
+            data_types=[],
+            harm_categories=[],
+            authors=[],
+            groups=[],
+            parameters=[],
+            metadata={},
+            prompt_group_ids=[],
+        )
+    )
+    exact_result = sqlite_instance.query_seeds(
+        query=SeedQuery(dataset_name="dataset_exact", dataset_name_pattern="dataset_%")
+    )
+
+    assert {seed.value for seed in all_results} == {"exact", "pattern"}
+    assert [seed.value for seed in exact_result] == ["exact"]
+
+
+async def test_query_seeds_preserves_single_query_order_for_large_hash_filters(
+    sqlite_instance: MemoryInterface,
+) -> None:
+    seeds = [
+        SeedPrompt(value="first", data_type="text"),
+        SeedPrompt(value="second", data_type="text"),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="user")
+    hashes = [f"{index:064x}" for index in range(sqlite_instance._MAX_BIND_VARS)]
+    hashes.extend(seed.value_sha256 for seed in reversed(seeds) if seed.value_sha256)
+
+    with patch.object(sqlite_instance, "_query_entries", wraps=sqlite_instance._query_entries) as query_entries:
+        results = sqlite_instance.query_seeds(query=SeedQuery(value_sha256=hashes))
+
+    assert query_entries.call_count == 1
+    assert [seed.value for seed in results] == ["first", "second"]
 
 
 async def test_get_seeds_with_audio(sqlite_instance: MemoryInterface):
