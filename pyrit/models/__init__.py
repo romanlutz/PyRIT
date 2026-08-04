@@ -116,6 +116,8 @@ from pyrit.models.target import (
     TargetCapabilities,
     TokenUsage,
     get_common_json_schema,
+    read_usage_int,
+    read_usage_value,
     register_common_json_schema,
     unregister_common_json_schema,
 )
@@ -221,6 +223,8 @@ __all__ = [
     "TokenUsage",
     "ToolCall",
     "UnvalidatedScore",
+    "read_usage_int",
+    "read_usage_value",
     "validate_registry_name",
     "RetryEvent",
 ]

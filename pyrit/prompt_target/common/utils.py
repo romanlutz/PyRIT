@@ -2,11 +2,14 @@
 # Licensed under the MIT license.
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from pyrit.exceptions import PyritException
 from pyrit.models import Message, MessagePiece, construct_response_from_request
+
+logger = logging.getLogger(__name__)
 
 
 def validate_temperature(temperature: float | None) -> None:
@@ -81,4 +84,24 @@ def build_empty_truncated_response(*, request: MessagePiece) -> Message:
         response_text_pieces=[""],
         response_type="text",
         error="empty",
+    )
+
+
+def warn_truncated_response(*, signal: str, limit_parameter: str) -> None:
+    """
+    Log the shared warning for a response cut off at the output-token limit.
+
+    Every API shape signals truncation differently but the advice is identical, so the wording
+    lives here to keep targets from drifting apart.
+
+    Args:
+        signal (str): How the API reported the truncation, quoted into the message (for example
+            ``"finish_reason='length'"``).
+        limit_parameter (str): The request parameter to raise (for example ``"max_output_tokens"``).
+    """
+    logger.warning(
+        f"The response was truncated because it reached the token limit ({signal}). Reasoning models "
+        f"consume tokens on hidden reasoning in addition to the visible answer, so a low "
+        f"{limit_parameter} can truncate or empty the response. Increase {limit_parameter} if you "
+        "expected complete content."
     )

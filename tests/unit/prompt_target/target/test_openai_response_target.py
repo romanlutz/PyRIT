@@ -1330,7 +1330,7 @@ async def test_construct_message_truncated_keeps_reasoning_and_empty_text(
     assert len(text_pieces) == 1
     assert text_pieces[0].original_value == ""
     assert text_pieces[0].response_error == "empty"
-    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+    assert result.message_pieces[0].is_truncated is True
 
 
 async def test_construct_message_truncated_keeps_partial_text(
@@ -1345,7 +1345,7 @@ async def test_construct_message_truncated_keeps_partial_text(
     assert len(text_pieces) == 1
     assert text_pieces[0].original_value == "Partial answer"
     assert text_pieces[0].response_error == "none"
-    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+    assert result.message_pieces[0].is_truncated is True
 
 
 async def test_construct_message_truncated_records_metadata_on_primary_piece_not_reasoning(
@@ -1359,10 +1359,10 @@ async def test_construct_message_truncated_records_metadata_on_primary_piece_not
 
     primary = result.message_pieces[0]
     assert primary.converted_value_data_type == "text"
-    assert primary.prompt_metadata["truncated"] is True
+    assert primary.is_truncated is True
     assert primary.prompt_metadata["token_usage_reasoning_tokens"] == 7
     assert result.message_pieces[-1].converted_value_data_type == "reasoning"
-    assert "truncated" not in result.message_pieces[-1].prompt_metadata
+    assert result.message_pieces[-1].is_truncated is False
 
 
 async def test_construct_message_truncated_tolerates_empty_typed_content(
@@ -1393,7 +1393,7 @@ async def test_construct_message_truncated_keeps_structured_refusal(
 
     assert len(result.message_pieces) == 1
     assert result.message_pieces[0].structured_refusal == refusal
-    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+    assert result.message_pieces[0].is_truncated is True
 
 
 async def test_construct_message_truncated_empty_output_returns_graceful_empty(
@@ -1407,7 +1407,7 @@ async def test_construct_message_truncated_empty_output_returns_graceful_empty(
     assert len(result.message_pieces) == 1
     assert result.message_pieces[0].original_value == ""
     assert result.message_pieces[0].response_error == "empty"
-    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+    assert result.message_pieces[0].is_truncated is True
 
 
 async def test_construct_message_truncated_none_output_returns_graceful_empty(
@@ -1421,7 +1421,7 @@ async def test_construct_message_truncated_none_output_returns_graceful_empty(
     assert len(result.message_pieces) == 1
     assert result.message_pieces[0].original_value == ""
     assert result.message_pieces[0].response_error == "empty"
-    assert result.message_pieces[0].prompt_metadata["truncated"] is True
+    assert result.message_pieces[0].is_truncated is True
 
 
 async def test_construct_message_truncated_skips_partial_tool_call(
@@ -1463,7 +1463,7 @@ async def test_construct_message_from_response(target: OpenAIResponseTarget, dum
 
         assert isinstance(result, Message)
         assert len(result.message_pieces) == 1
-        assert "truncated" not in result.message_pieces[0].prompt_metadata
+        assert result.message_pieces[0].is_truncated is False
         mock_parse.assert_called_once()
 
 
@@ -1511,6 +1511,15 @@ def test_token_usage_from_responses_ignores_missing_and_non_int():
     assert result.extra == {}
 
 
+def test_token_usage_from_responses_derives_total_when_omitted():
+    """A provider that reports only input/output counts still gets a total, as in Chat Completions."""
+    usage = SimpleNamespace(input_tokens=5, output_tokens=6, input_tokens_details=None, output_tokens_details=None)
+
+    result = token_usage_from_responses(usage)
+
+    assert result.total_tokens == 11
+
+
 async def test_construct_message_captures_token_usage(
     target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece
 ):
@@ -1540,11 +1549,11 @@ async def test_construct_message_truncated_captures_token_usage(
 
     result = await target._construct_message_from_response_async(response, dummy_text_message_piece)
 
-    metadata = result.message_pieces[0].prompt_metadata
-    assert metadata["truncated"] is True
-    assert metadata["token_usage_input_tokens"] == 11
-    assert metadata["token_usage_output_tokens"] == 22
-    assert metadata["token_usage_reasoning_tokens"] == 7
+    piece = result.message_pieces[0]
+    assert piece.is_truncated is True
+    assert piece.prompt_metadata["token_usage_input_tokens"] == 11
+    assert piece.prompt_metadata["token_usage_output_tokens"] == 22
+    assert piece.prompt_metadata["token_usage_reasoning_tokens"] == 7
 
 
 async def test_handle_openai_request_output_text(target: OpenAIResponseTarget, dummy_text_message_piece: MessagePiece):

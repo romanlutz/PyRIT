@@ -42,6 +42,7 @@ from pyrit.prompt_target.common.utils import (
     limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
+    warn_truncated_response,
 )
 from pyrit.prompt_target.openai.openai_chat_audio_config import OpenAIChatAudioConfig
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
@@ -305,12 +306,7 @@ class OpenAIChatTarget(OpenAITarget):
         # deliberate, so warn instead of raising and let construction preserve any partial content or
         # fall back to a graceful empty response.
         if self._is_truncated_response(response):
-            logger.warning(
-                "The response was truncated because it reached the token limit (finish_reason='length'). "
-                "Reasoning models consume tokens on hidden reasoning in addition to the visible answer, so a "
-                "low max_completion_tokens can truncate or empty the response. Increase max_completion_tokens "
-                "if you expected complete content."
-            )
+            warn_truncated_response(signal="finish_reason='length'", limit_parameter="max_completion_tokens")
             return
 
         # Genuinely empty responses (no truncation) raise so the retry logic can attempt to get a
@@ -394,8 +390,8 @@ class OpenAIChatTarget(OpenAITarget):
         Raises:
             EmptyResponseException: If a non-truncated response contains no content, audio, or tool
                 calls. A truncated (``finish_reason == "length"``) response with no content instead
-                yields a graceful empty piece so the run continues. Truncated responses set
-                ``prompt_metadata["truncated"] = True`` on the first piece.
+                yields a graceful empty piece so the run continues. Truncated responses are flagged
+                via ``MessagePiece.mark_as_truncated`` on the first piece.
         """
         audio_format = self._audio_response_config.audio_format if self._audio_response_config else "wav"
         truncated = self._is_truncated_response(response)
@@ -408,14 +404,14 @@ class OpenAIChatTarget(OpenAITarget):
             if truncated:
                 empty_message = build_empty_truncated_response(request=request)
                 capture_token_usage(pieces=empty_message.message_pieces, response=response)
-                empty_message.message_pieces[0].prompt_metadata["truncated"] = True
+                empty_message.message_pieces[0].mark_as_truncated()
                 return empty_message
             raise EmptyResponseException(message="Failed to extract any response content.")
 
         # Capture token usage from the API response and store in the first piece's metadata
         capture_token_usage(pieces=pieces, response=response)
         if truncated:
-            pieces[0].prompt_metadata["truncated"] = True
+            pieces[0].mark_as_truncated()
 
         return Message(message_pieces=pieces)
 

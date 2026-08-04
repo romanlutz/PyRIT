@@ -30,6 +30,8 @@ from pyrit.models import (
     PromptDataType,
     PromptResponseError,
     TokenUsage,
+    read_usage_int,
+    read_usage_value,
 )
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
@@ -38,6 +40,7 @@ from pyrit.prompt_target.common.utils import (
     limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
+    warn_truncated_response,
 )
 from pyrit.prompt_target.openai.openai_error_handling import _is_content_filter_error
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
@@ -69,30 +72,16 @@ class MessagePieceType(str, Enum):
     MCP_APPROVAL_REQUEST = "mcp_approval_request"
 
 
-def _int_or_none(value: Any) -> int | None:
-    """
-    Return ``value`` when it is a non-boolean integer, else None.
-
-    Booleans are rejected even though ``bool`` is a subclass of ``int``.
-
-    Args:
-        value (Any): The candidate value.
-
-    Returns:
-        int | None: The integer value, or None.
-    """
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def token_usage_from_responses(usage: Any) -> TokenUsage:
     """
     Build a ``TokenUsage`` from a Responses API ``usage`` payload.
 
     The Responses API reports usage under different names than Chat Completions -- top-level
     ``input_tokens`` / ``output_tokens`` / ``total_tokens`` with ``input_tokens_details`` and
-    ``output_tokens_details`` breakdowns -- so it is parsed here rather than by
-    ``token_usage_from_chat_completion``. Reads are int-guarded so a partial usage object
-    contributes only the counts the provider actually reports.
+    ``output_tokens_details`` breakdowns -- so the field names are resolved here rather than by
+    ``token_usage_from_chat_completion``. Both parsers share the format-agnostic reads
+    (``read_usage_value`` / ``read_usage_int``), so a partial usage payload contributes only the
+    counts the provider actually reports. ``total_tokens`` is derived when the provider omits it.
 
     Args:
         usage (Any): The Responses API usage object.
@@ -100,20 +89,26 @@ def token_usage_from_responses(usage: Any) -> TokenUsage:
     Returns:
         TokenUsage: The parsed token usage.
     """
-    input_details = getattr(usage, "input_tokens_details", None)
-    output_details = getattr(usage, "output_tokens_details", None)
+    input_details = read_usage_value(source=usage, name="input_tokens_details")
+    output_details = read_usage_value(source=usage, name="output_tokens_details")
+
+    input_tokens = read_usage_int(source=usage, name="input_tokens")
+    output_tokens = read_usage_int(source=usage, name="output_tokens")
+    total_tokens = read_usage_int(source=usage, name="total_tokens")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
 
     extra: dict[str, int] = {}
-    cache_write_tokens = _int_or_none(getattr(input_details, "cache_write_tokens", None))
+    cache_write_tokens = read_usage_int(source=input_details, name="cache_write_tokens")
     if cache_write_tokens is not None:
         extra["cache_write_tokens"] = cache_write_tokens
 
     return TokenUsage(
-        input_tokens=_int_or_none(getattr(usage, "input_tokens", None)),
-        output_tokens=_int_or_none(getattr(usage, "output_tokens", None)),
-        total_tokens=_int_or_none(getattr(usage, "total_tokens", None)),
-        reasoning_tokens=_int_or_none(getattr(output_details, "reasoning_tokens", None)),
-        cached_tokens=_int_or_none(getattr(input_details, "cached_tokens", None)),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        reasoning_tokens=read_usage_int(source=output_details, name="reasoning_tokens"),
+        cached_tokens=read_usage_int(source=input_details, name="cached_tokens"),
         extra=extra,
     )
 
@@ -602,11 +597,9 @@ class OpenAIResponseTarget(OpenAITarget):
         # limit may be a deliberate configuration. Construction preserves any completed output
         # (reasoning, partial text) and falls back to a graceful empty response.
         if self._is_truncated_response(response):
-            logger.warning(
-                "The response was truncated because it reached the token limit "
-                "(status='incomplete', reason='max_output_tokens'). Reasoning models consume tokens on "
-                "hidden reasoning in addition to the visible answer, so a low max_output_tokens can "
-                "truncate or empty the response. Increase max_output_tokens if you expected complete content."
+            warn_truncated_response(
+                signal="status='incomplete', reason='max_output_tokens'",
+                limit_parameter="max_output_tokens",
             )
             return
 
@@ -655,7 +648,8 @@ class OpenAIResponseTarget(OpenAITarget):
         Returns:
             Message: Constructed message with extracted content from output sections. Token-usage
                 counts from ``response.usage`` are recorded in the first piece's ``prompt_metadata``.
-                Truncated responses set ``prompt_metadata["truncated"] = True`` on the first piece.
+                Truncated responses are flagged via ``MessagePiece.mark_as_truncated`` on the first
+                piece.
         """
         truncated = self._is_truncated_response(response)
 
@@ -679,7 +673,9 @@ class OpenAIResponseTarget(OpenAITarget):
             if truncated and piece.original_value_data_type in ("function_call", "tool_call"):
                 continue
             extracted_response_pieces.append(piece)
-            if piece.original_value and piece.original_value_data_type in ("text", "error"):
+            # Reasoning is the one output the caller cannot read as an answer, so anything else
+            # with a value counts as a visible response and suppresses the empty fallback below.
+            if piece.original_value and piece.original_value_data_type != "reasoning":
                 has_visible_response = True
 
         if truncated and not has_visible_response:
@@ -695,12 +691,12 @@ class OpenAIResponseTarget(OpenAITarget):
         # Capture token usage in the first piece's metadata. This also runs on the truncated path:
         # usage is populated on token-limit responses and is most valuable there, since the whole
         # budget may have been spent on hidden reasoning with no visible answer.
-        usage = response.usage
+        usage = getattr(response, "usage", None)
         if usage is not None and extracted_response_pieces:
             extracted_response_pieces[0].prompt_metadata.update(token_usage_from_responses(usage).to_metadata())
 
         if truncated and extracted_response_pieces:
-            extracted_response_pieces[0].prompt_metadata["truncated"] = True
+            extracted_response_pieces[0].mark_as_truncated()
 
         return Message(message_pieces=extracted_response_pieces)
 

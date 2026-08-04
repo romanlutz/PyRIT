@@ -602,6 +602,25 @@ class OpenAITarget(PromptTarget):
             Various exceptions for validation failures.
         """
 
+    def _is_truncated_response(self, response: Any) -> bool:
+        """
+        Return True if the response was cut off by the output-token limit.
+
+        Every API shape signals truncation differently (Chat Completions
+        ``finish_reason == "length"``, Responses ``status == "incomplete"`` with
+        ``reason == "max_output_tokens"``), so subclasses that can detect it override this. A
+        truncated response is valid but incomplete: ``_validate_response`` warns instead of
+        raising, and ``_construct_message_from_response_async`` preserves whatever the model
+        produced. The base implementation reports no truncation.
+
+        Args:
+            response: The response object from OpenAI SDK.
+
+        Returns:
+            bool: True if the response was truncated at the token limit, False otherwise.
+        """
+        return False
+
     @abstractmethod
     def _set_openai_env_configuration_vars(self) -> None:
         """

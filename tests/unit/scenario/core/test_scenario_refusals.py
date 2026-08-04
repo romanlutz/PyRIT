@@ -138,7 +138,6 @@ def _build_responses_api_response(*, response_kind: str) -> MagicMock:
     response.error = None
     response.status = "completed"
     response.output = [output]
-    response.usage = None  # Optional usage payload (None when absent)
     return response
 
 
