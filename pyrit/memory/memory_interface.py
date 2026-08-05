@@ -120,7 +120,7 @@ class AttackResultsKeysetCursor(NamedTuple):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SeedQuery:
+class _SeedQuery:
     """
     Immutable filters for a seed query.
 
@@ -2239,7 +2239,7 @@ class MemoryInterface(abc.ABC):
         Returns:
             Sequence[SeedPrompt]: A list of prompts matching the criteria.
         """
-        query = SeedQuery(
+        query = _SeedQuery(
             value=value,
             value_sha256=value_sha256,
             dataset_name=dataset_name,
@@ -2257,19 +2257,7 @@ class MemoryInterface(abc.ABC):
         )
         return MemoryInterface._execute_seed_query(self, query=query)
 
-    def query_seeds(self, *, query: SeedQuery) -> Sequence[Seed]:
-        """
-        Retrieve seeds matching an immutable query.
-
-        Args:
-            query (SeedQuery): Filters to apply.
-
-        Returns:
-            Sequence[Seed]: Seeds matching the query.
-        """
-        return MemoryInterface._execute_seed_query(self, query=query)
-
-    def _execute_seed_query(self, *, query: SeedQuery) -> Sequence[Seed]:
+    def _execute_seed_query(self, *, query: _SeedQuery) -> Sequence[Seed]:
         """
         Execute a seed query through the existing backend extension points.
 
@@ -2287,7 +2275,7 @@ class MemoryInterface(abc.ABC):
             logger.exception(f"Failed to retrieve prompts with dataset name {query.dataset_name} with error {e}")
             raise
 
-    def _build_seed_conditions(self, *, query: SeedQuery) -> list[Any]:
+    def _build_seed_conditions(self, *, query: _SeedQuery) -> list[Any]:
         """
         Build scalar, substring-list, and backend-specific metadata conditions.
 
@@ -2305,7 +2293,7 @@ class MemoryInterface(abc.ABC):
         return conditions
 
     @staticmethod
-    def _build_seed_scalar_conditions(*, query: SeedQuery) -> list[Any]:
+    def _build_seed_scalar_conditions(*, query: _SeedQuery) -> list[Any]:
         """
         Build conditions for scalar seed columns.
 
@@ -2328,7 +2316,7 @@ class MemoryInterface(abc.ABC):
         return conditions
 
     @staticmethod
-    def _build_seed_exact_list_conditions(*, query: SeedQuery) -> list[Any]:
+    def _build_seed_exact_list_conditions(*, query: _SeedQuery) -> list[Any]:
         """
         Build conditions for exact-match sequence filters.
 

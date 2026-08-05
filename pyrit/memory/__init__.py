@@ -10,7 +10,7 @@ This package defines the core `MemoryInterface` and concrete implementations for
 from pyrit.memory.azure_sql_memory import AzureSQLMemory
 from pyrit.memory.central_memory import CentralMemory
 from pyrit.memory.memory_embedding import MemoryEmbedding
-from pyrit.memory.memory_interface import AttackResultsKeysetCursor, MemoryInterface, SeedQuery
+from pyrit.memory.memory_interface import AttackResultsKeysetCursor, MemoryInterface
 from pyrit.memory.memory_models import AttackResultEntry, EmbeddingDataEntry, PromptMemoryEntry, SeedEntry
 from pyrit.memory.sqlite_memory import SQLiteMemory
 from pyrit.memory.storage import (
@@ -51,7 +51,6 @@ __all__ = [
     "MemoryEmbedding",
     "PromptMemoryEntry",
     "SeedEntry",
-    "SeedQuery",
     "set_message_piece_sha256_async",
     "set_seed_sha256_async",
     "SQLiteMemory",
