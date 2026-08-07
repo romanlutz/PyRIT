@@ -4,8 +4,23 @@
 """Provider-neutral sandbox contracts and trusted local implementation."""
 
 from pyrit.sandbox.contracts import SandboxEnvironment, SandboxProcess, SandboxProvider, SandboxSession
+from pyrit.sandbox.docker_provider import (
+    DockerCliUnavailableError,
+    DockerComposeConfigError,
+    DockerDaemonUnavailableError,
+    DockerLifecycleError,
+    DockerSandboxError,
+    DockerSandboxProvider,
+    DockerSecurityPolicyViolationError,
+    DockerServiceSelectionError,
+    register_process_exit_cleanup,
+)
 from pyrit.sandbox.local import LocalSandboxProvider, SandboxPathEscapeError, SandboxSetupError
 from pyrit.sandbox.models import (
+    DockerPullPolicy,
+    DockerSandboxProviderConfig,
+    DockerSecurityPolicy,
+    DockerServiceBuildSpec,
     LocalSandboxProviderConfig,
     SandboxArtifact,
     SandboxConnectionInfo,
@@ -26,6 +41,18 @@ from pyrit.sandbox.registry import SandboxProviderMetadata, SandboxProviderRegis
 from pyrit.sandbox.tool_adapter import SandboxToolAdapter
 
 __all__ = [
+    "DockerCliUnavailableError",
+    "DockerComposeConfigError",
+    "DockerDaemonUnavailableError",
+    "DockerLifecycleError",
+    "DockerPullPolicy",
+    "DockerSandboxError",
+    "DockerSandboxProvider",
+    "DockerSandboxProviderConfig",
+    "DockerSecurityPolicy",
+    "DockerSecurityPolicyViolationError",
+    "DockerServiceBuildSpec",
+    "DockerServiceSelectionError",
     "LocalSandboxProvider",
     "LocalSandboxProviderConfig",
     "SandboxArtifact",
@@ -51,4 +78,5 @@ __all__ = [
     "SandboxTaskSpec",
     "SandboxToolAdapter",
     "SandboxWriteResult",
+    "register_process_exit_cleanup",
 ]

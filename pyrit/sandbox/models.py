@@ -187,6 +187,88 @@ class LocalSandboxProviderConfig(BaseModel):
     allow_unrestricted_host_execution: bool = False
 
 
+class DockerPullPolicy(str, Enum):
+    """When the Docker sandbox provider pulls images before building or starting services."""
+
+    MISSING = "missing"
+    ALWAYS = "always"
+    NEVER = "never"
+
+
+class DockerServiceBuildSpec(BaseModel):
+    """A Dockerfile-based service synthesized into a temporary Compose definition."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    service_name: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+    build_context: Path
+    dockerfile: str = "Dockerfile"
+    build_args: dict[str, str] = Field(default_factory=dict)
+    target: str | None = None
+    command: tuple[str, ...] | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    working_dir: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    depends_on: tuple[str, ...] = ()
+
+
+class DockerSecurityPolicy(BaseModel):
+    """
+    Security defaults enforced for every Docker sandbox service.
+
+    Every ``allow_*`` flag defaults to a rejecting posture. A synthesized service is
+    always compliant; an explicit user-supplied Compose file is validated against this
+    policy after resolution and rejected (``DockerSecurityPolicyViolationError``) unless
+    the corresponding flag is explicitly enabled.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    allow_privileged: bool = False
+    allow_host_namespaces: bool = False
+    allow_docker_socket_mount: bool = False
+    allow_device_mounts: bool = False
+    allow_bind_mounts: bool = False
+    allow_published_ports: bool = False
+    allow_dangerous_capabilities: bool = False
+    allow_unconfined_seccomp: bool = False
+    allow_unrestricted_secrets: bool = False
+    allow_absolute_container_paths: bool = False
+    isolate_interservice_network: bool = True
+    allow_egress: bool = True
+    drop_all_capabilities: bool = True
+    read_only_root_filesystem: bool = False
+    default_pids_limit: int | None = Field(default=256, gt=0)
+    default_memory_limit: str | None = None
+    default_cpus: float | None = Field(default=None, gt=0)
+
+
+class DockerSandboxProviderConfig(BaseModel):
+    """Configuration for the Docker/Compose sandbox provider."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    compose_files: tuple[Path, ...] = ()
+    services: tuple[DockerServiceBuildSpec, ...] = ()
+    project_context: Path | None = None
+    project_name_prefix: str = Field(default="pyrit-sbx", max_length=32, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    pull_policy: DockerPullPolicy = DockerPullPolicy.MISSING
+    security_policy: DockerSecurityPolicy = Field(default_factory=DockerSecurityPolicy)
+    readiness_timeout_seconds: float = Field(default=90.0, gt=0)
+    readiness_poll_interval_seconds: float = Field(default=0.5, gt=0)
+    max_concurrent_cli_calls: int = Field(default=4, gt=0)
+    cli_timeout_seconds: float = Field(default=180.0, gt=0)
+    state_dir: Path | None = None
+    retain_resources_on_close: bool = False
+    docker_executable: str = "docker"
+
+    @model_validator(mode="after")
+    def _validate_sources(self) -> DockerSandboxProviderConfig:
+        if not self.compose_files and not self.services:
+            raise ValueError("DockerSandboxProviderConfig requires at least one of 'compose_files' or 'services'.")
+        return self
+
+
 class SandboxExecResult(BaseModel):
     """Buffered process output with explicit limit and interruption facts."""
 
