@@ -97,6 +97,34 @@ describe("Navigation", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the scenarios button", () => {
+    renderWithProvider(<Navigation {...defaultProps} />);
+    expect(
+      screen.getByRole("button", { name: "Scenarios" })
+    ).toBeInTheDocument();
+  });
+
+  it("calls onNavigate with 'scenarios' when the scenarios button is clicked", async () => {
+    const user = userEvent.setup();
+    const onNavigate = jest.fn();
+    renderWithProvider(
+      <Navigation {...defaultProps} onNavigate={onNavigate} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Scenarios" }));
+    expect(onNavigate).toHaveBeenCalledWith("scenarios");
+  });
+
+  it("marks the scenarios button current when it is the active view", () => {
+    renderWithProvider(
+      <Navigation {...defaultProps} currentView="scenarios" />
+    );
+    expect(screen.getByRole("button", { name: "Scenarios" })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+  });
+
   it("renders the feedback button and forwards clicks to onOpenFeedback", () => {
     const onOpenFeedback = jest.fn();
     renderWithProvider(
