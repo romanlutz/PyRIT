@@ -116,15 +116,11 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
   }, [])
 
   const applyRunSummary = useCallback((run: ScenarioRunSummary): void => {
-    pollingStoppedRef.current = isTerminalRunState(run.status)
-    if (pollingStoppedRef.current) {
-      if (timerRef.current !== null) {
-        clearTimeout(timerRef.current)
-        timerRef.current = null
-      }
-      abortControllerRef.current?.abort()
-    }
     dispatch({ type: 'apply-run-summary', run })
+    if (isTerminalRunState(run.status)) {
+      pollingStoppedRef.current = false
+      setRetryEpoch((epoch) => epoch + 1)
+    }
   }, [])
 
   return { state, retry, applyRunSummary }

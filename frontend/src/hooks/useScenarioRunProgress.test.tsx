@@ -205,4 +205,49 @@ describe('useScenarioRunProgress', () => {
     )
     unmount()
   })
+
+  it('fetches final persisted deltas after applying a cancellation summary', async () => {
+    mockGetRunProgress
+      .mockResolvedValueOnce(makePage({ next_cursor: 'cursor-1' }))
+      .mockResolvedValueOnce(makePage({
+        run: {
+          ...makePage().run,
+          status: 'CANCELLED',
+          completed_at: '2026-01-01T00:00:02Z',
+        },
+        plan: null,
+        results: [makeResult('final-attempt')],
+        next_cursor: 'cursor-2',
+      }))
+
+    const { result, unmount } = renderHook(() => useScenarioRunProgress('run-1'))
+    await waitFor(() => expect(mockGetRunProgress).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      result.current.applyRunSummary({
+        scenario_result_id: 'run-1',
+        scenario_name: 'TestScenario',
+        scenario_version: 1,
+        status: 'CANCELLED',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:02Z',
+        techniques_used: [],
+        total_attacks: 1,
+        completed_attacks: 1,
+        objective_achieved_rate: 100,
+        failed_attacks: [],
+        attack_retries: [],
+        total_retries: 0,
+        labels: {},
+      })
+    })
+
+    await waitFor(() => expect(result.current.state.results).toEqual([makeResult('final-attempt')]))
+    expect(mockGetRunProgress).toHaveBeenLastCalledWith(
+      'run-1',
+      { since: 'cursor-1', limit: 500 },
+      expect.any(AbortSignal),
+    )
+    unmount()
+  })
 })
