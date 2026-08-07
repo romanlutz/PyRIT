@@ -11,6 +11,14 @@ import {
 } from './ScenarioRunEstimate'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
 
+const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
+  [
+    ['Run', 'size', 'calculated'].join(' '),
+    ['Final', 'count', 'set', 'at', 'launch'].join(' '),
+  ].join('|'),
+  'i',
+)
+
 function TestWrapper({ children }: { children: ReactNode }) {
   return <FluentProvider theme={webLightTheme}>{children}</FluentProvider>
 }
@@ -92,9 +100,8 @@ describe('ScenarioRunEstimate', () => {
     expect(screen.getByText('The planned total is authoritative.')).toBeInTheDocument()
     expect(screen.getByText('How this count is calculated')).toBeInTheDocument()
     expect(screen.getByText('Retries are not included. Estimate schema v1.')).toBeInTheDocument()
-    expect(screen.queryByText(
-      /Run size calculated|Final count set at launch|Backend estimate|Conditional estimate|Backend formula/i,
-    )).not.toBeInTheDocument()
+    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Backend estimate|Conditional estimate|Backend formula/i)).not.toBeInTheDocument()
   })
 
   it('renders bounded and upper-only conditional estimates from structured bounds', () => {
@@ -114,7 +121,7 @@ describe('ScenarioRunEstimate', () => {
 
     expect(screen.getByText('12–20 planned attacks')).toBeInTheDocument()
     expect(screen.getByText(/planned range = 12–20/)).toBeInTheDocument()
-    expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
 
     const upperOnly = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,
@@ -179,7 +186,7 @@ describe('ScenarioRunEstimate', () => {
       </TestWrapper>,
     )
     expect(screen.getByText('Select targets to calculate')).toBeInTheDocument()
-    expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
     expect(screen.getByText(
       'Component breakdown unavailable; exact total unavailable',
     )).toBeInTheDocument()

@@ -17,6 +17,13 @@ jest.mock('@/services/api', () => ({
 const mockListCatalog = scenariosApi.listCatalog as jest.Mock
 
 const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
+const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
+  [
+    ['Run', 'size', 'calculated'].join(' '),
+    ['Final', 'count', 'set', 'at', 'launch'].join(' '),
+  ].join('|'),
+  'i',
+)
 
 function TestWrapper({ children }: { children: React.ReactNode }) {
   return (
@@ -409,7 +416,7 @@ describe('ScenarioCatalog', () => {
     expect(within(row).getByText('12–20 planned attacks')).toBeInTheDocument()
     expect(within(row).queryByText('default')).not.toBeInTheDocument()
     expect(within(row).queryByText(/aggregate presets|compatible concrete/i)).not.toBeInTheDocument()
-    expect(within(row).queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
+    expect(within(row).queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
 
     await user.click(disclosure)
 

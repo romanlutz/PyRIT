@@ -27,6 +27,13 @@ const mockGetScenario = scenariosApi.getScenario as jest.Mock
 const mockEstimateRun = scenariosApi.estimateRun as jest.Mock
 const mockStartRun = scenariosApi.startRun as jest.Mock
 const mockListTargets = targetsApi.listTargets as jest.Mock
+const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
+  [
+    ['Run', 'size', 'calculated'].join(' '),
+    ['Final', 'count', 'set', 'at', 'launch'].join(' '),
+  ].join('|'),
+  'i',
+)
 
 const mockNavigate = jest.fn()
 const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
@@ -385,7 +392,7 @@ describe('ScenarioDetail', () => {
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('Run size is confirmed at launch.')).toBeInTheDocument()
-    expect(within(preview).queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
+    expect(within(preview).queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
     expect(within(preview).queryByText(/planned attacks/)).not.toBeInTheDocument()
   })
 
