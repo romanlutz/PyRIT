@@ -4,7 +4,11 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import { scenariosApi, targetsApi } from '@/services/api'
-import type { RegisteredScenario, TargetInstance } from '@/types'
+import type {
+  RegisteredScenario,
+  ScenarioDefaultRunSizeEstimate,
+  TargetInstance,
+} from '@/types'
 
 import ScenarioDetail from './ScenarioDetail'
 
@@ -33,18 +37,40 @@ jest.mock('react-router-dom', () => ({
 }))
 
 function makeScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredScenario {
+  const description = overrides.description ?? 'Red teams a target.'
+  const defaultTechnique = overrides.default_technique ?? 'default_technique'
+  const aggregateTechniques = overrides.aggregate_techniques ?? ['default_technique']
+  const defaultTechniques = overrides.default_techniques
+    ?? (aggregateTechniques.includes(defaultTechnique) ? ['crescendo'] : [defaultTechnique])
   return {
     scenario_name: 'foundry.red_team_agent',
     scenario_type: 'RedTeamAgentScenario',
-    description: 'Red teams a target.',
-    default_technique: 'default_technique',
-    aggregate_techniques: ['default_technique'],
+    scenario_version: 1,
+    aggregate_technique_expansions: overrides.aggregate_technique_expansions
+      ?? Object.fromEntries(
+        aggregateTechniques.map((name) => [name, name === defaultTechnique ? defaultTechniques : []]),
+      ),
     all_techniques: ['default_technique', 'crescendo'],
     default_datasets: ['harmbench'],
+    default_dataset_summaries: [],
     baseline_policy: 'enabled',
     include_baseline_by_default: true,
     supported_parameters: [],
+    default_run_size: {
+      version: 1,
+      status: 'unavailable',
+      total_attack_count: null,
+      components: [],
+      datasets: [],
+      note: 'Default sizing is unavailable.',
+      retries_included: false,
+    },
     ...overrides,
+    description,
+    description_markdown: overrides.description_markdown ?? description,
+    default_technique: defaultTechnique,
+    default_techniques: defaultTechniques,
+    aggregate_techniques: aggregateTechniques,
   }
 }
 
@@ -53,6 +79,45 @@ function makeTarget(name: string): TargetInstance {
     target_registry_name: name,
     identifier: { class_name: 'OpenAIChatTarget', hash: `${name}-hash` },
   }
+}
+
+function makeEstimate(
+  total: number | null,
+  status: ScenarioDefaultRunSizeEstimate['status'] = total === null ? 'conditional' : 'exact',
+): ScenarioDefaultRunSizeEstimate {
+  return {
+    version: 1,
+    status,
+    total_attack_count: total,
+    components: total === null
+      ? []
+      : [
+          {
+            label: 'Configured attacks',
+            count: total,
+            factors: [],
+            is_baseline: false,
+            note: null,
+          },
+        ],
+    datasets: [],
+    note: null,
+    retries_included: false,
+  }
+}
+
+async function flushRenderedPromises(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
+async function advanceTimers(milliseconds: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(milliseconds)
+    await Promise.resolve()
+  })
 }
 
 function renderDetail(
@@ -98,6 +163,10 @@ describe('ScenarioDetail', () => {
     mockGetScenario.mockResolvedValue(makeScenario())
     mockEstimateRun.mockReturnValue(new Promise(() => {}))
     mockStartRun.mockResolvedValue({ scenario_result_id: 'sr-default' })
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
   })
 
   it('shows a loading state while fetching', () => {
@@ -195,10 +264,130 @@ describe('ScenarioDetail', () => {
     expect(screen.getByRole('complementary', { name: 'Run preview' })).toBeInTheDocument()
   })
 
+  it('debounces preview requests and aborts the superseded request', async () => {
+    jest.useFakeTimers()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+
+    expect(screen.getByTestId('scenario-target-select')).toBeInTheDocument()
+    expect(mockEstimateRun).not.toHaveBeenCalled()
+
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(1)
+    const firstSignal = mockEstimateRun.mock.calls[0][2] as AbortSignal
+    expect(firstSignal.aborted).toBe(false)
+
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
+    expect(firstSignal.aborted).toBe(true)
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-a')
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
+
+    await advanceTimers(299)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(1)
+    await advanceTimers(1)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(2)
+    expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.objectContaining({ target_name: 'target-b' }),
+      expect.any(AbortSignal),
+    )
+  })
+
+  it('ignores an out-of-order estimate response even when the request promise does not abort', async () => {
+    jest.useFakeTimers()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    let resolveFirst: (estimate: ScenarioDefaultRunSizeEstimate) => void = () => {}
+    let resolveSecond: (estimate: ScenarioDefaultRunSizeEstimate) => void = () => {}
+    mockEstimateRun
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveFirst = resolve
+      }))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveSecond = resolve
+      }))
+
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
+    await advanceTimers(300)
+
+    resolveSecond(makeEstimate(12))
+    await flushRenderedPromises()
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).getByText('12 planned attacks')).toBeInTheDocument()
+
+    resolveFirst(makeEstimate(8))
+    await flushRenderedPromises()
+    expect(within(preview).getByText('12 planned attacks')).toBeInTheDocument()
+    expect(within(preview).queryByText('8 planned attacks')).not.toBeInTheDocument()
+  })
+
+  it('keeps the last good estimate and entered state after a transient preview failure', async () => {
+    jest.useFakeTimers()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    mockEstimateRun
+      .mockResolvedValueOnce(makeEstimate(8))
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        response: { status: 503, data: { detail: 'Preview service unavailable' } },
+      })
+
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(screen.getByText('8 planned attacks')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
+    await advanceTimers(300)
+    await flushRenderedPromises()
+
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).getByText('target-b')).toBeInTheDocument()
+    expect(within(preview).getByText('Previous estimate')).toBeInTheDocument()
+    expect(within(preview).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(preview).getByText('Preview service unavailable')).toBeInTheDocument()
+    expect(screen.getByTestId('scenario-target-select')).toHaveValue('target-b')
+    expect(screen.getByTestId('launch-scenario-btn')).not.toBeDisabled()
+  })
+
+  it('does not request a preview while the custom technique selection is empty', async () => {
+    jest.useFakeTimers()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+
+    await user.click(screen.getByTestId('technique-crescendo'))
+    await user.click(screen.getByTestId('technique-crescendo'))
+    await advanceTimers(300)
+
+    expect(mockEstimateRun).not.toHaveBeenCalled()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(screen.getByText('Complete the required configuration to request an estimate.'))
+      .toBeInTheDocument()
+  })
+
+  it('renders a backend conditional estimate without inventing a total', async () => {
+    jest.useFakeTimers()
+    mockEstimateRun.mockResolvedValue(makeEstimate(null))
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).getByText('Conditional estimate')).toBeInTheDocument()
+    expect(within(preview).getByText('Total depends on configuration')).toBeInTheDocument()
+    expect(within(preview).queryByText(/planned attacks/)).not.toBeInTheDocument()
+  })
+
   it('renders MyST literals through the shared safe Markdown renderer', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({
-        description: `Set \`\`num_jailbreaks\`\`.\n\n${RAW_IMAGE_HTML}unsafe`,
+        description: 'Configure this scenario.',
+        description_markdown: `Set \`\`num_jailbreaks\`\`.\n\n${RAW_IMAGE_HTML}unsafe`,
       }),
     )
     renderDetail('/scenarios/foundry.red_team_agent')
@@ -217,6 +406,29 @@ describe('ScenarioDetail', () => {
     await screen.findByTestId('scenario-target-select')
     expect(screen.getByTestId('technique-default_technique')).toBeChecked()
     expect(screen.getByTestId('technique-crescendo')).not.toBeChecked()
+  })
+
+  it('shows catalog-provided aggregate members before the configured estimate resolves', async () => {
+    mockGetScenario.mockResolvedValue(
+      makeScenario({
+        default_technique: 'default',
+        default_techniques: ['prompt_sending', 'jailbreak_system_prompt'],
+        aggregate_techniques: ['default'],
+        aggregate_technique_expansions: {
+          default: ['prompt_sending', 'jailbreak_system_prompt'],
+        },
+        all_techniques: ['prompt_sending', 'jailbreak_system_prompt'],
+      }),
+    )
+
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('scenario-target-select')
+
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).getByText(
+      'Resolves to prompt_sending, jailbreak_system_prompt',
+    )).toBeInTheDocument()
+    expect(within(preview).getByText('Loading backend run estimate...')).toBeInTheDocument()
   })
 
   it('switches from the default preset to a multi-technique custom selection', async () => {
@@ -422,6 +634,18 @@ describe('ScenarioDetail', () => {
     const request = mockStartRun.mock.calls[0][0]
     expect(request.dataset_names).toEqual(['ds_a', 'ds_b'])
     expect(request.max_dataset_size).toBe(25)
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.objectContaining({
+        target_name: 'target-a',
+        techniques: ['default_technique'],
+        dataset_names: ['ds_a', 'ds_b'],
+        max_dataset_size: 25,
+        include_baseline: true,
+      }),
+      expect.any(AbortSignal),
+    ))
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('labels')
   })
 
   it('rejects a non-positive-integer max dataset size', async () => {
@@ -484,8 +708,12 @@ describe('ScenarioDetail', () => {
         scenario_type: 'Jailbreak',
         description: 'Runs jailbreak templates.',
         default_technique: 'default',
+        default_techniques: ['prompt_sending', 'jailbreak_system_prompt'],
         aggregate_techniques: ['default'],
-        all_techniques: ['prompt_sending', 'jailbreak_system_prompt'],
+        aggregate_technique_expansions: {
+          default: ['prompt_sending', 'jailbreak_system_prompt'],
+        },
+        all_techniques: ['prompt_sending', 'jailbreak_system_prompt', 'flip'],
         default_datasets: ['harmbench'],
         include_baseline_by_default: true,
         supported_parameters: [
@@ -509,22 +737,42 @@ describe('ScenarioDetail', () => {
       }),
     )
     mockEstimateRun.mockResolvedValue({
-      status: 'available',
-      estimate: {
-        scope: 'request',
-        total: 8,
-        additiveComponents: [
-          { id: 'objectives', label: 'Objectives', value: 4 },
-        ],
-        multiplicativeFactors: [
-          { id: 'techniques', label: 'Concrete techniques', value: 1 },
-          { id: 'jailbreaks', label: 'Jailbreak templates', value: 2 },
-          { id: 'attempts', label: 'Attempts', value: 1 },
-        ],
-        resolvedTechniques: ['prompt_sending'],
-        formula: '4 objectives * 1 technique * 2 jailbreaks * 1 attempt',
-        caveat: 'The backend total is authoritative.',
-      },
+      version: 1,
+      status: 'exact',
+      total_attack_count: 8,
+      components: [
+        {
+          label: 'Prompt sending',
+          count: 8,
+          factors: [
+            { label: 'selected seed groups', count: 4 },
+            { label: 'concrete techniques', count: 1 },
+            { label: 'jailbreak templates', count: 2 },
+            { label: 'attempts', count: 1 },
+          ],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+      datasets: [
+        {
+          name: 'harmbench',
+          kind: 'dataset',
+          logical_seed_group_count: 5,
+          selected_seed_group_count: 4,
+          configured_caps: [
+            {
+              label: 'Jailbreak templates',
+              count: 2,
+              configured_on: 'configuration',
+              dataset_name: null,
+            },
+          ],
+          selection_note: 'One incompatible group is excluded.',
+        },
+      ],
+      note: 'The backend total is authoritative.',
+      retries_included: false,
     })
 
     renderDetail('/scenarios/airt.jailbreak')
@@ -537,7 +785,7 @@ describe('ScenarioDetail', () => {
     await user.type(screen.getByTestId('scenario-param-num_jailbreak_attempts'), '1')
     await user.click(screen.getByTestId('baseline-checkbox'))
 
-    const expectedRequest = {
+    const expectedRunRequest = {
       scenario_name: 'airt.jailbreak',
       target_name: 'target-a',
       techniques: ['prompt_sending'],
@@ -550,20 +798,38 @@ describe('ScenarioDetail', () => {
         num_jailbreak_attempts: 1,
       },
     }
+    const expectedEstimateRequest = {
+      target_name: 'target-a',
+      techniques: ['prompt_sending'],
+      include_baseline: false,
+      scenario_params: {
+        num_jailbreaks: 2,
+        num_jailbreak_attempts: 1,
+      },
+    }
 
-    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(expectedRequest))
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'airt.jailbreak',
+      expectedEstimateRequest,
+      expect.any(AbortSignal),
+    ))
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('prompt_sending')).toBeInTheDocument()
-    expect(within(preview).getByText('harmbench')).toBeInTheDocument()
+    expect(within(preview).getAllByText('harmbench')).toHaveLength(2)
     expect(within(preview).getByText('Not included')).toBeInTheDocument()
-    expect(within(preview).getByText('8 attacks')).toBeInTheDocument()
+    expect(within(preview).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(preview).getByText('Jailbreak templates: 2 (configuration)')).toBeInTheDocument()
     expect(within(preview).getByText('2')).toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalledTimes(1))
-    expect(mockStartRun).toHaveBeenCalledWith(expectedRequest)
+    expect(mockStartRun).toHaveBeenCalledWith(expectedRunRequest)
     expect(mockStartRun.mock.calls[0][0].techniques).not.toContain('default')
+    expect(expectedEstimateRequest.techniques).toEqual(expectedRunRequest.techniques)
+    expect(expectedEstimateRequest.scenario_params).toEqual(expectedRunRequest.scenario_params)
+    expect(expectedEstimateRequest.include_baseline).toBe(expectedRunRequest.include_baseline)
+    expect(expectedEstimateRequest).not.toHaveProperty('labels')
   })
 
   it('navigates to the scenario-history route with the encoded run id on success', async () => {

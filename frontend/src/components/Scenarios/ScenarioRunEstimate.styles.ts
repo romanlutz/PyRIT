@@ -16,6 +16,7 @@ export const useScenarioRunEstimateStyles = makeStyles({
   },
   total: {
     color: tokens.colorNeutralForeground1,
+    fontVariantNumeric: 'tabular-nums',
   },
   muted: {
     color: tokens.colorNeutralForeground3,
@@ -26,35 +27,95 @@ export const useScenarioRunEstimateStyles = makeStyles({
     gap: tokens.spacingVerticalM,
     minWidth: 0,
   },
-  termGroup: {
+  detailGroup: {
     display: 'flex',
     flexDirection: 'column',
     gap: tokens.spacingVerticalXS,
+    minWidth: 0,
   },
-  termList: {
+  componentList: {
     display: 'grid',
-    gap: tokens.spacingVerticalXS,
+    gap: tokens.spacingVerticalS,
     margin: 0,
+    padding: 0,
+    listStyleType: 'none',
   },
-  termRow: {
-    display: 'grid',
-    gridTemplateColumns: 'minmax(0, 1fr) auto',
-    columnGap: tokens.spacingHorizontalM,
-    alignItems: 'baseline',
-  },
-  termLabel: {
+  component: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    paddingLeft: tokens.spacingHorizontalS,
+    borderLeft: `${tokens.strokeWidthThick} solid ${tokens.colorNeutralStroke2}`,
     minWidth: 0,
     overflowWrap: 'anywhere',
   },
-  termValue: {
-    margin: 0,
-    fontWeight: tokens.fontWeightSemibold,
+  componentHeader: {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: tokens.spacingHorizontalS,
+  },
+  componentCount: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalXS,
+    flexShrink: 0,
     fontVariantNumeric: 'tabular-nums',
   },
-  termDetail: {
-    gridColumn: '1 / -1',
+  factorList: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: `${tokens.spacingVerticalXXS} ${tokens.spacingHorizontalS}`,
     margin: 0,
-    color: tokens.colorNeutralForeground3,
+    padding: 0,
+    listStyleType: 'none',
+    color: tokens.colorNeutralForeground2,
+  },
+  datasetList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalS,
+  },
+  dataset: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalS}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: tokens.borderRadiusSmall,
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+  },
+  datasetHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalXS,
+  },
+  countList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalXXS,
+    margin: 0,
+  },
+  countRow: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
+    gap: tokens.spacingHorizontalS,
+    fontVariantNumeric: 'tabular-nums',
+    '& dd': {
+      margin: 0,
+      fontWeight: tokens.fontWeightSemibold,
+    },
+  },
+  capGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+  },
+  capList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalXXS,
+    margin: 0,
+    paddingLeft: tokens.spacingHorizontalL,
   },
   formula: {
     display: 'block',
@@ -65,7 +126,13 @@ export const useScenarioRunEstimateStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground3,
     borderRadius: tokens.borderRadiusSmall,
   },
-  caveat: {
-    color: tokens.colorNeutralForeground3,
+  staleNotice: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalS}`,
+    color: tokens.colorPaletteDarkOrangeForeground1,
+    backgroundColor: tokens.colorPaletteDarkOrangeBackground1,
+    borderRadius: tokens.borderRadiusSmall,
   },
 })

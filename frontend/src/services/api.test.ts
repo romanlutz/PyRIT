@@ -535,6 +535,44 @@ describe("api service", () => {
       );
     });
 
+    it("posts the exact estimate request and forwards cancellation", async () => {
+      const mockResponse = {
+        data: {
+          version: 1,
+          status: "exact",
+          total_attack_count: 8,
+          components: [],
+          datasets: [],
+          note: null,
+          retries_included: false,
+        },
+      };
+      (apiClient.post as jest.Mock).mockResolvedValueOnce(mockResponse);
+      const controller = new AbortController();
+      const request = {
+        target_name: "my-target",
+        techniques: ["prompt_sending"],
+        dataset_names: ["harmbench"],
+        max_dataset_size: 4,
+        dataset_filters: { harm_categories: ["violence"] },
+        include_baseline: false,
+        scenario_params: { num_jailbreaks: 2, num_attempts_per_template: 1 },
+      };
+
+      const result = await scenariosApi.estimateRun(
+        "airt.jailbreak",
+        request,
+        controller.signal
+      );
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        "/scenarios/catalog/airt.jailbreak/estimate",
+        request,
+        { signal: controller.signal }
+      );
+      expect(result.total_attack_count).toBe(8);
+    });
+
     it("posts the exact RunScenarioRequest payload to start a run", async () => {
       const mockResponse = {
         data: {

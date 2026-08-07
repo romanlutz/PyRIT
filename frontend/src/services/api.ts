@@ -31,7 +31,8 @@ import type {
   ListRegisteredScenariosResponse,
   RegisteredScenario,
   RunScenarioRequest,
-  ScenarioRunEstimator,
+  ScenarioDefaultRunSizeEstimate,
+  ScenarioRunSizeEstimateRequest,
   ScenarioRunSummary,
   ScenarioRunProgress,
 } from '../types'
@@ -345,12 +346,6 @@ export const labelsApi = {
   },
 }
 
-// Layer 1 will replace this explicit seam with the request-specific estimate
-// endpoint adapter once its DTO and route are merged.
-function getScenarioRunEstimator(): ScenarioRunEstimator | undefined {
-  return undefined
-}
-
 export const scenariosApi = {
   /**
    * Lists one page of the scenario catalog. Callers that need the full
@@ -378,7 +373,18 @@ export const scenariosApi = {
     return response.data
   },
 
-  estimateRun: getScenarioRunEstimator(),
+  estimateRun: async (
+    scenarioName: string,
+    request: ScenarioRunSizeEstimateRequest,
+    signal?: AbortSignal,
+  ): Promise<ScenarioDefaultRunSizeEstimate> => {
+    const response = await apiClient.post(
+      `/scenarios/catalog/${encodeURIComponent(scenarioName)}/estimate`,
+      request,
+      { signal },
+    )
+    return response.data
+  },
 
   getRun: async (scenarioResultId: string): Promise<ScenarioRunSummary> => {
     const response = await apiClient.get(`/scenarios/runs/${encodeURIComponent(scenarioResultId)}`)

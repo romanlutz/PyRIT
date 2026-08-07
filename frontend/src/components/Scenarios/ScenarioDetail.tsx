@@ -37,6 +37,7 @@ import type {
   RegisteredScenario,
   RunScenarioRequest,
   ScenarioRunEstimateResult,
+  ScenarioRunSizeEstimateRequest,
   ScenarioRunEstimateState,
   TargetInstance,
 } from '@/types'
@@ -46,6 +47,7 @@ import { routerPathParamValue } from '@/utils/routeParams'
 import { useScenarioDetailStyles } from './ScenarioDetail.styles'
 import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
+import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
 
 /** Items requested per target page while paging through the full list. */
 const TARGET_PAGE_SIZE = 200
@@ -74,13 +76,7 @@ const MIN_MAX_RETRIES = 0
 const MAX_MAX_RETRIES = 20
 const DEFAULT_MAX_CONCURRENCY = 10
 const DEFAULT_MAX_RETRIES = 0
-
-const ESTIMATE_UNAVAILABLE_STATE: ScenarioRunEstimateState = {
-  status: 'unavailable',
-  scope: 'request',
-  label: 'A request-specific backend estimate is not connected yet.',
-  caveat: 'Your configuration is still valid for launch; sizing will appear here after the layer-1 route is wired.',
-}
+const ESTIMATE_DEBOUNCE_MS = 300
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
@@ -180,10 +176,22 @@ type BuildRunRequestResult =
       error: string
     }
 
-interface EstimateResolution {
-  requestKey: string
-  result: ScenarioRunEstimateResult
-}
+type SuccessfulEstimateResult = Extract<
+  ScenarioRunEstimateResult,
+  { status: 'available' | 'conditional' }
+>
+
+type EstimateRequestState =
+  | {
+      status: 'resolved'
+      requestKey: string
+      result: ScenarioRunEstimateResult
+    }
+  | {
+      status: 'error'
+      requestKey: string
+      error: string
+    }
 
 function buildRunRequest({
   scenario,
@@ -266,11 +274,25 @@ function buildRunRequest({
   return { ok: true, request }
 }
 
-function resolvedTechniques(state: ScenarioRunEstimateState): string[] {
-  if (state.status === 'available' || state.status === 'conditional') {
-    return state.estimate.resolvedTechniques ?? []
+function buildEstimateRequest(request: RunScenarioRequest): ScenarioRunSizeEstimateRequest {
+  const estimateRequest: ScenarioRunSizeEstimateRequest = {
+    target_name: request.target_name,
+    techniques: request.techniques,
+    include_baseline: request.include_baseline,
   }
-  return []
+  if (request.dataset_names !== undefined) {
+    estimateRequest.dataset_names = request.dataset_names
+  }
+  if (request.max_dataset_size !== undefined) {
+    estimateRequest.max_dataset_size = request.max_dataset_size
+  }
+  if (request.dataset_filters !== undefined) {
+    estimateRequest.dataset_filters = request.dataset_filters
+  }
+  if (request.scenario_params !== undefined) {
+    estimateRequest.scenario_params = request.scenario_params
+  }
+  return estimateRequest
 }
 
 interface ScenarioDetailProps {
@@ -496,9 +518,11 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [validationError, setValidationError] = useState<string | null>(null)
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [estimateResolution, setEstimateResolution] = useState<EstimateResolution | null>(null)
+  const [estimateRequestState, setEstimateRequestState] = useState<EstimateRequestState | null>(null)
+  const [lastGoodEstimate, setLastGoodEstimate] = useState<SuccessfulEstimateResult | null>(null)
   // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
+  const estimateSequenceRef = useRef(0)
 
   const techniques = useMemo(
     () => selectedTechniqueNames(techniqueSelection),
@@ -533,51 +557,106 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       techniques,
     ],
   )
-  const estimateRun = scenariosApi.estimateRun
-  const estimateRequestKey = requestResult.ok ? JSON.stringify(requestResult.request) : null
+  const estimateRequest = useMemo(
+    () => requestResult.ok ? buildEstimateRequest(requestResult.request) : null,
+    [requestResult],
+  )
+  const estimateRequestKey = useMemo(
+    () => estimateRequest === null
+      ? null
+      : JSON.stringify({ scenarioName: scenario.scenario_name, request: estimateRequest }),
+    [estimateRequest, scenario.scenario_name],
+  )
 
   useEffect(() => {
-    if (!estimateRun || !requestResult.ok || estimateRequestKey === null) {
+    if (estimateRequest === null || estimateRequestKey === null) {
       return
     }
 
-    let cancelled = false
-    estimateRun(requestResult.request)
-      .then((result) => {
-        if (!cancelled) {
-          setEstimateResolution({ requestKey: estimateRequestKey, result })
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setEstimateResolution({
-            requestKey: estimateRequestKey,
-            result: {
-              status: 'unavailable',
-              scope: 'request',
-              label: 'The backend estimate could not be refreshed.',
-              caveat: toApiError(err).detail,
-            },
-          })
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [estimateRequestKey, estimateRun, requestResult])
+    const requestSequence = estimateSequenceRef.current + 1
+    estimateSequenceRef.current = requestSequence
+    const controller = new AbortController()
 
-  const estimateState: ScenarioRunEstimateState = !estimateRun
-    ? ESTIMATE_UNAVAILABLE_STATE
-    : !requestResult.ok
+    const debounceTimer = window.setTimeout(() => {
+      scenariosApi
+        .estimateRun(scenario.scenario_name, estimateRequest, controller.signal)
+        .then((response) => {
+          if (
+            controller.signal.aborted
+            || requestSequence !== estimateSequenceRef.current
+          ) {
+            return
+          }
+          const result = mapScenarioRunEstimate(response, 'request')
+          setEstimateRequestState({
+            status: 'resolved',
+            requestKey: estimateRequestKey,
+            result,
+          })
+          if (result.status === 'available' || result.status === 'conditional') {
+            setLastGoodEstimate(result)
+          }
+        })
+        .catch((err: unknown) => {
+          if (
+            controller.signal.aborted
+            || requestSequence !== estimateSequenceRef.current
+          ) {
+            return
+          }
+          setEstimateRequestState({
+            status: 'error',
+            requestKey: estimateRequestKey,
+            error: toApiError(err).detail,
+          })
+        })
+    }, ESTIMATE_DEBOUNCE_MS)
+
+    return () => {
+      window.clearTimeout(debounceTimer)
+      controller.abort()
+    }
+  }, [estimateRequest, estimateRequestKey, scenario.scenario_name])
+
+  let estimateState: ScenarioRunEstimateState
+  if (!requestResult.ok) {
+    estimateState = {
+      status: 'unavailable',
+      scope: 'request',
+      label: 'Complete the required configuration to request an estimate.',
+      note: requestResult.error,
+    }
+  } else if (
+    estimateRequestState?.requestKey === estimateRequestKey
+    && estimateRequestState.status === 'resolved'
+  ) {
+    estimateState = estimateRequestState.result
+  } else if (
+    estimateRequestState?.requestKey === estimateRequestKey
+    && estimateRequestState.status === 'error'
+  ) {
+    estimateState = lastGoodEstimate
       ? {
+          status: 'stale',
+          estimate: lastGoodEstimate.estimate,
+          label: 'Showing the last successful estimate.',
+          error: estimateRequestState.error,
+        }
+      : {
           status: 'unavailable',
           scope: 'request',
-          label: 'Complete the required configuration to request an estimate.',
-          caveat: requestResult.error,
+          label: 'The backend estimate could not be refreshed.',
+          note: estimateRequestState.error,
         }
-      : estimateResolution?.requestKey === estimateRequestKey
-        ? estimateResolution.result
-        : { status: 'loading', scope: 'request' }
+  } else if (lastGoodEstimate) {
+    estimateState = {
+      status: 'refreshing',
+      estimate: lastGoodEstimate.estimate,
+      label: 'Updating for the current configuration…',
+    }
+  } else {
+    estimateState = { status: 'loading', scope: 'request' }
+  }
 
   const handlePresetChange = (preset: string): void => {
     setTechniqueSelection({ mode: 'preset', preset })
@@ -647,7 +726,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const previewDatasets = parseDatasetNames(datasetOverride)
   const effectiveDatasets = previewDatasets.length > 0 ? previewDatasets : scenario.default_datasets
   const presetMembers = techniqueSelection.mode === 'preset'
-    ? resolvedTechniques(estimateState)
+    ? (
+        scenario.aggregate_technique_expansions[techniqueSelection.preset]
+        ?? (techniqueSelection.preset === scenario.default_technique
+          ? scenario.default_techniques
+          : [])
+      )
     : []
 
   return (
@@ -666,7 +750,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
             {scenario.scenario_name}
           </Text>
           <MarkdownContent
-            content={normalizeScenarioMarkdown(scenario.description)}
+            content={normalizeScenarioMarkdown(
+              scenario.description_markdown || scenario.description,
+            )}
             className={styles.description}
             testId="scenario-detail-description"
           />
@@ -755,7 +841,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       </div>
                     ) : (
                       <Text size={200} className={styles.hint}>
-                        Members will appear when the backend estimate provides them.
+                        No concrete members were supplied for this preset.
                       </Text>
                     )}
                   </div>
@@ -970,7 +1056,10 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
             </dl>
             <div className={styles.estimateGroup}>
               <Text as="h3" size={400} weight="semibold">Backend-owned size</Text>
-              <ScenarioRunEstimateDetails state={estimateState} />
+              <ScenarioRunEstimateDetails
+                state={estimateState}
+                idPrefix={`${formId}-estimate`}
+              />
             </div>
             <div className={styles.previewActions}>
               <Button

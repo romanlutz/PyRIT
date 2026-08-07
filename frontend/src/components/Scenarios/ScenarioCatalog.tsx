@@ -27,7 +27,7 @@ import { Link } from 'react-router-dom'
 import MarkdownContent from '@/components/Markdown/MarkdownContent'
 import { scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
-import type { RegisteredScenario, ScenarioRunEstimateState } from '@/types'
+import type { RegisteredScenario, ScenarioDatasetSummary } from '@/types'
 import { fetchAllPages } from '@/utils/fetchAllPages'
 
 import { useScenarioCatalogStyles } from './ScenarioCatalog.styles'
@@ -36,16 +36,10 @@ import {
   ScenarioRunEstimateSummary,
 } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
+import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
 
 /** Items requested per catalog page while paging through the full list. */
 const CATALOG_PAGE_SIZE = 200
-
-const DEFAULT_ESTIMATE_STATE: ScenarioRunEstimateState = {
-  status: 'unavailable',
-  scope: 'default',
-  label: 'The backend has not supplied a default-run estimate.',
-  caveat: 'The authoritative total, ordered formula, and dataset counts will appear after sizing is configured.',
-}
 
 function matchesSearch(scenario: RegisteredScenario, query: string): boolean {
   if (!query) {
@@ -54,11 +48,19 @@ function matchesSearch(scenario: RegisteredScenario, query: string): boolean {
   const haystack = [
     scenario.scenario_name,
     scenario.description,
+    scenario.description_markdown,
     scenario.scenario_type,
     scenario.default_technique,
+    ...scenario.default_techniques,
     ...scenario.aggregate_techniques,
+    ...Object.values(scenario.aggregate_technique_expansions).flat(),
     ...scenario.all_techniques,
     ...scenario.default_datasets,
+    ...scenario.default_dataset_summaries.flatMap((dataset) => [
+      dataset.name,
+      dataset.selection_note ?? '',
+      ...dataset.configured_caps.map((cap) => cap.label),
+    ]),
   ]
     .join(' ')
     .toLowerCase()
@@ -67,6 +69,61 @@ function matchesSearch(scenario: RegisteredScenario, query: string): boolean {
 
 function uniqueNames(names: string[]): string[] {
   return [...new Set(names)]
+}
+
+function formatCount(value: number): string {
+  return value.toLocaleString()
+}
+
+function baselineDescription(scenario: RegisteredScenario): string {
+  if (scenario.baseline_policy === 'forbidden') {
+    return 'Baseline execution is not supported for this scenario.'
+  }
+  if (scenario.include_baseline_by_default) {
+    return 'Baseline execution is allowed and included by default.'
+  }
+  return 'Baseline execution is allowed and excluded by default.'
+}
+
+function DatasetPopulation({ dataset }: { dataset: ScenarioDatasetSummary }) {
+  const styles = useScenarioCatalogStyles()
+
+  return (
+    <article className={styles.datasetCard}>
+      <div className={styles.datasetHeader}>
+        <Text weight="semibold">{dataset.name}</Text>
+        <Badge appearance="tint" color="informative">{dataset.kind}</Badge>
+      </div>
+      <dl className={styles.datasetCounts}>
+        <div className={styles.datasetCountRow}>
+          <dt>Logical seed groups</dt>
+          <dd>{formatCount(dataset.logical_seed_group_count)}</dd>
+        </div>
+        <div className={styles.datasetCountRow}>
+          <dt>Selected seed groups</dt>
+          <dd>{formatCount(dataset.selected_seed_group_count)}</dd>
+        </div>
+      </dl>
+      {dataset.configured_caps.length > 0 && (
+        <div className={styles.metadataGroup}>
+          <Text size={200} weight="semibold">Configured caps</Text>
+          <ul className={styles.capList}>
+            {dataset.configured_caps.map((cap) => (
+              <li key={`${cap.label}:${cap.configured_on}:${cap.dataset_name ?? ''}:${cap.count}`}>
+                <Text size={200}>
+                  {cap.label}: {formatCount(cap.count)}
+                  {' '}({cap.configured_on}{cap.dataset_name ? `: ${cap.dataset_name}` : ''})
+                </Text>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {dataset.selection_note && (
+        <Text size={200} className={styles.secondaryText}>{dataset.selection_note}</Text>
+      )}
+    </article>
+  )
 }
 
 interface ScenarioCatalogRowProps {
@@ -78,18 +135,14 @@ interface ScenarioCatalogRowProps {
 function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRowProps) {
   const styles = useScenarioCatalogStyles()
   const detailsId = `scenario-details-${encodeURIComponent(scenario.scenario_name).replace(/%/g, '-')}`
-  const aggregateNames = new Set(scenario.aggregate_techniques)
-  const defaultIsAggregate = aggregateNames.has(scenario.default_technique)
-  const aggregateTechniques = uniqueNames(scenario.aggregate_techniques).filter(
-    (technique) => !defaultIsAggregate || technique !== scenario.default_technique,
+  const aggregateTechniques = uniqueNames(scenario.aggregate_techniques)
+  const defaultIsAggregate = aggregateTechniques.includes(scenario.default_technique)
+  const concreteTechniques = uniqueNames(scenario.all_techniques)
+  const defaultConcreteTechniques = uniqueNames(scenario.default_techniques)
+  const description = normalizeScenarioMarkdown(
+    scenario.description_markdown || scenario.description,
   )
-  const concreteCandidates = defaultIsAggregate
-    ? scenario.all_techniques
-    : [scenario.default_technique, ...scenario.all_techniques]
-  const concreteTechniques = uniqueNames(concreteCandidates).filter(
-    (technique) => !aggregateNames.has(technique),
-  )
-  const description = normalizeScenarioMarkdown(scenario.description)
+  const estimateState = mapScenarioRunEstimate(scenario.default_run_size, 'default')
   const scenarioPath = `/scenarios/${encodeURIComponent(scenario.scenario_name)}`
 
   return (
@@ -106,7 +159,9 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
             <Link to={scenarioPath} className={styles.scenarioLink}>
               {scenario.scenario_name}
             </Link>
-            <Text size={200} className={styles.scenarioType}>{scenario.scenario_type}</Text>
+            <Text size={200} className={styles.scenarioType}>
+              {scenario.scenario_type} · v{scenario.scenario_version}
+            </Text>
             <Text size={200} className={styles.purposePreview}>{scenario.description}</Text>
           </div>
         </TableCell>
@@ -114,7 +169,7 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Default run size
           </Text>
-          <ScenarioRunEstimateSummary state={DEFAULT_ESTIMATE_STATE} />
+          <ScenarioRunEstimateSummary state={estimateState} />
         </TableCell>
         <TableCell className={styles.tableCell}>
           <Text className={styles.mobileLabel} size={200} weight="semibold">
@@ -123,9 +178,9 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
           <div className={styles.compactStack}>
             <Badge appearance="tint" color="brand">{scenario.default_technique}</Badge>
             <Text size={200} className={styles.secondaryText}>
-              {aggregateTechniques.length} additional preset{aggregateTechniques.length === 1 ? '' : 's'}
+              {aggregateTechniques.length} aggregate preset{aggregateTechniques.length === 1 ? '' : 's'}
               {' · '}
-              {concreteTechniques.length} concrete
+              {concreteTechniques.length} compatible concrete
             </Text>
           </div>
         </TableCell>
@@ -178,7 +233,10 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
               </section>
               <section className={styles.detailGroup}>
                 <Text as="h3" size={400} weight="semibold">Default run size</Text>
-                <ScenarioRunEstimateDetails state={DEFAULT_ESTIMATE_STATE} />
+                <ScenarioRunEstimateDetails
+                  state={estimateState}
+                  idPrefix={`${detailsId}-estimate`}
+                />
               </section>
               <section className={styles.detailGroup}>
                 <Text as="h3" size={400} weight="semibold">Techniques</Text>
@@ -191,19 +249,40 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                   </div>
                 </div>
                 <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Other aggregate presets</Text>
-                  {aggregateTechniques.length > 0 ? (
+                  <Text weight="semibold">Backend-resolved default members</Text>
+                  {defaultConcreteTechniques.length > 0 ? (
                     <div className={styles.badgeGroup}>
-                      {aggregateTechniques.map((technique) => (
-                        <Badge key={technique} appearance="tint">{technique}</Badge>
+                      {defaultConcreteTechniques.map((technique) => (
+                        <Badge key={technique} appearance="outline">{technique}</Badge>
                       ))}
                     </div>
+                  ) : (
+                    <Text size={200} className={styles.secondaryText}>
+                      No concrete default members were supplied.
+                    </Text>
+                  )}
+                </div>
+                <div className={styles.metadataGroup}>
+                  <Text weight="semibold">Aggregate presets and members</Text>
+                  {aggregateTechniques.length > 0 ? (
+                    <ul className={styles.presetList}>
+                      {aggregateTechniques.map((technique) => (
+                        <li className={styles.presetItem} key={technique}>
+                          <Badge appearance="tint">{technique}</Badge>
+                          <Text size={200} className={styles.secondaryText}>
+                            {(scenario.aggregate_technique_expansions[technique] ?? []).length > 0
+                              ? scenario.aggregate_technique_expansions[technique].join(', ')
+                              : 'No concrete members supplied.'}
+                          </Text>
+                        </li>
+                      ))}
+                    </ul>
                   ) : (
                     <Text size={200} className={styles.secondaryText}>None registered.</Text>
                   )}
                 </div>
                 <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Concrete techniques</Text>
+                  <Text weight="semibold">Compatible concrete techniques</Text>
                   {concreteTechniques.length > 0 ? (
                     <div className={styles.badgeGroup}>
                       {concreteTechniques.map((technique) => (
@@ -216,13 +295,32 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                 </div>
               </section>
               <section className={styles.detailGroup}>
-                <Text as="h3" size={400} weight="semibold">Default datasets</Text>
-                {scenario.default_datasets.length > 0 ? (
+                <Text as="h3" size={400} weight="semibold">
+                  Default datasets and populations
+                </Text>
+                {scenario.default_dataset_summaries.length > 0 ? (
+                  <ul className={styles.datasetList}>
+                    {scenario.default_dataset_summaries.map((dataset) => (
+                      <li key={`${dataset.kind}:${dataset.name}`}>
+                        <DatasetPopulation dataset={dataset} />
+                      </li>
+                    ))}
+                  </ul>
+                ) : scenario.default_datasets.length > 0 ? (
                   <ul className={styles.datasetList}>
                     {uniqueNames(scenario.default_datasets).map((dataset) => (
-                      <li className={styles.datasetItem} key={dataset}>
-                        <Text>{dataset}</Text>
-                        <Badge appearance="outline">Count unavailable</Badge>
+                      <li key={dataset}>
+                        <article className={styles.datasetCard}>
+                          <div className={styles.datasetHeader}>
+                            <Text weight="semibold">{dataset}</Text>
+                            <Badge appearance="tint" color="warning">
+                              Population unavailable
+                            </Badge>
+                          </div>
+                          <Text size={200} className={styles.secondaryText}>
+                            The backend did not supply population counts or configured caps.
+                          </Text>
+                        </article>
                       </li>
                     ))}
                   </ul>
@@ -231,6 +329,23 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                     This scenario does not declare a default dataset.
                   </Text>
                 )}
+              </section>
+              <section className={styles.detailGroup}>
+                <Text as="h3" size={400} weight="semibold">Baseline policy</Text>
+                <div className={styles.badgeGroup}>
+                  <Badge
+                    appearance="tint"
+                    color={scenario.baseline_policy === 'forbidden' ? 'warning' : 'subtle'}
+                  >
+                    {scenario.baseline_policy}
+                  </Badge>
+                  <Badge appearance="outline">
+                    {scenario.include_baseline_by_default ? 'Included by default' : 'Excluded by default'}
+                  </Badge>
+                </div>
+                <Text size={200} className={styles.secondaryText}>
+                  {baselineDescription(scenario)}
+                </Text>
               </section>
             </div>
           </TableCell>

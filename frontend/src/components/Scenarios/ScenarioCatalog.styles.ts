@@ -145,6 +145,8 @@ export const useScenarioCatalogStyles = makeStyles({
     },
     [NARROW_VIEWPORT_QUERY]: {
       display: 'grid',
+      gridTemplateRows: 'repeat(5, max-content)',
+      height: 'max-content',
       width: '100%',
       marginBottom: tokens.spacingVerticalM,
       overflow: 'hidden',
@@ -168,6 +170,7 @@ export const useScenarioCatalogStyles = makeStyles({
       display: 'grid',
       gridTemplateColumns: 'minmax(7rem, 35%) minmax(0, 1fr)',
       gap: tokens.spacingHorizontalM,
+      height: 'auto',
       width: 'auto',
       padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalM}`,
       borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
@@ -190,6 +193,8 @@ export const useScenarioCatalogStyles = makeStyles({
     minWidth: 0,
   },
   scenarioLink: {
+    display: 'inline-flex',
+    alignItems: 'center',
     alignSelf: 'flex-start',
     color: tokens.colorBrandForegroundLink,
     fontWeight: tokens.fontWeightSemibold,
@@ -201,6 +206,9 @@ export const useScenarioCatalogStyles = makeStyles({
     ':focus-visible': {
       outline: `2px solid ${tokens.colorStrokeFocus2}`,
       outlineOffset: '2px',
+    },
+    [TOUCH_INPUT_QUERY]: {
+      minHeight: MINIMUM_TOUCH_TARGET_SIZE,
     },
   },
   scenarioType: {
@@ -308,19 +316,63 @@ export const useScenarioCatalogStyles = makeStyles({
     flexWrap: 'wrap',
     gap: tokens.spacingHorizontalXXS,
   },
-  datasetList: {
+  presetList: {
     display: 'grid',
-    gap: tokens.spacingVerticalXS,
+    gap: tokens.spacingVerticalS,
     margin: 0,
     padding: 0,
     listStyleType: 'none',
   },
-  datasetItem: {
+  presetItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: tokens.spacingVerticalXXS,
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+  },
+  datasetList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalS,
+    margin: 0,
+    padding: 0,
+    listStyleType: 'none',
+  },
+  datasetCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: tokens.borderRadiusSmall,
+    minWidth: 0,
+    overflowWrap: 'anywhere',
+  },
+  datasetHeader: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
     flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalXS,
+  },
+  datasetCounts: {
+    display: 'grid',
+    gap: tokens.spacingVerticalXXS,
+    margin: 0,
+  },
+  datasetCountRow: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
     gap: tokens.spacingHorizontalS,
-    minWidth: 0,
+    fontVariantNumeric: 'tabular-nums',
+    '& dd': {
+      margin: 0,
+      fontWeight: tokens.fontWeightSemibold,
+    },
+  },
+  capList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalXXS,
+    margin: 0,
+    paddingLeft: tokens.spacingHorizontalL,
   },
 })
