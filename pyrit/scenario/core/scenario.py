@@ -576,9 +576,14 @@ class Scenario(ABC):
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Structured configured-run estimate.
+
+        Raises:
+            ValueError: If target certainty is asserted without a resolved target.
         """
         self._resolve_runtime_configuration(require_objective_target=False)
-        self._estimate_target_is_configured = target_is_configured and self._objective_target is not None
+        if target_is_configured and self._objective_target is None:
+            raise ValueError("target_is_configured requires a resolved objective_target")
+        self._estimate_target_is_configured = self._objective_target is not None
         return await self._estimate_run_size_async()
 
     async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:

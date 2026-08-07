@@ -312,7 +312,7 @@ async def test_adaptive_estimate_counts_exact_compatible_outer_envelopes_with_ta
             return_value=dispatcher,
         ),
     ):
-        estimate = await scenario.get_run_size_estimate_async(target_is_configured=True)
+        estimate = await scenario.get_run_size_estimate_async()
 
     assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
     assert estimate.total_attack_count == 2
