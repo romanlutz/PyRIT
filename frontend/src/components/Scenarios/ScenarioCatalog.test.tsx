@@ -404,7 +404,7 @@ describe('ScenarioCatalog', () => {
     const disclosure = within(row).getByRole('button', { name: 'Show details' })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
     expect(within(row).getByText('4 selected seed groups')).toBeInTheDocument()
-    expect(within(row).getByText('of 400 available · harmbench')).toBeInTheDocument()
+    expect(within(row).getByText('harmbench · 400 available')).toBeInTheDocument()
     expect(within(row).getByText('2 techniques')).toBeInTheDocument()
     expect(within(row).getByText('12–20 planned attacks')).toBeInTheDocument()
     expect(within(row).queryByText('default')).not.toBeInTheDocument()

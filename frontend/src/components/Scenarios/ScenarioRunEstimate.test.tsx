@@ -113,6 +113,7 @@ describe('ScenarioRunEstimate', () => {
     )
 
     expect(screen.getByText('12–20 planned attacks')).toBeInTheDocument()
+    expect(screen.getByText(/planned range = 12–20/)).toBeInTheDocument()
     expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
 
     const upperOnly = mapScenarioRunEstimate({
@@ -180,7 +181,7 @@ describe('ScenarioRunEstimate', () => {
     expect(screen.getByText('Select targets to calculate')).toBeInTheDocument()
     expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
     expect(screen.getByText(
-      'Component breakdown unavailable; final count is set at launch',
+      'Component breakdown unavailable; exact total unavailable',
     )).toBeInTheDocument()
     expect(screen.getByText('A component breakdown isn’t available.')).toBeInTheDocument()
     expect(screen.getByText('Dataset population details aren’t available.')).toBeInTheDocument()

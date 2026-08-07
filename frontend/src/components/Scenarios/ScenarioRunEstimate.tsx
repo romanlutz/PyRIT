@@ -104,9 +104,18 @@ function formatCalculation(estimate: ScenarioRunEstimate): string {
   const components = estimate.components.length > 0
     ? estimate.components.map(formatComponentFormula).join(' + ')
     : 'Component breakdown unavailable'
-  const total = estimate.total === null
-    ? 'final count is set at launch'
-    : `planned total = ${formatEstimateValue(estimate.total)}`
+  let total = 'exact total unavailable'
+  if (estimate.total !== null) {
+    total = `planned total = ${formatEstimateValue(estimate.total)}`
+  } else if (estimate.minimum !== null && estimate.maximum !== null) {
+    total = estimate.minimum === estimate.maximum
+      ? `planned total = ${formatEstimateValue(estimate.minimum)}`
+      : `planned range = ${formatEstimateValue(estimate.minimum)}–${formatEstimateValue(estimate.maximum)}`
+  } else if (estimate.maximum !== null) {
+    total = `planned maximum = ${formatEstimateValue(estimate.maximum)}`
+  } else if (estimate.minimum !== null) {
+    total = `planned minimum = ${formatEstimateValue(estimate.minimum)}`
+  }
   return `${components}; ${total}`
 }
 

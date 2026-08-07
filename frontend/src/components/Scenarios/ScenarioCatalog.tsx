@@ -102,7 +102,7 @@ function DefaultDatasetSizeSummary({
       <div className={styles.compactStack}>
         <Text weight="semibold">{formatSeedGroupCount(dataset.selected_seed_group_count)}</Text>
         <Text size={200} className={styles.secondaryText}>
-          of {formatCount(dataset.logical_seed_group_count)} available · {dataset.name}
+          {dataset.name} · {formatCount(dataset.logical_seed_group_count)} available
         </Text>
       </div>
     )
