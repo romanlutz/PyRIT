@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from sqlalchemy import and_, create_engine, event, exists, func, text
+from sqlalchemy import and_, create_engine, event, exists, func, literal_column, text
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute, sessionmaker
@@ -631,7 +631,7 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         placeholders = []
         bindparams: dict[str, str] = {}
         for index, value in enumerate(scenario_names):
-            param = f"scenario_name_{index}"
+            param = f"scenario_registry_name_{index}"
             placeholders.append(f":{param}")
             bindparams[param] = value
         return text(
@@ -640,7 +640,7 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             f"IN ({', '.join(placeholders)})"
         ).bindparams(**bindparams)
 
-    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any]:
+    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any, Any]:
         """Return compact SQL Server run-plan fields without objective-bearing seed groups."""
         return (
             func.json_value(
@@ -650,6 +650,20 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             func.json_query(
                 ScenarioResultEntry.scenario_metadata,
                 "$.run_plan.atomic_groups",
+            ),
+            literal_column(
+                """
+                (
+                    SELECT
+                        JSON_VALUE([history_seed].[value], '$.id') AS [id],
+                        JSON_VALUE([history_seed].[value], '$.objective_sha256') AS [objective_sha256]
+                    FROM OPENJSON(
+                        [ScenarioResultEntries].[scenario_metadata],
+                        '$.run_plan.seed_groups'
+                    ) AS [history_seed]
+                    FOR JSON PATH
+                )
+                """
             ),
         )
 

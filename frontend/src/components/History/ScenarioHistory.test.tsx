@@ -101,6 +101,10 @@ describe('ScenarioHistory', () => {
     link.focus()
     await user.keyboard('{Enter}')
     expect(onOpenRun).toHaveBeenCalledTimes(2)
+
+    const modifiedClick = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true })
+    expect(link.dispatchEvent(modifiedClick)).toBe(true)
+    expect(onOpenRun).toHaveBeenCalledTimes(2)
   })
 
   it('renders honest legacy totals without a misleading percentage', async () => {
@@ -233,5 +237,42 @@ describe('ScenarioHistory', () => {
       4,
       expect.objectContaining({ cursor: undefined }),
     ))
+  })
+
+  it('hides stale pagination while changed filters are loading', async () => {
+    let resolveFilteredRequest: ((value: Awaited<ReturnType<typeof scenariosApi.listRuns>>) => void) | undefined
+    mockedScenariosApi.listRuns
+      .mockResolvedValueOnce({
+        items: [RUN],
+        pagination: { limit: 25, has_more: true, next_cursor: 'stale-cursor' },
+      })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFilteredRequest = resolve
+      }))
+
+    const history = renderHistory()
+    expect(await screen.findByRole('button', { name: 'Next' })).toBeEnabled()
+
+    history.rerender(
+      <FluentProvider theme={webLightTheme}>
+        <ScenarioHistory
+          {...defaultProps}
+          filters={{ ...DEFAULT_SCENARIO_HISTORY_FILTERS, statuses: ['FAILED'] }}
+        />
+      </FluentProvider>,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    expect(screen.getByText('Loading scenario history...')).toBeInTheDocument()
+    await waitFor(() => expect(mockedScenariosApi.listRuns).toHaveBeenCalledTimes(2))
+    expect(mockedScenariosApi.listRuns).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cursor: undefined, run_statuses: ['FAILED'] }),
+    )
+
+    resolveFilteredRequest?.({
+      items: [RUN],
+      pagination: { limit: 25, has_more: false },
+    })
+    expect(await screen.findByTestId('scenario-history-table')).toBeInTheDocument()
   })
 })

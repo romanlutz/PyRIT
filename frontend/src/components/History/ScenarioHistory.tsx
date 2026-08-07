@@ -109,6 +109,7 @@ export default function ScenarioHistory({
     filters.operation,
     filters.otherLabels,
   ])
+  const [settledFilterKey, setSettledFilterKey] = useState<string | null>(null)
   const [fetchToken, setFetchToken] = useState({
     cursor: undefined as string | undefined,
     filterKey,
@@ -172,6 +173,7 @@ export default function ScenarioHistory({
       setRuns(response.items)
       setHasMore(response.pagination.has_more)
       setNextCursor(response.pagination.next_cursor ?? undefined)
+      setSettledFilterKey(filterKey)
       setError(null)
       if (!effectiveCursor) setPage(0)
     }).catch((requestError: unknown) => {
@@ -179,6 +181,7 @@ export default function ScenarioHistory({
       setRuns([])
       setHasMore(false)
       setNextCursor(undefined)
+      setSettledFilterKey(filterKey)
       setError(toApiError(requestError).detail)
       if (!effectiveCursor) setPage(0)
     }).finally(() => {
@@ -208,6 +211,8 @@ export default function ScenarioHistory({
     || filters.operator.length > 0
     || filters.operation.length > 0
     || filters.otherLabels.length > 0
+  const filtersPending = settledFilterKey !== filterKey
+  const displayLoading = loading || filtersPending
 
   return (
     <main className={styles.root}>
@@ -219,7 +224,7 @@ export default function ScenarioHistory({
             appearance="subtle"
             icon={<ArrowSyncRegular />}
             onClick={() => requestPage()}
-            disabled={loading}
+            disabled={displayLoading}
             data-testid="scenario-history-refresh"
           >
             Refresh
@@ -291,7 +296,7 @@ export default function ScenarioHistory({
       </header>
 
       <div className={styles.content}>
-        {loading ? (
+        {displayLoading ? (
           <div className={styles.emptyState}><Spinner label="Loading scenario history..." /></div>
         ) : error ? (
           <div className={styles.emptyState} data-testid="scenario-history-error">
@@ -315,7 +320,7 @@ export default function ScenarioHistory({
         )}
       </div>
 
-      {!loading && !error && runs.length > 0 && (
+      {!displayLoading && !error && runs.length > 0 && (
         <div className={styles.pagination}>
           <Button
             className={styles.touchTarget}
@@ -328,7 +333,7 @@ export default function ScenarioHistory({
           >
             First
           </Button>
-          <Text>Page {(fetchToken.filterKey === filterKey ? page : 0) + 1}</Text>
+          <Text>Page {page + 1}</Text>
           <Button
             className={styles.touchTarget}
             icon={<ArrowRightRegular />}
@@ -384,6 +389,10 @@ function ScenarioHistoryTable({ runs, onOpenRun }: ScenarioHistoryTableProps) {
                 className={styles.rowLink}
                 aria-label={`Open ${run.scenario_registry_name ?? run.scenario_name} scenario run`}
                 onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                    event.stopPropagation()
+                    return
+                  }
                   event.preventDefault()
                   event.stopPropagation()
                   onOpenRun(run.scenario_result_id)

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from sqlalchemy import and_, create_engine, exists, func, or_, text
+from sqlalchemy import and_, create_engine, exists, func, or_, select, text
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute, sessionmaker
@@ -467,8 +467,26 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         )
         return registry_name.in_(scenario_names)
 
-    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any]:
+    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any, Any]:
         """Return compact SQLite run-plan fields without objective-bearing seed groups."""
+        seed_rows = func.json_each(
+            ScenarioResultEntry.scenario_metadata,
+            "$.run_plan.seed_groups",
+        ).table_valued("value")
+        compact_seed_map = (
+            select(
+                func.json_group_array(
+                    func.json_object(
+                        "id",
+                        func.json_extract(seed_rows.c.value, "$.id"),
+                        "objective_sha256",
+                        func.json_extract(seed_rows.c.value, "$.objective_sha256"),
+                    )
+                )
+            )
+            .select_from(seed_rows)
+            .scalar_subquery()
+        )
         return (
             func.json_extract(
                 ScenarioResultEntry.scenario_metadata,
@@ -478,6 +496,7 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
                 ScenarioResultEntry.scenario_metadata,
                 "$.run_plan.atomic_groups",
             ),
+            compact_seed_map,
         )
 
     def _get_scenario_attempt_unit_expressions(self) -> tuple[Any, Any, Any]:

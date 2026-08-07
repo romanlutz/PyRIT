@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, or_, select, text
 
 from pyrit.common.singleton import Singleton
 from pyrit.converter.base64_converter import Base64Converter
 from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, PromptMemoryEntry
+from pyrit.memory.memory_models import ScenarioResultEntry
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import Conversation, MessagePiece
 from pyrit.prompt_target.text_target import TextTarget
@@ -456,11 +457,18 @@ def test_scenario_history_conditions_bind_or_within_label_and_registry_values(
         "scenario_label_value_1_0": "nightly",
     }
     assert registry_condition.compile().params == {
-        "scenario_name_0": "first.scenario",
-        "scenario_name_1": "second.scenario",
+        "scenario_registry_name_0": "first.scenario",
+        "scenario_registry_name_1": "second.scenario",
     }
     assert " IN (" in str(label_condition)
     assert " AND " in str(label_condition)
+    combined_statement = select(ScenarioResultEntry.id).where(
+        or_(
+            ScenarioResultEntry.scenario_name.in_(["first.scenario", "second.scenario"]),
+            registry_condition,
+        )
+    )
+    assert "scenario_registry_name_1" in combined_statement.compile().params
 
 
 @pytest.mark.parametrize(

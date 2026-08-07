@@ -7,7 +7,7 @@ Tests for ScenarioRunService.
 
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -147,6 +147,7 @@ def _make_history_record(
         error_type=None,
         scenario_registry_name=None,
         plan_atomic_groups=None,
+        plan_seed_id_map=None,
     )
 
 
@@ -411,10 +412,8 @@ class TestScenarioRunServiceStartRun:
         assert built_config.dataset_names == ["only_this"]
         assert built_config.max_dataset_size is None
 
-    async def test_start_run_dataset_names_falls_back_when_subclass_constructor_incompatible(
-        self, mock_all_registries, caplog
-    ) -> None:
-        """If the subclass __init__ rejects standard kwargs, fall back to plain ``DatasetConfiguration``."""
+    async def test_start_run_dataset_names_rejects_incompatible_subclass_constructor(self, mock_all_registries) -> None:
+        """Reject overrides that cannot preserve scenario-specific dataset configuration."""
 
         class _RequiresExtraArgConfiguration(DatasetConfiguration):
             def __init__(self, *, required_extra: str, **kwargs: Any) -> None:
@@ -428,21 +427,13 @@ class TestScenarioRunServiceStartRun:
         )
 
         service = ScenarioRunService()
-        with caplog.at_level("WARNING", logger=_svc_mod.logger.name):
+        with pytest.raises(
+            ValueError,
+            match="does not support overriding dataset names.*_RequiresExtraArgConfiguration",
+        ):
             await service.start_run_async(request=_make_request(dataset_names=["custom"]))
 
-        init_call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
-        built_config = init_call.kwargs["dataset_config"]
-
-        # Fallback is the generic base class, not the subclass
-        assert type(built_config) is DatasetAttackConfiguration
-        assert built_config.dataset_names == ["custom"]
-        # Warning was logged so the operator can see the silent degradation
-        assert any(
-            "_RequiresExtraArgConfiguration" in record.message
-            and "Falling back to a generic DatasetAttackConfiguration" in record.message
-            for record in caplog.records
-        )
+        mock_all_registries["scenario_registry"].create_and_initialize_async.assert_not_awaited()
 
     async def test_start_run_dataset_filters_new_config(self, mock_all_registries) -> None:
         """``dataset_filters`` with ``dataset_names`` builds a config carrying the filters."""
@@ -740,9 +731,21 @@ class TestScenarioRunServiceListRuns:
             record,
             scenario_registry_name=plan.scenario_registry_name,
             plan_atomic_groups=[group.model_dump(mode="json") for group in plan.atomic_groups],
+            plan_seed_id_map=[{"id": seed.id, "objective_sha256": seed.objective_sha256} for seed in plan.seed_groups],
         )
         timestamp = datetime(2026, 8, 7, tzinfo=timezone.utc)
         units = [
+            ScenarioHistoryUnitRecord(
+                scenario_result_id=record.scenario_result_id,
+                atomic_attack_name="attack",
+                technique_eval_hash="eval-1",
+                seed_group_id="hash-1",
+                objective_sha256="hash-1",
+                latest_outcome=AttackOutcome.ERROR.value,
+                latest_timestamp=timestamp - timedelta(seconds=1),
+                total_retries=0,
+                error_count=1,
+            ),
             ScenarioHistoryUnitRecord(
                 scenario_result_id=record.scenario_result_id,
                 atomic_attack_name="attack",
@@ -751,8 +754,8 @@ class TestScenarioRunServiceListRuns:
                 objective_sha256="hash-1",
                 latest_outcome=AttackOutcome.SUCCESS.value,
                 latest_timestamp=timestamp,
-                total_retries=3,
-                error_count=1,
+                total_retries=2,
+                error_count=0,
             ),
         ]
         mock_memory.get_scenario_run_history_page.return_value = (
@@ -822,6 +825,7 @@ class TestScenarioRunServiceListRuns:
             record,
             scenario_registry_name="registered.scenario",
             plan_atomic_groups="{}",
+            plan_seed_id_map="[]",
         )
         mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, False)
 
@@ -830,6 +834,27 @@ class TestScenarioRunServiceListRuns:
         assert summary.planned_total_available is False
         assert summary.total_attacks == 0
         assert summary.completed_attacks == 0
+
+    def test_history_discards_duplicate_plan_groups_before_legacy_fallback(self, mock_memory) -> None:
+        record = _make_history_record(result_id="sr-duplicate-plan", run_state=ScenarioRunState.COMPLETED)
+        group = ScenarioRunPlanAtomicGroup(
+            id="duplicate",
+            atomic_attack_name="attack",
+            display_group="Attack",
+            technique_eval_hash="eval",
+            seed_group_ids=["seed-1"],
+        ).model_dump(mode="json")
+        record = replace(
+            record,
+            plan_atomic_groups=[group, group],
+            plan_seed_id_map=[{"id": "seed-1", "objective_sha256": "hash-1"}],
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, False)
+
+        summary = ScenarioRunService().list_runs().items[0]
+
+        assert summary.planned_total_available is False
+        assert summary.total_attacks == 0
 
 
 class TestScenarioRunServiceCancelRun:
@@ -1326,6 +1351,7 @@ def test_planned_progress_deduplicates_attempts_and_keeps_latest_non_error(mock_
     assert summary.completed_attacks == 1
     assert summary.objective_achieved_rate == 100
     assert len(summary.failed_attacks) == 2
+    assert summary.total_retries == 3
 
 
 def test_get_progress_uses_lightweight_queries_without_full_hydration(mock_memory) -> None:

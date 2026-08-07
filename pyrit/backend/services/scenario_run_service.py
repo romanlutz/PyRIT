@@ -66,7 +66,6 @@ from pyrit.registry import (
     TargetRegistry,
 )
 from pyrit.scenario import Scenario
-from pyrit.scenario.core import DatasetAttackConfiguration
 
 if TYPE_CHECKING:
     from pyrit.converter import Converter
@@ -89,6 +88,8 @@ _SAFE_SCENARIO_PARAMETER_NAMES = frozenset(
         "version",
     }
 )
+_HISTORY_ATOMIC_GROUPS_ADAPTER = TypeAdapter(list[ScenarioRunPlanAtomicGroup])
+_HISTORY_SEED_ID_MAP_ADAPTER = TypeAdapter(list[dict[str, str]])
 
 
 @dataclass
@@ -99,6 +100,14 @@ class _ActiveTask:
     task: asyncio.Task[None] | None = None
     scenario: Scenario | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveRunSnapshot:
+    """Event-loop-owned state copied before database work moves to a worker thread."""
+
+    error: str | None = None
+    active_group_ids: tuple[str, ...] = ()
 
 
 class ScenarioRunService:
@@ -169,7 +178,7 @@ class ScenarioRunService:
         task = asyncio.create_task(self._execute_run_async(scenario_result_id=scenario_result_id))
         active.task = task
 
-        response = self._build_response(scenario_result_id=scenario_result_id)
+        response = self.get_run(scenario_result_id=scenario_result_id)
         if response is None:
             raise RuntimeError(f"Scenario run {scenario_result_id} was not found in the database after initialization.")
         return response
@@ -184,7 +193,22 @@ class ScenarioRunService:
         Returns:
             ScenarioRunSummary if found, None otherwise.
         """
-        return self._build_response(scenario_result_id=scenario_result_id)
+        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
+        return self.get_run_from_storage(scenario_result_id=scenario_result_id, active_error=snapshot.error)
+
+    def get_run_from_storage(
+        self,
+        *,
+        scenario_result_id: str,
+        active_error: str | None,
+    ) -> ScenarioRunSummary | None:
+        """
+        Build a run summary using database state plus an event-loop snapshot.
+
+        Returns:
+            ScenarioRunSummary | None: The run summary when found.
+        """
+        return self._build_response(scenario_result_id=scenario_result_id, active_error=active_error)
 
     def list_runs(
         self,
@@ -297,7 +321,7 @@ class ScenarioRunService:
             error_type="CancelledError",
         )
 
-        return self._build_response(scenario_result_id=scenario_result_id)
+        return self.get_run(scenario_result_id=scenario_result_id)
 
     def _resolve_scenario_class(self, *, request: RunScenarioRequest) -> type[Scenario]:
         """
@@ -464,24 +488,10 @@ class ScenarioRunService:
                         filters=dataset_filters or None,
                     )
                 except TypeError as exc:
-                    # The subclass __init__ takes extra required kwargs we cannot
-                    # supply from a backend request. Fall back to the base
-                    # DatasetAttackConfiguration so the run can still proceed; downstream
-                    # scenarios that strictly require the subclass should either
-                    # define a no-extra-required-args constructor or surface the
-                    # incompatibility through their own initialize_async validation.
-                    logger.warning(
-                        "Cannot construct %s(dataset_names=..., max_dataset_size=..., filters=...) (%s). "
-                        "Falling back to a generic DatasetAttackConfiguration; scenario-specific "
-                        "dataset-config behavior may be lost.",
-                        default_config_class.__name__,
-                        exc,
-                    )
-                    init_kwargs["dataset_config"] = DatasetAttackConfiguration(
-                        dataset_names=request.dataset_names,
-                        max_dataset_size=request.max_dataset_size,
-                        filters=dataset_filters or None,
-                    )
+                    raise ValueError(
+                        f"Scenario '{request.scenario_name}' does not support overriding dataset names through "
+                        f"its {default_config_class.__name__} configuration: {exc}"
+                    ) from exc
             else:
                 # Reuse the scenario's default dataset config (preserves subtype +
                 # the scenario's own default dataset names) and override only the
@@ -647,12 +657,18 @@ class ScenarioRunService:
         finally:
             self._run_semaphore.release()
 
-    def _build_response(self, *, scenario_result_id: str) -> ScenarioRunSummary | None:
+    def _build_response(
+        self,
+        *,
+        scenario_result_id: str,
+        active_error: str | None,
+    ) -> ScenarioRunSummary | None:
         """
         Build a ScenarioRunResponse by querying the database and merging active task state.
 
         Args:
             scenario_result_id: The scenario result ID.
+            active_error: Error copied from the active asyncio task, if any.
 
         Returns:
             ScenarioRunResponse if found in the database, None otherwise.
@@ -660,20 +676,25 @@ class ScenarioRunService:
         results = self._memory.get_scenario_results(scenario_result_ids=[scenario_result_id])
         if not results:
             return None
-        return self._build_response_from_db(scenario_result=results[0])
+        return self._build_response_from_db(scenario_result=results[0], active_error=active_error)
 
-    def _build_response_from_db(self, *, scenario_result: ScenarioResult) -> ScenarioRunSummary:
+    def _build_response_from_db(
+        self,
+        *,
+        scenario_result: ScenarioResult,
+        active_error: str | None = None,
+    ) -> ScenarioRunSummary:
         """
         Build a ScenarioRunResponse from a database ScenarioResult, merged with active task info.
 
         Args:
             scenario_result: A ScenarioResult retrieved from CentralMemory.
+            active_error: Error copied from the active asyncio task, if any.
 
         Returns:
             The API response model.
         """
         scenario_result_id = str(scenario_result.id)
-        active = self._get_active_task(scenario_result_id=scenario_result_id)
 
         # Primary source: DB-persisted error fields
         error = scenario_result.error_message
@@ -691,8 +712,8 @@ class ScenarioRunService:
                 error_type = error_ars[0].error_type
 
         # Fallback: in-memory error for in-flight tasks where DB hasn't been updated yet
-        if not error and active is not None:
-            error = active.error
+        if not error:
+            error = active_error
 
         status = scenario_result.scenario_run_state
         terminal = status in (
@@ -721,8 +742,15 @@ class ScenarioRunService:
         failed_attacks: list[AttackErrorSummary] = []
         attack_retries: list[AttackRetrySummary] = []
         total_retries = 0
+        attempts_by_unit: dict[tuple[str, str], int] = {}
         for atomic_attack_name, results in scenario_result.attack_results.items():
             for attack_result in results:
+                unit_key = self._result_unit_key(
+                    atomic_attack_name=atomic_attack_name,
+                    attack_result=attack_result,
+                    plan=plan,
+                )
+                attempts_by_unit[unit_key] = attempts_by_unit.get(unit_key, 0) + 1
                 retries = getattr(attack_result, "total_retries", 0)
                 if isinstance(retries, int):
                     total_retries += retries
@@ -747,6 +775,7 @@ class ScenarioRunService:
                             total_retries=retries if isinstance(retries, int) else 0,
                         )
                     )
+        total_retries += sum(max(0, attempt_count - 1) for attempt_count in attempts_by_unit.values())
 
         updated_at = scenario_result.creation_time
         if terminal and scenario_result.completion_time is not None:
@@ -809,6 +838,7 @@ class ScenarioRunService:
                 record.scenario_result_id,
             )
         atomic_groups = None
+        seed_id_by_objective_hash: dict[str, str] = {}
         if record.plan_atomic_groups is not None:
             try:
                 raw_atomic_groups = (
@@ -816,10 +846,26 @@ class ScenarioRunService:
                     if isinstance(record.plan_atomic_groups, str)
                     else record.plan_atomic_groups
                 )
-                atomic_groups = TypeAdapter(list[ScenarioRunPlanAtomicGroup]).validate_python(raw_atomic_groups)
-                group_ids = [group.id for group in atomic_groups]
+                candidate_atomic_groups = _HISTORY_ATOMIC_GROUPS_ADAPTER.validate_python(raw_atomic_groups)
+                group_ids = [group.id for group in candidate_atomic_groups]
                 if len(group_ids) != len(set(group_ids)):
                     raise ValueError("duplicate atomic group IDs")
+                raw_seed_map = (
+                    json.loads(record.plan_seed_id_map)
+                    if isinstance(record.plan_seed_id_map, str)
+                    else record.plan_seed_id_map
+                )
+                candidate_seed_map = _HISTORY_SEED_ID_MAP_ADAPTER.validate_python(raw_seed_map)
+                candidate_seed_ids: dict[str, str] = {}
+                for seed in candidate_seed_map:
+                    objective_sha256 = seed["objective_sha256"]
+                    seed_id = seed["id"]
+                    previous_seed_id = candidate_seed_ids.get(objective_sha256)
+                    if previous_seed_id is not None and previous_seed_id != seed_id:
+                        raise ValueError("ambiguous objective hash in run plan")
+                    candidate_seed_ids[objective_sha256] = seed_id
+                atomic_groups = candidate_atomic_groups
+                seed_id_by_objective_hash = candidate_seed_ids
             except (json.JSONDecodeError, ValidationError, ValueError):
                 logger.warning(
                     "Scenario run %s has an incomplete persisted plan; using legacy history totals.",
@@ -839,7 +885,15 @@ class ScenarioRunService:
                     record.scenario_result_id,
                 )
 
-        units_by_key = {self._history_unit_key(unit=unit, atomic_groups=atomic_groups): unit for unit in units}
+        units_by_key: dict[tuple[str, str], ScenarioHistoryUnitRecord] = {}
+        for unit in units:
+            unit_key = self._history_unit_key(
+                unit=unit,
+                atomic_groups=atomic_groups,
+                seed_id_by_objective_hash=seed_id_by_objective_hash,
+            )
+            existing = units_by_key.get(unit_key)
+            units_by_key[unit_key] = self._merge_history_units(existing=existing, incoming=unit) if existing else unit
         planned_units = (
             {(group.id, seed_group_id) for group in atomic_groups for seed_group_id in group.seed_group_ids}
             if atomic_groups is not None
@@ -899,6 +953,7 @@ class ScenarioRunService:
         *,
         unit: ScenarioHistoryUnitRecord,
         atomic_groups: list[ScenarioRunPlanAtomicGroup] | None,
+        seed_id_by_objective_hash: dict[str, str],
     ) -> tuple[str, str]:
         """
         Resolve a projected history attempt to its logical planned unit.
@@ -914,7 +969,38 @@ class ScenarioRunService:
                 ):
                     atomic_group_id = group.id
                     break
-        return atomic_group_id, unit.seed_group_id
+        seed_group_id = seed_id_by_objective_hash.get(unit.seed_group_id, unit.seed_group_id)
+        return atomic_group_id, seed_group_id
+
+    @staticmethod
+    def _merge_history_units(
+        *,
+        existing: ScenarioHistoryUnitRecord,
+        incoming: ScenarioHistoryUnitRecord,
+    ) -> ScenarioHistoryUnitRecord:
+        """
+        Merge attempt partitions that resolve to the same persisted logical unit.
+
+        Returns:
+            ScenarioHistoryUnitRecord: Combined counters and preferred latest outcome.
+        """
+        existing_completed = existing.latest_outcome != AttackOutcome.ERROR.value
+        incoming_completed = incoming.latest_outcome != AttackOutcome.ERROR.value
+        if incoming_completed != existing_completed:
+            preferred = incoming if incoming_completed else existing
+        else:
+            preferred = incoming if incoming.latest_timestamp > existing.latest_timestamp else existing
+        return ScenarioHistoryUnitRecord(
+            scenario_result_id=preferred.scenario_result_id,
+            atomic_attack_name=preferred.atomic_attack_name,
+            technique_eval_hash=preferred.technique_eval_hash,
+            seed_group_id=preferred.seed_group_id,
+            objective_sha256=preferred.objective_sha256 or existing.objective_sha256 or incoming.objective_sha256,
+            latest_outcome=preferred.latest_outcome,
+            latest_timestamp=max(existing.latest_timestamp, incoming.latest_timestamp),
+            total_retries=max(0, existing.total_retries) + max(0, incoming.total_retries) + 1,
+            error_count=max(0, existing.error_count) + max(0, incoming.error_count),
+        )
 
     @staticmethod
     def _safe_run_metadata(
@@ -1105,6 +1191,19 @@ class ScenarioRunService:
             self._active_tasks.pop(scenario_result_id, None)
         return active
 
+    def snapshot_active_run(self, *, scenario_result_id: str) -> _ActiveRunSnapshot:
+        """
+        Copy asyncio-owned run state for use by database-only worker-thread methods.
+
+        Returns:
+            _ActiveRunSnapshot: An immutable copy of the active state.
+        """
+        active = self._get_active_task(scenario_result_id=scenario_result_id)
+        if active is None:
+            return _ActiveRunSnapshot()
+        active_group_ids = tuple(sorted(active.scenario.active_atomic_group_ids)) if active.scenario is not None else ()
+        return _ActiveRunSnapshot(error=active.error, active_group_ids=active_group_ids)
+
     @staticmethod
     def _load_run_plan(*, scenario_result: ScenarioResult) -> ScenarioRunPlan | None:
         """
@@ -1142,6 +1241,14 @@ class ScenarioRunService:
         seed_group_id = str(attributed_seed_group_id) if attributed_seed_group_id else ""
         if not seed_group_id and typed_identifier is not None and typed_identifier.seed_identifiers:
             seed_group_id = typed_identifier.logical_seed_group_id
+        if not seed_group_id and plan is not None:
+            objective_sha256 = str(getattr(attack_result, "objective_sha256", "") or to_sha256(objective))
+            matching_seed = next(
+                (seed for seed in plan.seed_groups if seed.objective_sha256 == objective_sha256),
+                None,
+            )
+            if matching_seed is not None:
+                seed_group_id = matching_seed.id
         if not seed_group_id:
             seed_group_id = config_hash({"objective": objective})
         atomic_group_id = atomic_attack_name
@@ -1213,7 +1320,29 @@ class ScenarioRunService:
         since: str | None,
         limit: int,
     ) -> ScenarioRunProgress | None:
-        """Return compact incremental progress without hydrating a full ScenarioResult."""
+        """
+        Snapshot live state and return compact incremental progress.
+
+        Returns:
+            ScenarioRunProgress | None: Compact progress when the run exists.
+        """
+        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
+        return self.get_run_progress_from_storage(
+            scenario_result_id=scenario_result_id,
+            since=since,
+            limit=limit,
+            active_group_ids=snapshot.active_group_ids,
+        )
+
+    def get_run_progress_from_storage(
+        self,
+        *,
+        scenario_result_id: str,
+        since: str | None,
+        limit: int,
+        active_group_ids: Sequence[str],
+    ) -> ScenarioRunProgress | None:
+        """Return compact database progress using a previously captured live-state snapshot."""
         header_result = self._memory.get_scenario_result_header(scenario_result_id=scenario_result_id)
         if header_result is None:
             return None
@@ -1233,12 +1362,6 @@ class ScenarioRunService:
         results = [self._map_progress_delta(delta=delta, plan=plan or response_plan) for delta in deltas]
         next_cursor = (
             self._encode_progress_cursor(scenario_result_id=scenario_result_id, delta=deltas[-1]) if deltas else since
-        )
-        active = self._get_active_task(scenario_result_id=scenario_result_id)
-        active_group_ids = (
-            sorted(active.scenario.active_atomic_group_ids)
-            if active is not None and active.scenario is not None
-            else []
         )
         terminal = header_result.scenario_run_state in (
             ScenarioRunState.COMPLETED,
@@ -1271,7 +1394,7 @@ class ScenarioRunService:
             ),
             plan=response_plan,
             reset=False,
-            active_atomic_group_ids=active_group_ids,
+            active_atomic_group_ids=list(active_group_ids),
             results=results,
             next_cursor=next_cursor,
             has_more=has_more,

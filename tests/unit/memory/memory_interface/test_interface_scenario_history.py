@@ -187,6 +187,10 @@ def test_history_filters_names_statuses_and_labels_without_hydration(
             "seed_group_ids": ["seed-1"],
         }
     ]
+    compact_seed_map = (
+        json.loads(rows[0].plan_seed_id_map) if isinstance(rows[0].plan_seed_id_map, str) else rows[0].plan_seed_id_map
+    )
+    assert compact_seed_map == [{"id": "seed-1", "objective_sha256": "objective-hash"}]
     assert len(units[str(included.id)]) == 1
     assert units[str(included.id)][0].latest_outcome == AttackOutcome.SUCCESS.value
     assert units[str(included.id)][0].error_count == 1

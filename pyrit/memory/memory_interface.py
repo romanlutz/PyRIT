@@ -157,6 +157,7 @@ class ScenarioHistoryRunRecord:
     error_type: str | None
     scenario_registry_name: str | None
     plan_atomic_groups: str | list[dict[str, Any]] | None
+    plan_seed_id_map: str | list[dict[str, str]] | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1652,7 +1653,7 @@ class MemoryInterface(abc.ABC):
         """Return a backend-specific condition matching persisted run-plan registry names."""
 
     @abc.abstractmethod
-    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any]:
+    def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any, Any]:
         """Return registry-name and compact atomic-group expressions for history rows."""
 
     @abc.abstractmethod
@@ -3508,7 +3509,7 @@ class MemoryInterface(abc.ABC):
                 expression.label(label)
                 for expression, label in zip(
                     self._get_scenario_history_plan_expressions(),
-                    ("scenario_registry_name", "plan_atomic_groups"),
+                    ("scenario_registry_name", "plan_atomic_groups", "plan_seed_id_map"),
                     strict=True,
                 )
             ),
@@ -3578,6 +3579,7 @@ class MemoryInterface(abc.ABC):
                 error_type=row.error_type,
                 scenario_registry_name=row.scenario_registry_name,
                 plan_atomic_groups=row.plan_atomic_groups,
+                plan_seed_id_map=row.plan_seed_id_map,
             )
             for row in page_rows
         ]
