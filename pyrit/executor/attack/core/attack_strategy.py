@@ -355,11 +355,11 @@ class _DefaultAttackStrategyEventHandler(StrategyEventHandler[AttackStrategyCont
         collector = get_retry_collector()
         retry_events = collector.events if collector else []
 
-        # Multi-turn contexts keep the active conversation on their session.
-        session = getattr(context, "session", None)
-        conversation_id = (
-            getattr(context, "conversation_id", None) or getattr(session, "conversation_id", None) or str(uuid.uuid4())
-        )
+        # Multi-turn contexts keep the active ID on their conversation session.
+        conversation_id = getattr(context, "conversation_id", None)
+        if not conversation_id:
+            conversation_id = getattr(getattr(context, "session", None), "conversation_id", None)
+        conversation_id = conversation_id or str(uuid.uuid4())
 
         error_result = AttackResult(
             conversation_id=conversation_id,
