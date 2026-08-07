@@ -228,7 +228,10 @@ def construct_response_from_request(
 
     """
     if request.prompt_metadata:
-        prompt_metadata = {**request.prompt_metadata, **(prompt_metadata or {})}
+        request_metadata = {key: value for key, value in request.prompt_metadata.items() if key != "target_invocation"}
+        prompt_metadata = {**request_metadata, **(prompt_metadata or {})}
+    if prompt_metadata:
+        prompt_metadata.pop("target_invocation", None)
 
     return Message(
         message_pieces=[

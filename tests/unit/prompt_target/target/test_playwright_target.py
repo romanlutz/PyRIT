@@ -301,7 +301,9 @@ class TestPlaywrightTargetEdgeCases:
 
     @pytest.fixture
     def mock_page(self):
-        return AsyncMock(name="MockPage")
+        page = AsyncMock(name="MockPage")
+        page.url = "https://example.com/test"
+        return page
 
     @pytest.fixture
     def mock_interaction_func(self):

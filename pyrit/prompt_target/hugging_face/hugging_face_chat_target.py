@@ -20,6 +20,7 @@ from pyrit.common.download_hf_model import download_specific_files_async
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.request_options import HuggingFaceRequestOptions
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -204,6 +205,19 @@ class HuggingFaceChatTarget(PromptTarget):
             },
         )
 
+    def _get_default_request_options(self) -> HuggingFaceRequestOptions:
+        """Return constructor-backed generation defaults."""
+        return HuggingFaceRequestOptions(
+            max_new_tokens=self.max_new_tokens,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            top_k=self._top_k,
+            do_sample=self._do_sample,
+            repetition_penalty=self._repetition_penalty,
+            random_seed=self._random_seed,
+            skip_special_tokens=self.skip_special_tokens,
+        )
+
     def _load_from_path(self, path: str, **kwargs: Any) -> None:
         """
         Load the model and tokenizer from a given path.
@@ -339,6 +353,8 @@ class HuggingFaceChatTarget(PromptTarget):
             EmptyResponseException: If the model generates an empty response.
         """
         await self.load_model_and_tokenizer_task
+        options = self._get_request_options(HuggingFaceRequestOptions)
+        overrides = self._get_request_overrides(HuggingFaceRequestOptions)
 
         request = normalized_conversation[-1].message_pieces[0]
 
@@ -359,7 +375,10 @@ class HuggingFaceChatTarget(PromptTarget):
             # Record input length to extract only newly generated tokens
             input_length = input_ids.shape[-1]
 
-            generate_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask, **self._generation_params}
+            if isinstance(overrides.random_seed, int):
+                self._seed_rng(random_seed=overrides.random_seed)
+            generation_params = self._build_generation_params(options=options)
+            generate_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask, **generation_params}
 
             logger.info("Generating response from model...")
             generated_ids = self.model.generate(**generate_kwargs)
@@ -370,7 +389,10 @@ class HuggingFaceChatTarget(PromptTarget):
 
             assistant_response = cast(
                 "str",
-                self.tokenizer.decode(generated_tokens, skip_special_tokens=self.skip_special_tokens),  # type: ignore[ty:unresolved-attribute]
+                self.tokenizer.decode(  # type: ignore[ty:unresolved-attribute]
+                    generated_tokens,
+                    skip_special_tokens=options.skip_special_tokens,
+                ),
             ).strip()
 
             if not assistant_response:
@@ -380,7 +402,10 @@ class HuggingFaceChatTarget(PromptTarget):
 
             model_identifier = self.model_id or self.model_path
 
-            effective_config = self._get_effective_generation_config()
+            effective_config = self._get_effective_generation_config(
+                generation_params=generation_params,
+                random_seed=options.random_seed if isinstance(options.random_seed, int) else None,
+            )
 
             response = construct_response_from_request(
                 request=request,
@@ -431,7 +456,11 @@ class HuggingFaceChatTarget(PromptTarget):
         self._random_seed = random_seed
         self._seed_rng()
 
-    def _build_generation_params(self) -> dict[str, Any]:
+    def _build_generation_params(
+        self,
+        *,
+        options: HuggingFaceRequestOptions | None = None,
+    ) -> dict[str, Any]:
         """
         Build the static generation parameters dict.
 
@@ -442,20 +471,21 @@ class HuggingFaceChatTarget(PromptTarget):
         Returns:
             dict[str, Any]: Static keyword arguments for model.generate().
         """
+        resolved = options or self._get_default_request_options()
         params: dict[str, Any] = {
-            "max_new_tokens": self.max_new_tokens,
-            "temperature": self._temperature,
-            "top_p": self._top_p,
+            "max_new_tokens": resolved.max_new_tokens,
+            "temperature": resolved.temperature,
+            "top_p": resolved.top_p,
         }
-        if self._top_k is not None:
-            params["top_k"] = self._top_k
-        if self._do_sample is not None:
-            params["do_sample"] = self._do_sample
-        if self._repetition_penalty is not None:
-            params["repetition_penalty"] = self._repetition_penalty
+        if resolved.top_k is not None:
+            params["top_k"] = resolved.top_k
+        if resolved.do_sample is not None:
+            params["do_sample"] = resolved.do_sample
+        if resolved.repetition_penalty is not None:
+            params["repetition_penalty"] = resolved.repetition_penalty
         return params
 
-    def _seed_rng(self) -> None:
+    def _seed_rng(self, *, random_seed: int | None = None) -> None:
         """
         Seed the random number generators for deterministic generation.
 
@@ -467,14 +497,20 @@ class HuggingFaceChatTarget(PromptTarget):
             This sets global torch RNG state. Concurrent generation calls on
             the same process may interfere with determinism.
         """
-        if self._random_seed is not None:
+        effective_seed = self._random_seed if random_seed is None else random_seed
+        if effective_seed is not None:
             import torch  # type: ignore[ty:unresolved-import]
 
-            torch.manual_seed(self._random_seed)
+            torch.manual_seed(effective_seed)
             if self.use_cuda:
-                torch.cuda.manual_seed_all(self._random_seed)
+                torch.cuda.manual_seed_all(effective_seed)
 
-    def _get_effective_generation_config(self) -> dict[str, Any]:
+    def _get_effective_generation_config(
+        self,
+        *,
+        generation_params: dict[str, Any] | None = None,
+        random_seed: int | None = None,
+    ) -> dict[str, Any]:
         """
         Return the effective generation parameters that were used for the last call.
 
@@ -488,9 +524,10 @@ class HuggingFaceChatTarget(PromptTarget):
         if hasattr(self.model, "generation_config"):
             effective = self.model.generation_config.to_dict()
 
-        effective.update(self._generation_params)
-        if self._random_seed is not None:
-            effective["random_seed"] = self._random_seed
+        effective.update(generation_params or self._generation_params)
+        effective_seed = self._random_seed if generation_params is None else random_seed
+        if effective_seed is not None:
+            effective["random_seed"] = effective_seed
         return effective
 
     def _warn_if_sampling_params_without_do_sample(self) -> None:

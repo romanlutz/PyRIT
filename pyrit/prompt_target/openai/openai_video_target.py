@@ -14,6 +14,7 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import DataTypeSerializer, data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, construct_response_from_request
+from pyrit.prompt_target.common.request_options import OpenAIVideoRequestOptions
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -139,6 +140,13 @@ class OpenAIVideoTarget(OpenAITarget):
             },
         )
 
+    def _get_default_request_options(self) -> OpenAIVideoRequestOptions:
+        """Return constructor-backed request defaults."""
+        return OpenAIVideoRequestOptions(
+            resolution_dimensions=self._size,
+            n_seconds=self._n_seconds,
+        )
+
     def _validate_resolution(self, *, resolution_dimensions: VideoSize) -> VideoSize:
         """
         Validate resolution dimensions.
@@ -260,13 +268,16 @@ class OpenAIVideoTarget(OpenAITarget):
             The response Message with the generated video path.
         """
         logger.info("Text+Image-to-video mode: Using image as first frame")
+        options = self._get_request_options(OpenAIVideoRequestOptions)
+        size = cast("VideoSize", options.resolution_dimensions)
+        seconds = cast("VideoSeconds", options.n_seconds)
         input_file = await self._prepare_image_input_async(image_piece=image_piece)
         return await self._handle_openai_request_async(
             api_call=lambda: self._client.videos.create_and_poll(
                 model=self._model_name,
                 prompt=prompt,
-                size=self._size,
-                seconds=self._n_seconds,
+                size=size,
+                seconds=seconds,
                 input_reference=input_file,
             ),
             request=request,
@@ -283,12 +294,15 @@ class OpenAIVideoTarget(OpenAITarget):
         Returns:
             The response Message with the generated video path.
         """
+        options = self._get_request_options(OpenAIVideoRequestOptions)
+        size = cast("VideoSize", options.resolution_dimensions)
+        seconds = cast("VideoSeconds", options.n_seconds)
         return await self._handle_openai_request_async(
             api_call=lambda: self._client.videos.create_and_poll(
                 model=self._model_name,
                 prompt=prompt,
-                size=self._size,
-                seconds=self._n_seconds,
+                size=size,
+                seconds=seconds,
             ),
             request=request,
         )

@@ -14,7 +14,7 @@ from pyrit.exceptions.exception_classes import (
     RateLimitException,
 )
 from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
-from pyrit.prompt_target import OpenAIImageTarget
+from pyrit.prompt_target import OpenAIImageRequestOptions, OpenAIImageTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -91,6 +91,36 @@ async def test_send_prompt_async_generate(
             assert data == b"hello"
 
         os.remove(path)
+
+
+async def test_send_prompt_async_generate_applies_per_call_options(
+    image_target: OpenAIImageTarget,
+    sample_conversations: MutableSequence[MessagePiece],
+):
+    request = sample_conversations[0]
+    mock_response = MagicMock()
+    mock_image = MagicMock()
+    mock_image.b64_json = "aGVsbG8="
+    mock_response.data = [mock_image]
+
+    with patch.object(image_target._async_client.images, "generate", new_callable=AsyncMock) as mock_generate:
+        mock_generate.return_value = mock_response
+        response = await image_target.send_prompt_async(
+            message=Message(message_pieces=[request]),
+            request_options=OpenAIImageRequestOptions(
+                image_size="1536x1024",
+                output_format="webp",
+                quality="high",
+                background="transparent",
+            ),
+        )
+
+    body = mock_generate.call_args.kwargs
+    assert body["size"] == "1536x1024"
+    assert body["output_format"] == "webp"
+    assert body["quality"] == "high"
+    assert body["background"] == "transparent"
+    os.remove(response[0].get_value())
 
 
 async def test_send_prompt_async_edit(

@@ -27,7 +27,7 @@ from pyrit.models import (
     construct_response_from_request,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, NormalizerRequest
-from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target import PromptTarget, TargetRequestOptions
 from pyrit.prompt_target.batch_helper import batch_task_async
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ class PromptNormalizer:
         conversation_id: str | None = None,
         request_converter_configurations: list[ConverterConfiguration] | None = None,
         response_converter_configurations: list[ConverterConfiguration] | None = None,
+        request_options: TargetRequestOptions | None = None,
     ) -> Message:
         """
         Send a single request to a target.
@@ -83,6 +84,8 @@ class PromptNormalizer:
                 converting the request. Defaults to an empty list.
             response_converter_configurations (list[ConverterConfiguration], optional): Configurations for
                 converting the response. Defaults to an empty list.
+            request_options: Immutable per-call target options. Omitted values inherit
+                constructor defaults.
 
         Returns:
             Message: The response received from the target.
@@ -116,7 +119,10 @@ class PromptNormalizer:
         responses = None
 
         try:
-            responses = await target.send_prompt_async(message=request)
+            if request_options is None:
+                responses = await target.send_prompt_async(message=request)
+            else:
+                responses = await target.send_prompt_async(message=request, request_options=request_options)
             self.memory.add_message_to_memory(request=request)
         except EmptyResponseException:
             # Empty responses are retried, but we don't want them to stop execution
@@ -207,6 +213,7 @@ class PromptNormalizer:
             [request.request_converter_configurations for request in requests],
             [request.response_converter_configurations for request in requests],
             [request.conversation_id for request in requests],
+            [request.request_options for request in requests],
         ]
 
         batch_item_keys = [
@@ -214,6 +221,7 @@ class PromptNormalizer:
             "request_converter_configurations",
             "response_converter_configurations",
             "conversation_id",
+            "request_options",
         ]
 
         return await batch_task_async(

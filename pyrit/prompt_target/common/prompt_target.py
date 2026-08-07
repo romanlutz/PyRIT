@@ -3,7 +3,9 @@
 
 import abc
 import logging
-from typing import Any, ClassVar, Literal, final
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, ClassVar, Literal, TypeVar, final
 
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import (
@@ -14,7 +16,9 @@ from pyrit.models import (
     Message,
     MessagePiece,
     TargetIdentifier,
+    TargetInvocation,
 )
+from pyrit.prompt_target.common.request_options import TargetRequestOptions
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityName,
     TargetCapabilities,
@@ -30,6 +34,20 @@ logger = logging.getLogger(__name__)
 # (e.g. minting a Microsoft Entra ID token for its own endpoint, or falling back
 # to ``DefaultAzureCredential``).
 AuthMode = Literal["api_key", "identity"]
+RequestOptionsT = TypeVar("RequestOptionsT", bound=TargetRequestOptions)
+
+_CURRENT_REQUEST_OPTIONS: ContextVar[TargetRequestOptions | None] = ContextVar(
+    "pyrit_current_target_request_options", default=None
+)
+_CURRENT_REQUEST_OVERRIDES: ContextVar[TargetRequestOptions | None] = ContextVar(
+    "pyrit_current_target_request_overrides", default=None
+)
+
+
+@dataclass(frozen=True)
+class _TargetSendResult:
+    responses: list[Message]
+    invocation: TargetInvocation
 
 
 class PromptTarget(Identifiable):
@@ -132,7 +150,12 @@ class PromptTarget(Identifiable):
             logging.basicConfig(level=logging.INFO)
 
     @final
-    async def send_prompt_async(self, *, message: Message) -> list[Message]:
+    async def send_prompt_async(
+        self,
+        *,
+        message: Message,
+        request_options: TargetRequestOptions | None = None,
+    ) -> list[Message]:
         """
         Validate, normalize, and send a prompt to the target.
 
@@ -149,6 +172,8 @@ class PromptTarget(Identifiable):
 
         Args:
             message (Message): The message to send.
+            request_options: Immutable per-call options. Omitted values inherit
+                constructor defaults.
 
         Returns:
             list[Message]: Response messages from the target.
@@ -156,12 +181,99 @@ class PromptTarget(Identifiable):
         Raises:
             ValueError: If the message or normalized conversation are empty.
         """
+        request_options = request_options.model_copy(deep=True) if request_options is not None else None
         message.validate()
         normalized_conversation = await self._get_normalized_conversation_async(message=message)
         if not normalized_conversation:
             raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
         self._validate_request(normalized_conversation=normalized_conversation)
-        return await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+        try:
+            result = await self._send_prompt_with_request_options_async(
+                normalized_conversation=normalized_conversation,
+                request_options=request_options,
+            )
+        except Exception:
+            attempted_invocation = TargetInvocation.from_metadata(
+                metadata=normalized_conversation[-1].message_pieces[0].prompt_metadata
+            )
+            if attempted_invocation is not None:
+                message.message_pieces[0].prompt_metadata[TargetInvocation.METADATA_KEY] = (
+                    attempted_invocation.to_metadata()
+                )
+            raise
+        for response in result.responses:
+            for piece in response.message_pieces:
+                piece.prompt_metadata.pop(TargetInvocation.METADATA_KEY, None)
+        message.message_pieces[0].prompt_metadata[TargetInvocation.METADATA_KEY] = result.invocation.to_metadata()
+        return result.responses
+
+    async def _send_prompt_with_request_options_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        request_options: TargetRequestOptions | None,
+    ) -> _TargetSendResult:
+        """
+        Resolve per-call options and invoke the target-specific send implementation.
+
+        Returns:
+            The target responses and invocation provenance.
+        """
+        defaults = self._get_default_request_options()
+        requested = request_options if request_options is not None else type(defaults)()
+        resolved = requested.resolve(defaults=defaults)
+        invocation = TargetInvocation(
+            target_identifier=self.get_identifier(),
+            effective_options=resolved.to_effective_dict(),
+        )
+        normalized_conversation[-1].message_pieces[0].prompt_metadata[TargetInvocation.METADATA_KEY] = (
+            invocation.to_metadata()
+        )
+        token = _CURRENT_REQUEST_OPTIONS.set(resolved)
+        overrides_token = _CURRENT_REQUEST_OVERRIDES.set(requested)
+        try:
+            responses = await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+        finally:
+            _CURRENT_REQUEST_OPTIONS.reset(token)
+            _CURRENT_REQUEST_OVERRIDES.reset(overrides_token)
+
+        return _TargetSendResult(responses=responses, invocation=invocation)
+
+    def _get_default_request_options(self) -> TargetRequestOptions:
+        """Return immutable constructor-backed defaults for per-call options."""
+        return TargetRequestOptions()
+
+    def _get_request_options(self, option_type: type[RequestOptionsT]) -> RequestOptionsT:
+        """
+        Return the resolved options for the current coroutine.
+
+        Returns:
+            The resolved options narrowed to ``option_type``.
+
+        Raises:
+            TypeError: If the target's resolved options do not match ``option_type``.
+        """
+        options = _CURRENT_REQUEST_OPTIONS.get() or self._get_default_request_options()
+        if not isinstance(options, option_type):
+            raise TypeError(f"Expected {option_type.__name__}, received {type(options).__name__}.")
+        return options
+
+    def _get_request_overrides(self, option_type: type[RequestOptionsT]) -> RequestOptionsT:
+        """
+        Return the unresolved per-call overrides for the current coroutine.
+
+        Returns:
+            The per-call overrides narrowed to ``option_type``.
+
+        Raises:
+            TypeError: If the target's request overrides do not match ``option_type``.
+        """
+        options = _CURRENT_REQUEST_OVERRIDES.get()
+        if options is None:
+            options = type(self._get_default_request_options())()
+        if not isinstance(options, option_type):
+            raise TypeError(f"Expected {option_type.__name__}, received {type(options).__name__}.")
+        return options
 
     @abc.abstractmethod
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:

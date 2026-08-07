@@ -11,7 +11,7 @@ from unit.mocks import get_sample_conversations
 
 from pyrit.exceptions import RateLimitException
 from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
-from pyrit.prompt_target import OpenAIVideoTarget
+from pyrit.prompt_target import OpenAIVideoRequestOptions, OpenAIVideoTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -140,6 +140,40 @@ async def test_video_send_prompt_async_success(
         assert len(response[0].message_pieces) == 1
         assert response[0].message_pieces[0].converted_value == "/path/to/video.mp4"
         assert response[0].message_pieces[0].converted_value_data_type == "video_path"
+
+
+async def test_video_send_prompt_applies_per_call_options(
+    video_target: OpenAIVideoTarget,
+    sample_conversations: MutableSequence[MessagePiece],
+):
+    request = sample_conversations[0]
+    request.conversation_id = str(uuid.uuid4())
+    mock_video = MagicMock(id="video_123", status="completed", error=None)
+    mock_video_response = MagicMock(content=b"video data content")
+    mock_serializer = MagicMock(value="/path/to/video.mp4", save_data_async=AsyncMock())
+
+    with (
+        patch.object(video_target._async_client.videos, "create_and_poll", new_callable=AsyncMock) as mock_create,
+        patch.object(video_target._async_client.videos, "download_content", new_callable=AsyncMock) as mock_download,
+        patch("pyrit.prompt_target.openai.openai_video_target.data_serializer_factory") as mock_factory,
+    ):
+        mock_create.return_value = mock_video
+        mock_download.return_value = mock_video_response
+        mock_factory.return_value = mock_serializer
+        await video_target.send_prompt_async(
+            message=Message(message_pieces=[request]),
+            request_options=OpenAIVideoRequestOptions(
+                resolution_dimensions="1792x1024",
+                n_seconds="12",
+            ),
+        )
+
+    mock_create.assert_called_once_with(
+        model="sora-2",
+        prompt="Hello, how are you?",
+        size="1792x1024",
+        seconds="12",
+    )
 
 
 async def test_video_send_prompt_async_failed_content_filter(

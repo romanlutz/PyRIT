@@ -13,7 +13,7 @@ from pyrit.models import (
     Message,
     MessagePiece,
 )
-from pyrit.prompt_target import HuggingFaceChatTarget
+from pyrit.prompt_target import HuggingFaceChatTarget, HuggingFaceRequestOptions
 
 
 def is_torch_installed():
@@ -407,6 +407,58 @@ async def test_generate_passes_new_params():
     assert call_kwargs["top_k"] == 40
     assert call_kwargs["do_sample"] is True
     assert call_kwargs["repetition_penalty"] == 1.2
+
+
+@pytest.mark.skipif(not is_torch_installed(), reason="torch is not installed")
+@pytest.mark.usefixtures("patch_central_database")
+async def test_generate_applies_per_call_options():
+    target = HuggingFaceChatTarget(
+        model_id="test_model",
+        use_cuda=False,
+        max_new_tokens=20,
+        temperature=1.0,
+        top_p=1.0,
+    )
+    await target.load_model_and_tokenizer_async()
+    message = Message.from_prompt(prompt="test prompt", role="user")
+
+    await target.send_prompt_async(
+        message=message,
+        request_options=HuggingFaceRequestOptions(
+            max_new_tokens=80,
+            temperature=0.4,
+            top_p=0.8,
+            top_k=20,
+            do_sample=True,
+            repetition_penalty=None,
+            random_seed=None,
+            skip_special_tokens=False,
+        ),
+    )
+
+    call_kwargs = target.model.generate.call_args.kwargs
+    assert call_kwargs["max_new_tokens"] == 80
+    assert call_kwargs["temperature"] == 0.4
+    assert call_kwargs["top_p"] == 0.8
+    assert call_kwargs["top_k"] == 20
+    assert call_kwargs["do_sample"] is True
+    assert "repetition_penalty" not in call_kwargs
+    assert target.tokenizer.decode.call_args.kwargs["skip_special_tokens"] is False
+
+
+@pytest.mark.skipif(not is_torch_installed(), reason="torch is not installed")
+@pytest.mark.usefixtures("patch_central_database")
+async def test_inherited_random_seed_does_not_reseed_each_request():
+    with patch("torch.manual_seed") as mock_manual_seed:
+        target = HuggingFaceChatTarget(
+            model_id="test_model",
+            use_cuda=False,
+            random_seed=42,
+        )
+        await target.load_model_and_tokenizer_async()
+        await target.send_prompt_async(message=Message.from_prompt(prompt="test prompt", role="user"))
+
+    mock_manual_seed.assert_called_once_with(42)
 
 
 @pytest.mark.skipif(not is_torch_installed(), reason="torch is not installed")

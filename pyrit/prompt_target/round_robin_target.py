@@ -11,7 +11,8 @@ from pyrit.models import (
     ComponentIdentifier,
     Message,
 )
-from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.prompt_target import PromptTarget, _TargetSendResult
+from pyrit.prompt_target.common.request_options import TargetRequestOptions
 from pyrit.prompt_target.common.target_requirements import CHAT_TARGET_REQUIREMENTS
 
 logger = logging.getLogger(__name__)
@@ -180,21 +181,46 @@ class RoundRobinTarget(PromptTarget):
             Exception: If all unique inner targets fail.
             RuntimeError: If no targets are available to try (should be unreachable).
         """
+        result = await self._send_prompt_with_request_options_async(
+            normalized_conversation=normalized_conversation,
+            request_options=None,
+        )
+        return result.responses
+
+    async def _send_prompt_with_request_options_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        request_options: TargetRequestOptions | None,
+    ) -> _TargetSendResult:
+        """
+        Select an inner target and forward the unresolved per-call options.
+
+        Returns:
+            The selected target's responses and invocation provenance.
+
+        Raises:
+            RuntimeError: If no inner target is available.
+            Exception: If every inner target fails.
+        """
         first_target = self._next_target()
         targets_to_try = [first_target] + [t for t in self._targets if t is not first_target]
         last_exception: BaseException | None = None
 
         for target in targets_to_try:
             try:
-                responses = await target._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+                result = await target._send_prompt_with_request_options_async(
+                    normalized_conversation=normalized_conversation,
+                    request_options=request_options,
+                )
 
                 inner_id_hash = target.get_identifier().hash
                 if inner_id_hash is not None:
-                    for response in responses:
+                    for response in result.responses:
                         for piece in response.message_pieces:
                             piece.prompt_metadata["inner_target_identifier"] = inner_id_hash
 
-                return responses
+                return result
             except Exception as ex:
                 logger.warning(
                     f"Inner target {type(target).__name__} (index {self._targets.index(target)}) "

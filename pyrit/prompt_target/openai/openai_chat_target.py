@@ -35,6 +35,7 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     save_audio_response_async,
     validate_chat_completion_response,
 )
+from pyrit.prompt_target.common.request_options import OpenAIChatRequestOptions
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
@@ -196,6 +197,20 @@ class OpenAIChatTarget(OpenAITarget):
                 "seed": self._seed,
                 "n": self._n,
             },
+        )
+
+    def _get_default_request_options(self) -> OpenAIChatRequestOptions:
+        """Return constructor-backed request defaults."""
+        extra_body_parameters = dict(self._extra_body_parameters or {})
+        return OpenAIChatRequestOptions(
+            max_completion_tokens=extra_body_parameters.pop("max_completion_tokens", self._max_completion_tokens),
+            temperature=extra_body_parameters.pop("temperature", self._temperature),
+            top_p=extra_body_parameters.pop("top_p", self._top_p),
+            frequency_penalty=extra_body_parameters.pop("frequency_penalty", self._frequency_penalty),
+            presence_penalty=extra_body_parameters.pop("presence_penalty", self._presence_penalty),
+            seed=extra_body_parameters.pop("seed", self._seed),
+            n=extra_body_parameters.pop("n", self._n),
+            extra_body_parameters=extra_body_parameters or None,
         )
 
     def _set_openai_env_configuration_vars(self) -> None:
@@ -393,7 +408,16 @@ class OpenAIChatTarget(OpenAITarget):
                 yields a graceful empty piece so the run continues. Truncated responses are flagged
                 via ``MessagePiece.mark_as_truncated`` on the first piece.
         """
-        audio_format = self._audio_response_config.audio_format if self._audio_response_config else "wav"
+        options = self._get_request_options(OpenAIChatRequestOptions)
+        audio = options.extra_body_parameters.get("audio") if isinstance(options.extra_body_parameters, dict) else None
+        configured_format = audio.get("format") if isinstance(audio, dict) else None
+        audio_format = (
+            configured_format
+            if isinstance(configured_format, str)
+            else self._audio_response_config.audio_format
+            if self._audio_response_config
+            else "wav"
+        )
         truncated = self._is_truncated_response(response)
         pieces = await build_response_pieces_async(response=response, request=request, audio_format=audio_format)
 
@@ -499,23 +523,24 @@ class OpenAIChatTarget(OpenAITarget):
     ) -> dict[str, Any]:
         messages = await self._build_chat_messages_async(conversation)
         response_format = self._build_response_format(json_config)
+        options = self._get_request_options(OpenAIChatRequestOptions)
 
         body_parameters = {
             "model": self._model_name,
-            "max_completion_tokens": self._max_completion_tokens,
-            "temperature": self._temperature,
-            "top_p": self._top_p,
-            "frequency_penalty": self._frequency_penalty,
-            "presence_penalty": self._presence_penalty,
+            "max_completion_tokens": options.max_completion_tokens,
+            "temperature": options.temperature,
+            "top_p": options.top_p,
+            "frequency_penalty": options.frequency_penalty,
+            "presence_penalty": options.presence_penalty,
             "stream": False,
-            "seed": self._seed,
-            "n": self._n,
+            "seed": options.seed,
+            "n": options.n,
             "messages": messages,
             "response_format": response_format,
         }
 
-        if self._extra_body_parameters:
-            body_parameters.update(self._extra_body_parameters)
+        if isinstance(options.extra_body_parameters, dict):
+            body_parameters.update(options.extra_body_parameters)
 
         # Filter out None values
         return {k: v for k, v in body_parameters.items() if v is not None}

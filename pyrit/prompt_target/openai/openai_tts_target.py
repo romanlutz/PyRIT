@@ -10,6 +10,7 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.request_options import OpenAITTSRequestOptions
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -106,6 +107,14 @@ class OpenAITTSTarget(OpenAITarget):
             },
         )
 
+    def _get_default_request_options(self) -> OpenAITTSRequestOptions:
+        """Return constructor-backed request defaults."""
+        return OpenAITTSRequestOptions(
+            voice=self._voice,
+            response_format=self._response_format,
+            speed=self._speed,
+        )
+
     @limit_requests_per_minute
     @pyrit_target_retry
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
@@ -122,6 +131,7 @@ class OpenAITTSTarget(OpenAITarget):
         """
         message = normalized_conversation[-1]
         message_piece = message.message_pieces[0]
+        options = self._get_request_options(OpenAITTSRequestOptions)
 
         logger.info(f"Sending the following prompt to the prompt target: {message_piece.converted_value}")
 
@@ -129,13 +139,13 @@ class OpenAITTSTarget(OpenAITarget):
         body_parameters: dict[str, object] = {
             "model": self._model_name,
             "input": message_piece.converted_value,
-            "voice": self._voice,
-            "response_format": self._response_format,
+            "voice": options.voice,
+            "response_format": options.response_format,
         }
 
         # Add optional parameters
-        if self._speed is not None:
-            body_parameters["speed"] = self._speed
+        if isinstance(options.speed, float):
+            body_parameters["speed"] = options.speed
 
         # Use unified error handler for consistent error handling
         response = await self._handle_openai_request_async(
@@ -162,11 +172,14 @@ class OpenAITTSTarget(OpenAITarget):
             Message: Constructed message with audio file path.
         """
         audio_bytes = response.content
+        options = self._get_request_options(OpenAITTSRequestOptions)
 
         logger.info("Received valid response from the prompt target")
 
         audio_response = data_serializer_factory(
-            category="prompt-memory-entries", data_type="audio_path", extension=self._response_format
+            category="prompt-memory-entries",
+            data_type="audio_path",
+            extension=str(options.response_format),
         )
 
         await audio_response.save_data_async(data=audio_bytes)

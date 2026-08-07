@@ -7,6 +7,7 @@ from pyrit.models import Message
 from pyrit.prompt_normalizer.converter_configuration import (
     ConverterConfiguration,
 )
+from pyrit.prompt_target.common.request_options import TargetRequestOptions
 
 
 @dataclass
@@ -19,6 +20,7 @@ class NormalizerRequest:
     request_converter_configurations: list[ConverterConfiguration]
     response_converter_configurations: list[ConverterConfiguration]
     conversation_id: str | None
+    request_options: TargetRequestOptions | None
 
     def __init__(
         self,
@@ -27,6 +29,7 @@ class NormalizerRequest:
         request_converter_configurations: list[ConverterConfiguration] | None = None,
         response_converter_configurations: list[ConverterConfiguration] | None = None,
         conversation_id: str | None = None,
+        request_options: TargetRequestOptions | None = None,
     ) -> None:
         """
         Initialize a normalizer request.
@@ -38,6 +41,7 @@ class NormalizerRequest:
             response_converter_configurations (list[ConverterConfiguration]): Configurations for converting
                 the response. Defaults to an empty list.
             conversation_id (str | None): The ID of the conversation. Defaults to None.
+            request_options: Immutable per-call target request options.
         """
         if response_converter_configurations is None:
             response_converter_configurations = []
@@ -47,3 +51,4 @@ class NormalizerRequest:
         self.request_converter_configurations = request_converter_configurations
         self.response_converter_configurations = response_converter_configurations
         self.conversation_id = conversation_id
+        self.request_options = request_options

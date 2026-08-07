@@ -37,6 +37,7 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     validate_chat_completion_response,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.request_options import LiteLLMRequestOptions
 from pyrit.prompt_target.common.target_capabilities import (
     TargetCapabilities,
     get_known_capabilities,
@@ -348,6 +349,22 @@ class LiteLLMChatTarget(PromptTarget):
             },
         )
 
+    def _get_default_request_options(self) -> LiteLLMRequestOptions:
+        """Return constructor-backed request defaults."""
+        extra_body_parameters = dict(self._extra_body_parameters or {})
+        return LiteLLMRequestOptions(
+            temperature=extra_body_parameters.pop("temperature", self._temperature),
+            top_p=extra_body_parameters.pop("top_p", self._top_p),
+            max_tokens=extra_body_parameters.pop("max_tokens", self._max_tokens),
+            frequency_penalty=extra_body_parameters.pop("frequency_penalty", self._frequency_penalty),
+            presence_penalty=extra_body_parameters.pop("presence_penalty", self._presence_penalty),
+            seed=extra_body_parameters.pop("seed", self._seed),
+            n=extra_body_parameters.pop("n", self._n),
+            stop=extra_body_parameters.pop("stop", self._stop),
+            drop_unsupported_params=extra_body_parameters.pop("drop_params", self._drop_unsupported_params),
+            extra_body_parameters=extra_body_parameters or None,
+        )
+
     def is_json_response_supported(self) -> bool:
         """
         Whether this target honors a JSON ``response_format`` request.
@@ -429,6 +446,7 @@ class LiteLLMChatTarget(PromptTarget):
         json_config: JsonResponseConfig,
         api_key: str | None = None,
     ) -> dict[str, Any]:
+        options = self._get_request_options(LiteLLMRequestOptions)
         body: dict[str, Any] = {
             "model": self._model_name,
             "messages": messages,
@@ -437,30 +455,39 @@ class LiteLLMChatTarget(PromptTarget):
             # with this enabled LiteLLM drops what a provider does not accept instead of raising.
             # Controlled by the ``drop_unsupported_params`` constructor arg; advanced callers can
             # still override per request via ``extra_body_parameters={"drop_params": ...}``.
-            "drop_params": self._drop_unsupported_params,
+            "drop_params": options.drop_unsupported_params,
             "api_key": api_key,
             "api_base": self._endpoint,
             "extra_headers": self._headers,
-            "temperature": self._temperature,
-            "top_p": self._top_p,
-            "max_tokens": self._max_tokens,
-            "frequency_penalty": self._frequency_penalty,
-            "presence_penalty": self._presence_penalty,
-            "seed": self._seed,
-            "n": self._n,
-            "stop": self._stop,
+            "temperature": options.temperature,
+            "top_p": options.top_p,
+            "max_tokens": options.max_tokens,
+            "frequency_penalty": options.frequency_penalty,
+            "presence_penalty": options.presence_penalty,
+            "seed": options.seed,
+            "n": options.n,
+            "stop": list(options.stop) if isinstance(options.stop, tuple) else options.stop,
             "num_retries": self._num_retries,
             "response_format": build_response_format(json_config=json_config),
         }
 
         # Passthrough for arbitrary provider params (may override defaults above, e.g. drop_params).
-        if self._extra_body_parameters:
-            body.update(self._extra_body_parameters)
+        if isinstance(options.extra_body_parameters, dict):
+            body.update(options.extra_body_parameters)
 
         return {k: v for k, v in body.items() if v is not None}
 
     async def _construct_message_from_response_async(self, *, response: Any, request: MessagePiece) -> Message:
-        audio_format = self._audio_response_config.audio_format if self._audio_response_config else "wav"
+        options = self._get_request_options(LiteLLMRequestOptions)
+        audio = options.extra_body_parameters.get("audio") if isinstance(options.extra_body_parameters, dict) else None
+        configured_format = audio.get("format") if isinstance(audio, dict) else None
+        audio_format = (
+            configured_format
+            if isinstance(configured_format, str)
+            else self._audio_response_config.audio_format
+            if self._audio_response_config
+            else "wav"
+        )
         pieces = await build_response_pieces_async(response=response, request=request, audio_format=audio_format)
         if not pieces:
             raise EmptyResponseException(message="Failed to extract any response content from LiteLLM.")

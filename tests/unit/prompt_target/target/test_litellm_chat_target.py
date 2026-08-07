@@ -17,6 +17,7 @@ from pyrit.exceptions import (
 )
 from pyrit.models import JsonResponseConfig, Message, MessagePiece
 from pyrit.prompt_target import (
+    LiteLLMRequestOptions,
     OpenAIChatAudioConfig,
     TargetCapabilities,
     TargetConfiguration,
@@ -371,6 +372,39 @@ async def test_send_prompt_returns_text_response(target, litellm_stub):
     call_kwargs = litellm_stub.acompletion.call_args.kwargs
     assert call_kwargs["model"] == "anthropic/claude-sonnet-4-6"
     assert call_kwargs["num_retries"] == target._num_retries
+
+
+async def test_send_prompt_applies_per_call_options(target, litellm_stub):
+    litellm_stub.acompletion = AsyncMock(return_value=_mock_response("ok"))
+
+    await target.send_prompt_async(
+        message=_user_message("hi"),
+        request_options=LiteLLMRequestOptions(
+            temperature=0.8,
+            top_p=None,
+            max_tokens=55,
+            stop=("done", "stop"),
+            drop_unsupported_params=False,
+        ),
+    )
+
+    body = litellm_stub.acompletion.call_args.kwargs
+    assert body["temperature"] == 0.8
+    assert "top_p" not in body
+    assert body["max_tokens"] == 55
+    assert body["stop"] == ["done", "stop"]
+    assert body["drop_params"] is False
+
+
+async def test_send_prompt_can_clear_drop_unsupported_params(target, litellm_stub):
+    litellm_stub.acompletion = AsyncMock(return_value=_mock_response("ok"))
+
+    await target.send_prompt_async(
+        message=_user_message("hi"),
+        request_options=LiteLLMRequestOptions(drop_unsupported_params=None),
+    )
+
+    assert "drop_params" not in litellm_stub.acompletion.call_args.kwargs
 
 
 async def test_send_prompt_handles_tool_calls(target, litellm_stub):

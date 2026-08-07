@@ -11,6 +11,7 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.request_options import OpenAIImageRequestOptions
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -141,6 +142,15 @@ class OpenAIImageTarget(OpenAITarget):
             },
         )
 
+    def _get_default_request_options(self) -> OpenAIImageRequestOptions:
+        """Return constructor-backed request defaults."""
+        return OpenAIImageRequestOptions(
+            image_size=self.image_size,
+            output_format=self.output_format,
+            quality=self.quality,
+            background=self.background,
+        )
+
     @limit_requests_per_minute
     @pyrit_target_retry
     async def _send_prompt_to_target_async(
@@ -186,20 +196,21 @@ class OpenAIImageTarget(OpenAITarget):
             Message: The response from the image target.
         """
         prompt = message.message_pieces[0].converted_value
+        options = self._get_request_options(OpenAIImageRequestOptions)
 
         # Construct request parameters
         image_generation_args: dict[str, Any] = {
             "model": self._model_name,
             "prompt": prompt,
-            "size": self.image_size,
+            "size": options.image_size,
         }
 
-        if self.output_format:
-            image_generation_args["output_format"] = self.output_format
-        if self.quality:
-            image_generation_args["quality"] = self.quality
-        if self.background:
-            image_generation_args["background"] = self.background
+        if isinstance(options.output_format, str):
+            image_generation_args["output_format"] = options.output_format
+        if isinstance(options.quality, str):
+            image_generation_args["quality"] = options.quality
+        if isinstance(options.background, str):
+            image_generation_args["background"] = options.background
 
         # Use unified error handler for consistent error handling
         return await self._handle_openai_request_async(
@@ -223,6 +234,7 @@ class OpenAIImageTarget(OpenAITarget):
         # Extract text and images from message pieces
         text_pieces = [p for p in message.message_pieces if p.converted_value_data_type == "text"]
         text_prompt = text_pieces[0].converted_value
+        options = self._get_request_options(OpenAIImageRequestOptions)
 
         image_paths = [p.converted_value for p in message.message_pieces if p.converted_value_data_type == "image_path"]
         image_files = []
@@ -244,15 +256,15 @@ class OpenAIImageTarget(OpenAITarget):
             # also supported by other targets such as OpenAI). Multiple images always sent as a list.
             "image": image_files[0] if len(image_files) == 1 else image_files,
             "prompt": text_prompt,
-            "size": self.image_size,
+            "size": options.image_size,
         }
 
-        if self.output_format:
-            image_edit_args["output_format"] = self.output_format
-        if self.quality:
-            image_edit_args["quality"] = self.quality
-        if self.background:
-            image_edit_args["background"] = self.background
+        if isinstance(options.output_format, str):
+            image_edit_args["output_format"] = options.output_format
+        if isinstance(options.quality, str):
+            image_edit_args["quality"] = options.quality
+        if isinstance(options.background, str):
+            image_edit_args["background"] = options.background
 
         return await self._handle_openai_request_async(
             api_call=lambda: self._client.images.edit(**image_edit_args),
@@ -276,7 +288,8 @@ class OpenAIImageTarget(OpenAITarget):
         image_data = response.data[0]
         image_bytes = await self._get_image_bytes_async(image_data)
 
-        extension = self.output_format or "png"
+        options = self._get_request_options(OpenAIImageRequestOptions)
+        extension = options.output_format if isinstance(options.output_format, str) else "png"
         data = data_serializer_factory(
             category="prompt-memory-entries",
             data_type="image_path",

@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import copy
 import json
 import logging
 from collections.abc import Awaitable, Callable, MutableSequence
@@ -33,6 +34,11 @@ from pyrit.models import (
     TokenUsage,
     read_usage_int,
     read_usage_value,
+)
+from pyrit.prompt_target.common.request_options import (
+    OpenAIResponsesGrammarTool,
+    OpenAIResponsesNamedToolChoice,
+    OpenAIResponsesRequestOptions,
 )
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
@@ -266,6 +272,29 @@ class OpenAIResponseTarget(OpenAITarget):
             },
         )
 
+    def _get_default_request_options(self) -> OpenAIResponsesRequestOptions:
+        """Return constructor-backed request defaults."""
+        extra_body_parameters = copy.deepcopy(self._extra_body_parameters or {})
+        tools = extra_body_parameters.pop("tools", None)
+        tool_choice = extra_body_parameters.pop("tool_choice", None)
+        parallel_tool_calls = extra_body_parameters.pop("parallel_tool_calls", None)
+        reasoning = extra_body_parameters.pop("reasoning", None)
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        reasoning_effort = reasoning.pop("effort", self._reasoning_effort)
+        reasoning_summary = reasoning.pop("summary", self._reasoning_summary)
+        return OpenAIResponsesRequestOptions(
+            max_output_tokens=extra_body_parameters.pop("max_output_tokens", self._max_output_tokens),
+            temperature=extra_body_parameters.pop("temperature", self._temperature),
+            top_p=extra_body_parameters.pop("top_p", self._top_p),
+            reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            reasoning_extra=reasoning or None,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            extra_body_parameters=extra_body_parameters or None,
+        )
+
     def _set_openai_env_configuration_vars(self) -> None:
         self.model_name_environment_variable = "OPENAI_RESPONSES_MODEL"
         self.endpoint_environment_variable = "OPENAI_RESPONSES_ENDPOINT"
@@ -437,43 +466,84 @@ class OpenAIResponseTarget(OpenAITarget):
             dict: The request body to send to the Responses API.
         """
         input_items = await self._build_input_for_multi_modal_async(conversation)
+        options = self._get_request_options(OpenAIResponsesRequestOptions)
 
         text_format = self._build_text_format(json_config=json_config)
 
         body_parameters = {
             "model": self._model_name,
-            "max_output_tokens": self._max_output_tokens,
-            "temperature": self._temperature,
-            "top_p": self._top_p,
+            "max_output_tokens": options.max_output_tokens,
+            "temperature": options.temperature,
+            "top_p": options.top_p,
             "stream": False,
             "input": input_items,
             # Correct JSON response format per Responses API
             "text": text_format,
-            "reasoning": self._build_reasoning_config(),
+            "reasoning": self._build_reasoning_config(options=options),
+            "tools": self._serialize_tools(options=options),
+            "tool_choice": self._serialize_tool_choice(options=options),
+            "parallel_tool_calls": options.parallel_tool_calls,
         }
 
-        if self._extra_body_parameters:
-            body_parameters.update(self._extra_body_parameters)
+        if isinstance(options.extra_body_parameters, dict):
+            body_parameters.update(options.extra_body_parameters)
 
         # Filter out None values
         return {k: v for k, v in body_parameters.items() if v is not None}
 
-    def _build_reasoning_config(self) -> dict[str, Any] | None:
+    def _build_reasoning_config(self, *, options: OpenAIResponsesRequestOptions) -> dict[str, Any] | None:
         """
         Build the reasoning configuration dict for the Responses API.
 
         Returns:
             dict[str, Any] | None: The reasoning config, or None if neither effort nor summary is set.
         """
-        if self._reasoning_effort is None and self._reasoning_summary is None:
+        if options.reasoning_effort is None and options.reasoning_summary is None and options.reasoning_extra is None:
             return None
 
-        reasoning: dict[str, Any] = {}
-        if self._reasoning_effort is not None:
-            reasoning["effort"] = self._reasoning_effort
-        if self._reasoning_summary is not None:
-            reasoning["summary"] = self._reasoning_summary
+        reasoning: dict[str, Any] = dict(options.reasoning_extra) if isinstance(options.reasoning_extra, dict) else {}
+        if options.reasoning_effort is not None:
+            reasoning["effort"] = options.reasoning_effort
+        if options.reasoning_summary is not None:
+            reasoning["summary"] = options.reasoning_summary
         return reasoning
+
+    @staticmethod
+    def _serialize_tools(*, options: OpenAIResponsesRequestOptions) -> list[dict[str, Any]] | None:
+        if not isinstance(options.tools, tuple):
+            return None
+        return [
+            tool.model_dump(mode="json", exclude_none=True) if not isinstance(tool, dict) else dict(tool)
+            for tool in options.tools
+        ]
+
+    @staticmethod
+    def _serialize_tool_choice(*, options: OpenAIResponsesRequestOptions) -> str | dict[str, Any] | None:
+        if isinstance(options.tool_choice, OpenAIResponsesNamedToolChoice):
+            return options.tool_choice.model_dump(mode="json")
+        if isinstance(options.tool_choice, dict):
+            return dict(options.tool_choice)
+        return options.tool_choice if isinstance(options.tool_choice, str) else None
+
+    def _get_grammar_name(self) -> str | None:
+        options = self._get_request_options(OpenAIResponsesRequestOptions)
+        if not isinstance(options.tools, tuple):
+            return None
+        grammar_names = [tool.name for tool in options.tools if isinstance(tool, OpenAIResponsesGrammarTool)]
+        for tool in options.tools:
+            if not isinstance(tool, dict) or tool.get("type") != "custom":
+                continue
+            format_config = tool.get("format")
+            tool_name = tool.get("name")
+            if (
+                isinstance(format_config, dict)
+                and format_config.get("type") == "grammar"
+                and isinstance(tool_name, str)
+            ):
+                grammar_names.append(tool_name)
+        if len(grammar_names) > 1:
+            raise ValueError("Multiple grammar tools detected; only one is supported.")
+        return grammar_names[0] if grammar_names else None
 
     def _build_text_format(self, json_config: JsonResponseConfig) -> dict[str, Any] | None:
         if not json_config.enabled:
@@ -923,9 +993,10 @@ class OpenAIResponseTarget(OpenAITarget):
             # https://platform.openai.com/docs/guides/function-calling#context-free-grammars
             logger.debug("Detected custom_tool_call in response, assuming grammar constraint.")
             extracted_grammar_name = section.name
-            if extracted_grammar_name != self._grammar_name:
+            expected_grammar_name = self._get_grammar_name()
+            if extracted_grammar_name != expected_grammar_name:
                 msg = "Mismatched grammar name in custom_tool_call "
-                msg += f"(expected {self._grammar_name}, got {extracted_grammar_name})"
+                msg += f"(expected {expected_grammar_name}, got {extracted_grammar_name})"
                 logger.error(msg)
                 raise ValueError(msg)
             piece_value = section.input
