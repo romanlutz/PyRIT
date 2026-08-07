@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict
 
 from pyrit.models.score import ComponentIdentifierField  # noqa: TC001 (runtime-required by Pydantic)
+from pyrit.models.target.token_usage import TokenUsage  # noqa: TC001 (runtime-required by Pydantic)
 
 TargetStopReason = Literal[
     "completed",
@@ -28,6 +29,7 @@ class TargetResponseMetadata(BaseModel):
     provider_response_id: str | None = None
     stop_reason: TargetStopReason
     provider_stop_reason: str | None = None
+    usage: TokenUsage | None = None
 
 
 class TargetInvocation(BaseModel):

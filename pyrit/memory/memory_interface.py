@@ -2152,6 +2152,27 @@ class MemoryInterface(abc.ABC):
             logger.error(f"Failed to update entries with conversation_id {conversation_id}.")
         return success
 
+    def update_prompt_metadata_by_id(
+        self,
+        *,
+        prompt_id: str | uuid.UUID,
+        prompt_metadata: dict[str, Any],
+    ) -> bool:
+        """
+        Update one prompt entry's metadata by its message-piece ID.
+
+        Args:
+            prompt_id (str | uuid.UUID): The exact message-piece ID to update.
+            prompt_metadata (dict[str, Any]): Replacement metadata.
+
+        Returns:
+            bool: True when the entry existed and was updated.
+        """
+        entries = self._query_entries(PromptMemoryEntry, conditions=PromptMemoryEntry.id == str(prompt_id))
+        if not entries:
+            return False
+        return self._update_entries(entries=[entries[0]], update_fields={"prompt_metadata": prompt_metadata})
+
     def update_prompt_metadata_by_conversation_id(
         self, *, conversation_id: str, prompt_metadata: dict[str, str | int]
     ) -> bool:

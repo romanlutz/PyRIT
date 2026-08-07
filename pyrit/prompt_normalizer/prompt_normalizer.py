@@ -72,6 +72,8 @@ class PromptNormalizer:
         request_converter_configurations: list[ConverterConfiguration] | None = None,
         response_converter_configurations: list[ConverterConfiguration] | None = None,
         request_options: TargetRequestOptions | None = None,
+        persist_request_before_send: bool = False,
+        request_already_persisted: bool = False,
     ) -> Message:
         """
         Send a single request to a target.
@@ -86,6 +88,11 @@ class PromptNormalizer:
                 converting the response. Defaults to an empty list.
             request_options: Immutable per-call target options. Omitted values inherit
                 constructor defaults.
+            persist_request_before_send (bool): Persist the request before provider
+                generation. This is required by executors that must durably record a
+                side-effecting tool result before requesting the next generation.
+            request_already_persisted (bool): The exact request was persisted before
+                this method was called.
 
         Returns:
             Message: The response received from the target.
@@ -101,6 +108,8 @@ class PromptNormalizer:
             raise ValueError("All MessagePieces in the Message must have the same sequence.")
 
         # Prepare the request by updating conversation ID
+        if persist_request_before_send and request_already_persisted:
+            raise ValueError("A request cannot be both newly pre-persisted and already persisted.")
         request = copy.deepcopy(message)
         conversation_id = conversation_id if conversation_id else str(uuid4())
         target_identifier = target.get_identifier()
@@ -117,16 +126,33 @@ class PromptNormalizer:
         await self._calc_hash_async(request=request)
 
         responses = None
+        request_persisted = request_already_persisted
+        if persist_request_before_send:
+            self.memory.add_message_to_memory(request=request)
+            request_persisted = True
 
         try:
             if request_options is None:
-                responses = await target.send_prompt_async(message=request)
+                responses = await target.send_prompt_async(
+                    message=request,
+                    request_already_persisted=request_persisted,
+                )
             else:
-                responses = await target.send_prompt_async(message=request, request_options=request_options)
-            self.memory.add_message_to_memory(request=request)
+                responses = await target.send_prompt_async(
+                    message=request,
+                    request_options=request_options,
+                    request_already_persisted=request_persisted,
+                )
+            if not request_persisted:
+                self.memory.add_message_to_memory(request=request)
+                request_persisted = True
         except EmptyResponseException:
             # Empty responses are retried, but we don't want them to stop execution
-            self.memory.add_message_to_memory(request=request)
+            self._finalize_request_persistence(
+                request=request,
+                already_persisted=request_persisted,
+            )
+            request_persisted = True
 
             responses = [
                 construct_response_from_request(
@@ -139,7 +165,10 @@ class PromptNormalizer:
 
         except Exception as ex:
             # Ensure request to memory before processing exception
-            self.memory.add_message_to_memory(request=request)
+            self._finalize_request_persistence(
+                request=request,
+                already_persisted=request_persisted,
+            )
 
             error_response = construct_response_from_request(
                 request=request.message_pieces[0],
@@ -158,6 +187,10 @@ class PromptNormalizer:
             # An empty list is valid for write-only targets (e.g., TextTarget)
             # that don't produce responses. Return the request as-is.
             if responses is not None and len(responses) == 0:
+                self._finalize_request_persistence(
+                    request=request,
+                    already_persisted=request_persisted,
+                )
                 return request
             empty_response = construct_response_from_request(
                 request=request.message_pieces[0],
@@ -167,6 +200,10 @@ class PromptNormalizer:
             )
             await self._calc_hash_async(request=empty_response)
             self.memory.add_message_to_memory(request=empty_response)
+            self._finalize_request_persistence(
+                request=request,
+                already_persisted=request_persisted,
+            )
             return empty_response
 
         # Process all response messages (targets return list[Message])
@@ -186,8 +223,60 @@ class PromptNormalizer:
             await self._calc_hash_async(request=resp)
             self.memory.add_message_to_memory(request=resp)
 
+        self._finalize_request_persistence(
+            request=request,
+            already_persisted=request_persisted,
+        )
+
         # Return the last response for backward compatibility
         return responses[-1]
+
+    async def persist_message_async(
+        self,
+        *,
+        message: Message,
+        target: PromptTarget,
+        conversation_id: str,
+    ) -> Message:
+        """
+        Normalize persistence metadata and store a message without invoking a target.
+
+        Args:
+            message (Message): The message to persist.
+            target (PromptTarget): The target that owns the conversation.
+            conversation_id (str): The conversation receiving the message.
+
+        Returns:
+            Message: The persisted defensive copy, including assigned sequence and IDs.
+        """
+        request = copy.deepcopy(message)
+        self.memory.add_conversation_to_memory(
+            conversation=Conversation(conversation_id=conversation_id, target_identifier=target.get_identifier())
+        )
+        for piece in request.message_pieces:
+            piece.conversation_id = conversation_id
+        await self._calc_hash_async(request=request)
+        self.memory.add_message_to_memory(request=request)
+        return request
+
+    def _finalize_request_persistence(
+        self,
+        *,
+        request: Message,
+        already_persisted: bool,
+    ) -> None:
+        if not already_persisted:
+            self.memory.add_message_to_memory(request=request)
+            return
+        piece = request.message_pieces[0]
+        if piece.not_in_memory:
+            return
+        updated = self.memory.update_prompt_metadata_by_id(
+            prompt_id=piece.id,
+            prompt_metadata=piece.prompt_metadata,
+        )
+        if not updated:
+            logger.warning("Persisted request piece '%s' was unavailable for target provenance update.", piece.id)
 
     async def send_prompt_batch_to_target_async(
         self,

@@ -193,6 +193,8 @@ async def test_response_identity_stop_reason_and_usage_are_recorded() -> None:
     assert invocation.responses[0].provider_response_id == "resp-metadata"
     assert invocation.responses[0].stop_reason == "completed"
     assert invocation.responses[0].provider_stop_reason == "completed"
+    assert invocation.responses[0].usage is not None
+    assert invocation.responses[0].usage.total_tokens == 7
     assert messages[0].message_pieces[0].prompt_metadata["token_usage_total_tokens"] == 7
 
 

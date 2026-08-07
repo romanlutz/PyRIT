@@ -881,10 +881,12 @@ class OpenAIResponseTarget(OpenAITarget):
         else:
             stop_reason = "unknown"
         raw_response_id = getattr(response, "id", None)
+        usage = getattr(response, "usage", None)
         return TargetResponseMetadata(
             provider_response_id=raw_response_id if isinstance(raw_response_id, str) else None,
             stop_reason=stop_reason,
             provider_stop_reason=incomplete_reason or status,
+            usage=token_usage_from_responses(usage) if usage is not None else None,
         )
 
     def _parse_response_message_content(

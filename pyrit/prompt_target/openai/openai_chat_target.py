@@ -35,6 +35,7 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     get_finish_reason,
     is_content_filter_response,
     save_audio_response_async,
+    token_usage_from_chat_completion,
     validate_chat_completion_response,
 )
 from pyrit.prompt_target.common.request_options import OpenAIChatRequestOptions
@@ -299,10 +300,12 @@ class OpenAIChatTarget(OpenAITarget):
         }
         raw_response_id = getattr(response, "id", None)
         provider_response_id = raw_response_id if isinstance(raw_response_id, str) else None
+        usage = getattr(response, "usage", None)
         return TargetResponseMetadata(
             provider_response_id=provider_response_id,
             stop_reason=stop_reasons.get(finish_reason, "unknown"),
             provider_stop_reason=finish_reason,
+            usage=token_usage_from_chat_completion(usage) if usage is not None else None,
         )
 
     def _check_content_filter(self, response: Any) -> bool:
