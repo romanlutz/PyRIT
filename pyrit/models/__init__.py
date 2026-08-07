@@ -18,6 +18,7 @@ ComponentIdentifier``).
 
 from pyrit.models.additional_initializer import AdditionalInitializer
 from pyrit.models.catalog import (
+    ScenarioDatasetSizeCap,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -220,6 +221,7 @@ __all__ = [
     "ScorerEvaluationIdentifier",
     "ScorerIdentifier",
     "ScenarioIdentifier",
+    "ScenarioDatasetSizeCap",
     "ScenarioDatasetSummary",
     "ScenarioDefaultRunSizeEstimate",
     "ScenarioResult",

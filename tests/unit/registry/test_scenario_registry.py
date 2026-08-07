@@ -88,6 +88,10 @@ def test_build_metadata_expands_ordered_default_techniques() -> None:
 
     assert metadata.default_technique == "default"
     assert metadata.default_techniques == ("one", "two")
+    assert dict(metadata.aggregate_technique_expansions) == {
+        "all": ("one", "two"),
+        "default": ("one", "two"),
+    }
 
 
 def test_build_metadata_preserves_structured_markdown_separately() -> None:
@@ -156,7 +160,7 @@ async def test_create_and_estimate_async_configures_without_initializing() -> No
             "include_baseline": False,
         }
     )
-    scenario.get_run_size_estimate_async.assert_awaited_once_with()
+    scenario.get_run_size_estimate_async.assert_awaited_once_with(target_is_configured=False)
     scenario.initialize_async.assert_not_called()
 
 

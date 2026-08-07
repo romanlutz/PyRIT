@@ -1,12 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""
-Scenario service for listing available scenarios.
+"""Scenario catalog and side-effect-free planning service."""
 
-Provides read-only access to the ScenarioRegistry, exposing scenario metadata
-through the REST API.
-"""
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -46,8 +43,9 @@ def _metadata_to_registered_scenario(
         default_run_size: Scenario-owned default-run estimate.
 
     Returns:
-        ScenarioSummary Pydantic model.
+        RegisteredScenario: Public catalog projection.
     """
+    resolved_default_run_size = default_run_size or ScenarioDefaultRunSizeEstimate.unavailable()
     return RegisteredScenario(
         scenario_name=metadata.registry_name,
         scenario_type=metadata.class_name,
@@ -57,24 +55,24 @@ def _metadata_to_registered_scenario(
         default_technique=metadata.default_technique,
         default_techniques=list(metadata.default_techniques),
         aggregate_techniques=list(metadata.aggregate_techniques),
+        aggregate_technique_expansions={
+            aggregate: list(expansion) for aggregate, expansion in metadata.aggregate_technique_expansions
+        },
         all_techniques=list(metadata.all_techniques),
         default_datasets=list(metadata.default_datasets),
+        default_dataset_summaries=list(resolved_default_run_size.datasets),
         supported_parameters=list(metadata.supported_parameters),
         baseline_policy=metadata.baseline_policy,
         include_baseline_by_default=metadata.include_baseline_by_default,
-        default_run_size=default_run_size or ScenarioDefaultRunSizeEstimate.unavailable(),
+        default_run_size=resolved_default_run_size,
     )
 
 
 class ScenarioService:
-    """
-    Service for listing available scenarios.
-
-    Uses ScenarioRegistry as the source of truth for scenario metadata.
-    """
+    """Expose Scenario metadata and scenario-owned run-size planning."""
 
     def __init__(self) -> None:
-        """Initialize the scenario service."""
+        """Initialize registry access and the per-scenario default-estimate cache."""
         self._registry = ScenarioRegistry.get_registry_singleton()
         self._estimate_cache: OrderedDict[_EstimateCacheKey, _EstimateCacheValue] = OrderedDict()
         self._estimate_semaphore = asyncio.Semaphore(_ESTIMATE_CONCURRENCY)
@@ -86,14 +84,10 @@ class ScenarioService:
         cursor: str | None = None,
     ) -> ListRegisteredScenariosResponse:
         """
-        List all available scenarios with pagination.
-
-        Args:
-            limit: Maximum items to return per page.
-            cursor: Pagination cursor (scenario_name to start after).
+        List scenarios with cached default estimates and cursor pagination.
 
         Returns:
-            ScenarioListResponse with paginated scenario summaries.
+            ListRegisteredScenariosResponse: The requested catalog page.
         """
         all_metadata = self._registry.get_all_registered_class_metadata()
         all_summaries = [_metadata_to_registered_scenario(m) for m in all_metadata]
@@ -104,11 +98,15 @@ class ScenarioService:
             *(self._get_default_run_size_estimate_async(metadata=metadata_by_name[item.scenario_name]) for item in page)
         )
         page = [
-            item.model_copy(update={"default_run_size": estimate})
+            item.model_copy(
+                update={
+                    "default_run_size": estimate,
+                    "default_dataset_summaries": list(estimate.datasets),
+                }
+            )
             for item, estimate in zip(page, estimates, strict=True)
         ]
         next_cursor = page[-1].scenario_name if has_more and page else None
-
         return ListRegisteredScenariosResponse(
             items=page,
             pagination=PaginationInfo(
@@ -121,13 +119,10 @@ class ScenarioService:
 
     async def get_scenario_async(self, *, scenario_name: str) -> RegisteredScenario | None:
         """
-        Get a single scenario by registry name.
-
-        Args:
-            scenario_name: The registry key of the scenario (e.g., 'foundry.red_team_agent').
+        Get one scenario and its cached default estimate.
 
         Returns:
-            ScenarioSummary if found, None otherwise.
+            RegisteredScenario | None: The catalog entry, or None when it is not registered.
         """
         metadata = self._registry.get_registered_class_metadata(scenario_name)
         if metadata is not None:
@@ -257,6 +252,7 @@ class ScenarioService:
             self._registry.create_and_estimate_async(
                 scenario_name,
                 scenario_params=request.scenario_params or {},
+                target_is_configured=objective_target is not None,
                 **estimate_kwargs,
             )
         )
@@ -269,15 +265,10 @@ class ScenarioService:
         limit: int,
     ) -> tuple[list[RegisteredScenario], bool]:
         """
-        Apply cursor-based pagination.
-
-        Args:
-            items: Full list of items.
-            cursor: Scenario name to start after.
-            limit: Maximum items per page.
+        Apply scenario-name cursor pagination.
 
         Returns:
-            Tuple of (paginated items, has_more flag).
+            tuple[list[RegisteredScenario], bool]: The page and whether another page exists.
         """
         start_idx = 0
         if cursor:
@@ -285,7 +276,6 @@ class ScenarioService:
                 if item.scenario_name == cursor:
                     start_idx = i + 1
                     break
-
         page = items[start_idx : start_idx + limit]
         has_more = len(items) > start_idx + limit
         return page, has_more
@@ -294,9 +284,9 @@ class ScenarioService:
 @lru_cache(maxsize=1)
 def get_scenario_service() -> ScenarioService:
     """
-    Get the global scenario service instance.
+    Get the process-wide Scenario service.
 
     Returns:
-        The singleton ScenarioService instance.
+        ScenarioService: The cached service instance.
     """
     return ScenarioService()

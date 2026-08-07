@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pyrit.models import (
+    ScenarioDatasetSizeCap,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -31,6 +32,19 @@ def test_exact_default_run_size_requires_component_total() -> None:
                         ScenarioRunSizeFactor(label="techniques", count=2),
                     ],
                 )
+            ],
+        )
+
+
+def test_run_size_component_requires_factor_product() -> None:
+    """Components reject counts that disagree with their ordered formula factors."""
+    with pytest.raises(ValidationError, match="factor product \\(6\\)"):
+        ScenarioRunSizeComponent(
+            label="Techniques",
+            count=7,
+            factors=[
+                ScenarioRunSizeFactor(label="seed groups", count=3),
+                ScenarioRunSizeFactor(label="techniques", count=2),
             ],
         )
 
@@ -65,10 +79,12 @@ def test_default_run_size_serializes_versioned_api_shape() -> None:
                     {"label": "techniques", "count": 2},
                 ],
                 "note": None,
+                "is_baseline": False,
             }
         ],
         "datasets": [],
         "note": None,
+        "retries_included": False,
     }
 
 
@@ -82,6 +98,14 @@ def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:
                 logical_seed_group_count=100,
                 selected_seed_group_count=4,
                 selection_note="The default selection uses 4 of 100 logical seed groups.",
+                configured_caps=[
+                    ScenarioDatasetSizeCap(
+                        label="per-dataset cap",
+                        count=4,
+                        configured_on="dataset",
+                        dataset_name="harmbench",
+                    )
+                ],
             )
         ],
         note="The final total depends on target capabilities.",
@@ -97,8 +121,17 @@ def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:
             "logical_seed_group_count": 100,
             "selected_seed_group_count": 4,
             "selection_note": "The default selection uses 4 of 100 logical seed groups.",
+            "configured_caps": [
+                {
+                    "label": "per-dataset cap",
+                    "count": 4,
+                    "configured_on": "dataset",
+                    "dataset_name": "harmbench",
+                }
+            ],
         }
     ]
+    assert payload["retries_included"] is False
 
 
 def test_estimate_request_reuses_dataset_filter_validation() -> None:

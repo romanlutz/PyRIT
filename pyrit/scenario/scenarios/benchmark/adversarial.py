@@ -24,7 +24,12 @@ from pyrit.models import (
 from pyrit.models.parameter import Parameter
 from pyrit.registry import AttackTechniqueRegistry, TargetRegistry
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
-from pyrit.scenario.core.matrix_atomic_attack_builder import MatrixAtomicAttackBuilder, resolve_technique_factories
+from pyrit.scenario.core.matrix_atomic_attack_builder import (
+    MatrixAtomicAttackBuilder,
+    filter_compatible_seed_groups,
+    resolve_technique_factories,
+    resolve_technique_factories_for_techniques,
+)
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
 
 if TYPE_CHECKING:
@@ -198,54 +203,63 @@ class AdversarialBenchmark(Scenario):
 
     async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
-        Expose the per-target formula because the adversarial-target axis is required at run time.
+        Estimate the target-by-technique matrix using execution compatibility.
 
         Returns:
-            ScenarioDefaultRunSizeEstimate: Conditional per-target estimate.
+            ScenarioDefaultRunSizeEstimate: Structured benchmark estimate.
         """
         selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
-        seed_group_count = sum(len(groups) for groups in selected_groups.values())
-        technique_count = len(self._scenario_techniques)
-        per_target_count = seed_group_count * technique_count
         target_names = self.params.get("adversarial_targets") or []
-        if target_names:
-            target_count = len(target_names)
-            total_count = per_target_count * target_count
+        if not target_names:
             return ScenarioDefaultRunSizeEstimate(
-                status=ScenarioRunSizeEstimateStatus.Exact,
-                total_attack_count=total_count,
-                components=[
-                    ScenarioRunSizeComponent(
-                        label="Adversarial target sweep",
-                        count=total_count,
-                        factors=[
-                            ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
-                            ScenarioRunSizeFactor(label="selected concrete techniques", count=technique_count),
-                            ScenarioRunSizeFactor(label="adversarial targets", count=target_count),
-                        ],
-                    )
-                ],
+                status=ScenarioRunSizeEstimateStatus.Conditional,
                 datasets=datasets,
-                note="Baseline is forbidden. The default use_cached=False policy does not subtract prior results.",
+                note=(
+                    "A total is unavailable until adversarial_targets is supplied and resolved. Baseline is forbidden."
+                ),
+            )
+
+        resolved_targets = self._resolve_adversarial_targets(target_names=target_names)
+        factories = resolve_technique_factories_for_techniques(
+            scenario_techniques=self._scenario_techniques,
+        )
+        components: list[ScenarioRunSizeComponent] = []
+        for technique in self._scenario_techniques:
+            factory = factories.get(technique.value)
+            if factory is None:
+                continue
+            compatible_count = sum(
+                len(filter_compatible_seed_groups(factory=factory, seed_groups=groups))
+                for groups in selected_groups.values()
+            )
+            components.append(
+                ScenarioRunSizeComponent(
+                    label=technique.value,
+                    count=len(resolved_targets) * compatible_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected concrete techniques", count=1),
+                        ScenarioRunSizeFactor(label="adversarial targets", count=len(resolved_targets)),
+                        ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_count),
+                    ],
+                )
+            )
+
+        if self._use_cached:
+            return ScenarioDefaultRunSizeEstimate(
+                status=ScenarioRunSizeEstimateStatus.Conditional,
+                components=components,
+                datasets=datasets,
+                note=(
+                    "Components describe the uncached candidate population. Live behavioral-cache hits can "
+                    "suppress work, so the authoritative total is unavailable before launch."
+                ),
             )
         return ScenarioDefaultRunSizeEstimate(
-            status=ScenarioRunSizeEstimateStatus.Conditional,
-            components=[
-                ScenarioRunSizeComponent(
-                    label="Per adversarial target",
-                    count=per_target_count,
-                    factors=[
-                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
-                        ScenarioRunSizeFactor(label="default concrete techniques", count=technique_count),
-                    ],
-                    note="Multiply this component by the required adversarial target count.",
-                )
-            ],
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=sum(component.count for component in components),
+            components=components,
             datasets=datasets,
-            note=(
-                "A total is unavailable until adversarial_targets is supplied. Baseline is forbidden. "
-                "The default use_cached=False policy does not subtract prior results."
-            ),
+            note="Baseline is forbidden; retries and internal attack turns are excluded.",
         )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:

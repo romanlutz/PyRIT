@@ -8,12 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.models import (
     AttackSeedGroup,
+    AttackTechniqueSeedGroup,
     ComponentIdentifier,
     ScenarioDatasetSummary,
     ScenarioRunSizeEstimateStatus,
     SeedObjective,
+    SeedPrompt,
+    SeedSimulatedConversation,
 )
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core import BaselineAttackPolicy, DatasetAttackConfiguration, Scenario, ScenarioTechnique
@@ -21,6 +25,7 @@ from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
 from pyrit.scenario.scenarios.airt.jailbreak import Jailbreak
 from pyrit.scenario.scenarios.airt.psychosocial import Psychosocial
 from pyrit.scenario.scenarios.benchmark.adversarial import AdversarialBenchmark
+from pyrit.scenario.scenarios.foundry.red_team_agent import FoundryComposite, FoundryTechnique, RedTeamAgent
 from pyrit.scenario.scenarios.garak.encoding import Encoding
 from pyrit.scenario.scenarios.garak.web_injection import WebInjection
 from pyrit.score import TrueFalseScorer
@@ -89,6 +94,12 @@ class _MatrixEstimateScenario(Scenario):
     async def _build_atomic_attacks_async(self, *, context):
         """Return no attacks; only estimation is exercised."""
         return []
+
+
+class _CompatibilityMatrixEstimateScenario(_MatrixEstimateScenario):
+    """Matrix scenario whose estimates mirror execution compatibility filtering."""
+
+    RUN_SIZE_USES_FACTORY_COMPATIBILITY: ClassVar[bool] = True
 
 
 def _scorer() -> MagicMock:
@@ -192,6 +203,78 @@ async def test_configured_estimate_applies_dataset_selection_and_cap() -> None:
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_configured_estimate_exposes_nonbinding_cap_provenance() -> None:
+    """Configured caps remain visible even when they do not reduce the population."""
+    scenario = _MatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(
+        args={
+            "dataset_config": DatasetAttackConfiguration(
+                seed_groups=[_seed_group(str(index)) for index in range(4)],
+                max_dataset_size=4,
+            ),
+            "scenario_techniques": [_TwoTechniqueDefault.ONE],
+            "include_baseline": False,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.datasets[0].logical_seed_group_count == 4
+    assert estimate.datasets[0].selected_seed_group_count == 4
+    assert [(cap.label, cap.count, cap.configured_on) for cap in estimate.datasets[0].configured_caps] == [
+        ("per-dataset cap", 4, "dataset")
+    ]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_matrix_estimate_filters_each_technique_seed_population_like_execution() -> None:
+    """A mixed seed matrix does not use naive technique-by-group multiplication."""
+    compatible = _seed_group("compatible")
+    incompatible = AttackSeedGroup(
+        seeds=[
+            SeedObjective(value="incompatible"),
+            SeedPrompt(value="user", data_type="text", role="user", sequence=0),
+            SeedPrompt(value="assistant", data_type="text", role="assistant", sequence=1),
+            SeedPrompt(value="user again", data_type="text", role="user", sequence=2),
+        ]
+    )
+    plain_factory = MagicMock()
+    plain_factory.seed_technique = None
+    conversation_factory = MagicMock()
+    conversation_factory.seed_technique = AttackTechniqueSeedGroup(
+        seeds=[
+            SeedSimulatedConversation(
+                adversarial_chat_system_prompt_path="fake.yaml",
+                num_turns=3,
+            )
+        ]
+    )
+    scenario = _CompatibilityMatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(args={"include_baseline": False})
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(
+        return_value=(
+            {"sample": [compatible, incompatible]},
+            [
+                ScenarioDatasetSummary(
+                    name="sample",
+                    logical_seed_group_count=2,
+                    selected_seed_group_count=2,
+                )
+            ],
+        )
+    )
+
+    with patch(
+        "pyrit.scenario.core.matrix_atomic_attack_builder.resolve_technique_factories_for_techniques",
+        return_value={"one": plain_factory, "two": conversation_factory},
+    ):
+        estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.total_attack_count == 3
+    assert [(component.label, component.count) for component in estimate.components] == [("one", 2), ("two", 1)]
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_techniques() -> None:
     """Adaptive techniques are selected internally rather than forming an outer axis."""
     with patch.object(TextAdaptive, "get_technique_class", return_value=_TwoTechniqueDefault):
@@ -203,6 +286,38 @@ async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_tec
     assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
     assert estimate.total_attack_count is None
     assert [component.count for component in estimate.components] == [3, 3]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_adaptive_estimate_counts_exact_compatible_outer_envelopes_with_target() -> None:
+    """A concrete target makes the compatible outer population exact without counting attempts."""
+    with patch.object(TextAdaptive, "get_technique_class", return_value=_TwoTechniqueDefault):
+        scenario = TextAdaptive(objective_scorer=_scorer())
+    target = MagicMock(spec=PromptTarget)
+    scenario.set_params_from_args(
+        args={
+            "objective_target": target,
+            "include_baseline": False,
+            "max_attempts_per_objective": 7,
+        }
+    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"adaptive": 3}))
+    dispatcher = MagicMock()
+    dispatcher.compatible_techniques.side_effect = [["one"], [], ["two"]]
+
+    with (
+        patch.object(scenario, "_build_techniques_dict", return_value={"one": MagicMock()}),
+        patch(
+            "pyrit.scenario.scenarios.adaptive.adaptive_scenario.AdaptiveTechniqueDispatcher",
+            return_value=dispatcher,
+        ),
+    ):
+        estimate = await scenario.get_run_size_estimate_async(target_is_configured=True)
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 2
+    assert [component.count for component in estimate.components] == [2]
+    assert "7 selected technique attempts" in estimate.note
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -369,5 +484,102 @@ async def test_adversarial_benchmark_estimate_exposes_per_required_target_formul
 
     assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
     assert estimate.total_attack_count is None
-    assert estimate.components[0].count == 6
+    assert estimate.components == []
     assert "adversarial_targets" in estimate.note
+
+
+@pytest.mark.parametrize(
+    ("use_cached", "expected_status", "expected_total"),
+    [
+        (False, ScenarioRunSizeEstimateStatus.Exact, 6),
+        (True, ScenarioRunSizeEstimateStatus.Conditional, None),
+    ],
+)
+@pytest.mark.usefixtures("patch_central_database")
+async def test_adversarial_benchmark_resolves_targets_and_filters_each_technique(
+    *,
+    use_cached: bool,
+    expected_status: ScenarioRunSizeEstimateStatus,
+    expected_total: int | None,
+) -> None:
+    """Benchmark sizing resolves target names and reports uncached compatible candidates."""
+    with patch(
+        "pyrit.scenario.scenarios.benchmark.adversarial._build_benchmark_technique",
+        return_value=_TwoTechniqueDefault,
+    ):
+        scenario = AdversarialBenchmark(objective_scorer=_scorer(), use_cached=use_cached)
+    scenario.set_params_from_args(args={"adversarial_targets": ["target-a", "target-b"]})
+    compatible = _seed_group("compatible")
+    incompatible = AttackSeedGroup(
+        seeds=[
+            SeedObjective(value="incompatible"),
+            SeedPrompt(value="user", data_type="text", role="user", sequence=0),
+            SeedPrompt(value="assistant", data_type="text", role="assistant", sequence=1),
+            SeedPrompt(value="user again", data_type="text", role="user", sequence=2),
+        ]
+    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(
+        return_value=(
+            {"harmbench": [compatible, incompatible]},
+            [
+                ScenarioDatasetSummary(
+                    name="harmbench",
+                    logical_seed_group_count=2,
+                    selected_seed_group_count=2,
+                )
+            ],
+        )
+    )
+    resolve_targets = MagicMock(return_value=[MagicMock(spec=PromptTarget), MagicMock(spec=PromptTarget)])
+    scenario._resolve_adversarial_targets = resolve_targets
+    plain_factory = MagicMock()
+    plain_factory.seed_technique = None
+    conversation_factory = MagicMock()
+    conversation_factory.seed_technique = AttackTechniqueSeedGroup(
+        seeds=[
+            SeedSimulatedConversation(
+                adversarial_chat_system_prompt_path="fake.yaml",
+                num_turns=3,
+            )
+        ]
+    )
+
+    with patch(
+        "pyrit.scenario.scenarios.benchmark.adversarial.resolve_technique_factories_for_techniques",
+        return_value={"one": plain_factory, "two": conversation_factory},
+    ):
+        estimate = await scenario.get_run_size_estimate_async()
+
+    resolve_targets.assert_called_once_with(target_names=["target-a", "target-b"])
+    assert estimate.status is expected_status
+    assert estimate.total_attack_count == expected_total
+    assert [(component.label, component.count) for component in estimate.components] == [("one", 4), ("two", 2)]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_foundry_estimate_counts_composites_instead_of_flattened_techniques() -> None:
+    """Each Foundry composite contributes one selected seed population."""
+    scenario = RedTeamAgent(
+        adversarial_chat=MagicMock(spec=PromptTarget),
+        attack_scoring_config=AttackScoringConfig(objective_scorer=_scorer()),
+    )
+    scenario.set_params_from_args(
+        args={
+            "scenario_techniques": [
+                FoundryComposite(
+                    attack=FoundryTechnique.Crescendo,
+                    converters=[FoundryTechnique.Base64, FoundryTechnique.ROT13],
+                ),
+                FoundryComposite(attack=None, converters=[FoundryTechnique.Tense]),
+            ],
+            "include_baseline": False,
+        }
+    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 3}))
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.total_attack_count == 6
+    assert len(estimate.components) == 2
+    assert [component.count for component in estimate.components] == [3, 3]
+    assert [factor.count for factor in estimate.components[0].factors] == [1, 3]

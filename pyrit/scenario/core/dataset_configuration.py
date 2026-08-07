@@ -31,7 +31,7 @@ import random
 from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pyrit.memory import CentralMemory
 from pyrit.models import AttackSeedGroup, Seed, SeedGroup, group_seeds_into_attack_groups
@@ -391,6 +391,28 @@ class DatasetConfiguration:
             dict[str, list[str]]: A copy of the configured filters.
         """
         return dict(self._filters)
+
+    @property
+    def has_size_cap(self) -> bool:
+        """Whether this configuration applies a logical-group selection cap."""
+        return self.max_dataset_size is not None
+
+    def size_caps_by_dataset(self) -> dict[str, list[tuple[str, int, Literal["dataset", "configuration", "compound"]]]]:
+        """
+        Describe configured caps for each named dataset or inline source.
+
+        Returns:
+            dict[str, list[tuple[str, int, Literal]]]: Source name to ordered
+            ``(cap label, count, provenance)`` entries.
+        """
+        if self.max_dataset_size is None:
+            return {}
+        names = self.dataset_names or [INLINE_DATASET_NAME]
+        if len(names) == 1:
+            cap = ("per-dataset cap", self.max_dataset_size, "dataset")
+        else:
+            cap = ("combined configuration cap", self.max_dataset_size, "configuration")
+        return {name: [cap] for name in names}
 
     @property
     def _get_seeds_filters(self) -> dict[str, Any]:
@@ -822,6 +844,27 @@ class CompoundDatasetAttackConfiguration(DatasetAttackConfiguration):
         if all(child.source_kind is DatasetSourceKind.INLINE for child in self._configurations):
             return DatasetSourceKind.INLINE
         return DatasetSourceKind.MEMORY
+
+    @property
+    def has_size_cap(self) -> bool:
+        """Whether the compound or any child applies a logical-group cap."""
+        return self.max_dataset_size is not None or any(child.has_size_cap for child in self._configurations)
+
+    def size_caps_by_dataset(self) -> dict[str, list[tuple[str, int, Literal["dataset", "configuration", "compound"]]]]:
+        """
+        Describe child and combined caps for every contributed dataset.
+
+        Returns:
+            dict[str, list[tuple[str, int, Literal]]]: Ordered cap labels, counts, and provenance by source.
+        """
+        caps: dict[str, list[tuple[str, int, Literal["dataset", "configuration", "compound"]]]] = {}
+        for child in self._configurations:
+            for name, child_caps in child.size_caps_by_dataset().items():
+                caps.setdefault(name, []).extend(child_caps)
+        if self.max_dataset_size is not None:
+            for name in self.dataset_names or [INLINE_DATASET_NAME]:
+                caps.setdefault(name, []).append(("combined compound cap", self.max_dataset_size, "compound"))
+        return caps
 
     def update_filters(self, *, filters: dict[str, list[str]]) -> None:
         """

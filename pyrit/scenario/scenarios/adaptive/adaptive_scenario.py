@@ -153,42 +153,6 @@ class AdaptiveScenario(Scenario):
             registry_overrides = {}
         return {**catalog, **registry_overrides}
 
-    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
-        """
-        Estimate adaptive per-objective dispatch, which depends on target compatibility.
-
-        Returns:
-            ScenarioDefaultRunSizeEstimate: Conditional adaptive estimate.
-        """
-        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
-        seed_group_count = sum(len(groups) for groups in selected_groups.values())
-        components = [
-            ScenarioRunSizeComponent(
-                label="Adaptive dispatch candidates",
-                count=seed_group_count,
-                factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
-                note="At most one outer execution unit is planned per target-compatible seed group.",
-            )
-        ]
-        if self._include_baseline:
-            components.append(
-                ScenarioRunSizeComponent(
-                    label="Baseline",
-                    count=seed_group_count,
-                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
-                )
-            )
-        return ScenarioDefaultRunSizeEstimate(
-            status=ScenarioRunSizeEstimateStatus.Conditional,
-            components=components,
-            datasets=datasets,
-            note=(
-                f"Up to {sum(component.count for component in components)} planned units. "
-                "The adaptive selector chooses a technique internally, and target/technique compatibility "
-                "can remove seed groups before planning."
-            ),
-        )
-
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """
         Build one ``AtomicAttack`` per (dataset, compatible seed group) pair.
@@ -238,6 +202,83 @@ class AdaptiveScenario(Scenario):
             )
 
         return atomic_attacks
+
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Estimate compatible persisted envelopes, excluding adaptive inner attempts.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: The adaptive outer-envelope estimate.
+        """
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
+        selected_count = sum(len(groups) for groups in selected_groups.values())
+        max_attempts = int(self.params.get("max_attempts_per_objective", 3))
+        baseline_components = (
+            [
+                ScenarioRunSizeComponent(
+                    label="Baseline",
+                    count=selected_count,
+                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=selected_count)],
+                    is_baseline=True,
+                )
+            ]
+            if self._include_baseline
+            else []
+        )
+        if not self._estimate_target_is_configured:
+            components = [
+                *baseline_components,
+                ScenarioRunSizeComponent(
+                    label="Adaptive attack-envelope candidates",
+                    count=selected_count,
+                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=selected_count)],
+                ),
+            ]
+            return ScenarioDefaultRunSizeEstimate(
+                status=ScenarioRunSizeEstimateStatus.Conditional,
+                components=components,
+                datasets=datasets,
+                note=(
+                    "The authoritative total depends on which selected techniques are compatible with the "
+                    f"configured objective target and each seed group. Up to {max_attempts} inner attempts per "
+                    "envelope and retries are excluded."
+                ),
+            )
+
+        assert self._objective_target is not None
+        techniques = self._build_techniques_dict(objective_target=self._objective_target)
+        dispatcher = AdaptiveTechniqueDispatcher(
+            objective_target=self._objective_target,
+            techniques=techniques,
+            selector=self._selector,
+            objective_scorer=self._objective_scorer,
+            max_attempts_per_objective=self.params.get("max_attempts_per_objective", 3),
+            scenario_result_id=self._scenario_result_id,
+        )
+        compatible_group_count = sum(
+            bool(dispatcher.compatible_techniques(seed_group=seed_group))
+            for seed_groups in selected_groups.values()
+            for seed_group in seed_groups
+        )
+
+        components = [
+            *baseline_components,
+            ScenarioRunSizeComponent(
+                label="Adaptive attack envelopes",
+                count=compatible_group_count,
+                factors=[ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_group_count)],
+            ),
+        ]
+        return ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=sum(component.count for component in components),
+            components=components,
+            datasets=datasets,
+            note=(
+                f"Each planned unit is one persisted adaptive envelope. Up to {max_attempts} selected technique "
+                "attempts may run inside that unit; inner attempts and retries are excluded."
+            ),
+        )
 
     def _build_techniques_dict(
         self,

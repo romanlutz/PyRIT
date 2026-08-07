@@ -517,6 +517,7 @@ class Psychosocial(Scenario):
                         label=f"{dataset_name} baseline",
                         count=seed_group_count,
                         factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                        is_baseline=True,
                         note="Psychosocial uses a distinct baseline and scorer for each sub-harm.",
                     )
                 )

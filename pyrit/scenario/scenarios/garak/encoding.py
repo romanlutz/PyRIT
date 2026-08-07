@@ -265,6 +265,7 @@ class Encoding(Scenario):
                     label="Baseline",
                     count=seed_group_count,
                     factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                    is_baseline=True,
                 )
             )
         return ScenarioDefaultRunSizeEstimate(

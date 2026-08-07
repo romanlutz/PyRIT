@@ -15,6 +15,7 @@ canonical models.
 
 from datetime import datetime
 from enum import Enum
+from math import prod
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -79,7 +80,36 @@ class ScenarioRunSizeComponent(BaseModel):
     label: str = Field(..., min_length=1)
     count: int = Field(..., ge=0)
     factors: list[ScenarioRunSizeFactor] = Field(default_factory=list)
+    is_baseline: bool = False
     note: str | None = None
+
+    @model_validator(mode="after")
+    def validate_factor_product(self) -> "ScenarioRunSizeComponent":
+        """
+        Require known component totals to equal their ordered factor product.
+
+        Returns:
+            ScenarioRunSizeComponent: The validated component.
+
+        Raises:
+            ValueError: If a component with factors has an inconsistent count.
+        """
+        if self.factors:
+            factor_product = prod(factor.count for factor in self.factors)
+            if self.count != factor_product:
+                raise ValueError(
+                    f"Component '{self.label}' count ({self.count}) must equal its factor product ({factor_product})"
+                )
+        return self
+
+
+class ScenarioDatasetSizeCap(BaseModel):
+    """One configured cap affecting a dataset or compound population."""
+
+    label: str = Field(..., min_length=1)
+    count: int = Field(..., ge=1)
+    configured_on: Literal["dataset", "configuration", "compound"] = "dataset"
+    dataset_name: str | None = None
 
 
 class ScenarioDatasetSummary(BaseModel):
@@ -89,6 +119,7 @@ class ScenarioDatasetSummary(BaseModel):
     kind: Literal["dataset", "synthesized"] = "dataset"
     logical_seed_group_count: int = Field(..., ge=0)
     selected_seed_group_count: int = Field(..., ge=0)
+    configured_caps: list[ScenarioDatasetSizeCap] = Field(default_factory=list)
     selection_note: str | None = None
 
 
@@ -106,6 +137,7 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
     note: str | None = None
+    retries_included: Literal[False] = False
 
     @model_validator(mode="after")
     def validate_total(self) -> "ScenarioDefaultRunSizeEstimate":
@@ -163,8 +195,16 @@ class RegisteredScenario(BaseModel):
     aggregate_techniques: list[str] = Field(
         ..., description="Aggregate techniques that combine multiple attack approaches"
     )
+    aggregate_technique_expansions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Concrete ordered technique expansion for every aggregate selector",
+    )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    default_dataset_summaries: list[ScenarioDatasetSummary] = Field(
+        default_factory=list,
+        description="Logical and effectively selected attack-group counts for the default configuration",
+    )
     baseline_policy: Literal["enabled", "disabled", "forbidden"] = Field(
         "enabled", description="Whether baseline execution is enabled, disabled, or forbidden"
     )
@@ -263,16 +303,8 @@ class RunScenarioRequest(BaseModel):
         """
         Reject any dataset-filter key not in the exposed ``DATASET_FILTERS`` allow-list.
 
-        Runs for every request source (CLI and GUI), so the allow-list is enforced server-side.
-
-        Args:
-            value (dict[str, list[str]] | None): The submitted dataset filters.
-
         Returns:
             dict[str, list[str]] | None: The validated filters, unchanged.
-
-        Raises:
-            ValueError: If any key is not present in ``DATASET_FILTERS``.
         """
         return _validate_dataset_filter_mapping(value)
 

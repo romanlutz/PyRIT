@@ -22,6 +22,8 @@ from pyrit.backend.services.scenario_service import (
 )
 from pyrit.models import (
     Parameter,
+    ScenarioDatasetSizeCap,
+    ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateRequest,
@@ -71,6 +73,10 @@ def _make_scenario_metadata(
     default_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     all_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     aggregate_techniques: tuple[str, ...] = ("all", "default"),
+    aggregate_technique_expansions: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("all", ("role_play", "many_shot")),
+        ("default", ("role_play",)),
+    ),
     default_datasets: tuple[str, ...] = ("test_dataset",),
     baseline_policy: str = "enabled",
     include_baseline_by_default: bool = True,
@@ -86,6 +92,7 @@ def _make_scenario_metadata(
         default_techniques=default_techniques,
         all_techniques=all_techniques,
         aggregate_techniques=aggregate_techniques,
+        aggregate_technique_expansions=aggregate_technique_expansions,
         default_datasets=default_datasets,
         baseline_policy=baseline_policy,
         include_baseline_by_default=include_baseline_by_default,
@@ -131,6 +138,7 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].default_technique == "default"
             assert result.items[0].default_techniques == ["role_play", "many_shot"]
             assert result.items[0].aggregate_techniques == ["all", "default"]
+            assert result.items[0].aggregate_technique_expansions["default"] == ["role_play"]
             assert result.items[0].all_techniques == ["role_play", "many_shot"]
             assert result.items[0].default_datasets == ["test_dataset"]
             assert result.items[0].baseline_policy == "enabled"
@@ -143,6 +151,21 @@ class TestScenarioServiceListScenarios:
             status=ScenarioRunSizeEstimateStatus.Exact,
             total_attack_count=4,
             components=[ScenarioRunSizeComponent(label="Default sweep", count=4)],
+            datasets=[
+                ScenarioDatasetSummary(
+                    name="sample",
+                    logical_seed_group_count=4,
+                    selected_seed_group_count=4,
+                    configured_caps=[
+                        ScenarioDatasetSizeCap(
+                            label="per-dataset cap",
+                            count=4,
+                            configured_on="dataset",
+                            dataset_name="sample",
+                        )
+                    ],
+                )
+            ],
         )
         scenario = MagicMock()
         scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
@@ -160,6 +183,8 @@ class TestScenarioServiceListScenarios:
         assert second is not None
         assert first.default_run_size == estimate
         assert second.default_run_size == estimate
+        assert first.default_dataset_summaries == estimate.datasets
+        assert second.default_dataset_summaries == estimate.datasets
         service._registry.create_instance.assert_called_once_with("test.scenario")
 
     async def test_one_failed_estimate_does_not_break_catalog(self) -> None:
@@ -376,6 +401,39 @@ class TestScenarioServiceGetScenario:
 
         service._registry.create_and_estimate_async.assert_not_awaited()
 
+    async def test_configured_estimate_without_target_does_not_resolve_or_send_to_target(self) -> None:
+        """Target-conditional previews stay side-effect free when no target is configured."""
+        metadata = _make_scenario_metadata(registry_name="adaptive.text")
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Conditional,
+            note="Target compatibility is unknown.",
+        )
+        introspection_instance = MagicMock()
+        introspection_instance._technique_class = _EstimateTechnique
+        introspection_instance._default_dataset_config = DatasetAttackConfiguration(dataset_names=["harmbench"])
+        scenario_class = MagicMock(return_value=introspection_instance)
+
+        with (
+            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioRunService, "resolve_target_name") as resolve_target,
+        ):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_registered_class_metadata.return_value = metadata
+            service._registry.get_class.return_value = scenario_class
+            service._registry.create_and_estimate_async = AsyncMock(return_value=estimate)
+
+            result = await service.estimate_scenario_run_size_async(
+                scenario_name="adaptive.text",
+                request=ScenarioRunSizeEstimateRequest(),
+            )
+
+        assert result == estimate
+        resolve_target.assert_not_called()
+        call = service._registry.create_and_estimate_async.await_args
+        assert call.kwargs["target_is_configured"] is False
+        assert "objective_target" not in call.kwargs
+
     async def test_get_scenario_returns_matching_scenario(self) -> None:
         """Test that get returns the matching scenario."""
         metadata = _make_scenario_metadata(registry_name="foundry.red_team_agent")
@@ -438,8 +496,27 @@ class TestScenarioRoutes:
             description_markdown='<script>alert("untrusted")</script>',
             default_technique="default",
             aggregate_techniques=["all", "default"],
+            aggregate_technique_expansions={
+                "all": ["role_play", "many_shot"],
+                "default": ["role_play"],
+            },
             all_techniques=["role_play", "many_shot"],
             default_datasets=["airt_hate"],
+            default_dataset_summaries=[
+                ScenarioDatasetSummary(
+                    name="airt_hate",
+                    logical_seed_group_count=4,
+                    selected_seed_group_count=4,
+                    configured_caps=[
+                        ScenarioDatasetSizeCap(
+                            label="per-dataset cap",
+                            count=4,
+                            configured_on="dataset",
+                            dataset_name="airt_hate",
+                        )
+                    ],
+                )
+            ],
         )
 
         with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
@@ -463,8 +540,10 @@ class TestScenarioRoutes:
             assert item["description_markdown"] == '<script>alert("untrusted")</script>'
             assert item["default_technique"] == "default"
             assert item["aggregate_techniques"] == ["all", "default"]
+            assert item["aggregate_technique_expansions"]["default"] == ["role_play"]
             assert item["all_techniques"] == ["role_play", "many_shot"]
             assert item["default_datasets"] == ["airt_hate"]
+            assert item["default_dataset_summaries"][0]["configured_caps"][0]["count"] == 4
 
     def test_list_scenarios_passes_pagination_params(self, client: TestClient) -> None:
         """Test that pagination params are forwarded to service."""

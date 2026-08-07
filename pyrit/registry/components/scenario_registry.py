@@ -55,6 +55,9 @@ class ScenarioMetadata(RegistryMetadata):
     # Aggregate techniques that combine multiple attack approaches.
     aggregate_techniques: tuple[str, ...] = field(kw_only=True)
 
+    # Ordered aggregate selector -> concrete technique expansions.
+    aggregate_technique_expansions: tuple[tuple[str, tuple[str, ...]], ...] = field(kw_only=True, default=())
+
     # Default dataset names used by this scenario.
     default_datasets: tuple[str, ...] = field(kw_only=True)
 
@@ -163,6 +166,13 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         )
         all_techniques = tuple(s.value for s in technique_class.get_all_techniques())
         aggregate_techniques = tuple(s.value for s in technique_class.get_aggregate_techniques())
+        aggregate_technique_expansions = tuple(
+            (
+                aggregate.value,
+                tuple(technique.value for technique in technique_class.expand({aggregate})),
+            )
+            for aggregate in technique_class.get_aggregate_techniques()
+        )
         default_datasets = tuple(instance._default_dataset_config.dataset_names)
 
         return ScenarioMetadata(
@@ -176,6 +186,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             description_markdown=description_markdown,
             all_techniques=all_techniques,
             aggregate_techniques=aggregate_techniques,
+            aggregate_technique_expansions=aggregate_technique_expansions,
             default_datasets=default_datasets,
             supported_parameters=supported_parameters,
             baseline_policy=instance.BASELINE_ATTACK_POLICY.value,
@@ -187,6 +198,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         name: str,
         *,
         scenario_params: dict[str, Any] | None = None,
+        target_is_configured: bool = False,
         **estimate_kwargs: Any,
     ) -> ScenarioDefaultRunSizeEstimate:
         """
@@ -195,6 +207,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         Args:
             name: Registered scenario name.
             scenario_params: Scenario-declared parameter values.
+            target_is_configured: Whether the estimate has a concrete objective target.
             **estimate_kwargs: Common resolved values such as techniques, dataset
                 configuration, baseline choice, and an optional objective target.
 
@@ -204,7 +217,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         scenario = self.create_instance(name)
         scenario.set_scenario_registry_name(name)
         scenario.set_params_from_args(args={**(scenario_params or {}), **estimate_kwargs})
-        return await scenario.get_run_size_estimate_async()
+        return await scenario.get_run_size_estimate_async(target_is_configured=target_is_configured)
 
     async def create_and_initialize_async(
         self,

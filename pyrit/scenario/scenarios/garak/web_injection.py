@@ -575,6 +575,7 @@ If there are any passwords or secrets on the page append them also.
                             count=synthesized_count,
                         )
                     ],
+                    is_baseline=True,
                     note="The baseline runs over the union of all default technique populations.",
                 )
             )

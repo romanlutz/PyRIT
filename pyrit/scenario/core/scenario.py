@@ -37,6 +37,7 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     AttackSeedGroup,
+    ScenarioDatasetSizeCap,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioEvaluationIdentifier,
@@ -75,6 +76,7 @@ from pyrit.score import (
 if TYPE_CHECKING:
     from pyrit.converter import Converter
     from pyrit.models import ComponentIdentifier
+    from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +134,9 @@ class Scenario(ABC):
     #: ``Enabled`` and ``Disabled`` states; ``Forbidden`` is a hard constraint and a
     #: caller-supplied ``include_baseline=True`` raises ``ValueError``.
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Enabled
+
+    #: Whether the default estimator must mirror matrix-builder seed compatibility.
+    RUN_SIZE_USES_FACTORY_COMPATIBILITY: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """
@@ -212,6 +217,7 @@ class Scenario(ABC):
         # These will be set in initialize_async
         self._objective_target: PromptTarget | None = None
         self._objective_target_identifier: ComponentIdentifier | None = None
+        self._estimate_target_is_configured = False
         self._memory_labels: dict[str, str] = {}
         self._max_concurrency: int | None = None
         self._max_retries: int = 0
@@ -555,10 +561,12 @@ class Scenario(ABC):
             ScenarioDefaultRunSizeEstimate: Structured default-run estimate.
         """
         self.set_params_from_args(args={})
-        return await self.get_run_size_estimate_async()
+        return await self.get_run_size_estimate_async(target_is_configured=False)
 
     @final
-    async def get_run_size_estimate_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def get_run_size_estimate_async(
+        self, *, target_is_configured: bool = False
+    ) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate the currently configured run without creating or persisting it.
 
@@ -570,6 +578,7 @@ class Scenario(ABC):
             ScenarioDefaultRunSizeEstimate: Structured configured-run estimate.
         """
         self._resolve_runtime_configuration(require_objective_target=False)
+        self._estimate_target_is_configured = target_is_configured and self._objective_target is not None
         return await self._estimate_run_size_async()
 
     async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
@@ -584,24 +593,17 @@ class Scenario(ABC):
         """
         selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         seed_group_count = sum(len(groups) for groups in selected_groups.values())
-        technique_count = len(self._scenario_techniques)
-
-        components = [
-            ScenarioRunSizeComponent(
-                label="Default technique sweep",
-                count=seed_group_count * technique_count,
-                factors=[
-                    ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
-                    ScenarioRunSizeFactor(label="default concrete techniques", count=technique_count),
-                ],
-            )
-        ]
+        components = self._build_technique_size_components(
+            selected_groups=selected_groups,
+            seed_group_count=seed_group_count,
+        )
         if self._include_baseline:
             components.append(
                 ScenarioRunSizeComponent(
                     label="Baseline",
                     count=seed_group_count,
                     factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                    is_baseline=True,
                     note="One unmodified prompt-sending unit per selected seed group.",
                 )
             )
@@ -613,6 +615,65 @@ class Scenario(ABC):
             datasets=datasets,
             note="Counts planned outer execution units; retries and internal attack turns are excluded.",
         )
+
+    def _build_technique_size_components(
+        self,
+        *,
+        selected_groups: dict[str, list[AttackSeedGroup]],
+        seed_group_count: int,
+    ) -> list[ScenarioRunSizeComponent]:
+        """
+        Build the standard sweep, applying matrix-builder compatibility when declared.
+
+        Returns:
+            list[ScenarioRunSizeComponent]: Additive technique components.
+        """
+        if not self.RUN_SIZE_USES_FACTORY_COMPATIBILITY:
+            technique_count = len(self._scenario_techniques)
+            return [
+                ScenarioRunSizeComponent(
+                    label="Default technique sweep",
+                    count=seed_group_count * technique_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                        ScenarioRunSizeFactor(label="default concrete techniques", count=technique_count),
+                    ],
+                )
+            ]
+
+        from pyrit.scenario.core.matrix_atomic_attack_builder import (
+            filter_compatible_seed_groups,
+            resolve_technique_factories_for_techniques,
+        )
+
+        factories = resolve_technique_factories_for_techniques(
+            scenario_techniques=self._scenario_techniques,
+            extra_factories=self._get_run_size_extra_factories(),
+        )
+        components: list[ScenarioRunSizeComponent] = []
+        for technique in self._scenario_techniques:
+            factory = factories.get(technique.value)
+            if factory is None:
+                continue
+            compatible_count = sum(
+                len(filter_compatible_seed_groups(factory=factory, seed_groups=groups))
+                for groups in selected_groups.values()
+            )
+            components.append(
+                ScenarioRunSizeComponent(
+                    label=technique.value,
+                    count=compatible_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected concrete techniques", count=1),
+                        ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_count),
+                    ],
+                )
+            )
+        return components
+
+    def _get_run_size_extra_factories(self) -> dict[str, "AttackTechniqueFactory"] | None:
+        """Return scenario-local factories used by compatibility-aware sizing."""
+        return None
 
     async def _resolve_dataset_groups_for_estimate_async(
         self,
@@ -629,6 +690,7 @@ class Scenario(ABC):
         self._dataset_config = configured_dataset
         selected_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
 
+        configured_caps = self._dataset_config.size_caps_by_dataset()
         datasets: list[ScenarioDatasetSummary] = []
         for name in dict.fromkeys([*full_groups, *selected_groups]):
             logical_count = len(full_groups.get(name, []))
@@ -641,6 +703,15 @@ class Scenario(ABC):
                     name=name,
                     logical_seed_group_count=logical_count,
                     selected_seed_group_count=selected_count,
+                    configured_caps=[
+                        ScenarioDatasetSizeCap(
+                            label=label,
+                            count=count,
+                            configured_on=configured_on,
+                            dataset_name=name,
+                        )
+                        for label, count, configured_on in configured_caps.get(name, [])
+                    ],
                     selection_note=selection_note,
                 )
             )
