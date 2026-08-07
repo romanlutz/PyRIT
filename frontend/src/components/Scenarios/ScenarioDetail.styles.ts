@@ -70,6 +70,9 @@ export const useScenarioDetailStyles = makeStyles({
   },
   control: {
     ...mobileTouchTargetHeight,
+    width: '100%',
+    minWidth: 0,
+    maxWidth: '100%',
     '& > select': {
       [TOUCH_INPUT_QUERY]: {
         minHeight: MINIMUM_TOUCH_TARGET_SIZE,

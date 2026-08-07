@@ -104,6 +104,31 @@ describe('ScenarioRunEstimate', () => {
     expect(screen.queryByText(/Backend estimate|Conditional estimate|Backend formula/i)).not.toBeInTheDocument()
   })
 
+  it('renders an authoritative total with scenario-specific units and context', () => {
+    const state = mapScenarioRunEstimate({
+      ...EXACT_ESTIMATE,
+      status: 'conditional',
+      total_attack_count: null,
+    }, 'request')
+
+    render(
+      <TestWrapper>
+        <ScenarioRunEstimateDetails
+          state={state}
+          primaryCount={21}
+          unitLabels={{ singular: 'objective envelope', plural: 'objective envelopes' }}
+          supportingText="Up to 3 technique attempts per objective (inner attempts are not included in this count)."
+        />
+      </TestWrapper>,
+    )
+
+    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
+    expect(screen.queryByText('21 planned attacks')).not.toBeInTheDocument()
+    expect(screen.getByText(
+      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
+    )).toBeInTheDocument()
+  })
+
   it('renders bounded and upper-only conditional estimates from structured bounds', () => {
     const bounded = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,

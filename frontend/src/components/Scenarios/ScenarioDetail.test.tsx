@@ -119,6 +119,38 @@ function makeEstimate(
   }
 }
 
+function makeAdaptiveScenario(): RegisteredScenario {
+  const defaultMembers = ['role_play_movie_script', 'many_shot']
+  const aggregateTechniqueExpansions = {
+    default: defaultMembers,
+    all: [...defaultMembers, ...Array.from({ length: 15 }, (_, index) => `all_member_${index + 1}`)],
+    core: Array.from({ length: 14 }, (_, index) => `core_member_${index + 1}`),
+    extra: Array.from({ length: 3 }, (_, index) => `extra_member_${index + 1}`),
+    light: Array.from({ length: 9 }, (_, index) => `light_member_${index + 1}`),
+    multi_turn: Array.from({ length: 5 }, (_, index) => `multi_turn_member_${index + 1}`),
+    single_turn: Array.from({ length: 12 }, (_, index) => `single_turn_member_${index + 1}`),
+  }
+  return makeScenario({
+    scenario_name: 'adaptive.text_adaptive',
+    scenario_type: 'TextAdaptive',
+    default_technique: 'default',
+    default_techniques: defaultMembers,
+    aggregate_techniques: ['all', 'default', 'core', 'extra', 'light', 'multi_turn', 'single_turn'],
+    aggregate_technique_expansions: aggregateTechniqueExpansions,
+    all_techniques: [...new Set(Object.values(aggregateTechniqueExpansions).flat())],
+    supported_parameters: [
+      {
+        name: 'max_attempts_per_objective',
+        type_name: 'int',
+        required: false,
+        default: 3,
+        choices: null,
+        is_list: false,
+      },
+    ],
+  })
+}
+
 async function flushRenderedPromises(): Promise<void> {
   await act(async () => {
     await Promise.resolve()
@@ -421,6 +453,21 @@ describe('ScenarioDetail', () => {
     expect(screen.getByTestId('technique-crescendo')).not.toBeChecked()
   })
 
+  it('marks a named technique set as the scenario default', async () => {
+    mockGetScenario.mockResolvedValue(
+      makeScenario({
+        default_technique: 'easy',
+        default_techniques: ['crescendo'],
+        aggregate_techniques: ['easy'],
+        aggregate_technique_expansions: { easy: ['crescendo'] },
+      }),
+    )
+
+    renderDetail('/scenarios/foundry.red_team_agent')
+
+    expect(await screen.findByLabelText('Easy (default) — 1 technique')).toBeChecked()
+  })
+
   it('shows catalog-provided aggregate members before the configured estimate resolves', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({
@@ -442,6 +489,89 @@ describe('ScenarioDetail', () => {
       'Resolves to prompt_sending, jailbreak_system_prompt',
     )).toBeInTheDocument()
     expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
+  })
+
+  it('explains Adaptive technique sets, member counts, and objective-envelope sizing', async () => {
+    mockGetScenario.mockResolvedValue(makeAdaptiveScenario())
+    mockEstimateRun.mockResolvedValue({
+      ...makeEstimate(null),
+      components: [
+        {
+          label: 'Baseline',
+          count: 21,
+          factors: [],
+          is_baseline: true,
+          note: null,
+        },
+        {
+          label: 'Adaptive attack envelopes',
+          count: 21,
+          factors: [],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+    })
+    const user = userEvent.setup()
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    expect(await screen.findByLabelText('Recommended (default) — 2 techniques')).toBeChecked()
+    expect(screen.getByLabelText('All (17 techniques)')).not.toBeChecked()
+    expect(screen.getByLabelText('Core (14 techniques)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Extra (3 techniques)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Light (9 techniques)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Multi-turn (5 techniques)')).toBeInTheDocument()
+    expect(screen.getByLabelText('Single-turn (12 techniques)')).toBeInTheDocument()
+    expect(screen.getByText(/A technique set is a shortcut that selects a predefined group/)).toBeInTheDocument()
+    expect(screen.getByText(
+      /All is generated from the catalog; Recommended is curated for this scenario/,
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      /may try up to 3 compatible techniques inside it, stopping after the first success/,
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      /compatibility can still change the envelope count/,
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/aggregate preset/i)).not.toBeInTheDocument()
+
+    expect(await screen.findByText('21 objective envelopes')).toBeInTheDocument()
+    expect(screen.getByText(
+      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
+    )).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('All (17 techniques)'))
+    expect(screen.getByLabelText('All (17 techniques)')).toBeChecked()
+    const selectedMembers = screen.getByTestId('selected-technique-set-members')
+    expect(within(selectedMembers).getByText('all_member_15')).toBeInTheDocument()
+    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Recommended (default) — 2 techniques'))
+    expect(screen.getByLabelText('Recommended (default) — 2 techniques')).toBeChecked()
+    expect(within(selectedMembers).queryByText('all_member_15')).not.toBeInTheDocument()
+    expect(within(selectedMembers).getByText('role_play_movie_script')).toBeInTheDocument()
+    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
+
+    const maxAttempts = screen.getByTestId('scenario-param-max_attempts_per_objective')
+    await user.clear(maxAttempts)
+    await user.type(maxAttempts, '5')
+    expect(screen.getByText(
+      /may try up to 5 compatible techniques inside it, stopping after the first success/,
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      'Up to 5 technique attempts per objective (inner attempts are not included in this count).',
+    )).toBeInTheDocument()
+
+    await user.clear(maxAttempts)
+    expect(screen.getByText(
+      /may try up to 3 compatible techniques inside it, stopping after the first success/,
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
+    )).toBeInTheDocument()
+
+    await user.type(maxAttempts, '0')
+    expect(screen.queryByText(/up to 0 technique/i)).not.toBeInTheDocument()
   })
 
   it('switches from the default preset to a multi-technique custom selection', async () => {

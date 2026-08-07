@@ -198,6 +198,10 @@ describe('ScenarioCatalog', () => {
           scenario_name: 'encoding.base64',
           description: 'Applies text encodings.',
           default_datasets: ['harmbench'],
+          default_technique: 'multi_turn',
+          default_techniques: ['crescendo'],
+          aggregate_techniques: ['multi_turn'],
+          aggregate_technique_expansions: { multi_turn: ['crescendo'] },
         }),
       ],
       pagination: { limit: 200, has_more: false },
@@ -207,7 +211,7 @@ describe('ScenarioCatalog', () => {
 
     await screen.findByText('foundry.red_team_agent')
 
-    await user.type(screen.getByLabelText('Search scenarios'), 'harmbench')
+    await user.type(screen.getByLabelText('Search scenarios'), 'Multi-turn')
 
     expect(screen.queryByText('foundry.red_team_agent')).not.toBeInTheDocument()
     expect(screen.getByText('encoding.base64')).toBeInTheDocument()
@@ -422,8 +426,8 @@ describe('ScenarioCatalog', () => {
 
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
     const details = screen.getByRole('region', { name: 'airt.jailbreak details' })
-    expect(within(details).getAllByText('default').length).toBeGreaterThan(0)
-    expect(within(details).getByText('easy')).toBeInTheDocument()
+    expect(within(details).getAllByText(/Recommended \(default\)/).length).toBeGreaterThan(0)
+    expect(within(details).getByText('Easy (1 technique)')).toBeInTheDocument()
     expect(within(details).getAllByText('prompt_sending').length).toBeGreaterThan(0)
     expect(within(details).getAllByText('jailbreak_system_prompt').length).toBeGreaterThan(0)
     expect(within(details).getByText('flip')).toBeInTheDocument()
@@ -433,7 +437,9 @@ describe('ScenarioCatalog', () => {
     expect(within(details).getAllByText('One incompatible group is excluded.').length)
       .toBeGreaterThan(0)
     expect(within(details).getByText('12–20 planned attacks')).toBeInTheDocument()
-    expect(within(details).getAllByText('Included by default')).not.toHaveLength(0)
+    expect(within(details).getAllByText('Included techniques')).not.toHaveLength(0)
+    expect(within(details).getByText('Technique sets')).toBeInTheDocument()
+    expect(within(details).queryByText(/aggregate preset/i)).not.toBeInTheDocument()
     expect(within(details).queryByText(/Backend estimate|Conditional estimate|Backend formula/i))
       .not.toBeInTheDocument()
     expect(within(details).queryByText('context_compliance')).not.toBeInTheDocument()

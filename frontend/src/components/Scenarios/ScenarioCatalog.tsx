@@ -37,6 +37,11 @@ import {
 } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
+import {
+  techniqueSetMembers,
+  techniqueSetName,
+  techniqueSetOptionLabel,
+} from './scenarioTechniqueSets'
 
 /** Items requested per catalog page while paging through the full list. */
 const CATALOG_PAGE_SIZE = 200
@@ -53,6 +58,7 @@ function matchesSearch(scenario: RegisteredScenario, query: string): boolean {
     scenario.default_technique,
     ...scenario.default_techniques,
     ...scenario.aggregate_techniques,
+    ...scenario.aggregate_techniques.map(techniqueSetName),
     ...Object.values(scenario.aggregate_technique_expansions).flat(),
     ...scenario.all_techniques,
     ...scenario.default_datasets,
@@ -295,14 +301,18 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                 <Text as="h3" size={400} weight="semibold">Techniques</Text>
                 <div className={styles.metadataGroup}>
                   <Text weight="semibold">
-                    {defaultIsAggregate ? 'Default aggregate preset' : 'Default concrete technique'}
+                    {defaultIsAggregate ? 'Default technique set' : 'Default concrete technique'}
                   </Text>
                   <div className={styles.badgeGroup}>
-                    <Badge appearance="tint" color="brand">{scenario.default_technique}</Badge>
+                    <Badge appearance="tint" color="brand">
+                      {defaultIsAggregate
+                        ? techniqueSetOptionLabel(scenario, scenario.default_technique)
+                        : scenario.default_technique}
+                    </Badge>
                   </div>
                 </div>
                 <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Included by default</Text>
+                  <Text weight="semibold">Included techniques</Text>
                   {defaultConcreteTechniques.length > 0 ? (
                     <div className={styles.badgeGroup}>
                       {defaultConcreteTechniques.map((technique) => (
@@ -316,15 +326,15 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                   )}
                 </div>
                 <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Aggregate presets and members</Text>
+                  <Text weight="semibold">Technique sets</Text>
                   {aggregateTechniques.length > 0 ? (
                     <ul className={styles.presetList}>
                       {aggregateTechniques.map((technique) => (
                         <li className={styles.presetItem} key={technique}>
-                          <Badge appearance="tint">{technique}</Badge>
+                          <Badge appearance="tint">{techniqueSetOptionLabel(scenario, technique)}</Badge>
                           <Text size={200} className={styles.secondaryText}>
-                            {(scenario.aggregate_technique_expansions[technique] ?? []).length > 0
-                              ? scenario.aggregate_technique_expansions[technique].join(', ')
+                            {techniqueSetMembers(scenario, technique).length > 0
+                              ? techniqueSetMembers(scenario, technique).join(', ')
                               : 'No concrete members supplied.'}
                           </Text>
                         </li>

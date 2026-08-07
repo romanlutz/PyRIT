@@ -10,11 +10,27 @@ import { useScenarioRunEstimateStyles } from './ScenarioRunEstimate.styles'
 
 interface ScenarioRunEstimateSummaryProps {
   state: ScenarioRunEstimateState
+  primaryCount?: number
+  unitLabels?: ScenarioRunEstimateUnitLabels
+  supportingText?: string
 }
 
 interface ScenarioRunEstimateDetailsProps {
   state: ScenarioRunEstimateState
   idPrefix?: string
+  primaryCount?: number
+  unitLabels?: ScenarioRunEstimateUnitLabels
+  supportingText?: string
+}
+
+interface ScenarioRunEstimateUnitLabels {
+  singular: string
+  plural: string
+}
+
+const DEFAULT_UNIT_LABELS: ScenarioRunEstimateUnitLabels = {
+  singular: 'planned attack',
+  plural: 'planned attacks',
 }
 
 function stateEstimate(state: ScenarioRunEstimateState): ScenarioRunEstimate | undefined {
@@ -70,20 +86,31 @@ function formatEstimateValue(value: number): string {
   return value.toLocaleString()
 }
 
-function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
+function unitLabel(value: number, labels: ScenarioRunEstimateUnitLabels): string {
+  return value === 1 ? labels.singular : labels.plural
+}
+
+function formatEstimateSummary(
+  estimate: ScenarioRunEstimate,
+  labels: ScenarioRunEstimateUnitLabels,
+  primaryCount?: number,
+): string {
+  if (primaryCount !== undefined) {
+    return `${formatEstimateValue(primaryCount)} ${unitLabel(primaryCount, labels)}`
+  }
   if (estimate.total !== null) {
-    return `${formatEstimateValue(estimate.total)} planned attacks`
+    return `${formatEstimateValue(estimate.total)} ${unitLabel(estimate.total, labels)}`
   }
   if (estimate.minimum !== null && estimate.maximum !== null) {
     return estimate.minimum === estimate.maximum
-      ? `${formatEstimateValue(estimate.minimum)} planned attacks`
-      : `${formatEstimateValue(estimate.minimum)}–${formatEstimateValue(estimate.maximum)} planned attacks`
+      ? `${formatEstimateValue(estimate.minimum)} ${unitLabel(estimate.minimum, labels)}`
+      : `${formatEstimateValue(estimate.minimum)}–${formatEstimateValue(estimate.maximum)} ${labels.plural}`
   }
   if (estimate.maximum !== null) {
-    return `Up to ${formatEstimateValue(estimate.maximum)} planned attacks`
+    return `Up to ${formatEstimateValue(estimate.maximum)} ${unitLabel(estimate.maximum, labels)}`
   }
   if (estimate.minimum !== null) {
-    return `At least ${formatEstimateValue(estimate.minimum)} planned attacks`
+    return `At least ${formatEstimateValue(estimate.minimum)} ${unitLabel(estimate.minimum, labels)}`
   }
   return estimate.scope === 'default'
     ? 'Select targets to calculate'
@@ -119,7 +146,12 @@ function formatCalculation(estimate: ScenarioRunEstimate): string {
   return `${components}; ${total}`
 }
 
-export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummaryProps) {
+export function ScenarioRunEstimateSummary({
+  state,
+  primaryCount,
+  unitLabels = DEFAULT_UNIT_LABELS,
+  supportingText,
+}: ScenarioRunEstimateSummaryProps) {
   const styles = useScenarioRunEstimateStyles()
   const estimate = stateEstimate(state)
   const label = statusLabel(state)
@@ -130,10 +162,13 @@ export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummary
         {label && <Badge appearance="tint" color={statusColor(state)}>{label}</Badge>}
         {estimate && (
           <Text className={styles.total} weight="semibold">
-            {formatEstimateSummary(estimate)}
+            {formatEstimateSummary(estimate, unitLabels, primaryCount)}
           </Text>
         )}
       </div>
+      {estimate && supportingText && (
+        <Text size={200} className={styles.muted}>{supportingText}</Text>
+      )}
     </div>
   )
 }
@@ -258,6 +293,9 @@ function EstimateDatasets({
 export function ScenarioRunEstimateDetails({
   state,
   idPrefix = 'scenario-run-estimate',
+  primaryCount,
+  unitLabels,
+  supportingText,
 }: ScenarioRunEstimateDetailsProps) {
   const styles = useScenarioRunEstimateStyles()
 
@@ -273,7 +311,12 @@ export function ScenarioRunEstimateDetails({
   if (state.status === 'unavailable') {
     return (
       <div className={styles.details} aria-live="polite">
-        <ScenarioRunEstimateSummary state={state} />
+        <ScenarioRunEstimateSummary
+          state={state}
+          primaryCount={primaryCount}
+          unitLabels={unitLabels}
+          supportingText={supportingText}
+        />
         <Text>{state.label}</Text>
         {state.note && <Text size={200} className={styles.muted}>{state.note}</Text>}
       </div>
@@ -283,7 +326,12 @@ export function ScenarioRunEstimateDetails({
   const { estimate } = state
   return (
     <div className={styles.details} aria-live="polite">
-      <ScenarioRunEstimateSummary state={state} />
+      <ScenarioRunEstimateSummary
+        state={state}
+        primaryCount={primaryCount}
+        unitLabels={unitLabels}
+        supportingText={supportingText}
+      />
       {state.status === 'refreshing' && (
         <Text size={200} className={styles.muted}>{state.label}</Text>
       )}

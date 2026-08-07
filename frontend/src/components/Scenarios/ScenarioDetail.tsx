@@ -48,6 +48,11 @@ import { useScenarioDetailStyles } from './ScenarioDetail.styles'
 import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
+import {
+  techniqueSetDisplayName,
+  techniqueSetMembers,
+  techniqueSetOptionLabel,
+} from './scenarioTechniqueSets'
 
 /** Items requested per target page while paging through the full list. */
 const TARGET_PAGE_SIZE = 200
@@ -77,6 +82,7 @@ const MAX_MAX_RETRIES = 20
 const DEFAULT_MAX_CONCURRENCY = 10
 const DEFAULT_MAX_RETRIES = 0
 const ESTIMATE_DEBOUNCE_MS = 300
+const TEXT_ADAPTIVE_SCENARIO_NAME = 'adaptive.text_adaptive'
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
@@ -134,6 +140,17 @@ function uniqueTechniqueOptions(scenario: RegisteredScenario): TechniqueOptions 
   return { presets, concrete, defaultSelection }
 }
 
+function adaptiveEnvelopeCount(state: ScenarioRunEstimateState): number | undefined {
+  if (
+    state.status === 'loading'
+    || state.status === 'unavailable'
+  ) {
+    return undefined
+  }
+  const envelopeComponents = state.estimate.components.filter((component) => !component.isBaseline)
+  return envelopeComponents.length === 1 ? envelopeComponents[0].count : undefined
+}
+
 function selectedTechniqueNames(selection: TechniqueSelection): string[] {
   return selection.mode === 'preset' ? [selection.preset] : selection.techniques
 }
@@ -150,6 +167,15 @@ function formatParameterPreview(value: ParameterFormValue | undefined): string {
     return value.length > 0 ? value.join(', ') : 'Not set'
   }
   return value?.trim() || 'Not set'
+}
+
+function effectivePositiveInteger(
+  value: ParameterFormValue | undefined,
+  fallback: unknown,
+): string | undefined {
+  const candidate = typeof value === 'string' && value.trim().length > 0 ? value : fallback
+  const parsed = typeof candidate === 'number' ? candidate : Number(candidate)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed.toLocaleString() : undefined
 }
 
 interface BuildRunRequestInput {
@@ -496,6 +522,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     [scenario.supported_parameters],
   )
   const isBaselineForbidden = scenario.baseline_policy === 'forbidden'
+  const usesAdaptiveTechniqueSelection = scenario.scenario_name === TEXT_ADAPTIVE_SCENARIO_NAME
 
   const [targetName, setTargetName] = useState(() => {
     if (activeTarget && targets.some((target) =>
@@ -726,13 +753,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const previewDatasets = parseDatasetNames(datasetOverride)
   const effectiveDatasets = previewDatasets.length > 0 ? previewDatasets : scenario.default_datasets
   const presetMembers = techniqueSelection.mode === 'preset'
-    ? (
-        scenario.aggregate_technique_expansions[techniqueSelection.preset]
-        ?? (techniqueSelection.preset === scenario.default_technique
-          ? scenario.default_techniques
-          : [])
-      )
+    ? techniqueSetMembers(scenario, techniqueSelection.preset)
     : []
+  const effectiveMaxAdaptiveAttempts = effectivePositiveInteger(
+    scenarioParamValues.max_attempts_per_objective,
+    dynamicParameters.find(
+      (parameter) => parameter.name === 'max_attempts_per_objective',
+    )?.default,
+  )
 
   return (
     <section
@@ -802,22 +830,41 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 Techniques
               </Text>
               <Text size={200} className={styles.hint}>
-                Selecting a preset replaces any custom list. Selecting the first individual technique
-                switches to a custom list and clears the preset.
+                A technique set is a shortcut that selects a predefined group. It is not an additional
+                technique. Choose a set or select techniques individually.
               </Text>
+              {usesAdaptiveTechniqueSelection && (
+                <>
+                  <Text size={200} className={styles.hint}>
+                    Core, Extra, Light, Multi-turn, and Single-turn reflect tags on PyRIT&apos;s registered
+                    techniques. All is generated from the catalog; Recommended is curated for this scenario.
+                  </Text>
+                  <MessageBar intent="info">
+                    <MessageBarBody>
+                      Adaptive uses these as a candidate pool. It creates at most one objective envelope per
+                      compatible selected seed group
+                      {effectiveMaxAdaptiveAttempts
+                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible techniques inside it, stopping after the first success`
+                        : ''}
+                      . Adding techniques changes the candidate pool, not the planned unit for each compatible
+                      group; compatibility can still change the envelope count.
+                    </MessageBarBody>
+                  </MessageBar>
+                </>
+              )}
               <div className={styles.techniqueGroups}>
                 {presets.length > 0 ? (
-                  <Field label="Aggregate preset">
+                  <Field label="Technique set">
                     <RadioGroup
                       value={techniqueSelection.mode === 'preset' ? techniqueSelection.preset : ''}
                       onChange={(_, data) => handlePresetChange(data.value)}
-                      aria-label="Aggregate preset"
+                      aria-label="Technique set"
                     >
                       {presets.map((name) => (
                         <Radio
                           className={styles.selectionControl}
                           key={name}
-                          label={name === scenario.default_technique ? `${name} (default)` : name}
+                          label={techniqueSetOptionLabel(scenario, name)}
                           value={name}
                           disabled={submitting}
                           data-testid={`technique-${name}`}
@@ -827,12 +874,16 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   </Field>
                 ) : (
                   <Text size={200} className={styles.hint}>
-                    No aggregate presets are registered for this scenario.
+                    No technique sets are registered for this scenario.
                   </Text>
                 )}
                 {techniqueSelection.mode === 'preset' && (
-                  <div className={styles.resolvedMembers} aria-live="polite">
-                    <Text size={200} weight="semibold">Included by preset</Text>
+                  <div
+                    className={styles.resolvedMembers}
+                    data-testid="selected-technique-set-members"
+                    aria-live="polite"
+                  >
+                    <Text size={200} weight="semibold">Included techniques</Text>
                     {presetMembers.length > 0 ? (
                       <div className={styles.previewBadges}>
                         {presetMembers.map((name) => (
@@ -841,7 +892,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       </div>
                     ) : (
                       <Text size={200} className={styles.hint}>
-                        No concrete members were supplied for this preset.
+                        No concrete members were supplied for this technique set.
                       </Text>
                     )}
                   </div>
@@ -994,7 +1045,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 <dd>
                   {techniqueSelection.mode === 'preset' ? (
                     <div className={styles.previewStack}>
-                      <Text weight="semibold">Preset: {techniqueSelection.preset}</Text>
+                      <Text weight="semibold">
+                        Technique set: {techniqueSetDisplayName(scenario, techniqueSelection.preset)}
+                      </Text>
                       {presetMembers.length > 0 && (
                         <Text size={200} className={styles.hint}>
                           Resolves to {presetMembers.join(', ')}
@@ -1059,6 +1112,16 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               <ScenarioRunEstimateDetails
                 state={estimateState}
                 idPrefix={`${formId}-estimate`}
+                primaryCount={usesAdaptiveTechniqueSelection
+                  ? adaptiveEnvelopeCount(estimateState)
+                  : undefined}
+                unitLabels={usesAdaptiveTechniqueSelection
+                  ? { singular: 'objective envelope', plural: 'objective envelopes' }
+                  : undefined}
+                supportingText={usesAdaptiveTechniqueSelection
+                  && effectiveMaxAdaptiveAttempts
+                  ? `Up to ${effectiveMaxAdaptiveAttempts} technique attempts per objective (inner attempts are not included in this count).`
+                  : undefined}
               />
             </div>
             <div className={styles.previewActions}>
