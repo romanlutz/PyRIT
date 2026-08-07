@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pyrit.registry.components.scenario_registry import ScenarioRegistry
+from pyrit.registry.registry_metadata import RegistryMetadata
 
 
 class _NotNoArgScenario:
@@ -27,6 +28,22 @@ def test_build_metadata_raises_when_scenario_requires_constructor_args() -> None
 
     with pytest.raises(TypeError, match="must be instantiable with no arguments"):
         registry._build_metadata("not_no_arg", _NotNoArgScenario)
+
+
+def test_markdown_description_preserves_docstring_structure() -> None:
+    class _MarkdownScenario:
+        """
+        First paragraph with ``literal`` and a [link](https://example.test).
+
+        * First item
+        * Second item
+        """
+
+    description = RegistryMetadata.markdown_from_docstring(_MarkdownScenario)
+
+    assert description == (
+        "First paragraph with ``literal`` and a [link](https://example.test).\n\n* First item\n* Second item"
+    )
 
 
 async def test_create_and_initialize_async_creates_sets_params_and_initializes() -> None:

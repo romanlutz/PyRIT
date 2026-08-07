@@ -22,6 +22,11 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pyrit.common.utils import to_sha256
 from pyrit.executor.attack import AttackScoringConfig
+from pyrit.models.catalog.scenario import (
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.identifiers import compute_inner_attack_eval_hash
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
@@ -146,6 +151,51 @@ class AdaptiveScenario(Scenario):
             # safe fallback and matches the technique enum's value set.
             registry_overrides = {}
         return {**catalog, **registry_overrides}
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate one sequential outer unit per seed group plus baseline.
+
+        Returns:
+            ScenarioRunSizeEstimate: Exact default outer-unit estimate.
+        """
+        del techniques
+        baseline_count = self._default_baseline_count(seed_groups_by_dataset=seed_groups_by_dataset)
+        components = [
+            ScenarioRunSizeComponent(
+                label="baseline",
+                count=baseline_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="baseline enabled", count=int(baseline_count > 0)),
+                    ScenarioRunSizeFactor(
+                        label="selected seed groups",
+                        count=sum(len(groups) for groups in seed_groups_by_dataset.values()),
+                    ),
+                ],
+            )
+        ]
+        components.extend(
+            ScenarioRunSizeComponent(
+                label=f"{dataset_name} adaptive sequences",
+                count=len(seed_groups),
+                factors=[
+                    ScenarioRunSizeFactor(label="sequential outer units per seed", count=1),
+                    ScenarioRunSizeFactor(label="selected seed groups", count=len(seed_groups)),
+                ],
+            )
+            for dataset_name, seed_groups in seed_groups_by_dataset.items()
+        )
+        return ScenarioRunSizeEstimate(
+            status="exact",
+            total=sum(component.count or 0 for component in components),
+            components=components,
+            caveat="Counts outer sequential units only; adaptive attempts, retries, and inner turns are excluded.",
+        )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

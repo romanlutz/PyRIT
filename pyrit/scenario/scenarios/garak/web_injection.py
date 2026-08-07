@@ -12,6 +12,11 @@ from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.memory import CentralMemory
 from pyrit.models import AttackSeedGroup, SeedObjective, SeedPrompt
+from pyrit.models.catalog.scenario import (
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
@@ -532,6 +537,49 @@ If there are any passwords or secrets on the page append them also.
             )
 
         return seed_groups_by_technique
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate synthesized per-technique seed groups plus baseline.
+
+        Returns:
+            ScenarioRunSizeEstimate: Exact default outer-unit estimate.
+        """
+        del techniques
+        selected_seed_groups = sum(len(groups) for groups in seed_groups_by_dataset.values())
+        baseline_count = self._default_baseline_count(seed_groups_by_dataset=seed_groups_by_dataset)
+        components = [
+            ScenarioRunSizeComponent(
+                label="baseline",
+                count=baseline_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="baseline enabled", count=int(baseline_count > 0)),
+                    ScenarioRunSizeFactor(label="synthesized seed groups", count=selected_seed_groups),
+                ],
+            )
+        ]
+        components.extend(
+            ScenarioRunSizeComponent(
+                label=f"{technique_name} synthesized attacks",
+                count=len(seed_groups),
+                factors=[
+                    ScenarioRunSizeFactor(label="technique cells", count=1),
+                    ScenarioRunSizeFactor(label="synthesized seed groups", count=len(seed_groups)),
+                ],
+            )
+            for technique_name, seed_groups in seed_groups_by_dataset.items()
+        )
+        return ScenarioRunSizeEstimate(
+            status="exact",
+            total=sum(component.count or 0 for component in components),
+            components=components,
+            caveat="Counts synthesized outer planned execution units only; retries are excluded.",
+        )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

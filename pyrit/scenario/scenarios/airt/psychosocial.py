@@ -31,6 +31,11 @@ from pyrit.executor.attack import (
     CrescendoAttack,
 )
 from pyrit.models import SeedPrompt
+from pyrit.models.catalog.scenario import (
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.parameter import Parameter
 from pyrit.prompt_normalizer.converter_configuration import ConverterConfiguration
 from pyrit.scenario.core.atomic_attack import AtomicAttack
@@ -41,7 +46,7 @@ from pyrit.scenario.core.dataset_configuration import (
     DatasetAttackConfiguration,
 )
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
-from pyrit.scenario.core.scenario import Scenario
+from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target, get_default_scorer_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import (
@@ -482,6 +487,48 @@ class Psychosocial(Scenario):
             rebuilt.max_dataset_size = per_subharm_cap * len(dataset_names)
             self._dataset_config = rebuilt
         return await super()._resolve_seed_groups_by_dataset_async(apply_sampling=apply_sampling)
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate per-sub-harm baselines and technique cells.
+
+        Returns:
+            ScenarioRunSizeEstimate: Exact default outer-unit estimate.
+        """
+        baseline_enabled = self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Enabled
+        components = [
+            ScenarioRunSizeComponent(
+                label=f"{dataset_name} baseline",
+                count=len(seed_groups) if baseline_enabled else 0,
+                factors=[
+                    ScenarioRunSizeFactor(label="baseline enabled", count=int(baseline_enabled)),
+                    ScenarioRunSizeFactor(label="sub-harm seed groups", count=len(seed_groups)),
+                ],
+            )
+            for dataset_name, seed_groups in seed_groups_by_dataset.items()
+        ]
+        components.extend(
+            ScenarioRunSizeComponent(
+                label=f"{dataset_name} psychosocial techniques",
+                count=len(techniques) * len(seed_groups),
+                factors=[
+                    ScenarioRunSizeFactor(label="default techniques", count=len(techniques)),
+                    ScenarioRunSizeFactor(label="sub-harm seed groups", count=len(seed_groups)),
+                ],
+            )
+            for dataset_name, seed_groups in seed_groups_by_dataset.items()
+        )
+        return ScenarioRunSizeEstimate(
+            status="exact",
+            total=sum(component.count or 0 for component in components),
+            components=components,
+            caveat="Counts outer per-sub-harm planned units only; retries and inner turns are excluded.",
+        )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

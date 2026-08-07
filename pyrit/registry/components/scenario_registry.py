@@ -41,6 +41,12 @@ class ScenarioMetadata(RegistryMetadata):
     # The default technique name (e.g., "single_turn")
     default_technique: str = field(kw_only=True)
 
+    # Concrete ordered expansion of the default preset.
+    default_techniques: tuple[str, ...] = field(kw_only=True, default=())
+
+    # Dedented class docstring with Markdown structure preserved.
+    description_markdown: str = field(kw_only=True, default="")
+
     # All available technique names for this scenario.
     all_techniques: tuple[str, ...] = field(kw_only=True)
 
@@ -133,6 +139,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             TypeError: If ``cls()`` cannot be called with no arguments.
         """
         description = RegistryMetadata.description_from_docstring(cls, fallback="No description available")
+        description_markdown = RegistryMetadata.markdown_from_docstring(cls, fallback=description)
 
         supported_parameters = tuple(cls.supported_parameters())
 
@@ -149,6 +156,13 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
 
         technique_class = instance._technique_class
         default_technique_value = instance._default_technique.value
+        default_techniques = tuple(
+            technique.value
+            for technique in technique_class.resolve(
+                None,
+                default=instance._default_technique,
+            )
+        )
         all_techniques = tuple(s.value for s in technique_class.get_all_techniques())
         aggregate_techniques = tuple(s.value for s in technique_class.get_aggregate_techniques())
         default_datasets = tuple(instance._default_dataset_config.dataset_names)
@@ -159,6 +173,8 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             class_description=description,
             registry_name=name,
             default_technique=default_technique_value,
+            default_techniques=default_techniques,
+            description_markdown=description_markdown,
             all_techniques=all_techniques,
             aggregate_techniques=aggregate_techniques,
             default_datasets=default_datasets,

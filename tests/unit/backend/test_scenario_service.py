@@ -5,6 +5,7 @@
 Tests for backend scenario service and routes.
 """
 
+import asyncio
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,10 +18,17 @@ from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
 from pyrit.backend.services.scenario_service import (
     ScenarioService,
+    _metadata_to_registered_scenario,
     get_scenario_service,
 )
 from pyrit.models import Parameter
-from pyrit.models.catalog.scenario import RegisteredScenario
+from pyrit.models.catalog.scenario import (
+    RegisteredScenario,
+    ScenarioDatasetSummary,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.registry import ScenarioMetadata
 
 
@@ -43,7 +51,9 @@ def _make_scenario_metadata(
     registry_name: str = "test.scenario",
     class_name: str = "TestScenario",
     description: str = "A test scenario",
+    description_markdown: str = "A test scenario",
     default_technique: str = "default",
+    default_techniques: tuple[str, ...] = ("role_play",),
     all_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     aggregate_techniques: tuple[str, ...] = ("all", "default"),
     default_datasets: tuple[str, ...] = ("test_dataset",),
@@ -56,13 +66,148 @@ def _make_scenario_metadata(
         class_name=class_name,
         class_module="pyrit.scenario.scenarios.test",
         class_description=description,
+        description_markdown=description_markdown,
         default_technique=default_technique,
+        default_techniques=default_techniques,
         all_techniques=all_techniques,
         aggregate_techniques=aggregate_techniques,
         default_datasets=default_datasets,
         baseline_policy=baseline_policy,
         include_baseline_by_default=include_baseline_by_default,
     )
+
+
+def test_metadata_mapper_preserves_real_catalog_dto_shape() -> None:
+    metadata = _make_scenario_metadata(
+        description="Paragraph one. * Item two. See [docs](https://example.test) and ``literal``.",
+        description_markdown=("Paragraph one.\n\n* Item two\n* See [docs](https://example.test) and ``literal``."),
+        default_techniques=("role_play", "many_shot"),
+    )
+    estimate = ScenarioRunSizeEstimate(
+        status="exact",
+        total=6,
+        components=[
+            ScenarioRunSizeComponent(
+                label="baseline",
+                count=2,
+                factors=[ScenarioRunSizeFactor(label="selected seed groups", count=2)],
+            ),
+            ScenarioRunSizeComponent(
+                label="test_dataset technique matrix",
+                count=4,
+                factors=[
+                    ScenarioRunSizeFactor(label="default techniques", count=2),
+                    ScenarioRunSizeFactor(label="selected seed groups", count=2),
+                ],
+            ),
+        ],
+    )
+
+    result = _metadata_to_registered_scenario(
+        metadata=metadata,
+        dataset_summaries=[
+            ScenarioDatasetSummary(name="test_dataset", seed_group_count=4, selected_seed_group_count=2)
+        ],
+        run_size=estimate,
+    )
+
+    assert isinstance(result, RegisteredScenario)
+    assert result.description_markdown.startswith("Paragraph one.\n\n* Item two")
+    assert result.default_techniques == ["role_play", "many_shot"]
+    assert result.default_dataset_summaries[0].selected_seed_group_count == 2
+    assert result.default_run_size.total == 6
+
+
+async def test_list_scenarios_isolates_failure_caches_success_and_retries_failure() -> None:
+    good_metadata = _make_scenario_metadata(registry_name="good")
+    bad_metadata = _make_scenario_metadata(registry_name="bad")
+    good_scenario = MagicMock()
+    good_scenario.get_default_catalog_details_async = AsyncMock(
+        return_value=(
+            [ScenarioDatasetSummary(name="test_dataset", seed_group_count=2, selected_seed_group_count=1)],
+            ScenarioRunSizeEstimate(status="exact", total=2),
+        )
+    )
+    bad_scenario = MagicMock()
+    bad_scenario.get_default_catalog_details_async = AsyncMock(side_effect=RuntimeError("estimate failed"))
+    registry = MagicMock()
+    registry.get_all_registered_class_metadata.return_value = [good_metadata, bad_metadata]
+    registry.get_class.side_effect = lambda name: {
+        "good": MagicMock(return_value=good_scenario),
+        "bad": MagicMock(return_value=bad_scenario),
+    }[name]
+
+    with patch.object(ScenarioService, "__init__", lambda self: None):
+        service = ScenarioService()
+        service._registry = registry
+        first = await service.list_scenarios_async()
+        second = await service.list_scenarios_async()
+
+    assert first.items[0].default_run_size.status == "exact"
+    assert first.items[1].default_run_size.status == "unavailable"
+    assert "estimate failed" in (first.items[1].default_run_size.caveat or "")
+    assert second.items[0].default_run_size.total == 2
+    good_scenario.get_default_catalog_details_async.assert_awaited_once()
+    assert bad_scenario.get_default_catalog_details_async.await_count == 2
+
+
+async def test_concurrent_catalog_requests_share_first_successful_estimate() -> None:
+    metadata = _make_scenario_metadata(registry_name="single-flight")
+    scenario = MagicMock()
+    scenario.get_default_catalog_details_async = AsyncMock(
+        return_value=([], ScenarioRunSizeEstimate(status="exact", total=1))
+    )
+    registry = MagicMock()
+    registry.get_registered_class_metadata.return_value = metadata
+    registry.get_class.return_value = MagicMock(return_value=scenario)
+
+    with patch.object(ScenarioService, "__init__", lambda self: None):
+        service = ScenarioService()
+        service._registry = registry
+        first, second = await asyncio.gather(
+            service.get_scenario_async(scenario_name="single-flight"),
+            service.get_scenario_async(scenario_name="single-flight"),
+        )
+
+    assert first is not None
+    assert second is not None
+    assert first.default_run_size.total == 1
+    assert second.default_run_size.total == 1
+    scenario.get_default_catalog_details_async.assert_awaited_once()
+
+
+async def test_cancelled_waiter_does_not_duplicate_in_flight_estimate() -> None:
+    metadata = _make_scenario_metadata(registry_name="shielded")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _resolve_async() -> tuple[list[ScenarioDatasetSummary], ScenarioRunSizeEstimate]:
+        started.set()
+        await release.wait()
+        return [], ScenarioRunSizeEstimate(status="exact", total=1)
+
+    scenario = MagicMock()
+    scenario.get_default_catalog_details_async = AsyncMock(side_effect=_resolve_async)
+    registry = MagicMock()
+    registry.get_registered_class_metadata.return_value = metadata
+    registry.get_class.return_value = MagicMock(return_value=scenario)
+
+    with patch.object(ScenarioService, "__init__", lambda self: None):
+        service = ScenarioService()
+        service._registry = registry
+        first = asyncio.create_task(service.get_scenario_async(scenario_name="shielded"))
+        await started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(service.get_scenario_async(scenario_name="shielded"))
+        release.set()
+        result = await second
+
+    assert result is not None
+    assert result.default_run_size.total == 1
+    scenario.get_default_catalog_details_async.assert_awaited_once()
 
 
 # ============================================================================

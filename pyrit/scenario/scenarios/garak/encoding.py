@@ -25,6 +25,11 @@ from pyrit.converter.nato_converter import NatoConverter
 from pyrit.executor.attack.core.attack_config import AttackConverterConfig, AttackScoringConfig
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.models import AttackSeedGroup, Seed, SeedObjective, SeedPrompt
+from pyrit.models.catalog.scenario import (
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.prompt_normalizer.converter_configuration import ConverterConfiguration
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
@@ -219,6 +224,50 @@ class Encoding(Scenario):
             )
         atomic_attacks.extend(self._get_converter_attacks(context=context))
         return atomic_attacks
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate converter variants by decode configs by selected seed groups.
+
+        Returns:
+            ScenarioRunSizeEstimate: Exact default outer-unit estimate.
+        """
+        variant_counts = {"base64": 2, "ascii85": 2}
+        converter_variants = sum(variant_counts.get(technique.value, 1) for technique in techniques)
+        decode_configs = 1 + len(self._encoding_templates)
+        selected_seed_groups = sum(len(groups) for groups in seed_groups_by_dataset.values())
+        baseline_count = self._default_baseline_count(seed_groups_by_dataset=seed_groups_by_dataset)
+        encoding_count = converter_variants * decode_configs * selected_seed_groups
+        components = [
+            ScenarioRunSizeComponent(
+                label="baseline",
+                count=baseline_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="baseline enabled", count=int(baseline_count > 0)),
+                    ScenarioRunSizeFactor(label="selected seed groups", count=selected_seed_groups),
+                ],
+            ),
+            ScenarioRunSizeComponent(
+                label="encoding attacks",
+                count=encoding_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="converter variants", count=converter_variants),
+                    ScenarioRunSizeFactor(label="decode configurations", count=decode_configs),
+                    ScenarioRunSizeFactor(label="selected seed groups", count=selected_seed_groups),
+                ],
+            ),
+        ]
+        return ScenarioRunSizeEstimate(
+            status="exact",
+            total=baseline_count + encoding_count,
+            components=components,
+            caveat="Counts outer planned execution units only; retries are excluded.",
+        )
 
     # These are the same as Garak encoding attacks
     def _get_converter_attacks(self, *, context: ScenarioContext) -> list[AtomicAttack]:

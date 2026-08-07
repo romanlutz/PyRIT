@@ -48,6 +48,7 @@ class _StubTechnique(ScenarioTechnique):
     EASY = ("easy", {"easy"})
     ROLE_PLAY = ("role_play", {"easy"})
     SINGLE_TURN = ("single_turn", {"easy"})
+    PROMPT_SENDING = ("prompt_sending", {"prompt"})
 
     @classmethod
     def get_aggregate_tags(cls) -> set[str]:
@@ -84,6 +85,8 @@ def _make_request(
     dataset_names: list[str] | None = None,
     max_dataset_size: int | None = None,
     dataset_filters: dict[str, list[str]] | None = None,
+    scenario_params: dict[str, Any] | None = None,
+    include_baseline: bool | None = None,
 ) -> RunScenarioRequest:
     """Create a RunScenarioRequest for testing."""
     return RunScenarioRequest(
@@ -95,6 +98,8 @@ def _make_request(
         dataset_names=dataset_names,
         max_dataset_size=max_dataset_size,
         dataset_filters=dataset_filters,
+        scenario_params=scenario_params,
+        include_baseline=include_baseline,
     )
 
 
@@ -308,6 +313,28 @@ class TestScenarioRunServiceStartRun:
 
         init_call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
         assert init_call.kwargs["scenario_techniques"] == [technique_a, technique_b]
+
+    async def test_start_run_preserves_explicit_jailbreak_launch_contract(self, mock_all_registries) -> None:
+        scenario_instance = mock_all_registries["scenario_instance"]
+        scenario_instance._technique_class = _StubTechnique
+        request = _make_request(
+            scenario_name="airt.jailbreak",
+            techniques=["prompt_sending"],
+            scenario_params={"num_jailbreaks": 2, "num_jailbreak_attempts": 1},
+            include_baseline=False,
+        )
+
+        service = ScenarioRunService()
+        await service.start_run_async(request=request)
+
+        call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
+        assert call.args == ("airt.jailbreak",)
+        assert call.kwargs["scenario_params"] == {
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+        assert call.kwargs["scenario_techniques"] == [_StubTechnique.PROMPT_SENDING]
+        assert call.kwargs["include_baseline"] is False
 
     async def test_start_run_forwards_include_baseline(self, mock_all_registries) -> None:
         service = ScenarioRunService()

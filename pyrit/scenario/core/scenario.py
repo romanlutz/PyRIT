@@ -46,6 +46,12 @@ from pyrit.models import (
     ScenarioRunState,
     config_hash,
 )
+from pyrit.models.catalog.scenario import (
+    ScenarioDatasetSummary,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.parameter import ComponentType, Parameter, RegistryReference
 from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
@@ -270,6 +276,148 @@ class Scenario(ABC):
     def set_scenario_registry_name(self, scenario_registry_name: str) -> None:
         """Record the requested registry name for durable run-plan attribution."""
         self._scenario_registry_name = scenario_registry_name
+
+    async def get_default_catalog_details_async(
+        self,
+    ) -> tuple[list[ScenarioDatasetSummary], ScenarioRunSizeEstimate]:
+        """
+        Resolve default dataset summaries and estimate outer planned execution units.
+
+        Default parameter and technique resolution uses the same paths as a real run.
+        Dataset resolution runs in a worker thread because central-memory reads are
+        blocking. The estimate counts the normalized ``ScenarioRunPlan`` units that
+        would be produced, not retries or inner attack turns.
+
+        Returns:
+            tuple[list[ScenarioDatasetSummary], ScenarioRunSizeEstimate]: Dataset
+                summaries and the default run-size estimate.
+        """
+        self.set_params_from_args(args={})
+        self._scenario_techniques = self._resolve_scenario_techniques(
+            scenario_techniques=self.params.get("scenario_techniques")
+        )
+        full_groups, selected_groups = await asyncio.to_thread(self._resolve_default_catalog_groups)
+        summaries = self._build_default_dataset_summaries(
+            full_groups=full_groups,
+            selected_groups=selected_groups,
+        )
+        estimate = self._estimate_default_run_size(
+            seed_groups_by_dataset=selected_groups,
+            techniques=self._scenario_techniques,
+        )
+        return summaries, estimate
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate a standard technique-by-dataset scenario's default run size.
+
+        Args:
+            seed_groups_by_dataset (dict[str, list[AttackSeedGroup]]): Effective
+                default seed groups after all configured caps.
+            techniques (list[ScenarioTechnique]): Concrete default techniques.
+
+        Returns:
+            ScenarioRunSizeEstimate: Exact outer-unit estimate for the matrix.
+        """
+        baseline_count = self._default_baseline_count(seed_groups_by_dataset=seed_groups_by_dataset)
+        components = [
+            ScenarioRunSizeComponent(
+                label="baseline",
+                count=baseline_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="baseline enabled", count=int(baseline_count > 0)),
+                    ScenarioRunSizeFactor(
+                        label="selected seed groups",
+                        count=sum(len(groups) for groups in seed_groups_by_dataset.values()),
+                    ),
+                ],
+            )
+        ]
+        for dataset_name, seed_groups in seed_groups_by_dataset.items():
+            components.append(
+                ScenarioRunSizeComponent(
+                    label=f"{dataset_name} technique matrix",
+                    count=len(techniques) * len(seed_groups),
+                    factors=[
+                        ScenarioRunSizeFactor(label="default techniques", count=len(techniques)),
+                        ScenarioRunSizeFactor(label="selected seed groups", count=len(seed_groups)),
+                    ],
+                )
+            )
+        return ScenarioRunSizeEstimate(
+            status="exact",
+            total=sum(component.count or 0 for component in components),
+            components=components,
+            caveat="Counts outer planned execution units only; retries and inner attack turns are excluded.",
+        )
+
+    def _resolve_default_catalog_groups(
+        self,
+    ) -> tuple[dict[str, list[AttackSeedGroup]], dict[str, list[AttackSeedGroup]]]:
+        """
+        Resolve full and effectively selected default groups in a worker thread.
+
+        Returns:
+            tuple[dict[str, list[AttackSeedGroup]], dict[str, list[AttackSeedGroup]]]:
+                Full groups followed by groups after default sampling.
+        """
+
+        async def _resolve_async() -> tuple[
+            dict[str, list[AttackSeedGroup]],
+            dict[str, list[AttackSeedGroup]],
+        ]:
+            self._dataset_config = self._default_dataset_config
+            full = await self._resolve_seed_groups_by_dataset_async(apply_sampling=False)
+            self._dataset_config = self._default_dataset_config
+            selected = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
+            return full, selected
+
+        return asyncio.run(_resolve_async())
+
+    def _build_default_dataset_summaries(
+        self,
+        *,
+        full_groups: dict[str, list[AttackSeedGroup]],
+        selected_groups: dict[str, list[AttackSeedGroup]],
+    ) -> list[ScenarioDatasetSummary]:
+        """
+        Map resolved groups back to each configured default dataset name.
+
+        Args:
+            full_groups (dict[str, list[AttackSeedGroup]]): Groups before sampling.
+            selected_groups (dict[str, list[AttackSeedGroup]]): Groups after sampling.
+
+        Returns:
+            list[ScenarioDatasetSummary]: Ordered summaries for every default dataset.
+        """
+        return [
+            ScenarioDatasetSummary(
+                name=name,
+                seed_group_count=len(full_groups[name]) if name in full_groups else None,
+                selected_seed_group_count=len(selected_groups.get(name, [])) if name in full_groups else None,
+            )
+            for name in self._default_dataset_config.dataset_names
+        ]
+
+    def _default_baseline_count(self, *, seed_groups_by_dataset: dict[str, list[AttackSeedGroup]]) -> int:
+        """
+        Calculate the explicit default baseline component.
+
+        Args:
+            seed_groups_by_dataset (dict[str, list[AttackSeedGroup]]): Effective
+                default seed groups.
+
+        Returns:
+            int: One baseline unit per selected seed group when enabled, otherwise zero.
+        """
+        if self.BASELINE_ATTACK_POLICY is not BaselineAttackPolicy.Enabled:
+            return 0
+        return sum(len(groups) for groups in seed_groups_by_dataset.values())
 
     @classmethod
     def _common_scenario_parameters(cls) -> list[Parameter]:

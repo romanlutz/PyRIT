@@ -39,18 +39,90 @@ from pyrit.models.retry_event import RetryEvent
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
 
 
+class ScenarioDatasetSummary(BaseModel):
+    """Default dataset sizing exposed by the scenario catalog."""
+
+    name: str = Field(..., description="Default dataset name")
+    seed_group_count: int | None = Field(
+        None,
+        ge=0,
+        description="Logical AttackSeedGroup count before the default sampling cap, when available",
+    )
+    selected_seed_group_count: int | None = Field(
+        None,
+        ge=0,
+        description="Effective logical AttackSeedGroup count after the default sampling cap, when available",
+    )
+
+
+class ScenarioRunSizeFactor(BaseModel):
+    """One ordered multiplicative factor in a scenario run-size component."""
+
+    label: str = Field(..., description="Human-readable factor label")
+    count: int | None = Field(None, ge=0, description="Factor count, or null when runtime input is required")
+
+
+class ScenarioRunSizeComponent(BaseModel):
+    """One additive component of a default scenario run-size estimate."""
+
+    label: str = Field(..., description="Human-readable additive component label")
+    count: int | None = Field(None, ge=0, description="Outer planned execution units contributed by this component")
+    factors: list[ScenarioRunSizeFactor] = Field(
+        default_factory=list,
+        description="Ordered multiplicative factors whose product is the component count",
+    )
+
+
+class ScenarioRunSizeEstimate(BaseModel):
+    """Default outer execution-unit estimate for a registered scenario."""
+
+    status: Literal["exact", "conditional", "unavailable"] = Field(
+        ...,
+        description="Whether the default total is authoritative, target-dependent, or unavailable",
+    )
+    total: int | None = Field(
+        None,
+        ge=0,
+        description="Authoritative total outer planned execution units, excluding retries, when knowable",
+    )
+    components: list[ScenarioRunSizeComponent] = Field(
+        default_factory=list,
+        description="Ordered additive components, including an explicit baseline component",
+    )
+    caveat: str | None = Field(None, description="Why the estimate is conditional or unavailable")
+
+
 class RegisteredScenario(BaseModel):
     """Summary of a registered scenario."""
 
     scenario_name: str = Field(..., description="Scenario name  (e.g., 'foundry.red_team_agent')")
     scenario_type: str = Field(..., description="Scenario type identifier (e.g., 'RedTeamAgentScenario')")
     description: str = Field(..., description="Human-readable description of the scenario")
+    description_markdown: str = Field(
+        "",
+        description="Dedented class docstring preserving Markdown paragraphs, lists, links, and literals",
+    )
     default_technique: str = Field(..., description="Default technique name used when none specified")
+    default_techniques: list[str] = Field(
+        default_factory=list,
+        description="Concrete ordered expansion of the default technique preset",
+    )
     aggregate_techniques: list[str] = Field(
         ..., description="Aggregate techniques that combine multiple attack approaches"
     )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    default_dataset_summaries: list[ScenarioDatasetSummary] = Field(
+        default_factory=list,
+        description="Default dataset names and logical AttackSeedGroup counts when available",
+    )
+    default_run_size: ScenarioRunSizeEstimate = Field(
+        default_factory=lambda: ScenarioRunSizeEstimate(
+            status="unavailable",
+            caveat="Default run-size estimate was not provided.",
+        ),
+        description="Default outer planned execution-unit estimate",
+    )
     baseline_policy: Literal["enabled", "disabled", "forbidden"] = Field(
         "enabled", description="Whether baseline execution is enabled, disabled, or forbidden"
     )

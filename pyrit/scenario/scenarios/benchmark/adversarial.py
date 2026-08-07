@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, ClassVar
 from pyrit.analytics import get_cached_results_for_technique
 from pyrit.common import apply_defaults
 from pyrit.models import AttackOutcome, AttackResult, ObjectiveTargetEvaluationIdentifier, ScenarioResult
+from pyrit.models.catalog.scenario import (
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.parameter import Parameter
 from pyrit.registry import AttackTechniqueRegistry, TargetRegistry
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
@@ -19,6 +24,7 @@ from pyrit.scenario.core.matrix_atomic_attack_builder import MatrixAtomicAttackB
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
 
 if TYPE_CHECKING:
+    from pyrit.models import AttackSeedGroup
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario.core.atomic_attack import AtomicAttack
     from pyrit.scenario.core.scenario_context import ScenarioContext
@@ -265,6 +271,44 @@ class AdversarialBenchmark(Scenario):
                 )
                 self._precomputed_cached_display_groups[attack.atomic_attack_name] = attack.display_group
         return filtered
+
+    def _estimate_default_run_size(
+        self,
+        *,
+        seed_groups_by_dataset: dict[str, list[AttackSeedGroup]],
+        techniques: list[ScenarioTechnique],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Report unavailable sizing until the required adversarial-target axis is configured.
+
+        Returns:
+            ScenarioRunSizeEstimate: Unavailable estimate with the missing axis identified.
+        """
+        selected_seed_groups = sum(len(groups) for groups in seed_groups_by_dataset.values())
+        return ScenarioRunSizeEstimate(
+            status="unavailable",
+            total=None,
+            components=[
+                ScenarioRunSizeComponent(
+                    label="baseline",
+                    count=0,
+                    factors=[ScenarioRunSizeFactor(label="baseline forbidden", count=0)],
+                ),
+                ScenarioRunSizeComponent(
+                    label="adversarial benchmark matrix",
+                    count=None,
+                    factors=[
+                        ScenarioRunSizeFactor(label="default techniques", count=len(techniques)),
+                        ScenarioRunSizeFactor(label="adversarial targets", count=None),
+                        ScenarioRunSizeFactor(label="selected seed groups", count=selected_seed_groups),
+                    ],
+                ),
+            ],
+            caveat=(
+                "AdversarialBenchmark requires the runtime adversarial_targets axis, so no authoritative "
+                "default total exists; retries and cached-result suppression are excluded."
+            ),
+        )
 
     def _resolve_adversarial_targets(self, *, target_names: list[str]) -> list[tuple[str, PromptTarget]]:
         """
