@@ -155,7 +155,10 @@ async def test_jailbreak_estimate_exposes_template_attempt_and_target_capability
     assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
     assert estimate.total_attack_count is None
     assert [component.count for component in estimate.components] == [4, 8, 8]
-    assert "12 planned units" in estimate.note
+    assert [factor.count for factor in estimate.components[1].factors] == [4, 2, 1, 1]
+    assert "2 template(s) x 4 selected logical seed group(s) x 1 selected" in estimate.note
+    assert "Baseline adds one unit per selected seed group (4 units)" in estimate.note
+    assert "num_jailbreaks selects templates" in estimate.components[1].note
     assert "20" in estimate.note
 
 

@@ -325,6 +325,10 @@ class Jailbreak(Scenario):
                     ScenarioRunSizeFactor(label="attempts", count=attempt_count),
                     ScenarioRunSizeFactor(label="inline delivery techniques", count=converter_count),
                 ],
+                note=(
+                    "Each planned unit is one template, one selected delivery technique, and one logical seed group. "
+                    "num_jailbreaks selects templates; it is not a persisted result or attempt count."
+                ),
             )
         )
         if include_system_delivery:
@@ -345,6 +349,16 @@ class Jailbreak(Scenario):
             component.count for component in components if component.label != "Native system-prompt jailbreak delivery"
         )
         maximum_count = sum(component.count for component in components)
+        baseline_explanation = (
+            f" Baseline adds one unit per selected seed group ({seed_group_count} units)."
+            if self._include_baseline
+            else " Baseline is disabled."
+        )
+        formula = (
+            f"{template_count} template(s) x {seed_group_count} selected logical seed group(s) x "
+            f"{converter_count} selected target-agnostic technique(s) x {attempt_count} configured attempt(s) "
+            f"= {seed_group_count * template_count * attempt_count * converter_count} planned unit(s)."
+        )
         status = (
             ScenarioRunSizeEstimateStatus.Conditional
             if include_system_delivery
@@ -356,10 +370,10 @@ class Jailbreak(Scenario):
             components=components,
             datasets=datasets,
             note=(
-                f"{guaranteed_count} planned units for target-agnostic delivery; "
-                f"{maximum_count} when native system-prompt delivery is supported."
+                f"{formula}{baseline_explanation} {guaranteed_count} total planned units for target-agnostic "
+                f"delivery; {maximum_count} when native system-prompt delivery is supported."
                 if include_system_delivery
-                else "The default techniques do not require target-specific delivery capabilities."
+                else f"{formula}{baseline_explanation}"
             ),
         )
 
