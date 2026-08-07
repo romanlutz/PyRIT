@@ -205,6 +205,10 @@ class ScenarioRunService:
         """
         Build a run summary using database state plus an event-loop snapshot.
 
+        Args:
+            scenario_result_id: The scenario result ID.
+            active_error: Error copied from the active asyncio task, if any.
+
         Returns:
             ScenarioRunSummary | None: The run summary when found.
         """
@@ -1241,17 +1245,8 @@ class ScenarioRunService:
         seed_group_id = str(attributed_seed_group_id) if attributed_seed_group_id else ""
         if not seed_group_id and typed_identifier is not None and typed_identifier.seed_identifiers:
             seed_group_id = typed_identifier.logical_seed_group_id
-        if not seed_group_id and plan is not None:
-            objective_sha256 = str(getattr(attack_result, "objective_sha256", "") or to_sha256(objective))
-            matching_seed = next(
-                (seed for seed in plan.seed_groups if seed.objective_sha256 == objective_sha256),
-                None,
-            )
-            if matching_seed is not None:
-                seed_group_id = matching_seed.id
-        if not seed_group_id:
-            seed_group_id = config_hash({"objective": objective})
         atomic_group_id = atomic_attack_name
+        planned_group: ScenarioRunPlanAtomicGroup | None = None
         if plan is not None:
             eval_hash = attribution_data.get("parent_eval_hash") if isinstance(attribution_data, dict) else None
             for group in plan.atomic_groups:
@@ -1259,7 +1254,19 @@ class ScenarioRunService:
                     eval_hash is None or group.technique_eval_hash == eval_hash
                 ):
                     atomic_group_id = group.id
+                    planned_group = group
                     break
+        if not seed_group_id and plan is not None and planned_group is not None:
+            objective_sha256 = str(getattr(attack_result, "objective_sha256", "") or to_sha256(objective))
+            matching_seed_ids = [
+                seed.id
+                for seed in plan.seed_groups
+                if seed.id in planned_group.seed_group_ids and seed.objective_sha256 == objective_sha256
+            ]
+            if len(matching_seed_ids) == 1:
+                seed_group_id = matching_seed_ids[0]
+        if not seed_group_id:
+            seed_group_id = config_hash({"objective": objective})
         return atomic_group_id, seed_group_id
 
     def _calculate_progress_counts(
@@ -1368,14 +1375,14 @@ class ScenarioRunService:
             ScenarioRunState.FAILED,
             ScenarioRunState.CANCELLED,
         )
-        target, datasets_used, scenario_parameters = self._safe_run_metadata(
-            scenario_identifier=header_result.scenario_identifier
-        )
-        techniques_used = (
-            list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
-            if plan is not None
-            else list(header_result.scenario_identifier.techniques or [])
-        )
+        scenario_identifier = header_result.scenario_identifier
+        target, datasets_used, scenario_parameters = self._safe_run_metadata(scenario_identifier=scenario_identifier)
+        if plan is not None:
+            techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
+        elif scenario_identifier is not None:
+            techniques_used = list(scenario_identifier.techniques or [])
+        else:
+            techniques_used = []
         return ScenarioRunProgress(
             run=ScenarioProgressHeader(
                 scenario_result_id=scenario_result_id,

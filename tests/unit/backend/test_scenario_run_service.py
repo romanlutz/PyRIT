@@ -5,6 +5,7 @@
 Tests for ScenarioRunService.
 """
 
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -111,7 +112,9 @@ def _make_db_scenario_result(
     sr.id = result_id
     sr.scenario_name = scenario_name
     sr.scenario_version = 1
+    sr.pyrit_version = "0.10.0"
     sr.scenario_run_state = run_state
+    sr.scenario_identifier = None
     sr.get_techniques_used.return_value = []
     sr.attack_results = attack_results or {}
     sr.number_tries = 1
@@ -892,6 +895,52 @@ class TestScenarioRunServiceCancelRun:
         assert result is not None
         assert result.status == ScenarioRunState.CANCELLED
 
+    async def test_cancel_waits_for_final_persisted_progress_delta(self, mock_all_registries) -> None:
+        """Cancellation completes task cleanup before callers can fetch terminal progress."""
+        mock_memory = mock_all_registries["memory"]
+        scenario_instance = mock_all_registries["scenario_instance"]
+        delta = ScenarioAttackResultDelta(
+            attack_result_id=str(uuid.uuid4()),
+            objective="persisted during cancellation",
+            outcome=AttackOutcome.ERROR,
+            execution_time_ms=10,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            error_type="CancelledError",
+            error_message="cancelled",
+            attribution_data={"parent_collection": "attack"},
+        )
+
+        async def run_until_cancelled() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                mock_memory.get_scenario_attack_result_deltas.return_value = ([delta], False)
+
+        scenario_instance.run_async.side_effect = run_until_cancelled
+        service = ScenarioRunService()
+        response = await service.start_run_async(request=_make_request())
+        await asyncio.sleep(0)
+
+        running_result = mock_all_registries["db_result"]
+        cancelled_result = _make_db_scenario_result(
+            result_id=response.scenario_result_id,
+            run_state=ScenarioRunState.CANCELLED,
+        )
+        cancelled_result.metadata = {}
+        mock_memory.get_scenario_results.side_effect = [[running_result], [cancelled_result]]
+
+        await service.cancel_run_async(scenario_result_id=response.scenario_result_id)
+        mock_memory.get_scenario_result_header.return_value = cancelled_result
+        progress = service.get_run_progress(
+            scenario_result_id=response.scenario_result_id,
+            since=None,
+            limit=25,
+        )
+
+        assert progress is not None
+        assert progress.run.status is ScenarioRunState.CANCELLED
+        assert [result.attack_result_id for result in progress.results] == [delta.attack_result_id]
+
     async def test_cancel_completed_run_raises_value_error(self, mock_memory) -> None:
         """Test that cancelling a completed run raises ValueError."""
         db_result = _make_db_scenario_result(result_id="sr-done", run_state=ScenarioRunState.COMPLETED)
@@ -1354,6 +1403,49 @@ def test_planned_progress_deduplicates_attempts_and_keeps_latest_non_error(mock_
     assert summary.total_retries == 3
 
 
+def test_planned_progress_maps_legacy_objective_hash_to_logical_seed_id(mock_memory) -> None:
+    objective = "legacy resumed objective"
+    seed_group = AttackSeedGroup(seeds=[SeedObjective(value=objective)])
+    seed_group_id = seed_group.logical_id
+    atomic_group_id = config_hash({"atomic_attack_name": "attack", "technique_eval_hash": "eval"})
+    plan = ScenarioRunPlan(
+        scenario_registry_name="test.scenario",
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id=atomic_group_id,
+                atomic_attack_name="attack",
+                display_group="Attack",
+                technique_eval_hash="eval",
+                seed_group_ids=[seed_group_id],
+            )
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(
+                id=seed_group_id,
+                objective_sha256=_svc_mod.to_sha256(objective),
+                objective=objective,
+            )
+        ],
+    )
+    legacy_attempt = AttackResult(
+        conversation_id="legacy-conversation",
+        objective=objective,
+        outcome=AttackOutcome.SUCCESS,
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        attribution_data={"parent_collection": "attack", "parent_eval_hash": "eval"},
+    )
+    scenario_result = make_scenario_result(
+        attack_results={"attack": [legacy_attempt]},
+        scenario_run_state=ScenarioRunState.COMPLETED,
+        metadata={SCENARIO_RUN_PLAN_METADATA_KEY: plan.model_dump(mode="json")},
+    )
+
+    summary = ScenarioRunService()._build_response_from_db(scenario_result=scenario_result)
+
+    assert summary.total_attacks == 1
+    assert summary.completed_attacks == 1
+
+
 def test_get_progress_uses_lightweight_queries_without_full_hydration(mock_memory) -> None:
     plan = ScenarioRunPlan(atomic_groups=[], seed_groups=[], scenario_registry_name="test.scenario")
     header = make_scenario_result(
@@ -1384,6 +1476,41 @@ def test_get_progress_uses_lightweight_queries_without_full_hydration(mock_memor
     assert progress.plan_complete is True
     mock_memory.get_scenario_results.assert_not_called()
     assert str(header.id) not in service._active_tasks
+
+
+def test_get_progress_rejects_duplicate_stored_plan_groups(mock_memory) -> None:
+    group = ScenarioRunPlanAtomicGroup(
+        id="duplicate",
+        atomic_attack_name="attack",
+        display_group="Attack",
+        technique_eval_hash="eval",
+        seed_group_ids=["seed-1"],
+    ).model_dump(mode="json")
+    header = make_scenario_result(
+        attack_results={},
+        metadata={
+            SCENARIO_RUN_PLAN_METADATA_KEY: {
+                "version": 1,
+                "atomic_groups": [group, group],
+                "seed_groups": [
+                    ScenarioRunPlanSeedGroup(
+                        id="seed-1",
+                        objective_sha256="objective-sha",
+                        objective="objective",
+                    ).model_dump(mode="json")
+                ],
+            }
+        },
+    )
+    mock_memory.get_scenario_result_header.return_value = header
+    mock_memory.get_scenario_attack_result_deltas.return_value = ([], False)
+
+    with pytest.raises(ValueError, match="duplicate atomic group IDs"):
+        ScenarioRunService().get_run_progress(
+            scenario_result_id=str(header.id),
+            since=None,
+            limit=25,
+        )
 
 
 def test_progress_prefers_persisted_logical_seed_group_attribution() -> None:

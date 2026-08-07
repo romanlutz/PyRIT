@@ -10,7 +10,7 @@ import pytest
 
 from pyrit.executor.attack.core import AttackExecutorResult
 from pyrit.memory import CentralMemory
-from pyrit.models import AttackOutcome, AttackResult, AttackSeedGroup, ComponentIdentifier, SeedObjective
+from pyrit.models import AttackOutcome, AttackResult, AttackSeedGroup, ComponentIdentifier, SeedObjective, config_hash
 from pyrit.scenario import DatasetConfiguration, ScenarioResult
 from pyrit.scenario.core import AtomicAttack, BaselineAttackPolicy, Scenario, ScenarioTechnique
 
@@ -136,7 +136,7 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
     attack = MagicMock(spec=AtomicAttack)
     attack.atomic_attack_name = name
     attack.display_group = name
-    attack.technique_eval_hash = "test-technique"
+    attack.technique_eval_hash = config_hash({"name": name, "objectives": objectives})
     attack._attack = mock_attack_strategy
     attack._scenario_result_id = None
 
@@ -149,16 +149,20 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
     # behaves correctly in resume tests.
     from pyrit.common.utils import to_sha256
 
-    current_objectives = {"value": list(objectives)}
-    type(attack).objectives = PropertyMock(side_effect=lambda: current_objectives["value"])
-    type(attack).seed_groups = PropertyMock(
-        side_effect=lambda: [
-            AttackSeedGroup(seeds=[SeedObjective(value=objective)]) for objective in current_objectives["value"]
-        ]
+    current_seed_groups = {
+        "value": [AttackSeedGroup(seeds=[SeedObjective(value=objective)]) for objective in objectives]
+    }
+    type(attack).objectives = PropertyMock(
+        side_effect=lambda: [seed_group.objective.value for seed_group in current_seed_groups["value"]]
     )
+    type(attack).seed_groups = PropertyMock(side_effect=lambda: current_seed_groups["value"])
 
     def drop_hashes(*, hashes):
-        current_objectives["value"] = [o for o in current_objectives["value"] if to_sha256(o) not in hashes]
+        current_seed_groups["value"] = [
+            seed_group
+            for seed_group in current_seed_groups["value"]
+            if to_sha256(seed_group.objective.value) not in hashes
+        ]
 
     attack.drop_seed_groups_with_hashes = MagicMock(side_effect=drop_hashes)
 
