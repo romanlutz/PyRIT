@@ -5,16 +5,18 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unit.mocks import get_mock_scorer_identifier, get_mock_target_identifier
+from unit.mocks import MockPromptTarget, get_mock_scorer_identifier, get_mock_target_identifier
 
 from pyrit.converter import Base64Converter, StringJoinConverter
 from pyrit.executor.attack import (
     AttackConverterConfig,
     AttackParameters,
     AttackScoringConfig,
+    PrependedConversationConfig,
     PromptSendingAttack,
     SingleTurnAttackContext,
 )
+from pyrit.memory import CentralMemory
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
@@ -279,6 +281,60 @@ class TestSetupPhase:
             prepended_conversation_config=None,
             memory_labels={},
         )
+
+    async def test_default_converter_scoping_preserves_simulated_assistant_history(self):
+        target = MockPromptTarget()
+        converter_config = AttackConverterConfig(
+            request_converters=ConverterConfiguration.from_converters(converters=[Base64Converter()])
+        )
+        attack = PromptSendingAttack(objective_target=target, attack_converter_config=converter_config)
+        prepended_user = "prepended user request"
+        simulated_response = "simulated assistant response"
+        final_request = "live final request"
+
+        result = await attack.execute_async(
+            objective="Test objective",
+            prepended_conversation=[
+                Message.from_prompt(prompt=prepended_user, role="user"),
+                Message.from_prompt(prompt=simulated_response, role="assistant"),
+            ],
+            next_message=Message.from_prompt(prompt=final_request, role="user"),
+        )
+
+        pieces = CentralMemory.get_memory_instance().get_message_pieces(conversation_id=result.conversation_id)
+        assistant_piece = next(piece for piece in pieces if piece.original_value == simulated_response)
+        final_piece = next(piece for piece in pieces if piece.original_value == final_request)
+
+        assert assistant_piece.role == "simulated_assistant"
+        assert assistant_piece.converted_value == assistant_piece.original_value
+        assert assistant_piece.converter_identifiers == []
+        assert final_piece.converted_value != final_piece.original_value
+        assert [identifier.class_name for identifier in final_piece.converter_identifiers] == ["Base64Converter"]
+
+    async def test_explicit_assistant_role_opt_in_converts_simulated_history(self):
+        target = MockPromptTarget()
+        converter_config = AttackConverterConfig(
+            request_converters=ConverterConfiguration.from_converters(converters=[Base64Converter()])
+        )
+        attack = PromptSendingAttack(
+            objective_target=target,
+            attack_converter_config=converter_config,
+            prepended_conversation_config=PrependedConversationConfig(apply_converters_to_roles=["assistant"]),
+        )
+        simulated_response = "assistant history explicitly converted"
+
+        result = await attack.execute_async(
+            objective="Test objective",
+            prepended_conversation=[Message.from_prompt(prompt=simulated_response, role="assistant")],
+            next_message=Message.from_prompt(prompt="live request", role="user"),
+        )
+
+        pieces = CentralMemory.get_memory_instance().get_message_pieces(conversation_id=result.conversation_id)
+        assistant_piece = next(piece for piece in pieces if piece.original_value == simulated_response)
+
+        assert assistant_piece.role == "simulated_assistant"
+        assert assistant_piece.converted_value != assistant_piece.original_value
+        assert [identifier.class_name for identifier in assistant_piece.converter_identifiers] == ["Base64Converter"]
 
 
 @pytest.mark.usefixtures("patch_central_database")
