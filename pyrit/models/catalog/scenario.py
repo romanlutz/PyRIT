@@ -67,6 +67,13 @@ class ScenarioRunSizeEstimateStatus(str, Enum):
     Unavailable = "unavailable"
 
 
+class ScenarioRunSizeEstimateCondition(str, Enum):
+    """Reason an estimate remains conditional until launch."""
+
+    TargetCapabilities = "target_capabilities"
+    LaunchConfiguration = "launch_configuration"
+
+
 class ScenarioRunSizeFactor(BaseModel):
     """One labeled multiplicative factor in a run-size component."""
 
@@ -142,6 +149,9 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
         ge=0,
         validation_alias=AliasChoices("total_attack_count", "total"),
     )
+    minimum_attack_count: int | None = Field(default=None, ge=0)
+    maximum_attack_count: int | None = Field(default=None, ge=0)
+    condition: ScenarioRunSizeEstimateCondition | None = None
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
     note: str | None = Field(default=None, validation_alias=AliasChoices("note", "caveat"))
@@ -191,14 +201,30 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
         Raises:
             ValueError: If an exact estimate omits or misstates its total.
         """
-        if self.status is ScenarioRunSizeEstimateStatus.Exact:
-            if self.total_attack_count is None:
-                raise ValueError("Exact default-run estimates require total_attack_count")
-            component_total = sum(component.count for component in self.components)
-            if component_total != self.total_attack_count:
-                raise ValueError(
-                    f"Exact default-run estimate components total {component_total}, not {self.total_attack_count}"
-                )
+        if (
+            self.minimum_attack_count is not None
+            and self.maximum_attack_count is not None
+            and self.minimum_attack_count > self.maximum_attack_count
+        ):
+            raise ValueError("minimum_attack_count must be less than or equal to maximum_attack_count")
+
+        if self.status is not ScenarioRunSizeEstimateStatus.Exact:
+            return self
+
+        if self.total_attack_count is None:
+            raise ValueError("Exact default-run estimates require total_attack_count")
+        for field_name, bound in (
+            ("minimum_attack_count", self.minimum_attack_count),
+            ("maximum_attack_count", self.maximum_attack_count),
+        ):
+            if bound is not None and bound != self.total_attack_count:
+                raise ValueError(f"Exact default-run estimates require {field_name} to equal total_attack_count")
+
+        component_total = sum(component.count for component in self.components)
+        if component_total != self.total_attack_count:
+            raise ValueError(
+                f"Exact default-run estimate components total {component_total}, not {self.total_attack_count}"
+            )
         return self
 
     @classmethod

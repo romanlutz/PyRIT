@@ -151,7 +151,9 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
         className={mergeClasses(styles.summaryRow, expanded && styles.expandedSummaryRow)}
         data-testid={`scenario-card-${scenario.scenario_name}`}
       >
-        <TableCell className={styles.tableCell}>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Scenario / purpose
           </Text>
@@ -165,13 +167,17 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
             <Text size={200} className={styles.purposePreview}>{scenario.description}</Text>
           </div>
         </TableCell>
-        <TableCell className={styles.tableCell}>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Default run size
           </Text>
           <ScenarioRunEstimateSummary state={estimateState} />
         </TableCell>
-        <TableCell className={styles.tableCell}>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Techniques
           </Text>
@@ -184,7 +190,9 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
             </Text>
           </div>
         </TableCell>
-        <TableCell className={styles.tableCell}>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Datasets
           </Text>
@@ -194,7 +202,14 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
               : `${scenario.default_datasets.length} default dataset${scenario.default_datasets.length === 1 ? '' : 's'}`}
           </Text>
         </TableCell>
-        <TableCell className={mergeClasses(styles.tableCell, styles.actionCell)}>
+        <TableCell
+          className={mergeClasses(
+            styles.tableCell,
+            styles.tableCellPadding,
+            styles.actionCell,
+            'scenario-catalog-cell-padding',
+          )}
+        >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
             Action
           </Text>
@@ -249,7 +264,7 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                   </div>
                 </div>
                 <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Backend-resolved default members</Text>
+                  <Text weight="semibold">Included by default</Text>
                   {defaultConcreteTechniques.length > 0 ? (
                     <div className={styles.badgeGroup}>
                       {defaultConcreteTechniques.map((technique) => (
@@ -318,7 +333,7 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
                             </Badge>
                           </div>
                           <Text size={200} className={styles.secondaryText}>
-                            The backend did not supply population counts or configured caps.
+                            Population counts and configured caps aren’t available.
                           </Text>
                         </article>
                       </li>
@@ -430,7 +445,7 @@ export default function ScenarioCatalog() {
           </Text>
           <Text as="p" size={300} className={styles.explanation}>
             A scenario packages objective datasets, selected or aggregate techniques, baseline policy,
-            and scenario-specific axes into a backend run plan.
+            and scenario-specific axes into a run plan.
           </Text>
         </div>
         <div className={styles.headerActions}>
@@ -488,11 +503,51 @@ export default function ScenarioCatalog() {
           <Table className={styles.table} size="small" aria-label="Registered scenarios">
             <TableHeader className={styles.tableHeader}>
               <TableRow>
-                <TableHeaderCell className={styles.scenarioColumn}>Scenario / purpose</TableHeaderCell>
-                <TableHeaderCell className={styles.sizeColumn}>Default run size</TableHeaderCell>
-                <TableHeaderCell className={styles.techniqueColumn}>Techniques</TableHeaderCell>
-                <TableHeaderCell className={styles.datasetColumn}>Datasets</TableHeaderCell>
-                <TableHeaderCell className={styles.actionColumn}>Action</TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
+                    styles.scenarioColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Scenario / purpose
+                </TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
+                    styles.sizeColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Default run size
+                </TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
+                    styles.techniqueColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Techniques
+                </TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
+                    styles.datasetColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Datasets
+                </TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
+                    styles.actionColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Action
+                </TableHeaderCell>
               </TableRow>
             </TableHeader>
             <TableBody className={styles.tableBody}>

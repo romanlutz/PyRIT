@@ -362,6 +362,10 @@ async def test_jailbreak_estimate_exposes_template_attempt_and_target_capability
 
     assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
     assert estimate.total_attack_count is None
+    assert estimate.minimum_attack_count == 12
+    assert estimate.maximum_attack_count == 20
+    assert estimate.model_dump(mode="json")["minimum_attack_count"] == 12
+    assert estimate.model_dump(mode="json")["maximum_attack_count"] == 20
     assert [component.count for component in estimate.components] == [4, 8, 8]
     assert [factor.count for factor in estimate.components[1].factors] == [4, 2, 1, 1]
     assert "2 template(s) x 4 selected logical seed group(s) x 1 selected" in estimate.note

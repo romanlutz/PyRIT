@@ -17,6 +17,7 @@ from pyrit.models import (
     Parameter,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateCondition,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
@@ -450,6 +451,15 @@ class Jailbreak(Scenario):
         return ScenarioDefaultRunSizeEstimate(
             status=status,
             total_attack_count=planned_count if status is ScenarioRunSizeEstimateStatus.Exact else None,
+            minimum_attack_count=(
+                target_agnostic_count if status is ScenarioRunSizeEstimateStatus.Conditional else None
+            ),
+            maximum_attack_count=planned_count if status is ScenarioRunSizeEstimateStatus.Conditional else None,
+            condition=(
+                ScenarioRunSizeEstimateCondition.TargetCapabilities
+                if status is ScenarioRunSizeEstimateStatus.Conditional
+                else None
+            ),
             components=components,
             datasets=datasets,
             note=f"{formula}{baseline_explanation}{capability_note}",

@@ -270,6 +270,9 @@ class TestJailbreakInitialization:
 
         assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
         assert estimate.total_attack_count is None
+        assert estimate.minimum_attack_count == 2
+        assert estimate.maximum_attack_count == 4
+        assert estimate.condition.value == "target_capabilities"
         assert [component.label for component in estimate.components] == [
             "Inline jailbreak delivery",
             "Native system-prompt jailbreak delivery",

@@ -44,6 +44,9 @@ function makeScenario(overrides: Partial<RegisteredScenario> & { scenario_name: 
       version: 1,
       status: 'unavailable',
       total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
       components: [],
       datasets: [],
       note: 'Default sizing is not available.',
@@ -84,7 +87,7 @@ describe('ScenarioCatalog', () => {
     expect(mockListCatalog).toHaveBeenCalledTimes(1)
   })
 
-  it('explains how scenarios become backend run plans and renders a semantic comparison table', async () => {
+  it('explains scenario run plans and applies spacing classes to every table cell', async () => {
     mockListCatalog.mockResolvedValueOnce({
       items: [makeScenario({ scenario_name: 'foundry.red_team_agent' })],
       pagination: { limit: 200, has_more: false },
@@ -92,13 +95,14 @@ describe('ScenarioCatalog', () => {
 
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
-    expect(await screen.findByRole('table', { name: 'Registered scenarios' })).toBeInTheDocument()
+    const table = await screen.findByRole('table', { name: 'Registered scenarios' })
     expect(screen.getByText(/packages objective datasets, selected or aggregate techniques/i)).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Scenario / purpose' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Default run size' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Techniques' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Datasets' })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: 'Action' })).toBeInTheDocument()
+    const headers = within(table).getAllByRole('columnheader')
+    expect(headers).toHaveLength(5)
+    expect(headers.every((cell) => cell.classList.contains('scenario-catalog-cell-padding'))).toBe(true)
+    const cells = within(screen.getByTestId('scenario-card-foundry.red_team_agent')).getAllByRole('cell')
+    expect(cells).toHaveLength(5)
+    expect(cells.every((cell) => cell.classList.contains('scenario-catalog-cell-padding'))).toBe(true)
   })
 
   it('follows the cursor to load every page automatically', async () => {
@@ -266,7 +270,7 @@ describe('ScenarioCatalog', () => {
     expect(within(details).getByText('harmbench')).toBeInTheDocument()
     expect(within(details).getByText('Population unavailable')).toBeInTheDocument()
     expect(within(details).getByText(
-      'The backend did not supply population counts or configured caps.',
+      'Population counts and configured caps aren’t available.',
     )).toBeInTheDocument()
     expect(within(details).queryByText(
       'This scenario does not declare a default dataset.',
@@ -308,8 +312,11 @@ describe('ScenarioCatalog', () => {
           ],
           default_run_size: {
             version: 1,
-            status: 'exact',
-            total_attack_count: 8,
+            status: 'conditional',
+            total_attack_count: null,
+            minimum_attack_count: 12,
+            maximum_attack_count: 20,
+            condition: 'target_capabilities',
             components: [
               {
                 label: 'Default attacks',
@@ -367,7 +374,11 @@ describe('ScenarioCatalog', () => {
       .toBeGreaterThan(0)
     expect(within(details).getAllByText('One incompatible group is excluded.').length)
       .toBeGreaterThan(0)
-    expect(within(details).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(details).getByText('12–20 planned attacks')).toBeInTheDocument()
+    expect(within(details).getByText('Final count depends on target capabilities.')).toBeInTheDocument()
+    expect(within(details).getAllByText('Included by default')).not.toHaveLength(0)
+    expect(within(details).queryByText(/Backend estimate|Conditional estimate|Backend formula/i))
+      .not.toBeInTheDocument()
     expect(within(details).queryByText('context_compliance')).not.toBeInTheDocument()
     expect(within(details).queryByText(/multi.?turn/i)).not.toBeInTheDocument()
     expect(within(details).queryByText(/simulated/i)).not.toBeInTheDocument()

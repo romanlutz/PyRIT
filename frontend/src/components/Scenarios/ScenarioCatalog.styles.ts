@@ -118,6 +118,12 @@ export const useScenarioCatalogStyles = makeStyles({
       border: 0,
     },
   },
+  tableHeaderCell: {
+    paddingTop: tokens.spacingVerticalM,
+    paddingRight: tokens.spacingHorizontalL,
+    paddingBottom: tokens.spacingVerticalM,
+    paddingLeft: tokens.spacingHorizontalL,
+  },
   tableBody: {
     [NARROW_VIEWPORT_QUERY]: {
       display: 'block',
@@ -178,6 +184,12 @@ export const useScenarioCatalogStyles = makeStyles({
         borderBottom: 0,
       },
     },
+  },
+  tableCellPadding: {
+    paddingTop: tokens.spacingVerticalM,
+    paddingRight: tokens.spacingHorizontalL,
+    paddingBottom: tokens.spacingVerticalM,
+    paddingLeft: tokens.spacingHorizontalL,
   },
   mobileLabel: {
     display: 'none',

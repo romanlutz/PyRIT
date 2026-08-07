@@ -712,6 +712,8 @@ class TestScenarioRoutes:
             default_run_size=ScenarioDefaultRunSizeEstimate(
                 status=ScenarioRunSizeEstimateStatus.Exact,
                 total_attack_count=8,
+                minimum_attack_count=8,
+                maximum_attack_count=8,
                 components=[
                     ScenarioRunSizeComponent(
                         label="Default technique sweep",
@@ -735,6 +737,8 @@ class TestScenarioRoutes:
             assert data["default_run_size"]["version"] == 1
             assert data["default_run_size"]["status"] == "exact"
             assert data["default_run_size"]["total_attack_count"] == 8
+            assert data["default_run_size"]["minimum_attack_count"] == 8
+            assert data["default_run_size"]["maximum_attack_count"] == 8
 
     def test_get_scenario_returns_404_when_not_found(self, client: TestClient) -> None:
         """Test that GET /api/scenarios/catalog/{name} returns 404 when not found."""
@@ -776,6 +780,8 @@ class TestScenarioRoutes:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total_attack_count"] == 8
+        assert response.json()["minimum_attack_count"] is None
+        assert response.json()["maximum_attack_count"] is None
         request = mock_service.estimate_scenario_run_size_async.await_args.kwargs["request"]
         assert request.techniques == ["prompt_sending"]
         assert request.include_baseline is False

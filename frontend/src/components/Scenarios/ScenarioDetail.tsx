@@ -645,7 +645,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       : {
           status: 'unavailable',
           scope: 'request',
-          label: 'The backend estimate could not be refreshed.',
+          label: 'Run size couldn’t be updated.',
           note: estimateRequestState.error,
         }
   } else if (lastGoodEstimate) {
@@ -832,7 +832,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 )}
                 {techniqueSelection.mode === 'preset' && (
                   <div className={styles.resolvedMembers} aria-live="polite">
-                    <Text size={200} weight="semibold">Backend-resolved preset members</Text>
+                    <Text size={200} weight="semibold">Included by preset</Text>
                     {presetMembers.length > 0 ? (
                       <div className={styles.previewBadges}>
                         {presetMembers.map((name) => (
@@ -981,7 +981,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
             <div className={styles.previewHeader}>
               <Text id="run-preview-title" as="h2" size={500} weight="semibold">Run preview</Text>
               <Text size={200} className={styles.hint}>
-                Review the exact configuration sent to the backend.
+                Review the exact configuration used for this run.
               </Text>
             </div>
             <dl className={styles.previewList}>
@@ -1055,7 +1055,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               </div>
             </dl>
             <div className={styles.estimateGroup}>
-              <Text as="h3" size={400} weight="semibold">Backend-owned size</Text>
+              <Text as="h3" size={400} weight="semibold">Planned run size</Text>
               <ScenarioRunEstimateDetails
                 state={estimateState}
                 idPrefix={`${formId}-estimate`}

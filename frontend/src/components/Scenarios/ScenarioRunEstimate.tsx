@@ -41,9 +41,9 @@ function statusLabel(state: ScenarioRunEstimateState): string {
     case 'loading':
       return 'Loading estimate'
     case 'available':
-      return 'Backend estimate'
+      return 'Run size calculated'
     case 'conditional':
-      return 'Conditional estimate'
+      return 'Final count set at launch'
     case 'refreshing':
       return 'Updating estimate'
     case 'stale':
@@ -70,6 +70,35 @@ function formatEstimateValue(value: number): string {
   return value.toLocaleString()
 }
 
+function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
+  if (estimate.total !== null) {
+    return `${formatEstimateValue(estimate.total)} planned attacks`
+  }
+  if (estimate.minimum !== null && estimate.maximum !== null) {
+    return estimate.minimum === estimate.maximum
+      ? `${formatEstimateValue(estimate.minimum)} planned attacks`
+      : `${formatEstimateValue(estimate.minimum)}–${formatEstimateValue(estimate.maximum)} planned attacks`
+  }
+  if (estimate.maximum !== null) {
+    return `Up to ${formatEstimateValue(estimate.maximum)} planned attacks`
+  }
+  if (estimate.minimum !== null) {
+    return `At least ${formatEstimateValue(estimate.minimum)} planned attacks`
+  }
+  return estimate.scope === 'default'
+    ? 'Choose a target to calculate the run size.'
+    : 'Run size is confirmed at launch.'
+}
+
+function estimateSupportingCopy(state: ScenarioRunEstimateState, estimate: ScenarioRunEstimate | undefined): string {
+  if (state.status !== 'conditional' || !estimate) {
+    return scopeLabel(state)
+  }
+  return estimate.condition === 'target_capabilities'
+    ? 'Final count depends on target capabilities.'
+    : 'Final count is confirmed at launch.'
+}
+
 function formatComponentFormula(component: ScenarioRunEstimateComponent): string {
   if (component.factors.length === 0) {
     return `${component.label}: ${formatEstimateValue(component.count)}`
@@ -80,13 +109,13 @@ function formatComponentFormula(component: ScenarioRunEstimateComponent): string
   return `${component.label}: ${factors} = ${formatEstimateValue(component.count)}`
 }
 
-function formatBackendFormula(estimate: ScenarioRunEstimate): string {
+function formatCalculation(estimate: ScenarioRunEstimate): string {
   const components = estimate.components.length > 0
     ? estimate.components.map(formatComponentFormula).join(' + ')
-    : 'No additive components supplied'
+    : 'Component breakdown unavailable'
   const total = estimate.total === null
-    ? 'backend total is conditional'
-    : `backend total = ${formatEstimateValue(estimate.total)}`
+    ? 'final count is set at launch'
+    : `planned total = ${formatEstimateValue(estimate.total)}`
   return `${components}; ${total}`
 }
 
@@ -98,18 +127,13 @@ export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummary
     <div className={styles.summary} aria-live="polite">
       <div className={styles.summaryHeader}>
         <Badge appearance="tint" color={statusColor(state)}>{statusLabel(state)}</Badge>
-        {estimate?.total !== null && estimate?.total !== undefined && (
+        {estimate && (
           <Text className={styles.total} weight="semibold">
-            {formatEstimateValue(estimate.total)} planned attacks
-          </Text>
-        )}
-        {estimate?.total === null && (
-          <Text className={styles.total} weight="semibold">
-            Total depends on configuration
+            {formatEstimateSummary(estimate)}
           </Text>
         )}
       </div>
-      <Text size={200} className={styles.muted}>{scopeLabel(state)}</Text>
+      <Text size={200} className={styles.muted}>{estimateSupportingCopy(state, estimate)}</Text>
     </div>
   )
 }
@@ -131,7 +155,7 @@ function EstimateComponents({
       </Text>
       {estimate.components.length === 0 ? (
         <Text size={200} className={styles.muted}>
-          No additive components supplied by the backend.
+          A component breakdown isn’t available.
         </Text>
       ) : (
         <ol className={styles.componentList}>
@@ -185,7 +209,7 @@ function EstimateDatasets({
       </Text>
       {estimate.datasets.length === 0 ? (
         <Text size={200} className={styles.muted}>
-          No dataset population details supplied by the backend.
+          Dataset population details aren’t available.
         </Text>
       ) : (
         <div className={styles.datasetList}>
@@ -240,7 +264,7 @@ export function ScenarioRunEstimateDetails({
   if (state.status === 'loading') {
     return (
       <div className={styles.details} aria-live="polite">
-        <Spinner size="tiny" label="Loading backend run estimate..." />
+        <Spinner size="tiny" label="Calculating planned attacks..." />
         <Text size={200} className={styles.muted}>{scopeLabel(state)}</Text>
       </div>
     )
@@ -273,16 +297,16 @@ export function ScenarioRunEstimateDetails({
       <EstimateDatasets estimate={estimate} idPrefix={idPrefix} />
       <section className={styles.detailGroup} aria-labelledby={`${idPrefix}-formula`}>
         <Text as="h4" id={`${idPrefix}-formula`} weight="semibold">
-          Backend formula
+          How this count is calculated
         </Text>
-        <code className={styles.formula}>{formatBackendFormula(estimate)}</code>
+        <code className={styles.formula}>{formatCalculation(estimate)}</code>
       </section>
       <section className={styles.detailGroup} aria-labelledby={`${idPrefix}-notes`}>
         <Text as="h4" id={`${idPrefix}-notes`} weight="semibold">
           Estimate notes
         </Text>
         <Text size={200} className={styles.muted}>
-          {estimate.note ?? 'No additional note supplied by the backend.'}
+          {estimate.note ?? 'No additional calculation note is available.'}
         </Text>
         <Text size={200} className={styles.muted}>
           Retries are {estimate.retriesIncluded ? 'included' : 'not included'}.

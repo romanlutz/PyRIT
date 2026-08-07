@@ -12,6 +12,7 @@ from pyrit.models import (
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
+    ScenarioRunSizeEstimateCondition,
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
@@ -46,6 +47,8 @@ def test_run_size_estimate_accepts_legacy_fields_and_serializes_canonically() ->
     payload = estimate.model_dump(mode="json")
     assert payload["version"] == 1
     assert payload["total_attack_count"] == 2
+    assert payload["minimum_attack_count"] is None
+    assert payload["maximum_attack_count"] is None
     assert payload["note"] == "Legacy explanation."
     assert payload["datasets"][0]["logical_seed_group_count"] == 100
     assert "total" not in payload
@@ -85,6 +88,42 @@ def test_exact_default_run_size_requires_component_total() -> None:
         )
 
 
+@pytest.mark.parametrize("field_name", ["minimum_attack_count", "maximum_attack_count"])
+def test_exact_default_run_size_requires_bounds_to_match_total(field_name: str) -> None:
+    """Exact estimates reject bounds that disagree with their authoritative total."""
+    with pytest.raises(ValidationError, match=f"{field_name} to equal total_attack_count"):
+        ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=6,
+            components=[ScenarioRunSizeComponent(label="Techniques", count=6)],
+            **{field_name: 5},
+        )
+
+
+def test_default_run_size_requires_ordered_nonnegative_bounds() -> None:
+    """Conditional estimate bounds remain nonnegative and ordered."""
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Conditional,
+            minimum_attack_count=-1,
+        )
+
+    with pytest.raises(ValidationError, match="minimum_attack_count must be less than or equal"):
+        ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Conditional,
+            minimum_attack_count=20,
+            maximum_attack_count=12,
+        )
+
+
+def test_conditional_default_run_size_allows_unknown_bounds() -> None:
+    """Conditional estimates may remain unbounded when no truthful range is available."""
+    estimate = ScenarioDefaultRunSizeEstimate(status=ScenarioRunSizeEstimateStatus.Conditional)
+
+    assert estimate.minimum_attack_count is None
+    assert estimate.maximum_attack_count is None
+
+
 def test_run_size_component_requires_factor_product() -> None:
     """Components reject counts that disagree with their ordered formula factors."""
     with pytest.raises(ValidationError, match="factor product \\(6\\)"):
@@ -119,6 +158,9 @@ def test_default_run_size_serializes_versioned_api_shape() -> None:
         "version": 1,
         "status": "exact",
         "total_attack_count": 6,
+        "minimum_attack_count": None,
+        "maximum_attack_count": None,
+        "condition": None,
         "components": [
             {
                 "label": "Techniques",
@@ -141,6 +183,9 @@ def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:
     """Conditionality and effective dataset selection are machine-readable."""
     estimate = ScenarioDefaultRunSizeEstimate(
         status=ScenarioRunSizeEstimateStatus.Conditional,
+        minimum_attack_count=12,
+        maximum_attack_count=20,
+        condition=ScenarioRunSizeEstimateCondition.TargetCapabilities,
         datasets=[
             ScenarioDatasetSummary(
                 name="harmbench",
@@ -163,6 +208,9 @@ def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:
     payload = estimate.model_dump(mode="json")
     assert payload["status"] == "conditional"
     assert payload["total_attack_count"] is None
+    assert payload["minimum_attack_count"] == 12
+    assert payload["maximum_attack_count"] == 20
+    assert payload["condition"] == "target_capabilities"
     assert payload["datasets"] == [
         {
             "name": "harmbench",

@@ -19,6 +19,9 @@ const EXACT_ESTIMATE: ScenarioDefaultRunSizeEstimate = {
   version: 1,
   status: 'exact',
   total_attack_count: 8,
+  minimum_attack_count: null,
+  maximum_attack_count: null,
+  condition: null,
   components: [
     {
       label: 'Prompt sending',
@@ -59,7 +62,7 @@ const EXACT_ESTIMATE: ScenarioDefaultRunSizeEstimate = {
       selection_note: 'Four compatible objective groups selected.',
     },
   ],
-  note: 'The backend total is authoritative.',
+  note: 'The planned total is authoritative.',
   retries_included: false,
 }
 
@@ -84,25 +87,88 @@ describe('ScenarioRunEstimate', () => {
     expect(screen.getByText('Jailbreak templates: 2 (configuration)')).toBeInTheDocument()
     expect(screen.getByText('Four compatible objective groups selected.')).toBeInTheDocument()
     expect(screen.getByText(
-      'Prompt sending: 4 selected seed groups × 2 jailbreak templates × 1 techniques × 1 attempts = 8 + Baseline attack: 2; backend total = 8',
+      'Prompt sending: 4 selected seed groups × 2 jailbreak templates × 1 techniques × 1 attempts = 8 + Baseline attack: 2; planned total = 8',
     )).toBeInTheDocument()
-    expect(screen.getByText('The backend total is authoritative.')).toBeInTheDocument()
+    expect(screen.getByText('The planned total is authoritative.')).toBeInTheDocument()
+    expect(screen.getByText('Run size calculated')).toBeInTheDocument()
+    expect(screen.getByText('How this count is calculated')).toBeInTheDocument()
     expect(screen.getByText('Retries are not included. Estimate schema v1.')).toBeInTheDocument()
+    expect(screen.queryByText(/Backend estimate|Conditional estimate|Backend formula/i)).not.toBeInTheDocument()
   })
 
-  it('supports loading, conditional null totals, unavailable, and stale states', () => {
+  it('renders bounded and upper-only conditional estimates from structured bounds', () => {
+    const bounded = mapScenarioRunEstimate({
+      ...EXACT_ESTIMATE,
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: 12,
+      maximum_attack_count: 20,
+      condition: 'target_capabilities',
+    }, 'default')
+    const { rerender } = render(
+      <TestWrapper>
+        <ScenarioRunEstimateDetails state={bounded} />
+      </TestWrapper>,
+    )
+
+    expect(screen.getByText('12–20 planned attacks')).toBeInTheDocument()
+    expect(screen.getByText('Final count set at launch')).toBeInTheDocument()
+    expect(screen.getByText('Final count depends on target capabilities.')).toBeInTheDocument()
+
+    const upperOnly = mapScenarioRunEstimate({
+      ...EXACT_ESTIMATE,
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: 20,
+      condition: 'launch_configuration',
+    }, 'request')
+    rerender(
+      <TestWrapper>
+        <ScenarioRunEstimateSummary state={upperOnly} />
+      </TestWrapper>,
+    )
+
+    expect(screen.getByText('Up to 20 planned attacks')).toBeInTheDocument()
+    expect(screen.getByText('Final count is confirmed at launch.')).toBeInTheDocument()
+  })
+
+  it('renders an equal bounded estimate as one number', () => {
+    const conditional = mapScenarioRunEstimate({
+      ...EXACT_ESTIMATE,
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: 12,
+      maximum_attack_count: 12,
+      condition: 'launch_configuration',
+    }, 'default')
+
+    render(
+      <TestWrapper>
+        <ScenarioRunEstimateSummary state={conditional} />
+      </TestWrapper>,
+    )
+
+    expect(screen.getByText('12 planned attacks')).toBeInTheDocument()
+    expect(screen.queryByText('12–12 planned attacks')).not.toBeInTheDocument()
+  })
+
+  it('supports loading, unknown conditional, unavailable, and stale states', () => {
     const loading: ScenarioRunEstimateState = { status: 'loading', scope: 'request' }
     const { rerender } = render(
       <TestWrapper>
         <ScenarioRunEstimateDetails state={loading} />
       </TestWrapper>,
     )
-    expect(screen.getByText('Loading backend run estimate...')).toBeInTheDocument()
+    expect(screen.getByText('Calculating planned attacks...')).toBeInTheDocument()
 
     const conditional = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,
       status: 'conditional',
       total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
       components: [],
       datasets: [],
       note: null,
@@ -112,17 +178,40 @@ describe('ScenarioRunEstimate', () => {
         <ScenarioRunEstimateDetails state={conditional} />
       </TestWrapper>,
     )
-    expect(screen.getByText('Conditional estimate')).toBeInTheDocument()
-    expect(screen.getByText('Total depends on configuration')).toBeInTheDocument()
-    expect(screen.getByText('Default configuration')).toBeInTheDocument()
+    expect(screen.getByText('Final count set at launch')).toBeInTheDocument()
+    expect(screen.getByText('Choose a target to calculate the run size.')).toBeInTheDocument()
+    expect(screen.getByText('Final count is confirmed at launch.')).toBeInTheDocument()
     expect(screen.getByText(
-      'No additive components supplied; backend total is conditional',
+      'Component breakdown unavailable; final count is set at launch',
     )).toBeInTheDocument()
+    expect(screen.getByText('A component breakdown isn’t available.')).toBeInTheDocument()
+    expect(screen.getByText('Dataset population details aren’t available.')).toBeInTheDocument()
+
+    const configuredConditional = mapScenarioRunEstimate({
+      ...EXACT_ESTIMATE,
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: 'launch_configuration',
+      components: [],
+      datasets: [],
+    }, 'request')
+    rerender(
+      <TestWrapper>
+        <ScenarioRunEstimateSummary state={configuredConditional} />
+      </TestWrapper>,
+    )
+    expect(screen.getByText('Run size is confirmed at launch.')).toBeInTheDocument()
+    expect(screen.queryByText('Choose a target to calculate the run size.')).not.toBeInTheDocument()
 
     const unavailable = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,
       status: 'unavailable',
       total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
       components: [],
       datasets: [],
       note: 'Target capability is not available.',

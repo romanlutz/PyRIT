@@ -77,6 +77,9 @@ export function mapScenarioRunEstimate(
     version: response.version,
     scope,
     total: response.total_attack_count,
+    minimum: response.minimum_attack_count ?? null,
+    maximum: response.maximum_attack_count ?? null,
+    condition: response.condition ?? null,
     components: response.components.map((component) => {
       const id = nextStableId('component', component.label, componentOccurrences)
       return {

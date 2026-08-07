@@ -457,6 +457,9 @@ export interface ScenarioDefaultRunSizeEstimate {
   version: 1
   status: ScenarioRunSizeEstimateStatus
   total_attack_count: number | null
+  minimum_attack_count: number | null
+  maximum_attack_count: number | null
+  condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunSizeComponent[]
   datasets: ScenarioDatasetSummary[]
   note: string | null
@@ -510,6 +513,9 @@ export interface ScenarioRunEstimate {
   version: number
   scope: 'default' | 'request'
   total: number | null
+  minimum: number | null
+  maximum: number | null
+  condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunEstimateComponent[]
   datasets: ScenarioRunEstimateDataset[]
   note: string | null

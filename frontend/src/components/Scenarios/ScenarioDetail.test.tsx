@@ -60,6 +60,9 @@ function makeScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredSc
       version: 1,
       status: 'unavailable',
       total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
       components: [],
       datasets: [],
       note: 'Default sizing is unavailable.',
@@ -89,6 +92,9 @@ function makeEstimate(
     version: 1,
     status,
     total_attack_count: total,
+    minimum_attack_count: null,
+    maximum_attack_count: null,
+    condition: null,
     components: total === null
       ? []
       : [
@@ -369,7 +375,7 @@ describe('ScenarioDetail', () => {
       .toBeInTheDocument()
   })
 
-  it('renders a backend conditional estimate without inventing a total', async () => {
+  it('renders an unknown conditional estimate without inventing a total', async () => {
     jest.useFakeTimers()
     mockEstimateRun.mockResolvedValue(makeEstimate(null))
     renderDetail('/scenarios/foundry.red_team_agent')
@@ -378,8 +384,8 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
-    expect(within(preview).getByText('Conditional estimate')).toBeInTheDocument()
-    expect(within(preview).getByText('Total depends on configuration')).toBeInTheDocument()
+    expect(within(preview).getByText('Final count set at launch')).toBeInTheDocument()
+    expect(within(preview).getByText('Run size is confirmed at launch.')).toBeInTheDocument()
     expect(within(preview).queryByText(/planned attacks/)).not.toBeInTheDocument()
   })
 
@@ -428,7 +434,7 @@ describe('ScenarioDetail', () => {
     expect(within(preview).getByText(
       'Resolves to prompt_sending, jailbreak_system_prompt',
     )).toBeInTheDocument()
-    expect(within(preview).getByText('Loading backend run estimate...')).toBeInTheDocument()
+    expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
   })
 
   it('switches from the default preset to a multi-technique custom selection', async () => {
@@ -740,6 +746,9 @@ describe('ScenarioDetail', () => {
       version: 1,
       status: 'exact',
       total_attack_count: 8,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
       components: [
         {
           label: 'Prompt sending',
@@ -771,7 +780,7 @@ describe('ScenarioDetail', () => {
           selection_note: 'One incompatible group is excluded.',
         },
       ],
-      note: 'The backend total is authoritative.',
+      note: 'The planned total is authoritative.',
       retries_included: false,
     })
 
