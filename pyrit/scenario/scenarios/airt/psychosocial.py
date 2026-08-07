@@ -489,14 +489,14 @@ class Psychosocial(Scenario):
             self._dataset_config = rebuilt
         return await super()._resolve_seed_groups_by_dataset_async(apply_sampling=apply_sampling)
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate the independent sub-harm technique sweeps and per-harm baselines.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Exact per-sub-harm estimate.
         """
-        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         technique_count = len(self._scenario_techniques)
         components: list[ScenarioRunSizeComponent] = []
         for dataset_name, seed_groups in selected_groups.items():

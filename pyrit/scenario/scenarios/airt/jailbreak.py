@@ -289,14 +289,18 @@ class Jailbreak(Scenario):
         metadata[_JAILBREAK_TEMPLATES_METADATA_KEY] = list(self._resolved_jailbreaks)
         return metadata
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate the template and attempt axes, preserving the target capability caveat.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Conditional target-aware estimate.
+
+        Raises:
+            ValueError: If native system-prompt delivery is the only selected
+                technique but the selected target cannot support it.
         """
-        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         seed_group_count = sum(len(groups) for groups in selected_groups.values())
         template_count = len(self.params.get("jailbreak_names") or []) or (
             self.params.get("num_jailbreaks") or _DEFAULT_NUM_JAILBREAKS
@@ -304,7 +308,17 @@ class Jailbreak(Scenario):
         attempt_count = self.params.get("num_jailbreak_attempts") or 1
         technique_names = {technique.value for technique in self._scenario_techniques}
         converter_count = len(technique_names - {_JAILBREAK_SYSTEM_PROMPT})
-        include_system_delivery = _JAILBREAK_SYSTEM_PROMPT in technique_names
+        system_delivery_selected = _JAILBREAK_SYSTEM_PROMPT in technique_names
+        system_delivery_supported = (
+            self._target_supports_system_delivery(self._objective_target)
+            if system_delivery_selected and self._objective_target is not None
+            else None
+        )
+        if system_delivery_selected and system_delivery_supported is False and converter_count == 0:
+            raise ValueError(
+                "Technique 'jailbreak_system_prompt' requires an objective target with editable history "
+                "and system-prompt support."
+            )
 
         components: list[ScenarioRunSizeComponent] = []
         if self._include_baseline:
@@ -331,7 +345,7 @@ class Jailbreak(Scenario):
                 ),
             )
         )
-        if include_system_delivery:
+        if system_delivery_selected and system_delivery_supported is not False:
             components.append(
                 ScenarioRunSizeComponent(
                     label="Native system-prompt jailbreak delivery",
@@ -341,14 +355,18 @@ class Jailbreak(Scenario):
                         ScenarioRunSizeFactor(label="jailbreak templates", count=template_count),
                         ScenarioRunSizeFactor(label="attempts", count=attempt_count),
                     ],
-                    note="Included only when the objective target supports editable history and system prompts.",
+                    note=(
+                        "The selected objective target supports native system-prompt delivery."
+                        if system_delivery_supported is True
+                        else "Included only when the objective target supports editable history and system prompts."
+                    ),
                 )
             )
 
-        guaranteed_count = sum(
+        target_agnostic_count = sum(
             component.count for component in components if component.label != "Native system-prompt jailbreak delivery"
         )
-        maximum_count = sum(component.count for component in components)
+        planned_count = sum(component.count for component in components)
         baseline_explanation = (
             f" Baseline adds one unit per selected seed group ({seed_group_count} units)."
             if self._include_baseline
@@ -361,20 +379,26 @@ class Jailbreak(Scenario):
         )
         status = (
             ScenarioRunSizeEstimateStatus.Conditional
-            if include_system_delivery
+            if system_delivery_selected and system_delivery_supported is None
             else ScenarioRunSizeEstimateStatus.Exact
         )
+        if status is ScenarioRunSizeEstimateStatus.Conditional:
+            capability_note = (
+                f" {target_agnostic_count} total planned units for target-agnostic delivery; "
+                f"{planned_count} when native system-prompt delivery is supported."
+            )
+        elif system_delivery_selected and system_delivery_supported is True:
+            capability_note = " The selected target supports the native system-prompt component."
+        elif system_delivery_selected:
+            capability_note = " The selected target does not support native system-prompt delivery, so it is omitted."
+        else:
+            capability_note = ""
         return ScenarioDefaultRunSizeEstimate(
             status=status,
-            total_attack_count=maximum_count if status is ScenarioRunSizeEstimateStatus.Exact else None,
+            total_attack_count=planned_count if status is ScenarioRunSizeEstimateStatus.Exact else None,
             components=components,
             datasets=datasets,
-            note=(
-                f"{formula}{baseline_explanation} {guaranteed_count} total planned units for target-agnostic "
-                f"delivery; {maximum_count} when native system-prompt delivery is supported."
-                if include_system_delivery
-                else f"{formula}{baseline_explanation}"
-            ),
+            note=f"{formula}{baseline_explanation}{capability_note}",
         )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:

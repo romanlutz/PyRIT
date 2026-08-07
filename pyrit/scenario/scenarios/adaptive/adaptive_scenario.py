@@ -153,14 +153,14 @@ class AdaptiveScenario(Scenario):
             registry_overrides = {}
         return {**catalog, **registry_overrides}
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate adaptive per-objective dispatch, which depends on target compatibility.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Conditional adaptive estimate.
         """
-        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         seed_group_count = sum(len(groups) for groups in selected_groups.values())
         components = [
             ScenarioRunSizeComponent(

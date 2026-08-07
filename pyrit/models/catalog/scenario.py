@@ -40,6 +40,24 @@ from pyrit.models.retry_event import RetryEvent
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
 
 
+def _validate_dataset_filter_mapping(
+    value: dict[str, list[str]] | None,
+) -> dict[str, list[str]] | None:
+    """
+    Validate dataset filter keys shared by launch and estimate requests.
+
+    Returns:
+        dict[str, list[str]] | None: Validated filters.
+
+    Raises:
+        ValueError: If a filter key is not supported.
+    """
+    for key in value or {}:
+        if key not in DATASET_FILTERS:
+            raise ValueError(f"Unknown dataset filter '{key}'. Allowed: {', '.join(sorted(DATASET_FILTERS))}.")
+    return value
+
+
 class ScenarioRunSizeEstimateStatus(str, Enum):
     """Confidence level for a catalog default-run size estimate."""
 
@@ -153,6 +171,45 @@ class RegisteredScenario(BaseModel):
     )
 
 
+class ScenarioRunSizeEstimateRequest(BaseModel):
+    """Request-specific scenario run-size configuration."""
+
+    target_name: str | None = Field(
+        None,
+        description="Optional registered objective target used to resolve target-capability-dependent estimates",
+    )
+    techniques: list[str] | None = Field(
+        None, description="Technique names to estimate (uses scenario default if omitted)"
+    )
+    dataset_names: list[str] | None = Field(
+        None, description="Dataset names to estimate (uses scenario default if omitted)"
+    )
+    max_dataset_size: int | None = Field(None, ge=1, description="Maximum selected logical seed groups")
+    dataset_filters: dict[str, list[str]] | None = Field(
+        None,
+        description="Dataset seed filters keyed by field. Accepted keys: harm_categories, data_types.",
+    )
+    include_baseline: bool | None = Field(
+        None,
+        description="Override the scenario baseline default; forbidden scenarios reject true",
+    )
+    scenario_params: dict[str, Any] | None = Field(
+        None,
+        description="Scenario-declared parameters such as Jailbreak template and attempt counts",
+    )
+
+    @field_validator("dataset_filters")
+    @classmethod
+    def _validate_dataset_filters(cls, value: dict[str, list[str]] | None) -> dict[str, list[str]] | None:
+        """
+        Validate estimate dataset filters against the shared allow-list.
+
+        Returns:
+            dict[str, list[str]] | None: Validated filters.
+        """
+        return _validate_dataset_filter_mapping(value)
+
+
 class RunScenarioRequest(BaseModel):
     """Request body for starting a scenario run."""
 
@@ -210,10 +267,7 @@ class RunScenarioRequest(BaseModel):
         Raises:
             ValueError: If any key is not present in ``DATASET_FILTERS``.
         """
-        for key in value or {}:
-            if key not in DATASET_FILTERS:
-                raise ValueError(f"Unknown dataset filter '{key}'. Allowed: {', '.join(sorted(DATASET_FILTERS))}.")
-        return value
+        return _validate_dataset_filter_mapping(value)
 
 
 class AttackErrorSummary(BaseModel):

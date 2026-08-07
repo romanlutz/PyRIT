@@ -21,6 +21,7 @@ from pyrit.models.catalog import (
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
@@ -223,6 +224,7 @@ __all__ = [
     "ScenarioDefaultRunSizeEstimate",
     "ScenarioResult",
     "ScenarioRunSizeComponent",
+    "ScenarioRunSizeEstimateRequest",
     "ScenarioRunSizeEstimateStatus",
     "ScenarioRunSizeFactor",
     "ScenarioRunState",

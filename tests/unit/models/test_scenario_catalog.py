@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from pyrit.models import (
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
@@ -68,3 +69,9 @@ def test_default_run_size_serializes_versioned_api_shape() -> None:
         "datasets": [],
         "note": None,
     }
+
+
+def test_estimate_request_reuses_dataset_filter_validation() -> None:
+    """Configured estimates reject the same unsupported dataset filters as launches."""
+    with pytest.raises(ValidationError, match="Unknown dataset filter 'unknown'"):
+        ScenarioRunSizeEstimateRequest(dataset_filters={"unknown": ["value"]})

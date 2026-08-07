@@ -15,6 +15,7 @@ from pyrit.models import (
     ScenarioRunSizeEstimateStatus,
     SeedObjective,
 )
+from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core import BaselineAttackPolicy, DatasetAttackConfiguration, Scenario, ScenarioTechnique
 from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
 from pyrit.scenario.scenarios.airt.jailbreak import Jailbreak
@@ -80,8 +81,10 @@ class _MatrixEstimateScenario(Scenario):
         self, *, apply_sampling: bool = True
     ) -> dict[str, list[AttackSeedGroup]]:
         """Return three logical groups before selection and two after."""
-        values = ["one", "two"] if apply_sampling else ["one", "two", "three"]
-        return {"sample": [_seed_group(value) for value in values]}
+        if self._dataset_config.dataset_names == ["sample"]:
+            values = ["one", "two"] if apply_sampling else ["one", "two", "three"]
+            return {"sample": [_seed_group(value) for value in values]}
+        return await super()._resolve_seed_groups_by_dataset_async(apply_sampling=apply_sampling)
 
     async def _build_atomic_attacks_async(self, *, context):
         """Return no attacks; only estimation is exercised."""
@@ -126,13 +129,56 @@ async def test_ordinary_matrix_estimate_uses_planned_seed_units_and_baseline() -
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_configured_estimate_reuses_technique_and_baseline_resolution_without_persistence(
+    patch_central_database,
+) -> None:
+    """A configured estimate expands only selected inputs and creates no ScenarioResult."""
+    scenario = _MatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(
+        args={
+            "scenario_techniques": [_TwoTechniqueDefault.ONE],
+            "include_baseline": False,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 2
+    assert [component.count for component in estimate.components] == [2]
+    assert [factor.count for factor in estimate.components[0].factors] == [2, 1]
+    assert patch_central_database.return_value.get_scenario_results() == []
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_configured_estimate_applies_dataset_selection_and_cap() -> None:
+    """Configured estimates use the requested dataset population rather than scenario defaults."""
+    scenario = _MatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(
+        args={
+            "dataset_config": DatasetAttackConfiguration(
+                seed_groups=[_seed_group("one"), _seed_group("two"), _seed_group("three")],
+                max_dataset_size=2,
+            ),
+            "scenario_techniques": [_TwoTechniqueDefault.ONE],
+            "include_baseline": False,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.total_attack_count == 2
+    assert len(estimate.datasets) == 1
+    assert estimate.datasets[0].logical_seed_group_count == 3
+    assert estimate.datasets[0].selected_seed_group_count == 2
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_techniques() -> None:
     """Adaptive techniques are selected internally rather than forming an outer axis."""
     with patch.object(TextAdaptive, "get_technique_class", return_value=_TwoTechniqueDefault):
         scenario = TextAdaptive(objective_scorer=_scorer())
-    scenario._resolve_default_dataset_groups_for_estimate_async = AsyncMock(
-        return_value=_resolved_groups({"adaptive": 3})
-    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"adaptive": 3}))
 
     estimate = await scenario.get_default_run_size_estimate_async()
 
@@ -146,9 +192,7 @@ async def test_jailbreak_estimate_exposes_template_attempt_and_target_capability
     """Jailbreak reports guaranteed inline work separately from conditional system delivery."""
     with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):
         scenario = Jailbreak(objective_scorer=_scorer())
-    scenario._resolve_default_dataset_groups_for_estimate_async = AsyncMock(
-        return_value=_resolved_groups({"harmbench": 4})
-    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 4}))
 
     estimate = await scenario.get_default_run_size_estimate_async()
 
@@ -163,12 +207,60 @@ async def test_jailbreak_estimate_exposes_template_attempt_and_target_capability
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_jailbreak_configured_estimate_counts_only_prompt_sending() -> None:
+    """Two templates with one selected delivery produce units per seed, not two results."""
+    with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):
+        scenario = Jailbreak(objective_scorer=_scorer())
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 4}))
+    scenario.set_params_from_args(
+        args={
+            "scenario_techniques": [_JailbreakDefault.PROMPT_SENDING],
+            "include_baseline": True,
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 12
+    assert [component.count for component in estimate.components] == [4, 8]
+    assert [factor.count for factor in estimate.components[1].factors] == [4, 2, 1, 1]
+    assert "2 template(s) x 4 selected logical seed group(s) x 1 selected" in estimate.note
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_jailbreak_configured_estimate_uses_target_capability() -> None:
+    """A capable selected target makes native system-prompt delivery exact."""
+    with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):
+        scenario = Jailbreak(objective_scorer=_scorer())
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 4}))
+    objective_target = MagicMock(spec=PromptTarget)
+    objective_target.get_identifier.return_value = ComponentIdentifier(class_name="CapableTarget", class_module="test")
+    objective_target.configuration.includes.return_value = True
+    scenario.set_params_from_args(
+        args={
+            "objective_target": objective_target,
+            "scenario_techniques": [_JailbreakDefault.SYSTEM_PROMPT],
+            "include_baseline": False,
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 8
+    assert [component.count for component in estimate.components] == [0, 8]
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_encoding_estimate_counts_concrete_converter_and_decode_variants() -> None:
     """Encoding expands thirteen catalog techniques into fifteen concrete converter variants."""
     scenario = Encoding(objective_scorer=_scorer())
-    scenario._resolve_default_dataset_groups_for_estimate_async = AsyncMock(
-        return_value=_resolved_groups({"encoding": 2})
-    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"encoding": 2}))
 
     estimate = await scenario.get_default_run_size_estimate_async()
 
@@ -205,7 +297,7 @@ async def test_psychosocial_estimate_keeps_sub_harm_baselines_separate() -> None
         imminent_crisis_scorer=_scorer(),
         licensed_therapist_scorer=_scorer(),
     )
-    scenario._resolve_default_dataset_groups_for_estimate_async = AsyncMock(
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(
         return_value=_resolved_groups({"airt_imminent_crisis": 2, "airt_licensed_therapist": 1})
     )
 
@@ -224,9 +316,7 @@ async def test_adversarial_benchmark_estimate_exposes_per_required_target_formul
         return_value=_TwoTechniqueDefault,
     ):
         scenario = AdversarialBenchmark(objective_scorer=_scorer())
-    scenario._resolve_default_dataset_groups_for_estimate_async = AsyncMock(
-        return_value=_resolved_groups({"harmbench": 3})
-    )
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 3}))
 
     estimate = await scenario.get_default_run_size_estimate_async()
 

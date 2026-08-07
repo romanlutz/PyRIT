@@ -229,14 +229,14 @@ class Encoding(Scenario):
         atomic_attacks.extend(self._get_converter_attacks(context=context))
         return atomic_attacks
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate converter variants crossed with raw and decode-template prompt configurations.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Exact converter-variant estimate.
         """
-        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         seed_group_count = sum(len(groups) for groups in selected_groups.values())
         selected_encoding_names = {technique.value for technique in self._scenario_techniques}
         variant_count = sum(1 for _, name, _ in self._converter_variants() if name in selected_encoding_names)

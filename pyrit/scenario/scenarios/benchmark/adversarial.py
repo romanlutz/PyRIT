@@ -196,17 +196,38 @@ class AdversarialBenchmark(Scenario):
             scenario_result_id=scenario_result_id,
         )
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Expose the per-target formula because the adversarial-target axis is required at run time.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Conditional per-target estimate.
         """
-        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         seed_group_count = sum(len(groups) for groups in selected_groups.values())
         technique_count = len(self._scenario_techniques)
         per_target_count = seed_group_count * technique_count
+        target_names = self.params.get("adversarial_targets") or []
+        if target_names:
+            target_count = len(target_names)
+            total_count = per_target_count * target_count
+            return ScenarioDefaultRunSizeEstimate(
+                status=ScenarioRunSizeEstimateStatus.Exact,
+                total_attack_count=total_count,
+                components=[
+                    ScenarioRunSizeComponent(
+                        label="Adversarial target sweep",
+                        count=total_count,
+                        factors=[
+                            ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                            ScenarioRunSizeFactor(label="selected concrete techniques", count=technique_count),
+                            ScenarioRunSizeFactor(label="adversarial targets", count=target_count),
+                        ],
+                    )
+                ],
+                datasets=datasets,
+                note="Baseline is forbidden. The default use_cached=False policy does not subtract prior results.",
+            )
         return ScenarioDefaultRunSizeEstimate(
             status=ScenarioRunSizeEstimateStatus.Conditional,
             components=[

@@ -105,6 +105,35 @@ async def test_create_and_initialize_async_creates_sets_params_and_initializes()
     scenario.initialize_async.assert_awaited_once_with()
 
 
+async def test_create_and_estimate_async_configures_without_initializing() -> None:
+    """Configured estimation uses the registry parameter lifecycle without creating a run."""
+    registry = ScenarioRegistry()
+    scenario = MagicMock()
+    estimate = MagicMock()
+    scenario.get_run_size_estimate_async = AsyncMock(return_value=estimate)
+    registry.create_instance = MagicMock(return_value=scenario)  # type: ignore[method-assign]
+
+    result = await registry.create_and_estimate_async(
+        "my.scenario",
+        scenario_params={"num_jailbreaks": 2},
+        scenario_techniques=["prompt_sending"],
+        include_baseline=False,
+    )
+
+    assert result is estimate
+    registry.create_instance.assert_called_once_with("my.scenario")
+    scenario.set_scenario_registry_name.assert_called_once_with("my.scenario")
+    scenario.set_params_from_args.assert_called_once_with(
+        args={
+            "num_jailbreaks": 2,
+            "scenario_techniques": ["prompt_sending"],
+            "include_baseline": False,
+        }
+    )
+    scenario.get_run_size_estimate_async.assert_awaited_once_with()
+    scenario.initialize_async.assert_not_called()
+
+
 async def test_create_and_initialize_async_omits_result_id_when_none() -> None:
     """When no scenario_result_id is supplied, it is not forwarded to the constructor."""
     registry = ScenarioRegistry()

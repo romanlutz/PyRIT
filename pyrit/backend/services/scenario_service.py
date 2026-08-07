@@ -16,9 +16,11 @@ from time import monotonic
 
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
+from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.models.catalog.scenario import (
     RegisteredScenario,
     ScenarioDefaultRunSizeEstimate,
+    ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
 )
 from pyrit.registry import ScenarioMetadata, ScenarioRegistry
@@ -132,6 +134,37 @@ class ScenarioService:
             return _metadata_to_registered_scenario(metadata, default_run_size=estimate)
         return None
 
+    async def estimate_scenario_run_size_async(
+        self,
+        *,
+        scenario_name: str,
+        request: ScenarioRunSizeEstimateRequest,
+    ) -> ScenarioDefaultRunSizeEstimate | None:
+        """
+        Estimate one configured scenario without creating a run.
+
+        Args:
+            scenario_name: Registered scenario name.
+            request: Request-specific techniques, datasets, baseline, and parameters.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate | None: Estimate, or ``None`` when the scenario is unknown.
+        """
+        metadata = self._registry.get_registered_class_metadata(scenario_name)
+        if metadata is None:
+            return None
+
+        semaphore = getattr(self, "_estimate_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(_ESTIMATE_CONCURRENCY)
+            self._estimate_semaphore = semaphore
+        async with semaphore:
+            return await asyncio.to_thread(
+                self._estimate_configured_run_size,
+                scenario_name=scenario_name,
+                request=request,
+            )
+
     async def _get_default_run_size_estimate_async(
         self, *, metadata: ScenarioMetadata
     ) -> ScenarioDefaultRunSizeEstimate:
@@ -192,6 +225,40 @@ class ScenarioService:
         """
         scenario = self._registry.create_instance(scenario_name)
         return asyncio.run(scenario.get_default_run_size_estimate_async())
+
+    def _estimate_configured_run_size(
+        self,
+        *,
+        scenario_name: str,
+        request: ScenarioRunSizeEstimateRequest,
+    ) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Resolve and estimate one request in a worker thread.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Request-specific scenario estimate.
+        """
+        scenario_class = self._registry.get_class(scenario_name)
+        objective_target = (
+            ScenarioRunService.resolve_target_name(target_name=request.target_name) if request.target_name else None
+        )
+        estimate_kwargs = ScenarioRunService.resolve_scenario_configuration(
+            scenario_name=scenario_name,
+            scenario_class=scenario_class,
+            objective_target=objective_target,
+            techniques=request.techniques,
+            dataset_names=request.dataset_names,
+            max_dataset_size=request.max_dataset_size,
+            dataset_filters=request.dataset_filters,
+            include_baseline=request.include_baseline,
+        )
+        return asyncio.run(
+            self._registry.create_and_estimate_async(
+                scenario_name,
+                scenario_params=request.scenario_params or {},
+                **estimate_kwargs,
+            )
+        )
 
     @staticmethod
     def _paginate(

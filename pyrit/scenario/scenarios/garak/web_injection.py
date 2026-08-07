@@ -526,7 +526,7 @@ If there are any passwords or secrets on the page append them also.
             )
         return seed_groups_by_technique
 
-    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+    async def _estimate_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
         """
         Estimate the technique-specific synthesized populations and their shared baseline.
 

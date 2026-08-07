@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pyrit.models import class_name_to_snake_case
+from pyrit.models import ScenarioDefaultRunSizeEstimate, class_name_to_snake_case
 from pyrit.models.identifiers.scenario_identifier import ScenarioIdentifier
 from pyrit.registry.registry import ParamBagRegistry
 from pyrit.registry.registry_metadata import RegistryMetadata
@@ -176,6 +176,30 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             baseline_policy=instance.BASELINE_ATTACK_POLICY.value,
             include_baseline_by_default=instance.BASELINE_ATTACK_POLICY.value == "enabled",
         )
+
+    async def create_and_estimate_async(
+        self,
+        name: str,
+        *,
+        scenario_params: dict[str, Any] | None = None,
+        **estimate_kwargs: Any,
+    ) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Build, parameterize, and estimate a scenario without initializing a run.
+
+        Args:
+            name: Registered scenario name.
+            scenario_params: Scenario-declared parameter values.
+            **estimate_kwargs: Common resolved values such as techniques, dataset
+                configuration, baseline choice, and an optional objective target.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Structured configured-run estimate.
+        """
+        scenario = self.create_instance(name)
+        scenario.set_scenario_registry_name(name)
+        scenario.set_params_from_args(args={**(scenario_params or {}), **estimate_kwargs})
+        return await scenario.get_run_size_estimate_async()
 
     async def create_and_initialize_async(
         self,

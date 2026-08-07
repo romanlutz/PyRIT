@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from pyrit.backend.main import app
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
+from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import (
     ScenarioService,
     get_scenario_service,
@@ -23,10 +24,26 @@ from pyrit.models import (
     Parameter,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
 )
 from pyrit.models.catalog.scenario import RegisteredScenario
 from pyrit.registry import ScenarioMetadata
+from pyrit.scenario.core import DatasetAttackConfiguration, ScenarioTechnique
+
+
+class _EstimateTechnique(ScenarioTechnique):
+    """Technique enum for configured catalog estimate tests."""
+
+    ALL = ("all", {"all"})
+    DEFAULT = ("default", {"default"})
+    PROMPT_SENDING = ("prompt_sending", {"default"})
+    CONTEXT_COMPLIANCE = ("context_compliance", {"default"})
+
+    @classmethod
+    def get_aggregate_tags(cls) -> set[str]:
+        """Return aggregate tags."""
+        return {"all", "default"}
 
 
 @pytest.fixture
@@ -275,6 +292,63 @@ class TestScenarioServiceListScenarios:
 class TestScenarioServiceGetScenario:
     """Tests for ScenarioService.get_scenario_async."""
 
+    async def test_configured_estimate_uses_shared_launch_resolution(self) -> None:
+        """Configured estimates pass typed selections and parameters into the registry lifecycle."""
+        metadata = _make_scenario_metadata(registry_name="airt.jailbreak")
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=12,
+            components=[ScenarioRunSizeComponent(label="Configured Jailbreak", count=12)],
+        )
+        introspection_instance = MagicMock()
+        introspection_instance._technique_class = _EstimateTechnique
+        introspection_instance._default_dataset_config = DatasetAttackConfiguration(dataset_names=["harmbench"])
+        scenario_class = MagicMock(return_value=introspection_instance)
+        objective_target = MagicMock()
+
+        with (
+            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioRunService, "resolve_target_name", return_value=objective_target) as resolve_target,
+        ):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_registered_class_metadata.return_value = metadata
+            service._registry.get_class.return_value = scenario_class
+            service._registry.create_and_estimate_async = AsyncMock(return_value=estimate)
+
+            result = await service.estimate_scenario_run_size_async(
+                scenario_name="airt.jailbreak",
+                request=ScenarioRunSizeEstimateRequest(
+                    target_name="preview_target",
+                    techniques=["prompt_sending"],
+                    dataset_names=["harmbench"],
+                    max_dataset_size=3,
+                    dataset_filters={"harm_categories": ["violence"]},
+                    include_baseline=True,
+                    scenario_params={
+                        "num_jailbreaks": 2,
+                        "num_jailbreak_attempts": 1,
+                    },
+                ),
+            )
+
+        assert result == estimate
+        resolve_target.assert_called_once_with(target_name="preview_target")
+        call = service._registry.create_and_estimate_async.await_args
+        assert call.args == ("airt.jailbreak",)
+        assert call.kwargs["scenario_params"] == {
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+        assert call.kwargs["scenario_techniques"] == [_EstimateTechnique.PROMPT_SENDING]
+        assert call.kwargs["include_baseline"] is True
+        assert call.kwargs["objective_target"] is objective_target
+        dataset_config = call.kwargs["dataset_config"]
+        assert type(dataset_config) is DatasetAttackConfiguration
+        assert dataset_config.dataset_names == ["harmbench"]
+        assert dataset_config.max_dataset_size == 3
+        assert dataset_config.filters == {"harm_categories": ["violence"]}
+
     async def test_get_scenario_returns_matching_scenario(self) -> None:
         """Test that get returns the matching scenario."""
         metadata = _make_scenario_metadata(registry_name="foundry.red_team_agent")
@@ -428,6 +502,69 @@ class TestScenarioRoutes:
             response = client.get("/api/scenarios/catalog/nonexistent")
 
             assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_estimate_scenario_returns_configured_projection(self, client: TestClient) -> None:
+        """POST catalog estimate forwards request fields and returns the structured estimate."""
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=12,
+            components=[ScenarioRunSizeComponent(label="Configured Jailbreak", count=12)],
+        )
+        with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.estimate_scenario_run_size_async = AsyncMock(return_value=estimate)
+            mock_get_service.return_value = mock_service
+
+            response = client.post(
+                "/api/scenarios/catalog/airt.jailbreak/estimate",
+                json={
+                    "techniques": ["prompt_sending"],
+                    "include_baseline": True,
+                    "scenario_params": {
+                        "num_jailbreaks": 2,
+                        "num_jailbreak_attempts": 1,
+                    },
+                },
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["total_attack_count"] == 12
+        request = mock_service.estimate_scenario_run_size_async.await_args.kwargs["request"]
+        assert request.techniques == ["prompt_sending"]
+        assert request.include_baseline is True
+        assert request.scenario_params == {
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+
+    def test_estimate_scenario_returns_400_for_invalid_configuration(self, client: TestClient) -> None:
+        """Configured estimate validation errors become clear client errors."""
+        with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.estimate_scenario_run_size_async = AsyncMock(
+                side_effect=ValueError("Technique 'unknown' not found")
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.post(
+                "/api/scenarios/catalog/airt.jailbreak/estimate",
+                json={"techniques": ["unknown"]},
+            )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "Technique 'unknown' not found" in response.json()["detail"]
+
+    def test_estimate_scenario_returns_404_for_unknown_scenario(self, client: TestClient) -> None:
+        """Unknown configured estimates preserve the catalog not-found contract."""
+        with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.estimate_scenario_run_size_async = AsyncMock(return_value=None)
+            mock_get_service.return_value = mock_service
+
+            response = client.post("/api/scenarios/catalog/missing.scenario/estimate", json={})
+
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+        assert "missing.scenario" in response.json()["detail"]
 
     def test_get_scenario_with_dotted_name(self, client: TestClient) -> None:
         """Test that dotted scenario names (e.g., 'foundry.red_team_agent') work in path."""
