@@ -17,6 +17,12 @@ ComponentIdentifier``).
 """
 
 from pyrit.models.additional_initializer import AdditionalInitializer
+from pyrit.models.catalog import (
+    ScenarioDatasetSummary,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.conversation_stats import ConversationStats
 from pyrit.models.embeddings import EmbeddingData, EmbeddingResponse, EmbeddingSupport, EmbeddingUsageInformation
 from pyrit.models.harm_definition import HarmDefinition, ScaleDescription, get_all_harm_definitions
@@ -211,8 +217,12 @@ __all__ = [
     "ScenarioEvaluationIdentifier",
     "ScorerEvaluationIdentifier",
     "ScorerIdentifier",
+    "ScenarioDatasetSummary",
     "ScenarioIdentifier",
     "ScenarioResult",
+    "ScenarioRunSizeComponent",
+    "ScenarioRunSizeEstimate",
+    "ScenarioRunSizeFactor",
     "ScenarioRunState",
     "SCENARIO_RUN_PLAN_METADATA_KEY",
     "SCENARIO_RUN_PLAN_VERSION",
