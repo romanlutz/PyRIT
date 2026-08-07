@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import logging
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from pyrit.common import apply_defaults
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_matrix_atomic_attacks
 from pyrit.scenario.core.scenario import Scenario
+from pyrit.scenario.core.scenario_run_size import ScenarioRunSizeShape
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,6 +71,7 @@ class Cyber(Scenario):
     #: technique pool (and the ``all`` aggregate) reflects whatever the initializer
     #: registered. ``use_cached`` only matches prior runs at the current ``VERSION``.
     VERSION: int = 3
+    RUN_SIZE_SHAPE: ClassVar[ScenarioRunSizeShape] = ScenarioRunSizeShape.MATRIX
 
     @classmethod
     def get_override_composite_scorer_questions_path(cls) -> list[Path]:

@@ -26,6 +26,8 @@ from pyrit.models import ScenarioResult
 from pyrit.models.catalog.scenario import (
     RegisteredScenario,
     RunScenarioRequest,
+    ScenarioEstimateRequest,
+    ScenarioRunSizeEstimate,
     ScenarioRunSummary,
 )
 from pyrit.models.scenario_progress import ScenarioRunProgress
@@ -57,6 +59,37 @@ async def list_scenarios(  # pyrit-async-suffix-exempt
     """
     service = get_scenario_service()
     return await service.list_scenarios_async(limit=limit, cursor=cursor)
+
+
+@router.post(
+    "/catalog/{scenario_name:path}/estimate",
+    response_model=ScenarioRunSizeEstimate,
+    responses={
+        400: {"model": ProblemDetail, "description": "Invalid estimate configuration"},
+        404: {"model": ProblemDetail, "description": "Scenario not found"},
+    },
+)
+async def estimate_scenario(
+    scenario_name: str,
+    request: ScenarioEstimateRequest,
+) -> ScenarioRunSizeEstimate:  # pyrit-async-suffix-exempt
+    """
+    Preview scenario-owned planned execution sizing without persisting a run.
+
+    Returns:
+        ScenarioRunSizeEstimate: The structured planning result.
+    """
+    service = get_scenario_service()
+    try:
+        estimate = await service.estimate_scenario_async(scenario_name=scenario_name, request=request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    if estimate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scenario '{scenario_name}' not found",
+        )
+    return estimate
 
 
 @router.get(

@@ -12,7 +12,7 @@ from pyrit.common import apply_defaults
 from pyrit.converter import TextJailbreakConverter
 from pyrit.datasets import TextJailBreak
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.models import AttackTechniqueSeedGroup, Parameter
+from pyrit.models import AttackTechniqueSeedGroup, Parameter, ScenarioRunSizeEstimate
 from pyrit.prompt_target import CapabilityName
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
@@ -20,9 +20,18 @@ from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import (
     MatrixAtomicAttackBuilder,
     build_baseline_atomic_attack,
+    resolve_selected_factories_and_compatible_groups,
     resolve_technique_factories,
 )
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    build_baseline_size_component,
+    build_conditional_estimate,
+    build_exact_estimate,
+    build_size_component,
+    build_unavailable_estimate,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -281,6 +290,92 @@ class Jailbreak(Scenario):
         metadata = super()._build_initial_scenario_metadata()
         metadata[_JAILBREAK_TEMPLATES_METADATA_KEY] = list(self._resolved_jailbreaks)
         return metadata
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate technique × template × attempt × compatible-group outer units.
+
+        Returns:
+            ScenarioRunSizeEstimate: The structured jailbreak estimate.
+        """
+        factories, compatible_groups = resolve_selected_factories_and_compatible_groups(
+            context=context,
+            extra_factories=_extra_default_factories(),
+        )
+        system_selected = _JAILBREAK_SYSTEM_PROMPT in factories
+        system_supported = (
+            self._target_supports_system_delivery(context.objective_target)
+            if context.objective_target is not None
+            else False
+        )
+        active_names = [name for name in factories if name != _JAILBREAK_SYSTEM_PROMPT or system_supported]
+        if context.target_is_configured and system_selected and not system_supported and not active_names:
+            return build_unavailable_estimate(
+                context=context,
+                caveat=(
+                    "The selected jailbreak_system_prompt delivery requires a target with native editable-history "
+                    "and system-prompt capabilities."
+                ),
+            )
+
+        template_count = len(self._resolve_templates())
+        attempt_count = int(self.params.get("num_jailbreak_attempts", 1))
+        components = []
+        if context.include_baseline:
+            components.append(build_baseline_size_component(context=context))
+        components.extend(
+            (
+                build_size_component(
+                    label=name,
+                    factors=[
+                        ("techniques", 1),
+                        ("jailbreak templates", template_count),
+                        ("attempts", attempt_count),
+                        ("compatible logical seed groups", sum(map(len, compatible_groups[name].values()))),
+                    ],
+                )
+            )
+            for name in active_names
+        )
+
+        if system_selected and not context.target_is_configured:
+            conditional_components = list(components)
+            if not system_supported:
+                conditional_components.append(
+                    build_size_component(
+                        label=_JAILBREAK_SYSTEM_PROMPT,
+                        factors=[
+                            ("techniques", 1),
+                            ("jailbreak templates", template_count),
+                            ("attempts", attempt_count),
+                            (
+                                "compatible logical seed groups",
+                                sum(map(len, compatible_groups[_JAILBREAK_SYSTEM_PROMPT].values())),
+                            ),
+                        ],
+                    )
+                )
+            return build_conditional_estimate(
+                context=context,
+                components=conditional_components,
+                caveat=(
+                    "The authoritative total depends on whether the eventual target supports native editable "
+                    "history and system prompts; the components include the system-prompt candidate."
+                ),
+            )
+
+        caveat = (
+            "jailbreak_system_prompt is included because the selected target supports native editable history "
+            "and system prompts."
+            if system_selected and system_supported
+            else (
+                "jailbreak_system_prompt is excluded because the selected target lacks native editable-history "
+                "or system-prompt capability."
+                if system_selected
+                else None
+            )
+        )
+        return build_exact_estimate(context=context, components=components, caveat=caveat)
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

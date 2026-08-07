@@ -11,12 +11,29 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pyrit.analytics import get_cached_results_for_technique
 from pyrit.common import apply_defaults
-from pyrit.models import AttackOutcome, AttackResult, ObjectiveTargetEvaluationIdentifier, ScenarioResult
+from pyrit.models import (
+    AttackOutcome,
+    AttackResult,
+    ObjectiveTargetEvaluationIdentifier,
+    ScenarioResult,
+    ScenarioRunSizeEstimate,
+)
 from pyrit.models.parameter import Parameter
 from pyrit.registry import AttackTechniqueRegistry, TargetRegistry
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
-from pyrit.scenario.core.matrix_atomic_attack_builder import MatrixAtomicAttackBuilder, resolve_technique_factories
+from pyrit.scenario.core.matrix_atomic_attack_builder import (
+    MatrixAtomicAttackBuilder,
+    resolve_selected_factories_and_compatible_groups,
+    resolve_technique_factories,
+)
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    build_conditional_estimate,
+    build_exact_estimate,
+    build_size_component,
+    build_unavailable_estimate,
+)
 
 if TYPE_CHECKING:
     from pyrit.prompt_target import PromptTarget
@@ -186,6 +203,50 @@ class AdversarialBenchmark(Scenario):
             ),
             scenario_result_id=scenario_result_id,
         )
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate the technique × adversarial-target × compatible-group benchmark matrix.
+
+        Returns:
+            ScenarioRunSizeEstimate: The benchmark matrix estimate.
+        """
+        target_names = self.params.get("adversarial_targets")
+        if not target_names:
+            return build_unavailable_estimate(
+                context=context,
+                caveat=(
+                    "A total is unavailable until scenario_params.adversarial_targets names at least one "
+                    "registered adversarial chat target."
+                ),
+            )
+
+        resolved_targets = self._resolve_adversarial_targets(target_names=target_names)
+        _, compatible_groups = resolve_selected_factories_and_compatible_groups(context=context)
+        components = [
+            build_size_component(
+                label=technique.value,
+                factors=[
+                    ("techniques", 1),
+                    ("adversarial targets", len(resolved_targets)),
+                    (
+                        "compatible logical seed groups",
+                        sum(map(len, compatible_groups.get(technique.value, {}).values())),
+                    ),
+                ],
+            )
+            for technique in context.scenario_techniques
+        ]
+        if self._use_cached:
+            return build_conditional_estimate(
+                context=context,
+                components=components,
+                caveat=(
+                    "The displayed components are the uncached candidate population. The authoritative total "
+                    "depends on live behavioral-cache hits and is therefore unavailable before launch."
+                ),
+            )
+        return build_exact_estimate(context=context, components=components)
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

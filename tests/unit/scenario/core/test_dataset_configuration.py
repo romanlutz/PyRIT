@@ -490,6 +490,16 @@ class TestCompoundDatasetAttackConfiguration:
         assert [child.dataset_names for child in config._configurations] == [["d1"], ["d2"]]
         assert all(child.max_dataset_size == 4 for child in config._configurations)
 
+    def test_size_caps_report_child_and_combined_limits(self) -> None:
+        """Planning metadata explains independent child caps and the final compound cap."""
+        config = CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["d1", "d2"], max_dataset_size=4)
+        config.max_dataset_size = 6
+
+        assert config.size_caps_by_dataset() == {
+            "d1": [("per-dataset cap", 4), ("combined compound cap", 6)],
+            "d2": [("per-dataset cap", 4), ("combined compound cap", 6)],
+        }
+
     def test_dataset_names_aggregates_and_dedups(self) -> None:
         config = CompoundDatasetAttackConfiguration(
             configurations=[

@@ -30,7 +30,7 @@ from pyrit.executor.attack import (
     AttackScoringConfig,
     CrescendoAttack,
 )
-from pyrit.models import SeedPrompt
+from pyrit.models import ScenarioRunSizeEstimate, SeedPrompt
 from pyrit.models.parameter import Parameter
 from pyrit.prompt_normalizer.converter_configuration import ConverterConfiguration
 from pyrit.scenario.core.atomic_attack import AtomicAttack
@@ -42,6 +42,11 @@ from pyrit.scenario.core.dataset_configuration import (
 )
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import Scenario
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    build_exact_estimate,
+    build_size_component,
+)
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target, get_default_scorer_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import (
@@ -482,6 +487,38 @@ class Psychosocial(Scenario):
             rebuilt.max_dataset_size = per_subharm_cap * len(dataset_names)
             self._dataset_config = rebuilt
         return await super()._resolve_seed_groups_by_dataset_async(apply_sampling=apply_sampling)
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate each selected sub-harm's technique cells and distinct baseline.
+
+        Returns:
+            ScenarioRunSizeEstimate: The per-sub-harm additive estimate.
+        """
+        components = []
+        for harm in self._selected_sub_harms():
+            group_count = len(context.seed_groups_by_source.get(harm.dataset_name, []))
+            if context.include_baseline:
+                components.append(
+                    build_size_component(
+                        label=f"{harm.name} baseline",
+                        factors=[("selected logical seed groups", group_count)],
+                        is_baseline=True,
+                    )
+                )
+            components.extend(
+                (
+                    build_size_component(
+                        label=f"{harm.name}: {technique.value}",
+                        factors=[
+                            ("technique cells", 1),
+                            ("selected logical seed groups", group_count),
+                        ],
+                    )
+                )
+                for technique in context.scenario_techniques
+            )
+        return build_exact_estimate(context=context, components=components)
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

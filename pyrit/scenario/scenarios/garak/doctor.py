@@ -16,6 +16,7 @@ from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import MatrixAtomicAttackBuilder
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
+from pyrit.scenario.core.scenario_run_size import ScenarioRunSizeShape
 
 if TYPE_CHECKING:
     from pyrit.scenario.core.atomic_attack import AtomicAttack
@@ -104,10 +105,15 @@ class Doctor(Scenario):
     """
 
     VERSION: int = 1
+    RUN_SIZE_SHAPE: ClassVar[ScenarioRunSizeShape] = ScenarioRunSizeShape.MATRIX
 
     # Template-dominated like the Jailbreak scenario: baseline is supported but off
     # by default since the unmodified objective is a weak comparison point here.
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Disabled
+
+    def _get_run_size_extra_factories(self) -> dict[str, AttackTechniqueFactory]:
+        """Return Doctor's local Policy Puppetry factories for matrix sizing."""
+        return {factory.name: factory for factory in DOCTOR_FACTORIES}
 
     @classmethod
     def required_datasets(cls) -> list[str]:

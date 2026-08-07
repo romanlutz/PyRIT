@@ -37,12 +37,15 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     AttackSeedGroup,
+    ScenarioDatasetSizeCap,
+    ScenarioDatasetSummary,
     ScenarioEvaluationIdentifier,
     ScenarioIdentifier,
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
     ScenarioRunPlanSeedGroup,
+    ScenarioRunSizeEstimate,
     ScenarioRunState,
     config_hash,
 )
@@ -54,6 +57,16 @@ from pyrit.registry.resolution import resolve_declared_params, resolve_reference
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.scenario_context import ScenarioContext
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    ScenarioRunSizeShape,
+    append_estimate_caveat,
+    build_baseline_size_component,
+    build_exact_estimate,
+    build_matrix_run_size_estimate,
+    build_size_component,
+    build_unavailable_estimate,
+)
 from pyrit.scenario.core.scenario_target_defaults import get_default_scorer_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import (
@@ -70,6 +83,7 @@ from pyrit.score import (
 if TYPE_CHECKING:
     from pyrit.converter import Converter
     from pyrit.models import ComponentIdentifier
+    from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +141,10 @@ class Scenario(ABC):
     #: ``Enabled`` and ``Disabled`` states; ``Forbidden`` is a hard constraint and a
     #: caller-supplied ``include_baseline=True`` raises ``ValueError``.
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Enabled
+
+    #: Explicit opt-in to a safe base run-size shape. Custom scenarios keep
+    #: ``Unavailable`` and override ``_estimate_run_size``.
+    RUN_SIZE_SHAPE: ClassVar[ScenarioRunSizeShape] = ScenarioRunSizeShape.UNAVAILABLE
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """
@@ -539,6 +557,111 @@ class Scenario(ABC):
         return self._technique_class.resolve(scenario_techniques, default=self._default_technique)
 
     @final
+    async def estimate_run_size_async(self, *, target_is_configured: bool = True) -> ScenarioRunSizeEstimate:
+        """
+        Estimate outer planned executions without constructing or persisting a run.
+
+        Uses the same parameter, technique, dataset, baseline, and sampling paths as
+        ``initialize_async``. The resulting count matches the outer units persisted in
+        ``ScenarioRunPlan``; retries and attack-internal attempts are excluded.
+
+        Args:
+            target_is_configured (bool): Whether the target represents a concrete launch selection.
+
+        Returns:
+            ScenarioRunSizeEstimate: The scenario-owned structured estimate.
+        """
+        self._prepare_run_inputs(require_objective_target=False)
+        unresolved_dataset_config = self._dataset_config
+        logical_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=False)
+        logical_resolved_config = self._dataset_config
+        self._dataset_config = unresolved_dataset_config
+        if self._dataset_config.has_size_cap:
+            selected_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
+        else:
+            selected_groups = logical_groups
+            self._dataset_config = logical_resolved_config
+        context = self._build_run_size_context(
+            logical_seed_groups_by_source=logical_groups,
+            seed_groups_by_source=selected_groups,
+            target_is_configured=target_is_configured,
+        )
+        estimate = self._estimate_run_size(context=context)
+        if self._dataset_config.has_size_cap:
+            estimate = append_estimate_caveat(
+                estimate=estimate,
+                caveat=("A later launch may sample different logical groups while retaining the same capped total."),
+            )
+        return estimate
+
+    def _prepare_run_inputs(self, *, require_objective_target: bool) -> None:
+        """Resolve the launch-aligned parameter bag for initialization or estimation."""
+        if not self._params_resolved:
+            self.set_params_from_args(args=self.params)
+        params = self.params
+        declared_names = {parameter.name for parameter in self.supported_parameters()}
+        self._prepare_objective_target(
+            value=params.get("objective_target"),
+            declared="objective_target" in declared_names,
+            required=require_objective_target,
+        )
+
+        dataset_config = params.get("dataset_config")
+        self._dataset_config_provided = dataset_config is not None
+        self._dataset_config = dataset_config if dataset_config else self._default_dataset_config
+        self._max_concurrency = params.get("max_concurrency", 4)
+        self._max_retries = params.get("max_retries", 0)
+        self._memory_labels = params.get("memory_labels") or {}
+        self._include_baseline = self._resolve_include_baseline(value=params.get("include_baseline"))
+        self._scenario_techniques = self._resolve_scenario_techniques(
+            scenario_techniques=params.get("scenario_techniques")
+        )
+        self._technique_converters = params.get("technique_converters") or {}
+
+    def _prepare_objective_target(self, *, value: Any, declared: bool, required: bool) -> None:
+        """
+        Resolve and validate an objective target when supplied or required.
+
+        Raises:
+            ValueError: If a required target cannot be resolved.
+        """
+        self._objective_target = None
+        self._objective_target_identifier = None
+        if not declared or (value is None and not required):
+            return
+        objective_target = self._resolve_objective_target(value=value)
+        if objective_target is None:
+            raise ValueError(
+                "objective_target is required. Provide it via "
+                "set_params_from_args(args={'objective_target': ...}) or register a default "
+                "with set_default_value() in an initialization script."
+            )
+        self._objective_target = objective_target
+        self._objective_target_identifier = objective_target.get_identifier()
+        type(self).TARGET_REQUIREMENTS.validate(target=objective_target)
+
+    def _resolve_include_baseline(self, *, value: Any) -> bool:
+        """
+        Resolve the runtime baseline flag against the scenario policy.
+
+        Returns:
+            bool: Whether the run includes baseline units.
+
+        Raises:
+            ValueError: If baseline inclusion is requested when forbidden.
+        """
+        if self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Forbidden:
+            if value is True:
+                raise ValueError(
+                    f"{type(self).__name__} does not support a default baseline "
+                    f"(BASELINE_ATTACK_POLICY = Forbidden); pass include_baseline=False or omit the argument."
+                )
+            return False
+        if value is None:
+            return self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Enabled
+        return bool(value)
+
+    @final
     async def initialize_async(self) -> None:
         """
         Initialize the scenario by populating self._atomic_attacks and creating the ScenarioResult.
@@ -573,60 +696,7 @@ class Scenario(ABC):
                 ``TargetRegistry``, or if ``include_baseline=True`` is set for a scenario whose
                 ``BASELINE_ATTACK_POLICY`` is ``Forbidden``.
         """
-        # Resolve declared parameters through the single registry-owned path, materializing
-        # defaults for programmatic callers that skipped an explicit set_params_from_args.
-        # Guarded so the bag is resolved exactly once: the registry/CLI flows already call
-        # set_params_from_args, so this only runs for a direct construct-then-initialize caller
-        # and avoids a surprising re-validation / self-mutation of an already-resolved bag.
-        if not self._params_resolved:
-            self.set_params_from_args(args=self.params)
-        params = self.params
-        declared_names = {p.name for p in self.supported_parameters()}
-
-        # objective_target is only required when the scenario declares it; a subclass may drop
-        # it (then self._objective_target stays None and the scenario supplies its own target).
-        if "objective_target" in declared_names:
-            objective_target = self._resolve_objective_target(value=params.get("objective_target"))
-            if objective_target is None:
-                raise ValueError(
-                    "objective_target is required. Provide it via "
-                    "set_params_from_args(args={'objective_target': ...}) or register a default "
-                    "with set_default_value() in an initialization script."
-                )
-            self._objective_target = objective_target
-            self._objective_target_identifier = objective_target.get_identifier()
-            type(self).TARGET_REQUIREMENTS.validate(target=objective_target)
-
-        dataset_config = params.get("dataset_config")
-        self._dataset_config_provided = dataset_config is not None
-        self._dataset_config = dataset_config if dataset_config else self._default_dataset_config
-        self._max_concurrency = params.get("max_concurrency", 4)
-        self._max_retries = params.get("max_retries", 0)
-        self._memory_labels = params.get("memory_labels") or {}
-
-        # Resolve the effective include_baseline. Forbidden is checked first so a forbidden
-        # scenario type never silently inherits a True default; explicit-True on a forbidden
-        # type is a hard error rather than a silent ignore. For the Enabled / Disabled states,
-        # a None runtime value defers to the policy.
-        include_baseline = params.get("include_baseline")
-        if self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Forbidden:
-            if include_baseline is True:
-                raise ValueError(
-                    f"{type(self).__name__} does not support a default baseline "
-                    f"(BASELINE_ATTACK_POLICY = Forbidden); pass include_baseline=False or omit the argument."
-                )
-            include_baseline = False
-        elif include_baseline is None:
-            include_baseline = self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Enabled
-
-        self._include_baseline = include_baseline
-
-        # Prepare scenario techniques via the resolution hook (subclasses override to widen
-        # accepted types or expand composites) and stash any per-technique converter overrides.
-        self._scenario_techniques = self._resolve_scenario_techniques(
-            scenario_techniques=params.get("scenario_techniques")
-        )
-        self._technique_converters = params.get("technique_converters") or {}
+        self._prepare_run_inputs(require_objective_target=True)
 
         # Build atomic attacks: resolve the seed groups once, snapshot the resolved inputs
         # into a ScenarioContext, and hand it to the subclass extension point. Baseline emission
@@ -1107,6 +1177,113 @@ class Scenario(ABC):
             seed_groups=seed_groups,
             seed_groups_by_dataset=seed_groups_by_dataset,
         )
+
+    def _build_run_size_context(
+        self,
+        *,
+        logical_seed_groups_by_source: dict[str, list[AttackSeedGroup]],
+        seed_groups_by_source: dict[str, list[AttackSeedGroup]],
+        target_is_configured: bool,
+    ) -> ScenarioRunSizeContext:
+        """
+        Build the immutable planning context used by scenario estimators.
+
+        Returns:
+            ScenarioRunSizeContext: The resolved planning inputs.
+        """
+        cap_map = self._dataset_config.size_caps_by_dataset()
+        ordered_names = list(dict.fromkeys([*logical_seed_groups_by_source.keys(), *seed_groups_by_source.keys()]))
+        summaries = [
+            ScenarioDatasetSummary(
+                name=name,
+                logical_group_count=len(logical_seed_groups_by_source.get(name, [])),
+                selected_group_count=len(seed_groups_by_source.get(name, [])),
+                configured_caps=[
+                    ScenarioDatasetSizeCap(label=label, count=count) for label, count in cap_map.get(name, [])
+                ],
+            )
+            for name in ordered_names
+        ]
+        return ScenarioRunSizeContext(
+            scenario_techniques=tuple(self._scenario_techniques),
+            dataset_config=self._dataset_config,
+            seed_groups_by_source=seed_groups_by_source,
+            logical_seed_groups_by_source=logical_seed_groups_by_source,
+            dataset_summaries=summaries,
+            include_baseline=self._include_baseline,
+            objective_target=self._objective_target,
+            target_is_configured=target_is_configured and self._objective_target is not None,
+        )
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate this scenario's outer planned-unit shape.
+
+        Returns:
+            ScenarioRunSizeEstimate: The structured estimate.
+        """
+        if self.RUN_SIZE_SHAPE is ScenarioRunSizeShape.MATRIX:
+            return self._estimate_matrix_run_size(context=context)
+        if self.RUN_SIZE_SHAPE is ScenarioRunSizeShape.SINGLE_POPULATION:
+            return self._estimate_single_population_run_size(
+                context=context,
+                component_labels=[technique.value for technique in context.scenario_techniques],
+            )
+        return build_unavailable_estimate(
+            context=context,
+            caveat=f"{type(self).__name__} does not declare a run-size estimation shape.",
+        )
+
+    def _estimate_matrix_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Use the canonical matrix compatibility and factory-resolution paths.
+
+        Returns:
+            ScenarioRunSizeEstimate: The matrix estimate.
+        """
+        from pyrit.scenario.core.matrix_atomic_attack_builder import (
+            resolve_technique_factories_for_techniques,
+        )
+
+        factories = resolve_technique_factories_for_techniques(
+            scenario_techniques=context.scenario_techniques,
+            extra_factories=self._get_run_size_extra_factories(),
+        )
+        return build_matrix_run_size_estimate(
+            context=context,
+            technique_factories=factories,
+        )
+
+    def _estimate_single_population_run_size(
+        self,
+        *,
+        context: ScenarioRunSizeContext,
+        component_labels: Sequence[str],
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Estimate one full selected population per named attack component.
+
+        Returns:
+            ScenarioRunSizeEstimate: The additive population estimate.
+        """
+        components = []
+        if context.include_baseline:
+            components.append(build_baseline_size_component(context=context))
+        components.extend(
+            build_size_component(
+                label=label,
+                factors=[
+                    ("attack components", 1),
+                    ("selected logical seed groups", context.selected_seed_group_count),
+                ],
+            )
+            for label in component_labels
+        )
+        return build_exact_estimate(context=context, components=components)
+
+    def _get_run_size_extra_factories(self) -> dict[str, "AttackTechniqueFactory"] | None:
+        """Return scenario-local factories used by an opted-in matrix estimator."""
+        return None
 
     @abstractmethod
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:

@@ -48,6 +48,7 @@ class _StubTechnique(ScenarioTechnique):
     EASY = ("easy", {"easy"})
     ROLE_PLAY = ("role_play", {"easy"})
     SINGLE_TURN = ("single_turn", {"easy"})
+    PROMPT_SENDING = ("prompt_sending", set())
 
     @classmethod
     def get_aggregate_tags(cls) -> set[str]:
@@ -318,6 +319,28 @@ class TestScenarioRunServiceStartRun:
 
         init_call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
         assert init_call.kwargs["include_baseline"] is False
+
+    async def test_jailbreak_selection_params_and_baseline_reach_registry_without_default_aggregate(
+        self, mock_all_registries
+    ) -> None:
+        """The GUI's explicit Jailbreak selection reaches the registry unchanged."""
+        mock_all_registries["scenario_instance"]._technique_class = _StubTechnique
+        request = RunScenarioRequest(
+            scenario_name="airt.jailbreak",
+            target_name="my_target",
+            techniques=["prompt_sending"],
+            scenario_params={"num_jailbreaks": 2, "num_jailbreak_attempts": 1},
+            include_baseline=False,
+        )
+
+        service = ScenarioRunService()
+        await service.start_run_async(request=request)
+
+        call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
+        assert call.args == ("airt.jailbreak",)
+        assert call.kwargs["scenario_params"] == {"num_jailbreaks": 2, "num_jailbreak_attempts": 1}
+        assert call.kwargs["include_baseline"] is False
+        assert call.kwargs["scenario_techniques"] == [_StubTechnique.PROMPT_SENDING]
 
     async def test_start_run_max_dataset_size_uses_default_config(self, mock_all_registries) -> None:
         """``max_dataset_size`` with no ``dataset_names`` reuses the scenario's default config."""

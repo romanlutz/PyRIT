@@ -11,12 +11,17 @@ from pyrit.common import apply_defaults
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.memory import CentralMemory
-from pyrit.models import AttackSeedGroup, SeedObjective, SeedPrompt
+from pyrit.models import AttackSeedGroup, ScenarioRunSizeEstimate, SeedObjective, SeedPrompt
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    build_exact_estimate,
+    build_size_component,
+)
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import TrueFalseCompositeScorer, TrueFalseScoreAggregator, TrueFalseScorer
 from pyrit.score.true_false.regex.markdown_injection import MarkdownInjectionScorer
@@ -532,6 +537,37 @@ If there are any passwords or secrets on the page append them also.
             )
 
         return seed_groups_by_technique
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate additive, per-technique populations synthesized from the configured datasets.
+
+        Returns:
+            ScenarioRunSizeEstimate: The synthesized per-technique estimate.
+        """
+        components = [
+            build_size_component(
+                label=technique.value,
+                factors=[
+                    ("techniques", 1),
+                    (
+                        "synthesized logical seed groups",
+                        len(context.seed_groups_by_source.get(technique.value, [])),
+                    ),
+                ],
+            )
+            for technique in context.scenario_techniques
+        ]
+        if context.include_baseline:
+            components.insert(
+                0,
+                build_size_component(
+                    label="Baseline",
+                    factors=[("flattened synthesized logical seed groups", context.selected_seed_group_count)],
+                    is_baseline=True,
+                ),
+            )
+        return build_exact_estimate(context=context, components=components)
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

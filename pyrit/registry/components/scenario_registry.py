@@ -25,7 +25,7 @@ from pyrit.registry.registry_metadata import RegistryMetadata
 if TYPE_CHECKING:
     from types import ModuleType
 
-    from pyrit.models import Parameter
+    from pyrit.models import Parameter, ScenarioRunSizeEstimate
     from pyrit.models.identifiers.component_identifier import ComponentIdentifier
     from pyrit.scenario.core import Scenario
 
@@ -41,14 +41,23 @@ class ScenarioMetadata(RegistryMetadata):
     # The default technique name (e.g., "single_turn")
     default_technique: str = field(kw_only=True)
 
+    # Expanded concrete techniques selected when the caller omits a selection.
+    default_techniques: tuple[str, ...] = field(kw_only=True, default=())
+
     # All available technique names for this scenario.
     all_techniques: tuple[str, ...] = field(kw_only=True)
 
     # Aggregate techniques that combine multiple attack approaches.
     aggregate_techniques: tuple[str, ...] = field(kw_only=True)
 
+    # Ordered aggregate selector -> concrete technique expansions.
+    aggregate_technique_expansions: tuple[tuple[str, tuple[str, ...]], ...] = field(kw_only=True, default=())
+
     # Default dataset names used by this scenario.
     default_datasets: tuple[str, ...] = field(kw_only=True)
+
+    # Dedented Markdown/MyST description with block structure preserved.
+    class_description_markdown: str = field(kw_only=True, default="")
 
     # Scenario-declared custom parameters.
     supported_parameters: tuple[Parameter, ...] = field(kw_only=True, default=())
@@ -132,7 +141,9 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         Raises:
             TypeError: If ``cls()`` cannot be called with no arguments.
         """
-        description = RegistryMetadata.description_from_docstring(cls, fallback="No description available")
+        fallback_description = "No description available"
+        description = RegistryMetadata.description_from_docstring(cls, fallback=fallback_description)
+        description_markdown = RegistryMetadata.description_markdown_from_docstring(cls, fallback=fallback_description)
 
         supported_parameters = tuple(cls.supported_parameters())
 
@@ -149,18 +160,31 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
 
         technique_class = instance._technique_class
         default_technique_value = instance._default_technique.value
+        default_techniques = tuple(
+            technique.value for technique in instance._resolve_scenario_techniques(scenario_techniques=None)
+        )
         all_techniques = tuple(s.value for s in technique_class.get_all_techniques())
         aggregate_techniques = tuple(s.value for s in technique_class.get_aggregate_techniques())
+        aggregate_technique_expansions = tuple(
+            (
+                aggregate.value,
+                tuple(technique.value for technique in technique_class.expand({aggregate})),
+            )
+            for aggregate in technique_class.get_aggregate_techniques()
+        )
         default_datasets = tuple(instance._default_dataset_config.dataset_names)
 
         return ScenarioMetadata(
             class_name=cls.__name__,
             class_module=cls.__module__,
             class_description=description,
+            class_description_markdown=description_markdown,
             registry_name=name,
             default_technique=default_technique_value,
+            default_techniques=default_techniques,
             all_techniques=all_techniques,
             aggregate_techniques=aggregate_techniques,
+            aggregate_technique_expansions=aggregate_technique_expansions,
             default_datasets=default_datasets,
             supported_parameters=supported_parameters,
             baseline_policy=instance.BASELINE_ATTACK_POLICY.value,
@@ -217,3 +241,35 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         scenario.set_scenario_registry_name(name)
         await scenario.initialize_async()
         return scenario
+
+    async def create_and_estimate_async(
+        self,
+        name: str,
+        *,
+        scenario_params: dict[str, Any] | None = None,
+        target_is_configured: bool = True,
+        **estimate_kwargs: Any,
+    ) -> ScenarioRunSizeEstimate:
+        """
+        Build, parameterize, and estimate a scenario without creating run results.
+
+        Uses the same ``Scenario.set_params_from_args`` coercion/default path as
+        ``create_and_initialize_async`` but calls ``estimate_run_size_async`` instead
+        of initialization, so no ``ScenarioResult`` or ``AttackResult`` is persisted.
+
+        Args:
+            name (str): The registered scenario name.
+            scenario_params (dict[str, Any] | None): Scenario-specific declared parameters.
+            target_is_configured (bool): Whether the estimate represents a concrete target selection.
+            **estimate_kwargs (Any): Common launch-aligned parameters for the estimate.
+
+        Returns:
+            ScenarioRunSizeEstimate: The scenario-owned structured estimate.
+        """
+        scenario = self._create_and_configure(
+            name,
+            params={**(scenario_params or {}), **estimate_kwargs},
+            constructor_kwargs={},
+        )
+        scenario.set_scenario_registry_name(name)
+        return await scenario.estimate_run_size_async(target_is_configured=target_is_configured)

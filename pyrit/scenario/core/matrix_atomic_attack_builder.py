@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
     from pyrit.scenario.core.scenario_context import ScenarioContext
+    from pyrit.scenario.core.scenario_run_size import ScenarioRunSizeContext
+    from pyrit.scenario.core.scenario_technique import ScenarioTechnique
     from pyrit.score import Scorer
     from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
 
@@ -155,6 +157,23 @@ def resolve_technique_factories(
         dict[str, AttackTechniqueFactory]: Mapping of technique name to factory, ordered by
         the selected techniques.
     """
+    return resolve_technique_factories_for_techniques(
+        scenario_techniques=context.scenario_techniques,
+        extra_factories=extra_factories,
+    )
+
+
+def resolve_technique_factories_for_techniques(
+    *,
+    scenario_techniques: Sequence[ScenarioTechnique],
+    extra_factories: dict[str, AttackTechniqueFactory] | None = None,
+) -> dict[str, AttackTechniqueFactory]:
+    """
+    Resolve selected concrete techniques to their canonical factories.
+
+    Returns:
+        dict[str, AttackTechniqueFactory]: Selected factories in technique order.
+    """
     from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
 
     all_factories = dict(AttackTechniqueRegistry.get_registry_singleton().get_factories_or_raise())
@@ -162,9 +181,53 @@ def resolve_technique_factories(
         all_factories.update(extra_factories)
     return {
         technique.value: all_factories[technique.value]
-        for technique in context.scenario_techniques
+        for technique in scenario_techniques
         if technique.value in all_factories
     }
+
+
+def filter_compatible_seed_groups(
+    *,
+    factory: AttackTechniqueFactory,
+    seed_groups: Sequence[AttackSeedGroup],
+) -> list[AttackSeedGroup]:
+    """
+    Apply the matrix builder's seed-technique compatibility rule.
+
+    Returns:
+        list[AttackSeedGroup]: Compatible groups in source order.
+    """
+    if factory.seed_technique is None:
+        return list(seed_groups)
+    return AttackSeedGroup.filter_compatible(
+        seed_groups=list(seed_groups),
+        technique=factory.seed_technique,
+    )
+
+
+def resolve_selected_factories_and_compatible_groups(
+    *,
+    context: ScenarioRunSizeContext,
+    extra_factories: dict[str, AttackTechniqueFactory] | None = None,
+) -> tuple[dict[str, AttackTechniqueFactory], dict[str, dict[str, list[AttackSeedGroup]]]]:
+    """
+    Resolve factories and apply the execution builder's compatibility rule for planning.
+
+    Returns:
+        tuple: Selected factories and compatible groups keyed by technique and source.
+    """
+    factories = resolve_technique_factories_for_techniques(
+        scenario_techniques=context.scenario_techniques,
+        extra_factories=extra_factories,
+    )
+    compatible_groups = {
+        technique_name: {
+            source_name: filter_compatible_seed_groups(factory=factory, seed_groups=seed_groups)
+            for source_name, seed_groups in context.seed_groups_by_source.items()
+        }
+        for technique_name, factory in factories.items()
+    }
+    return factories, compatible_groups
 
 
 def build_matrix_atomic_attacks(
@@ -404,13 +467,7 @@ class MatrixAtomicAttackBuilder:
             list[AttackSeedGroup] | None: The compatible groups, or ``None`` when the
             ``(technique, dataset)`` pair has no compatible groups and should be skipped.
         """
-        if factory.seed_technique is None:
-            return list(seed_groups)
-
-        compatible_groups = AttackSeedGroup.filter_compatible(
-            seed_groups=seed_groups,
-            technique=factory.seed_technique,
-        )
+        compatible_groups = filter_compatible_seed_groups(factory=factory, seed_groups=seed_groups)
         skipped = len(seed_groups) - len(compatible_groups)
         if skipped:
             logger.info(

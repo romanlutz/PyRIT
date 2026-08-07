@@ -3,7 +3,7 @@
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pyrit.common import apply_defaults
 from pyrit.common.path import EXECUTOR_RED_TEAM_PATH, EXECUTOR_SIMULATED_TARGET_PATH, SCORER_SEED_PROMPT_PATH
@@ -18,6 +18,7 @@ from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import Scenario
 from pyrit.scenario.core.scenario_context import ScenarioContext
+from pyrit.scenario.core.scenario_run_size import ScenarioRunSizeShape
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import TrueFalseScorer
@@ -89,6 +90,7 @@ class Scam(Scenario):
     """
 
     VERSION: int = 2
+    RUN_SIZE_SHAPE: ClassVar[ScenarioRunSizeShape] = ScenarioRunSizeShape.SINGLE_POPULATION
 
     @classmethod
     def _get_additional_scoring_questions(cls) -> list[Path]:

@@ -12,7 +12,13 @@ from pyrit.common.path import JAILBREAK_TEMPLATES_PATH
 from pyrit.converter import TextJailbreakConverter
 from pyrit.datasets import TextJailBreak
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.models import AttackSeedGroup, ComponentIdentifier, SeedObjective, SeedPrompt
+from pyrit.models import (
+    AttackSeedGroup,
+    ComponentIdentifier,
+    ScenarioRunSizeStatus,
+    SeedObjective,
+    SeedPrompt,
+)
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry import TargetRegistry
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
@@ -201,6 +207,66 @@ class TestJailbreakInitialization:
             scenario.set_params_from_args(args=_default_args(mock_objective_target, num_jailbreaks=3))
             await scenario.initialize_async()
             assert len(scenario._resolved_jailbreaks) == 3
+
+    async def test_run_size_prompt_sending_two_templates_four_groups_is_eight(
+        self, mock_objective_target, mock_objective_scorer
+    ) -> None:
+        """The launch-aligned GUI selection has exactly eight persisted outer units."""
+        seed_groups = [AttackSeedGroup(seeds=[SeedObjective(value=f"objective {index}")]) for index in range(4)]
+        technique_class = _build_jailbreak_technique()
+        with _patch_seed_groups(seed_groups):
+            scenario = Jailbreak(objective_scorer=mock_objective_scorer)
+            scenario.set_params_from_args(
+                args={
+                    "objective_target": mock_objective_target,
+                    "scenario_techniques": [technique_class(_PROMPT_SENDING)],
+                    "include_baseline": False,
+                    "num_jailbreaks": 2,
+                    "num_jailbreak_attempts": 1,
+                }
+            )
+
+            estimate = await scenario.estimate_run_size_async()
+
+        assert estimate.status is ScenarioRunSizeStatus.EXACT
+        assert estimate.total_planned_executions == 8
+        assert [component.label for component in estimate.components] == [_PROMPT_SENDING]
+        assert [(factor.label, factor.count) for factor in estimate.components[0].factors] == [
+            ("techniques", 1),
+            ("jailbreak templates", 2),
+            ("attempts", 1),
+            ("compatible logical seed groups", 4),
+        ]
+        assert estimate.datasets[0].logical_group_count == 4
+        assert estimate.datasets[0].selected_group_count == 4
+        assert [(cap.label, cap.count) for cap in estimate.datasets[0].configured_caps] == [("per-dataset cap", 4)]
+
+    async def test_run_size_is_conditional_when_system_delivery_target_is_not_selected(
+        self, mock_objective_target, mock_objective_scorer
+    ) -> None:
+        """The default system-prompt axis does not claim a total before target capability is known."""
+        seed_groups = [AttackSeedGroup(seeds=[SeedObjective(value="objective")])]
+        technique_class = _build_jailbreak_technique()
+        with _patch_seed_groups(seed_groups):
+            scenario = Jailbreak(objective_scorer=mock_objective_scorer)
+            scenario.set_params_from_args(
+                args={
+                    "objective_target": mock_objective_target,
+                    "scenario_techniques": [technique_class("default")],
+                    "include_baseline": False,
+                    "num_jailbreaks": 2,
+                }
+            )
+
+            estimate = await scenario.estimate_run_size_async(target_is_configured=False)
+
+        assert estimate.status is ScenarioRunSizeStatus.CONDITIONAL
+        assert estimate.total_planned_executions is None
+        assert [component.label for component in estimate.components] == [
+            _PROMPT_SENDING,
+            _JAILBREAK_SYSTEM_PROMPT,
+        ]
+        assert "target supports native editable history" in (estimate.caveat or "")
 
     async def test_mutually_exclusive_selectors_raise(
         self, mock_objective_target, mock_objective_scorer, mock_memory_seed_groups

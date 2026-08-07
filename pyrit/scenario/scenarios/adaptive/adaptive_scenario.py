@@ -27,12 +27,19 @@ from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import Scenario
+from pyrit.scenario.core.scenario_run_size import (
+    ScenarioRunSizeContext,
+    build_baseline_size_component,
+    build_conditional_estimate,
+    build_exact_estimate,
+    build_size_component,
+)
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.scenario.scenarios.adaptive.dispatcher import AdaptiveTechniqueDispatcher, TechniqueBundle
 from pyrit.scenario.scenarios.adaptive.selectors import EpsilonGreedyTechniqueSelector, TechniqueSelector
 
 if TYPE_CHECKING:
-    from pyrit.models import AttackSeedGroup
+    from pyrit.models import AttackSeedGroup, ScenarioRunSizeEstimate
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
     from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
@@ -196,6 +203,68 @@ class AdaptiveScenario(Scenario):
             )
 
         return atomic_attacks
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate compatible persisted envelopes, excluding adaptive inner attempts.
+
+        Returns:
+            ScenarioRunSizeEstimate: The adaptive outer-envelope estimate.
+        """
+        max_attempts = int(self.params.get("max_attempts_per_objective", 3))
+        if not context.target_is_configured:
+            components = []
+            if context.include_baseline:
+                components.append(build_baseline_size_component(context=context))
+            components.append(
+                build_size_component(
+                    label="Adaptive attack-envelope candidates",
+                    factors=[("selected logical seed groups", context.selected_seed_group_count)],
+                )
+            )
+            return build_conditional_estimate(
+                context=context,
+                components=components,
+                caveat=(
+                    "The authoritative total depends on which selected techniques are compatible with the "
+                    f"configured objective target and each seed group. Up to {max_attempts} inner attempts per "
+                    "envelope and retries are excluded."
+                ),
+            )
+
+        assert context.objective_target is not None
+        techniques = self._build_techniques_dict(objective_target=context.objective_target)
+        dispatcher = AdaptiveTechniqueDispatcher(
+            objective_target=context.objective_target,
+            techniques=techniques,
+            selector=self._selector,
+            objective_scorer=self._objective_scorer,
+            max_attempts_per_objective=self.params.get("max_attempts_per_objective", 3),
+            scenario_result_id=self._scenario_result_id,
+        )
+        compatible_group_count = sum(
+            bool(dispatcher.compatible_techniques(seed_group=seed_group))
+            for seed_groups in context.seed_groups_by_source.values()
+            for seed_group in seed_groups
+        )
+
+        components = []
+        if context.include_baseline:
+            components.append(build_baseline_size_component(context=context))
+        components.append(
+            build_size_component(
+                label="Adaptive attack envelopes",
+                factors=[("compatible logical seed groups", compatible_group_count)],
+            )
+        )
+        return build_exact_estimate(
+            context=context,
+            components=components,
+            caveat=(
+                f"Each planned unit is one persisted adaptive envelope. Up to {max_attempts} selected technique "
+                "attempts may run inside that unit; inner attempts and retries are excluded."
+            ),
+        )
 
     def _build_techniques_dict(
         self,

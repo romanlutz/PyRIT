@@ -50,7 +50,7 @@ from pyrit.executor.attack import (
     TreeOfAttacksWithPruningAttack,
 )
 from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackConverterConfig, AttackScoringConfig
-from pyrit.models import AttackSeedGroup
+from pyrit.models import AttackSeedGroup, ScenarioRunSizeEstimate
 from pyrit.prompt_normalizer.converter_configuration import ConverterConfiguration
 from pyrit.prompt_target import PromptTarget
 from pyrit.scenario.core.atomic_attack import AtomicAttack
@@ -59,6 +59,7 @@ from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
 from pyrit.scenario.core.scenario import Scenario
 from pyrit.scenario.core.scenario_context import ScenarioContext
+from pyrit.scenario.core.scenario_run_size import ScenarioRunSizeContext
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 
@@ -413,6 +414,18 @@ class RedTeamAgent(Scenario):
 
         self._scenario_composites = composites
         return flat
+
+    def _estimate_run_size(self, *, context: ScenarioRunSizeContext) -> ScenarioRunSizeEstimate:
+        """
+        Estimate one selected seed population per resolved Foundry composition.
+
+        Returns:
+            ScenarioRunSizeEstimate: The composition population estimate.
+        """
+        return self._estimate_single_population_run_size(
+            context=context,
+            component_labels=[composition.name for composition in self._scenario_composites],
+        )
 
     @staticmethod
     def _technique_to_composite(technique: ScenarioTechnique) -> "FoundryComposite":

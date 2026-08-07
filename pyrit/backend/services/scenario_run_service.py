@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
+from pyrit.backend.services.scenario_configuration_service import ScenarioConfigurationService
 from pyrit.common.utils import to_sha256
 from pyrit.memory import CentralMemory
 from pyrit.memory.memory_interface import ScenarioProgressKeysetCursor
@@ -61,8 +62,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CONCURRENT_RUNS = 3
 
-_CONVERTER_MODIFIER_PREFIX = "converter."
-
 
 @dataclass
 class _ActiveTask:
@@ -96,6 +95,7 @@ class ScenarioRunService:
         self._memory = CentralMemory.get_memory_instance()
         self._active_tasks: dict[str, _ActiveTask] = {}
         self._run_semaphore = asyncio.Semaphore(max_concurrent_runs)
+        self._configuration_service = ScenarioConfigurationService(converter_registry=ConverterRegistry)
 
     async def start_run_async(self, *, request: RunScenarioRequest) -> ScenarioRunSummary:
         """
@@ -349,86 +349,20 @@ class ScenarioRunService:
                 introspection is required to resolve techniques or dataset
                 configuration.
         """
-        init_kwargs: dict[str, Any] = {
-            "objective_target": objective_target,
-            "max_concurrency": request.max_concurrency,
-            "max_retries": request.max_retries,
-        }
-        if request.include_baseline is not None:
-            init_kwargs["include_baseline"] = request.include_baseline
-
+        init_kwargs = self._configuration_service.build_initialization_kwargs(
+            configuration=request,
+            scenario_name=request.scenario_name,
+            scenario_class=scenario_class,
+            objective_target=objective_target,
+        )
+        init_kwargs.update(
+            {
+                "max_concurrency": request.max_concurrency,
+                "max_retries": request.max_retries,
+            }
+        )
         if request.labels:
             init_kwargs["memory_labels"] = request.labels
-
-        # The request model has already validated the filter keys and coerced values into
-        # lists, so the service can consume them directly.
-        dataset_filters = request.dataset_filters or {}
-
-        # Resolve techniques and dataset config from a temporary instance of the
-        # scenario. The downstream _initialize_scenario_async builds its own
-        # instance (so scenario_result_id can be passed), so this is a cheap
-        # throwaway used only for introspection. Introspection is required
-        # whenever the caller wants to override techniques, dataset names, the
-        # sample cap, or dataset filters, because each of those needs the
-        # scenario's own technique enum or dataset-config subclass to be resolved
-        # correctly.
-        needs_introspection = (
-            bool(request.techniques)
-            or bool(request.dataset_names)
-            or request.max_dataset_size is not None
-            or bool(dataset_filters)
-        )
-        if not needs_introspection:
-            return init_kwargs
-
-        try:
-            introspection_instance = scenario_class()  # type: ignore[ty:missing-argument]
-        except Exception as exc:
-            raise ValueError(
-                f"Cannot resolve runtime configuration for scenario '{request.scenario_name}': "
-                f"scenario class is not instantiable without arguments ({exc})."
-            ) from exc
-
-        if request.techniques:
-            technique_class = introspection_instance._technique_class
-            technique_enums, technique_converters = self._resolve_techniques_and_converters(
-                tokens=request.techniques,
-                technique_class=technique_class,
-                scenario_name=request.scenario_name,
-            )
-            init_kwargs["scenario_techniques"] = technique_enums
-            if technique_converters:
-                init_kwargs["technique_converters"] = technique_converters
-
-        if request.dataset_names or request.max_dataset_size is not None or dataset_filters:
-            default_config = introspection_instance._default_dataset_config
-
-            if request.dataset_names:
-                # Construct a fresh instance of the scenario's own dataset-config
-                # class so subclass-specific behavior is preserved.
-                default_config_class = type(default_config)
-                try:
-                    init_kwargs["dataset_config"] = default_config_class(
-                        dataset_names=request.dataset_names,
-                        max_dataset_size=request.max_dataset_size,
-                        filters=dataset_filters or None,
-                    )
-                except TypeError as exc:
-                    raise ValueError(
-                        f"Scenario '{request.scenario_name}' does not support overriding dataset names through "
-                        f"its {default_config_class.__name__} configuration: {exc}"
-                    ) from exc
-            else:
-                # Reuse the scenario's default dataset config (preserves subtype +
-                # the scenario's own default dataset names) and override only the
-                # sample cap and/or filters. Safe because the introspection instance
-                # is throwaway.
-                if request.max_dataset_size is not None:
-                    default_config.max_dataset_size = request.max_dataset_size
-                if dataset_filters:
-                    default_config.update_filters(filters=dataset_filters)
-                init_kwargs["dataset_config"] = default_config
-
         return init_kwargs
 
     def _resolve_techniques_and_converters(
@@ -460,31 +394,11 @@ class ScenarioRunService:
             ValueError: If a base technique name is unknown, a modifier is malformed, or a
                 converter name is not registered.
         """
-        technique_enums: list[Any] = []
-        technique_converters: dict[str, list[Converter]] = {}
-
-        for token in tokens:
-            base_name, _, remainder = token.partition(":")
-            modifiers = [m for m in remainder.split(":") if m] if remainder else []
-
-            try:
-                technique_enum = technique_class(base_name)
-            except ValueError:
-                available_techniques = [s.value for s in technique_class]
-                raise ValueError(
-                    f"Technique '{base_name}' not found for scenario '{scenario_name}'. "
-                    f"Available: {', '.join(available_techniques)}"
-                ) from None
-            technique_enums.append(technique_enum)
-
-            converters = self._resolve_converter_modifiers(modifiers=modifiers, token=token)
-            if not converters:
-                continue
-
-            for concrete in technique_class.expand({technique_enum}):
-                technique_converters.setdefault(concrete.value, []).extend(converters)
-
-        return technique_enums, technique_converters
+        return self._configuration_service.resolve_techniques_and_converters(
+            tokens=tokens,
+            technique_class=technique_class,
+            scenario_name=scenario_name,
+        )
 
     def _resolve_converter_modifiers(self, *, modifiers: list[str], token: str) -> list["Converter"]:
         """
@@ -501,29 +415,7 @@ class ScenarioRunService:
             ValueError: If a modifier does not use the ``converter.`` prefix or names a
                 converter that is not registered.
         """
-        if not modifiers:
-            return []
-
-        instances = ConverterRegistry.get_registry_singleton().instances
-        converters: list[Converter] = []
-        for modifier in modifiers:
-            if not modifier.startswith(_CONVERTER_MODIFIER_PREFIX):
-                raise ValueError(
-                    f"Unknown technique modifier '{modifier}' in '{token}'. "
-                    f"Supported modifiers must use the '{_CONVERTER_MODIFIER_PREFIX}' prefix "
-                    f"(e.g. '{_CONVERTER_MODIFIER_PREFIX}translation_spanish')."
-                )
-            converter_name = modifier[len(_CONVERTER_MODIFIER_PREFIX) :]
-            converter = instances.get(converter_name)
-            if converter is None:
-                available = instances.get_names()
-                available_text = ", ".join(available) if available else "(none registered)"
-                raise ValueError(
-                    f"Converter '{converter_name}' in '{token}' is not a registered converter "
-                    f"instance. Available converters: {available_text}"
-                )
-            converters.append(converter)
-        return converters
+        return self._configuration_service.resolve_converter_modifiers(modifiers=modifiers, token=token)
 
     async def _initialize_scenario_async(self, *, request: RunScenarioRequest, init_kwargs: dict[str, Any]) -> Scenario:
         """

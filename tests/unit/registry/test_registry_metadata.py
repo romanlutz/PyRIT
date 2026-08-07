@@ -45,6 +45,26 @@ class TestDescriptionFromDocstring:
         result = RegistryMetadata.description_from_docstring(NoDoc)
         assert result == ""
 
+    def test_markdown_description_preserves_blocks_links_and_myst_literals(self):
+        class MarkdownDoc:
+            """
+            First paragraph with a [link](https://example.com) and ``literal value``.
+
+            - First item
+            - Second item
+
+            Final paragraph.
+            """
+
+        result = RegistryMetadata.description_markdown_from_docstring(MarkdownDoc)
+
+        assert result == (
+            "First paragraph with a [link](https://example.com) and ``literal value``.\n\n"
+            "- First item\n"
+            "- Second item\n\n"
+            "Final paragraph."
+        )
+
 
 class TestMatchesFilters:
     """Tests for the _matches_filters function."""
