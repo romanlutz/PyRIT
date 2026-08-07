@@ -486,6 +486,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
               <Table size="small" className={styles.attemptsTable} aria-label="Persisted attack attempts">
                 <TableHeader>
                   <TableRow>
+                    <TableHeaderCell>Attack</TableHeaderCell>
                     <TableHeaderCell>Outcome</TableHeaderCell>
                     <TableHeaderCell>Group</TableHeaderCell>
                     <TableHeaderCell>Seed</TableHeaderCell>
@@ -530,10 +531,15 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                             aria-label={`Open attack ${attempt.attack_result_id}`}
                             onClick={(event) => event.stopPropagation()}
                           >
-                            <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
-                              {formatOutcome(attempt.outcome)}
-                            </Badge>
+                            <Text className={styles.preview} title={attempt.attack_result_id}>
+                              {attempt.attack_result_id}
+                            </Text>
                           </Link>
+                        </TableCell>
+                        <TableCell>
+                          <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
+                            {formatOutcome(attempt.outcome)}
+                          </Badge>
                         </TableCell>
                         <TableCell>{atomicGroupNames.get(attempt.atomic_group_id) ?? attempt.atomic_attack_name}</TableCell>
                         <TableCell><Text className={styles.preview}>{attempt.seed_group_id}</Text></TableCell>

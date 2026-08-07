@@ -229,14 +229,17 @@ describe('ScenarioRunPage', () => {
   it('puts the essential attack link in the first column with bounded provenance', () => {
     renderPage()
 
-    expect(screen.getByRole('link', { name: 'Open attack attack-result-1' })).toHaveAttribute(
+    const attackLink = screen.getByRole('link', { name: 'Open attack attack-result-1' })
+    expect(attackLink).toHaveAttribute(
       'href',
       `/attacks/attack-result-1?scenarioResultId=${SCENARIO_RESULT_ID}`,
     )
+    expect(attackLink).toHaveTextContent('attack-result-1')
     const attemptsTable = screen.getByRole('table', { name: 'Persisted attack attempts' })
+    expect(within(attemptsTable).getByRole('columnheader', { name: 'Attack' })).toBeInTheDocument()
     const firstBodyRow = within(attemptsTable).getAllByRole('row')[1]
     expect(within(firstBodyRow).getAllByRole('cell')[0]).toContainElement(
-      screen.getByRole('link', { name: 'Open attack attack-result-1' }),
+      attackLink,
     )
   })
 
