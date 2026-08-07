@@ -1,9 +1,10 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+
 import {
-  NARROW_VIEWPORT_QUERY,
-  TOUCH_INPUT_QUERY,
   MINIMUM_TOUCH_TARGET_SIZE,
   mobileTouchTarget,
+  NARROW_VIEWPORT_QUERY,
+  TOUCH_INPUT_QUERY,
 } from '@/styles/touchTargets'
 
 export const useScenarioCatalogStyles = makeStyles({
@@ -26,7 +27,7 @@ export const useScenarioCatalogStyles = makeStyles({
     alignItems: 'flex-start',
     justifyContent: 'space-between',
     flexWrap: 'wrap',
-    gap: tokens.spacingVerticalM,
+    gap: tokens.spacingVerticalL,
     marginBottom: tokens.spacingVerticalXL,
     [NARROW_VIEWPORT_QUERY]: {
       flexDirection: 'column',
@@ -40,6 +41,11 @@ export const useScenarioCatalogStyles = makeStyles({
   },
   subtitle: {
     color: tokens.colorNeutralForeground3,
+  },
+  explanation: {
+    maxWidth: '75ch',
+    margin: `${tokens.spacingVerticalS} 0 0`,
+    color: tokens.colorNeutralForeground2,
   },
   headerActions: {
     display: 'flex',
@@ -73,44 +79,248 @@ export const useScenarioCatalogStyles = makeStyles({
     textAlign: 'center',
     color: tokens.colorNeutralForeground3,
   },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(18rem, 1fr))',
-    gap: tokens.spacingVerticalM,
-  },
-  card: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalS,
-    padding: tokens.spacingVerticalL,
+  tableContainer: {
+    minWidth: 0,
+    overflowX: 'auto',
     border: `1px solid ${tokens.colorNeutralStroke2}`,
     borderRadius: tokens.borderRadiusLarge,
     backgroundColor: tokens.colorNeutralBackground1,
+    [NARROW_VIEWPORT_QUERY]: {
+      overflowX: 'visible',
+      border: 0,
+      borderRadius: 0,
+      backgroundColor: 'transparent',
+    },
+  },
+  table: {
+    width: '100%',
+    minWidth: '64rem',
+    tableLayout: 'fixed',
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'block',
+      minWidth: 0,
+    },
+  },
+  tableHeader: {
+    position: 'sticky',
+    top: 0,
+    zIndex: 1,
+    backgroundColor: tokens.colorNeutralBackground1,
+    [NARROW_VIEWPORT_QUERY]: {
+      position: 'absolute',
+      width: '1px',
+      height: '1px',
+      padding: 0,
+      margin: '-1px',
+      overflow: 'hidden',
+      clip: 'rect(0, 0, 0, 0)',
+      whiteSpace: 'nowrap',
+      border: 0,
+    },
+  },
+  tableBody: {
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'block',
+    },
+  },
+  scenarioColumn: {
+    width: '30%',
+  },
+  sizeColumn: {
+    width: '17%',
+  },
+  techniqueColumn: {
+    width: '22%',
+  },
+  datasetColumn: {
+    width: '14%',
+  },
+  actionColumn: {
+    width: '17%',
+  },
+  summaryRow: {
     color: tokens.colorNeutralForeground1,
-    textDecoration: 'none',
-    minHeight: MINIMUM_TOUCH_TARGET_SIZE,
     ':hover': {
       backgroundColor: tokens.colorNeutralBackground1Hover,
+    },
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'grid',
+      width: '100%',
+      marginBottom: tokens.spacingVerticalM,
+      overflow: 'hidden',
+      border: `1px solid ${tokens.colorNeutralStroke2}`,
+      borderRadius: tokens.borderRadiusLarge,
+      backgroundColor: tokens.colorNeutralBackground1,
+    },
+  },
+  expandedSummaryRow: {
+    backgroundColor: tokens.colorNeutralBackground1Hover,
+    [NARROW_VIEWPORT_QUERY]: {
+      marginBottom: 0,
+      borderBottomLeftRadius: 0,
+      borderBottomRightRadius: 0,
+    },
+  },
+  tableCell: {
+    verticalAlign: 'top',
+    overflowWrap: 'anywhere',
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'grid',
+      gridTemplateColumns: 'minmax(7rem, 35%) minmax(0, 1fr)',
+      gap: tokens.spacingHorizontalM,
+      width: 'auto',
+      padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalM}`,
+      borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+      ':last-child': {
+        borderBottom: 0,
+      },
+    },
+  },
+  mobileLabel: {
+    display: 'none',
+    color: tokens.colorNeutralForeground3,
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'block',
+    },
+  },
+  scenarioSummary: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    minWidth: 0,
+  },
+  scenarioLink: {
+    alignSelf: 'flex-start',
+    color: tokens.colorBrandForegroundLink,
+    fontWeight: tokens.fontWeightSemibold,
+    textDecorationLine: 'none',
+    overflowWrap: 'anywhere',
+    ':hover': {
+      textDecorationLine: 'underline',
     },
     ':focus-visible': {
       outline: `2px solid ${tokens.colorStrokeFocus2}`,
       outlineOffset: '2px',
     },
   },
-  description: {
-    color: tokens.colorNeutralForeground2,
-  },
-  datasets: {
+  scenarioType: {
     color: tokens.colorNeutralForeground3,
+  },
+  purposePreview: {
+    display: '-webkit-box',
+    maxWidth: '56ch',
+    maxHeight: '2.75rem',
+    overflow: 'hidden',
+    color: tokens.colorNeutralForeground2,
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: 2,
+  },
+  compactStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: tokens.spacingVerticalXS,
+    minWidth: 0,
+  },
+  secondaryText: {
+    color: tokens.colorNeutralForeground3,
+  },
+  actionCell: {
+    [NARROW_VIEWPORT_QUERY]: {
+      borderBottom: 0,
+    },
+  },
+  actionGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: tokens.spacingVerticalXS,
+    minWidth: 0,
+  },
+  actionLink: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: tokens.spacingVerticalXXL,
+    padding: `0 ${tokens.spacingHorizontalM}`,
+    color: tokens.colorBrandForegroundLink,
+    fontWeight: tokens.fontWeightSemibold,
+    textDecorationLine: 'none',
+    borderRadius: tokens.borderRadiusMedium,
+    ':hover': {
+      backgroundColor: tokens.colorSubtleBackgroundHover,
+    },
+    ':focus-visible': {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: '2px',
+    },
+    [TOUCH_INPUT_QUERY]: {
+      minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+    },
+  },
+  detailsRow: {
+    backgroundColor: tokens.colorNeutralBackground2,
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'block',
+      width: '100%',
+      marginBottom: tokens.spacingVerticalM,
+    },
+  },
+  detailsCell: {
+    padding: tokens.spacingVerticalL,
+    [NARROW_VIEWPORT_QUERY]: {
+      display: 'block',
+      width: 'auto',
+      padding: tokens.spacingVerticalL,
+      border: `1px solid ${tokens.colorNeutralStroke2}`,
+      borderTop: 0,
+      borderBottomLeftRadius: tokens.borderRadiusLarge,
+      borderBottomRightRadius: tokens.borderRadiusLarge,
+      backgroundColor: tokens.colorNeutralBackground2,
+    },
+  },
+  detailsPanel: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: `${tokens.spacingVerticalXL} ${tokens.spacingHorizontalXXL}`,
+    [NARROW_VIEWPORT_QUERY]: {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+      gap: tokens.spacingVerticalXL,
+    },
+  },
+  detailGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    minWidth: 0,
+  },
+  descriptionGroup: {
+    gridColumn: '1 / -1',
+    maxWidth: '75ch',
   },
   metadataGroup: {
     display: 'flex',
     flexDirection: 'column',
-    gap: tokens.spacingVerticalXXS,
+    gap: tokens.spacingVerticalXS,
   },
   badgeGroup: {
     display: 'flex',
     flexWrap: 'wrap',
     gap: tokens.spacingHorizontalXXS,
+  },
+  datasetList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalXS,
+    margin: 0,
+    padding: 0,
+    listStyleType: 'none',
+  },
+  datasetItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalS,
+    minWidth: 0,
   },
 })

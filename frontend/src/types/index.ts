@@ -416,6 +416,50 @@ export interface RunScenarioRequest {
   scenario_result_id?: string | null
 }
 
+export interface ScenarioRunEstimateTerm {
+  id: string
+  label: string
+  value: number
+  detail?: string
+}
+
+export interface ScenarioRunEstimate {
+  scope: 'default' | 'request'
+  total?: number
+  additiveComponents: ScenarioRunEstimateTerm[]
+  multiplicativeFactors: ScenarioRunEstimateTerm[]
+  resolvedTechniques?: string[]
+  formula?: string
+  caveat?: string
+}
+
+export type ScenarioRunEstimateResult =
+  | {
+      status: 'available'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'conditional'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'unavailable'
+      scope: 'default' | 'request'
+      label: string
+      caveat?: string
+    }
+
+export type ScenarioRunEstimateState =
+  | {
+      status: 'loading'
+      scope: 'default' | 'request'
+    }
+  | ScenarioRunEstimateResult
+
+export type ScenarioRunEstimator = (
+  request: RunScenarioRequest,
+) => Promise<ScenarioRunEstimateResult>
+
 export interface AttackErrorSummary {
   atomic_attack_name: string
   objective: string

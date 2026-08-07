@@ -1,27 +1,34 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+
 import {
-  NARROW_VIEWPORT_QUERY,
-  TOUCH_INPUT_QUERY,
   MINIMUM_TOUCH_TARGET_SIZE,
   mobileTouchTarget,
+  mobileTouchTargetHeight,
+  NARROW_VIEWPORT_QUERY,
+  TOUCH_INPUT_QUERY,
 } from '@/styles/touchTargets'
 
 export const useScenarioDetailStyles = makeStyles({
   root: {
-    display: 'flex',
-    flexDirection: 'column',
     height: '100%',
     width: '100%',
     minWidth: 0,
-    maxWidth: '48rem',
     padding: tokens.spacingVerticalXXL,
     overflowX: 'hidden',
     overflowY: 'auto',
     backgroundColor: tokens.colorNeutralBackground2,
-    gap: tokens.spacingVerticalL,
     [NARROW_VIEWPORT_QUERY]: {
       padding: `${tokens.spacingVerticalL} ${tokens.spacingHorizontalM}`,
     },
+  },
+  content: {
+    display: 'flex',
+    flexDirection: 'column',
+    width: '100%',
+    maxWidth: '80rem',
+    minWidth: 0,
+    margin: '0 auto',
+    gap: tokens.spacingVerticalL,
   },
   backLink: {
     alignSelf: 'flex-start',
@@ -32,7 +39,25 @@ export const useScenarioDetailStyles = makeStyles({
     gap: tokens.spacingVerticalXS,
   },
   description: {
+    maxWidth: '75ch',
     color: tokens.colorNeutralForeground2,
+  },
+  layout: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) minmax(18rem, 23rem)',
+    alignItems: 'start',
+    gap: tokens.spacingHorizontalXXL,
+    minWidth: 0,
+    [NARROW_VIEWPORT_QUERY]: {
+      gridTemplateColumns: 'minmax(0, 1fr)',
+      gap: tokens.spacingVerticalXL,
+    },
+  },
+  formColumn: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalL,
+    minWidth: 0,
   },
   section: {
     display: 'flex',
@@ -42,6 +67,19 @@ export const useScenarioDetailStyles = makeStyles({
     border: `1px solid ${tokens.colorNeutralStroke2}`,
     borderRadius: tokens.borderRadiusLarge,
     backgroundColor: tokens.colorNeutralBackground1,
+  },
+  control: {
+    ...mobileTouchTargetHeight,
+    '& > select': {
+      [TOUCH_INPUT_QUERY]: {
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
+    '& > input': {
+      [TOUCH_INPUT_QUERY]: {
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
   },
   checkboxGroup: {
     display: 'flex',
@@ -53,8 +91,22 @@ export const useScenarioDetailStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalM,
   },
+  selectionControl: {
+    ...mobileTouchTargetHeight,
+  },
+  resolvedMembers: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    paddingLeft: tokens.spacingHorizontalM,
+  },
   hint: {
     color: tokens.colorNeutralForeground3,
+  },
+  advancedSection: {
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
   },
   advancedFields: {
     display: 'flex',
@@ -67,11 +119,6 @@ export const useScenarioDetailStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalM,
   },
-  actionsRow: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    gap: tokens.spacingHorizontalS,
-  },
   touchTarget: {
     ...mobileTouchTarget,
   },
@@ -81,6 +128,7 @@ export const useScenarioDetailStyles = makeStyles({
     alignItems: 'center',
     justifyContent: 'center',
     gap: tokens.spacingVerticalM,
+    minHeight: '20rem',
     padding: tokens.spacingVerticalXXXL,
     textAlign: 'center',
     color: tokens.colorNeutralForeground3,
@@ -90,5 +138,97 @@ export const useScenarioDetailStyles = makeStyles({
     [TOUCH_INPUT_QUERY]: {
       minHeight: MINIMUM_TOUCH_TARGET_SIZE,
     },
+  },
+  previewRail: {
+    position: 'sticky',
+    top: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalL,
+    minWidth: 0,
+    padding: tokens.spacingVerticalL,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorNeutralBackground1,
+    [NARROW_VIEWPORT_QUERY]: {
+      position: 'static',
+    },
+  },
+  previewHeader: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+  },
+  previewList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 0,
+    margin: 0,
+  },
+  previewGroup: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(7rem, 38%) minmax(0, 1fr)',
+    gap: tokens.spacingHorizontalM,
+    padding: `${tokens.spacingVerticalM} 0`,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    '& > dt': {
+      color: tokens.colorNeutralForeground3,
+      fontWeight: tokens.fontWeightSemibold,
+    },
+    '& > dd': {
+      minWidth: 0,
+      margin: 0,
+      overflowWrap: 'anywhere',
+    },
+    [NARROW_VIEWPORT_QUERY]: {
+      gridTemplateColumns: 'minmax(7rem, 35%) minmax(0, 1fr)',
+    },
+  },
+  previewStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+  },
+  previewBadges: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalXXS,
+  },
+  errorText: {
+    color: tokens.colorPaletteRedForeground1,
+  },
+  parameterPreview: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    margin: 0,
+  },
+  parameterPreviewRow: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) auto',
+    gap: tokens.spacingHorizontalS,
+    '& > dt': {
+      overflowWrap: 'anywhere',
+    },
+    '& > dd': {
+      margin: 0,
+      fontWeight: tokens.fontWeightSemibold,
+      overflowWrap: 'anywhere',
+    },
+  },
+  estimateGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalM,
+    paddingTop: tokens.spacingVerticalM,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  previewActions: {
+    paddingTop: tokens.spacingVerticalM,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  launchButton: {
+    width: '100%',
+    ...mobileTouchTargetHeight,
   },
 })

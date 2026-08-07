@@ -1,16 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   Accordion,
   AccordionHeader,
   AccordionItem,
   AccordionPanel,
+  Badge,
   Button,
   Checkbox,
   Field,
   Input,
   MessageBar,
   MessageBarBody,
+  Radio,
+  RadioGroup,
   Select,
   Spinner,
   SpinButton,
@@ -19,16 +22,30 @@ import {
 import { ArrowLeftRegular, ArrowSyncRegular, SettingsRegular } from '@fluentui/react-icons'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
+import MarkdownContent from '@/components/Markdown/MarkdownContent'
 import ParameterField from '@/components/Parameters/ParameterField'
-import { buildParametersFromForm, getInitialFormValues, type ParameterFormValue } from '@/components/Parameters/parameterForm'
+import {
+  buildParametersFromForm,
+  getInitialFormValues,
+  type ParameterFormValue,
+} from '@/components/Parameters/parameterForm'
 import type { ViewName } from '@/components/Sidebar/Navigation'
 import { scenariosApi, targetsApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
-import type { RegisteredScenario, RunScenarioRequest, TargetInstance } from '@/types'
+import type {
+  Parameter,
+  RegisteredScenario,
+  RunScenarioRequest,
+  ScenarioRunEstimateResult,
+  ScenarioRunEstimateState,
+  TargetInstance,
+} from '@/types'
 import { fetchAllPages } from '@/utils/fetchAllPages'
 import { routerPathParamValue } from '@/utils/routeParams'
 
 import { useScenarioDetailStyles } from './ScenarioDetail.styles'
+import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
+import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 
 /** Items requested per target page while paging through the full list. */
 const TARGET_PAGE_SIZE = 200
@@ -58,6 +75,13 @@ const MAX_MAX_RETRIES = 20
 const DEFAULT_MAX_CONCURRENCY = 10
 const DEFAULT_MAX_RETRIES = 0
 
+const ESTIMATE_UNAVAILABLE_STATE: ScenarioRunEstimateState = {
+  status: 'unavailable',
+  scope: 'request',
+  label: 'A request-specific backend estimate is not connected yet.',
+  caveat: 'Your configuration is still valid for launch; sizing will appear here after the layer-1 route is wired.',
+}
+
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
   if (typeof data.value === 'number') {
@@ -69,24 +93,184 @@ function resolveSpinButtonValue(data: { value?: number | null; displayValue?: st
 
 type LoadStatus = 'loading' | 'success' | 'not-found' | 'error'
 
-/** Options rendered for technique selection: aggregates first, then concrete techniques, deduped by exact name. */
-function uniqueTechniqueOptions(scenario: RegisteredScenario): { aggregates: string[]; concrete: string[] } {
-  const seen = new Set<string>()
-  const aggregates: string[] = []
+type TechniqueSelection =
+  | {
+      mode: 'preset'
+      preset: string
+    }
+  | {
+      mode: 'custom'
+      techniques: string[]
+    }
+
+interface TechniqueOptions {
+  presets: string[]
+  concrete: string[]
+  defaultSelection: TechniqueSelection
+}
+
+/** Options rendered for technique selection: exclusive presets first, then concrete techniques. */
+function uniqueTechniqueOptions(scenario: RegisteredScenario): TechniqueOptions {
+  const aggregateNames = new Set(scenario.aggregate_techniques)
+  const defaultIsPreset = aggregateNames.has(scenario.default_technique)
+  const seenPresets = new Set<string>()
+  const presets: string[] = []
   for (const name of scenario.aggregate_techniques) {
-    if (!seen.has(name)) {
-      seen.add(name)
-      aggregates.push(name)
+    if (!seenPresets.has(name)) {
+      seenPresets.add(name)
+      presets.push(name)
     }
   }
+  const seenConcrete = new Set<string>()
   const concrete: string[] = []
-  for (const name of scenario.all_techniques) {
-    if (!seen.has(name)) {
-      seen.add(name)
+  const concreteCandidates = defaultIsPreset
+    ? scenario.all_techniques
+    : [scenario.default_technique, ...scenario.all_techniques]
+  for (const name of concreteCandidates) {
+    if (!aggregateNames.has(name) && !seenConcrete.has(name)) {
+      seenConcrete.add(name)
       concrete.push(name)
     }
   }
-  return { aggregates, concrete }
+  const defaultSelection: TechniqueSelection = defaultIsPreset
+    ? { mode: 'preset', preset: scenario.default_technique }
+    : { mode: 'custom', techniques: [scenario.default_technique] }
+  return { presets, concrete, defaultSelection }
+}
+
+function selectedTechniqueNames(selection: TechniqueSelection): string[] {
+  return selection.mode === 'preset' ? [selection.preset] : selection.techniques
+}
+
+function parseDatasetNames(datasetOverride: string): string[] {
+  return datasetOverride
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+}
+
+function formatParameterPreview(value: ParameterFormValue | undefined): string {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(', ') : 'Not set'
+  }
+  return value?.trim() || 'Not set'
+}
+
+interface BuildRunRequestInput {
+  scenario: RegisteredScenario
+  targetName: string
+  techniques: string[]
+  dynamicParameters: Parameter[]
+  scenarioParamValues: Record<string, ParameterFormValue>
+  datasetOverride: string
+  maxDatasetSize: string
+  maxConcurrency: number
+  maxRetries: number
+  includeBaseline: boolean
+  labels: Record<string, string>
+}
+
+type BuildRunRequestResult =
+  | {
+      ok: true
+      request: RunScenarioRequest
+    }
+  | {
+      ok: false
+      error: string
+    }
+
+interface EstimateResolution {
+  requestKey: string
+  result: ScenarioRunEstimateResult
+}
+
+function buildRunRequest({
+  scenario,
+  targetName,
+  techniques,
+  dynamicParameters,
+  scenarioParamValues,
+  datasetOverride,
+  maxDatasetSize,
+  maxConcurrency,
+  maxRetries,
+  includeBaseline,
+  labels,
+}: BuildRunRequestInput): BuildRunRequestResult {
+  if (!targetName) {
+    return { ok: false, error: 'Select a target.' }
+  }
+  if (techniques.length === 0) {
+    return { ok: false, error: 'Select at least one technique.' }
+  }
+
+  let scenarioParams: Record<string, unknown> | null = null
+  if (dynamicParameters.length > 0) {
+    const result = buildParametersFromForm(dynamicParameters, scenarioParamValues)
+    if (!result.ok) {
+      return result
+    }
+    scenarioParams = result.parameters
+  }
+
+  let maxDatasetSizeValue: number | undefined
+  const trimmedMaxDatasetSize = maxDatasetSize.trim()
+  if (trimmedMaxDatasetSize.length > 0) {
+    const parsed = Number(trimmedMaxDatasetSize)
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return { ok: false, error: 'Max dataset size must be a positive integer.' }
+    }
+    maxDatasetSizeValue = parsed
+  }
+  if (
+    !Number.isInteger(maxConcurrency)
+    || maxConcurrency < MIN_MAX_CONCURRENCY
+    || maxConcurrency > MAX_MAX_CONCURRENCY
+  ) {
+    return {
+      ok: false,
+      error: `Max concurrency must be an integer from ${MIN_MAX_CONCURRENCY} to ${MAX_MAX_CONCURRENCY}.`,
+    }
+  }
+  if (
+    !Number.isInteger(maxRetries)
+    || maxRetries < MIN_MAX_RETRIES
+    || maxRetries > MAX_MAX_RETRIES
+  ) {
+    return {
+      ok: false,
+      error: `Max retries must be an integer from ${MIN_MAX_RETRIES} to ${MAX_MAX_RETRIES}.`,
+    }
+  }
+
+  const datasetNames = parseDatasetNames(datasetOverride)
+  const request: RunScenarioRequest = {
+    scenario_name: scenario.scenario_name,
+    target_name: targetName,
+    techniques,
+    max_concurrency: maxConcurrency,
+    max_retries: maxRetries,
+    include_baseline: includeBaseline,
+    labels,
+  }
+  if (datasetNames.length > 0) {
+    request.dataset_names = datasetNames
+  }
+  if (maxDatasetSizeValue !== undefined) {
+    request.max_dataset_size = maxDatasetSizeValue
+  }
+  if (scenarioParams) {
+    request.scenario_params = scenarioParams
+  }
+  return { ok: true, request }
+}
+
+function resolvedTechniques(state: ScenarioRunEstimateState): string[] {
+  if (state.status === 'available' || state.status === 'conditional') {
+    return state.estimate.resolvedTechniques ?? []
+  }
+  return []
 }
 
 interface ScenarioDetailProps {
@@ -99,8 +283,7 @@ export default function ScenarioDetail(props: ScenarioDetailProps) {
   const { scenarioName: encodedScenarioName } = useParams<{ scenarioName: string }>()
   // Keying on the raw URL param forces a full remount (and state reset to the
   // initial "loading" values) whenever the route navigates from one scenario
-  // detail page directly to another, without needing to reset state from
-  // inside an effect.
+  // detail page directly to another.
   return <ScenarioDetailContent key={encodedScenarioName} encodedScenarioName={encodedScenarioName} {...props} />
 }
 
@@ -178,77 +361,82 @@ function ScenarioDetailContent({
 
   if (scenarioStatus === 'loading' || targets === null) {
     return (
-      <div className={styles.root} data-testid="scenario-detail">
+      <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
         <div className={styles.centeredState}>
           <Spinner label="Loading scenario..." />
         </div>
-      </div>
+      </section>
     )
   }
 
   if (scenarioStatus === 'not-found') {
     return (
-      <div className={styles.root} data-testid="scenario-detail">
-        <Link to="/scenarios" className={styles.backLink}>
-          <ArrowLeftRegular /> Back to scenarios
-        </Link>
-        <div className={styles.centeredState} data-testid="scenario-not-found">
-          <Text size={400}>Scenario &quot;{decodedScenarioName}&quot; was not found</Text>
-          <Text size={200}>It may have been renamed or is no longer registered.</Text>
+      <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
+        <div className={styles.content}>
+          <Link to="/scenarios" className={styles.backLink}>
+            <ArrowLeftRegular /> Back to scenarios
+          </Link>
+          <div className={styles.centeredState} data-testid="scenario-not-found">
+            <Text size={400}>Scenario &quot;{decodedScenarioName}&quot; was not found</Text>
+            <Text size={200}>It may have been renamed or is no longer registered.</Text>
+          </div>
         </div>
-      </div>
+      </section>
     )
   }
 
   if (scenarioStatus === 'error' || targetsError) {
     return (
-      <div className={styles.root} data-testid="scenario-detail">
-        <Link to="/scenarios" className={styles.backLink}>
-          <ArrowLeftRegular /> Back to scenarios
-        </Link>
-        <div className={styles.centeredState} data-testid="scenario-error">
-          <MessageBar intent="error">
-            <MessageBarBody>{scenarioError ?? targetsError}</MessageBarBody>
-          </MessageBar>
-          <Button
-            className={styles.touchTarget}
-            appearance="primary"
-            icon={<ArrowSyncRegular />}
-            onClick={handleRetry}
-            data-testid="retry-btn"
-          >
-            Retry
-          </Button>
+      <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
+        <div className={styles.content}>
+          <Link to="/scenarios" className={styles.backLink}>
+            <ArrowLeftRegular /> Back to scenarios
+          </Link>
+          <div className={styles.centeredState} data-testid="scenario-error">
+            <MessageBar intent="error">
+              <MessageBarBody>{scenarioError ?? targetsError}</MessageBarBody>
+            </MessageBar>
+            <Button
+              className={styles.touchTarget}
+              appearance="primary"
+              icon={<ArrowSyncRegular />}
+              onClick={handleRetry}
+              data-testid="retry-btn"
+            >
+              Retry
+            </Button>
+          </div>
         </div>
-      </div>
+      </section>
     )
   }
 
-  // scenarioStatus === 'success' from here on; TS can't narrow `scenario` from
-  // `scenarioStatus`, so this is asserted defensively — both are set together.
+  // scenarioStatus === 'success' from here on; both values are set together.
   if (!scenario) {
     return null
   }
 
   if (targets.length === 0) {
     return (
-      <div className={styles.root} data-testid="scenario-detail">
-        <Link to="/scenarios" className={styles.backLink}>
-          <ArrowLeftRegular /> Back to scenarios
-        </Link>
-        <div className={styles.centeredState} data-testid="no-targets-state">
-          <Text size={400}>No targets configured</Text>
-          <Text size={200}>Configure a target before launching a scenario.</Text>
-          <Button
-            className={styles.touchTarget}
-            appearance="primary"
-            icon={<SettingsRegular />}
-            onClick={() => onNavigate('config')}
-          >
-            Configure target
-          </Button>
+      <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
+        <div className={styles.content}>
+          <Link to="/scenarios" className={styles.backLink}>
+            <ArrowLeftRegular /> Back to scenarios
+          </Link>
+          <div className={styles.centeredState} data-testid="no-targets-state">
+            <Text size={400}>No targets configured</Text>
+            <Text size={200}>Configure a target before launching a scenario.</Text>
+            <Button
+              className={styles.touchTarget}
+              appearance="primary"
+              icon={<SettingsRegular />}
+              onClick={() => onNavigate('config')}
+            >
+              Configure target
+            </Button>
+          </div>
         </div>
-      </div>
+      </section>
     )
   }
 
@@ -273,20 +461,28 @@ interface ScenarioLaunchFormProps {
 function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: ScenarioLaunchFormProps) {
   const styles = useScenarioDetailStyles()
   const navigate = useNavigate()
+  const formId = `scenario-launch-${encodeURIComponent(scenario.scenario_name).replace(/%/g, '-')}`
 
-  const { aggregates, concrete } = uniqueTechniqueOptions(scenario)
-  const dynamicParameters = scenario.supported_parameters.filter(
-    (parameter) => !COMMON_SCENARIO_PARAMETER_NAMES.has(parameter.name),
+  const { presets, concrete, defaultSelection } = useMemo(
+    () => uniqueTechniqueOptions(scenario),
+    [scenario],
+  )
+  const dynamicParameters = useMemo(
+    () => scenario.supported_parameters.filter(
+      (parameter) => !COMMON_SCENARIO_PARAMETER_NAMES.has(parameter.name),
+    ),
+    [scenario.supported_parameters],
   )
   const isBaselineForbidden = scenario.baseline_policy === 'forbidden'
 
   const [targetName, setTargetName] = useState(() => {
-    if (activeTarget && targets.some((t) => t.target_registry_name === activeTarget.target_registry_name)) {
+    if (activeTarget && targets.some((target) =>
+      target.target_registry_name === activeTarget.target_registry_name)) {
       return activeTarget.target_registry_name
     }
     return targets[0].target_registry_name
   })
-  const [selectedTechniques, setSelectedTechniques] = useState<string[]>([scenario.default_technique])
+  const [techniqueSelection, setTechniqueSelection] = useState<TechniqueSelection>(() => defaultSelection)
   const [baselineChecked, setBaselineChecked] = useState(
     () => !isBaselineForbidden && scenario.include_baseline_by_default,
   )
@@ -300,21 +496,117 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [validationError, setValidationError] = useState<string | null>(null)
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  // Synchronous guard against a double-submit (e.g. a fast double click) racing
-  // ahead of the `submitting` state update, which only takes effect next render.
+  const [estimateResolution, setEstimateResolution] = useState<EstimateResolution | null>(null)
+  // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
 
-  const toggleTechnique = (name: string, checked: boolean): void => {
-    setSelectedTechniques((prev) => {
+  const techniques = useMemo(
+    () => selectedTechniqueNames(techniqueSelection),
+    [techniqueSelection],
+  )
+  const requestResult = useMemo(
+    () => buildRunRequest({
+      scenario,
+      targetName,
+      techniques,
+      dynamicParameters,
+      scenarioParamValues,
+      datasetOverride,
+      maxDatasetSize,
+      maxConcurrency,
+      maxRetries,
+      includeBaseline: isBaselineForbidden ? false : baselineChecked,
+      labels,
+    }),
+    [
+      baselineChecked,
+      datasetOverride,
+      dynamicParameters,
+      isBaselineForbidden,
+      labels,
+      maxConcurrency,
+      maxDatasetSize,
+      maxRetries,
+      scenario,
+      scenarioParamValues,
+      targetName,
+      techniques,
+    ],
+  )
+  const estimateRun = scenariosApi.estimateRun
+  const estimateRequestKey = requestResult.ok ? JSON.stringify(requestResult.request) : null
+
+  useEffect(() => {
+    if (!estimateRun || !requestResult.ok || estimateRequestKey === null) {
+      return
+    }
+
+    let cancelled = false
+    estimateRun(requestResult.request)
+      .then((result) => {
+        if (!cancelled) {
+          setEstimateResolution({ requestKey: estimateRequestKey, result })
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setEstimateResolution({
+            requestKey: estimateRequestKey,
+            result: {
+              status: 'unavailable',
+              scope: 'request',
+              label: 'The backend estimate could not be refreshed.',
+              caveat: toApiError(err).detail,
+            },
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [estimateRequestKey, estimateRun, requestResult])
+
+  const estimateState: ScenarioRunEstimateState = !estimateRun
+    ? ESTIMATE_UNAVAILABLE_STATE
+    : !requestResult.ok
+      ? {
+          status: 'unavailable',
+          scope: 'request',
+          label: 'Complete the required configuration to request an estimate.',
+          caveat: requestResult.error,
+        }
+      : estimateResolution?.requestKey === estimateRequestKey
+        ? estimateResolution.result
+        : { status: 'loading', scope: 'request' }
+
+  const handlePresetChange = (preset: string): void => {
+    setTechniqueSelection({ mode: 'preset', preset })
+    setValidationError(null)
+  }
+
+  const handleConcreteChange = (name: string, checked: boolean): void => {
+    setTechniqueSelection((current) => {
       if (checked) {
-        return prev.includes(name) ? prev : [...prev, name]
+        if (current.mode === 'preset') {
+          return { mode: 'custom', techniques: [name] }
+        }
+        return current.techniques.includes(name)
+          ? current
+          : { mode: 'custom', techniques: [...current.techniques, name] }
       }
-      return prev.filter((entry) => entry !== name)
+      if (current.mode === 'preset') {
+        return current
+      }
+      return {
+        mode: 'custom',
+        techniques: current.techniques.filter((technique) => technique !== name),
+      }
     })
+    setValidationError(null)
   }
 
   const updateScenarioParam = (name: string, value: ParameterFormValue): void => {
-    setScenarioParamValues((prev) => ({ ...prev, [name]: value }))
+    setScenarioParamValues((current) => ({ ...current, [name]: value }))
   }
 
   const handleSubmit = async (): Promise<void> => {
@@ -323,84 +615,17 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     }
 
     setApiError(null)
-    if (!targetName) {
-      setValidationError('Select a target.')
+    if (!requestResult.ok) {
+      setValidationError(requestResult.error)
       return
     }
-    if (selectedTechniques.length === 0) {
-      setValidationError('Select at least one technique.')
-      return
-    }
-
-    let scenarioParams: Record<string, unknown> | null = null
-    if (dynamicParameters.length > 0) {
-      const result = buildParametersFromForm(dynamicParameters, scenarioParamValues)
-      if (!result.ok) {
-        setValidationError(result.error)
-        return
-      }
-      scenarioParams = result.parameters
-    }
-
-    let maxDatasetSizeValue: number | undefined
-    const trimmedMaxDatasetSize = maxDatasetSize.trim()
-    if (trimmedMaxDatasetSize.length > 0) {
-      const parsed = Number(trimmedMaxDatasetSize)
-      if (!Number.isInteger(parsed) || parsed < 1) {
-        setValidationError('Max dataset size must be a positive integer.')
-        return
-      }
-      maxDatasetSizeValue = parsed
-    }
-    if (
-      !Number.isInteger(maxConcurrency)
-      || maxConcurrency < MIN_MAX_CONCURRENCY
-      || maxConcurrency > MAX_MAX_CONCURRENCY
-    ) {
-      setValidationError(
-        `Max concurrency must be an integer from ${MIN_MAX_CONCURRENCY} to ${MAX_MAX_CONCURRENCY}.`,
-      )
-      return
-    }
-    if (
-      !Number.isInteger(maxRetries)
-      || maxRetries < MIN_MAX_RETRIES
-      || maxRetries > MAX_MAX_RETRIES
-    ) {
-      setValidationError(`Max retries must be an integer from ${MIN_MAX_RETRIES} to ${MAX_MAX_RETRIES}.`)
-      return
-    }
-
-    const datasetNames = datasetOverride
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
 
     isSubmittingRef.current = true
     setSubmitting(true)
     setValidationError(null)
 
-    const request: RunScenarioRequest = {
-      scenario_name: scenario.scenario_name,
-      target_name: targetName,
-      techniques: selectedTechniques,
-      max_concurrency: maxConcurrency,
-      max_retries: maxRetries,
-      include_baseline: isBaselineForbidden ? false : baselineChecked,
-      labels,
-    }
-    if (datasetNames.length > 0) {
-      request.dataset_names = datasetNames
-    }
-    if (maxDatasetSizeValue !== undefined) {
-      request.max_dataset_size = maxDatasetSizeValue
-    }
-    if (scenarioParams) {
-      request.scenario_params = scenarioParams
-    }
-
     try {
-      const summary = await scenariosApi.startRun(request)
+      const summary = await scenariosApi.startRun(requestResult.request)
       navigate(`/scenario-history/${encodeURIComponent(summary.scenario_result_id)}`, {
         state: { scenarioName: scenario.scenario_name },
       })
@@ -412,182 +637,356 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     }
   }
 
+  const handleFormSubmit = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault()
+    void handleSubmit()
+  }
+
+  const techniqueSelectionInvalid =
+    techniqueSelection.mode === 'custom' && techniqueSelection.techniques.length === 0
+  const previewDatasets = parseDatasetNames(datasetOverride)
+  const effectiveDatasets = previewDatasets.length > 0 ? previewDatasets : scenario.default_datasets
+  const presetMembers = techniqueSelection.mode === 'preset'
+    ? resolvedTechniques(estimateState)
+    : []
+
   return (
-    <div className={styles.root} data-testid="scenario-detail">
-      <Link to="/scenarios" className={styles.backLink}>
-        <ArrowLeftRegular /> Back to scenarios
-      </Link>
+    <section
+      className={styles.root}
+      data-testid="scenario-detail"
+      aria-labelledby="scenario-detail-title"
+    >
+      <div className={styles.content}>
+        <Link to="/scenarios" className={styles.backLink}>
+          <ArrowLeftRegular /> Back to scenarios
+        </Link>
 
-      <div className={styles.headerText}>
-        <Text as="h1" size={600} weight="semibold">{scenario.scenario_name}</Text>
-        <Text size={300} className={styles.description}>{scenario.description}</Text>
-      </div>
-
-      {validationError && (
-        <MessageBar intent="warning">
-          <MessageBarBody role="alert">{validationError}</MessageBarBody>
-        </MessageBar>
-      )}
-      {apiError && (
-        <MessageBar intent="error">
-          <MessageBarBody role="alert">{apiError}</MessageBarBody>
-        </MessageBar>
-      )}
-
-      <div className={styles.section}>
-        <Field label="Target" hint="The registered target this scenario will run against.">
-          <Select
-            value={targetName}
-            disabled={submitting}
-            onChange={(_, data) => setTargetName(data.value)}
-            data-testid="scenario-target-select"
-          >
-            {targets.map((target) => (
-              <option key={target.target_registry_name} value={target.target_registry_name}>
-                {target.target_registry_name}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-
-      <div className={styles.section}>
-        <Text weight="semibold">Techniques</Text>
-        <div className={styles.techniqueGroups}>
-          {aggregates.length > 0 && (
-            <Field label="Aggregate techniques">
-              <div className={styles.checkboxGroup} role="group" aria-label="Aggregate techniques">
-                {aggregates.map((name) => (
-                  <Checkbox
-                    key={name}
-                    label={name}
-                    checked={selectedTechniques.includes(name)}
-                    disabled={submitting}
-                    onChange={(_, data) => toggleTechnique(name, data.checked === true)}
-                    data-testid={`technique-${name}`}
-                  />
-                ))}
-              </div>
-            </Field>
-          )}
-          <Field label="Individual techniques">
-            <div className={styles.checkboxGroup} role="group" aria-label="Individual techniques">
-              {concrete.map((name) => (
-                <Checkbox
-                  key={name}
-                  label={name}
-                  checked={selectedTechniques.includes(name)}
-                  disabled={submitting}
-                  onChange={(_, data) => toggleTechnique(name, data.checked === true)}
-                  data-testid={`technique-${name}`}
-                />
-              ))}
-            </div>
-          </Field>
-        </div>
-      </div>
-
-      <div className={styles.section}>
-        <Field label="Baseline attack">
-          <Checkbox
-            checked={baselineChecked}
-            disabled={submitting || isBaselineForbidden}
-            label={isBaselineForbidden ? 'Not available for this scenario' : 'Include baseline attack'}
-            onChange={(_, data) => setBaselineChecked(data.checked === true)}
-            data-testid="baseline-checkbox"
-          />
-        </Field>
-        {isBaselineForbidden && (
-          <Text size={200} className={styles.hint}>
-            This scenario forbids a baseline comparison run.
+        <div className={styles.headerText}>
+          <Text id="scenario-detail-title" as="h1" size={600} weight="semibold">
+            {scenario.scenario_name}
           </Text>
-        )}
-      </div>
-
-      {dynamicParameters.length > 0 && (
-        <div className={styles.section}>
-          <Text weight="semibold">Scenario parameters</Text>
-          <div className={styles.dynamicParameters}>
-            {dynamicParameters.map((parameter) => (
-              <ParameterField
-                key={parameter.name}
-                parameter={parameter}
-                value={scenarioParamValues[parameter.name]}
-                disabled={submitting}
-                onChange={updateScenarioParam}
-                testIdPrefix="scenario-param"
-              />
-            ))}
-          </div>
+          <MarkdownContent
+            content={normalizeScenarioMarkdown(scenario.description)}
+            className={styles.description}
+            testId="scenario-detail-description"
+          />
         </div>
-      )}
 
-      <Accordion collapsible>
-        <AccordionItem value="advanced">
-          <AccordionHeader>Advanced options</AccordionHeader>
-          <AccordionPanel>
-            <div className={styles.advancedFields}>
-              <Field
-                label="Dataset override"
-                hint="Comma-separated dataset names. Leave blank to use the scenario's default datasets."
-              >
-                <Input
-                  value={datasetOverride}
+        <div className={styles.layout}>
+          <form
+            id={formId}
+            className={styles.formColumn}
+            aria-label="Scenario run configuration"
+            onSubmit={handleFormSubmit}
+            noValidate
+          >
+            {validationError && (
+              <MessageBar intent="warning">
+                <MessageBarBody role="alert">{validationError}</MessageBarBody>
+              </MessageBar>
+            )}
+            {apiError && (
+              <MessageBar intent="error">
+                <MessageBarBody role="alert">{apiError}</MessageBarBody>
+              </MessageBar>
+            )}
+
+            <section className={styles.section} aria-labelledby="target-section-title">
+              <Text id="target-section-title" as="h2" size={400} weight="semibold">Target</Text>
+              <Field hint="The registered target this scenario will run against.">
+                <Select
+                  className={styles.control}
+                  value={targetName}
                   disabled={submitting}
-                  onChange={(_, data) => setDatasetOverride(data.value)}
-                  placeholder={scenario.default_datasets.join(', ') || undefined}
-                  data-testid="dataset-override-input"
+                  onChange={(_, data) => setTargetName(data.value)}
+                  data-testid="scenario-target-select"
+                  aria-label="Target"
+                >
+                  {targets.map((target) => (
+                    <option key={target.target_registry_name} value={target.target_registry_name}>
+                      {target.target_registry_name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </section>
+
+            <section className={styles.section} aria-labelledby="techniques-section-title">
+              <Text id="techniques-section-title" as="h2" size={400} weight="semibold">
+                Techniques
+              </Text>
+              <Text size={200} className={styles.hint}>
+                Selecting a preset replaces any custom list. Selecting the first individual technique
+                switches to a custom list and clears the preset.
+              </Text>
+              <div className={styles.techniqueGroups}>
+                {presets.length > 0 ? (
+                  <Field label="Aggregate preset">
+                    <RadioGroup
+                      value={techniqueSelection.mode === 'preset' ? techniqueSelection.preset : ''}
+                      onChange={(_, data) => handlePresetChange(data.value)}
+                      aria-label="Aggregate preset"
+                    >
+                      {presets.map((name) => (
+                        <Radio
+                          className={styles.selectionControl}
+                          key={name}
+                          label={name === scenario.default_technique ? `${name} (default)` : name}
+                          value={name}
+                          disabled={submitting}
+                          data-testid={`technique-${name}`}
+                        />
+                      ))}
+                    </RadioGroup>
+                  </Field>
+                ) : (
+                  <Text size={200} className={styles.hint}>
+                    No aggregate presets are registered for this scenario.
+                  </Text>
+                )}
+                {techniqueSelection.mode === 'preset' && (
+                  <div className={styles.resolvedMembers} aria-live="polite">
+                    <Text size={200} weight="semibold">Backend-resolved preset members</Text>
+                    {presetMembers.length > 0 ? (
+                      <div className={styles.previewBadges}>
+                        {presetMembers.map((name) => (
+                          <Badge key={name} appearance="outline">{name}</Badge>
+                        ))}
+                      </div>
+                    ) : (
+                      <Text size={200} className={styles.hint}>
+                        Members will appear when the backend estimate provides them.
+                      </Text>
+                    )}
+                  </div>
+                )}
+                <Field
+                  label="Individual techniques"
+                  validationState={techniqueSelectionInvalid ? 'error' : 'none'}
+                  validationMessage={techniqueSelectionInvalid
+                    ? 'Select at least one technique.'
+                    : undefined}
+                >
+                  {concrete.length > 0 ? (
+                    <div className={styles.checkboxGroup} role="group" aria-label="Individual techniques">
+                      {concrete.map((name) => (
+                        <Checkbox
+                          className={styles.selectionControl}
+                          key={name}
+                          label={name}
+                          checked={
+                            techniqueSelection.mode === 'custom'
+                            && techniqueSelection.techniques.includes(name)
+                          }
+                          disabled={submitting}
+                          onChange={(_, data) => handleConcreteChange(name, data.checked === true)}
+                          data-testid={`technique-${name}`}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <Text size={200} className={styles.hint}>
+                      No concrete techniques are registered for custom selection.
+                    </Text>
+                  )}
+                </Field>
+              </div>
+            </section>
+
+            <section className={styles.section} aria-labelledby="baseline-section-title">
+              <Text id="baseline-section-title" as="h2" size={400} weight="semibold">
+                Baseline
+              </Text>
+              <Field>
+                <Checkbox
+                  className={styles.selectionControl}
+                  checked={baselineChecked}
+                  disabled={submitting || isBaselineForbidden}
+                  label={isBaselineForbidden ? 'Not available for this scenario' : 'Include baseline attack'}
+                  onChange={(_, data) => setBaselineChecked(data.checked === true)}
+                  data-testid="baseline-checkbox"
                 />
               </Field>
-              <Field label="Max dataset size" hint="Optional. Leave blank for no cap.">
-                <Input
-                  className={styles.numberInput}
-                  type="number"
-                  min={1}
-                  value={maxDatasetSize}
-                  disabled={submitting}
-                  onChange={(_, data) => setMaxDatasetSize(data.value)}
-                  data-testid="max-dataset-size-input"
-                />
-              </Field>
-              <Field label="Max concurrency">
-                <SpinButton
-                  className={styles.numberInput}
-                  value={maxConcurrency}
-                  min={MIN_MAX_CONCURRENCY}
-                  max={MAX_MAX_CONCURRENCY}
-                  disabled={submitting}
-                  onChange={(_, data) => setMaxConcurrency(resolveSpinButtonValue(data, maxConcurrency))}
-                  data-testid="max-concurrency-input"
-                />
-              </Field>
-              <Field label="Max retries">
-                <SpinButton
-                  className={styles.numberInput}
-                  value={maxRetries}
-                  min={MIN_MAX_RETRIES}
-                  max={MAX_MAX_RETRIES}
-                  disabled={submitting}
-                  onChange={(_, data) => setMaxRetries(resolveSpinButtonValue(data, maxRetries))}
-                  data-testid="max-retries-input"
-                />
-              </Field>
+              {isBaselineForbidden && (
+                <Text size={200} className={styles.hint}>
+                  This scenario forbids a baseline comparison run.
+                </Text>
+              )}
+            </section>
+
+            {dynamicParameters.length > 0 && (
+              <section className={styles.section} aria-labelledby="parameters-section-title">
+                <Text id="parameters-section-title" as="h2" size={400} weight="semibold">
+                  Scenario parameters
+                </Text>
+                <div className={styles.dynamicParameters}>
+                  {dynamicParameters.map((parameter) => (
+                    <ParameterField
+                      key={parameter.name}
+                      parameter={parameter}
+                      value={scenarioParamValues[parameter.name]}
+                      disabled={submitting}
+                      onChange={updateScenarioParam}
+                      testIdPrefix="scenario-param"
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <Accordion collapsible className={styles.advancedSection}>
+              <AccordionItem value="advanced">
+                <AccordionHeader>Advanced options</AccordionHeader>
+                <AccordionPanel>
+                  <div className={styles.advancedFields}>
+                    <Field
+                      label="Dataset override"
+                      hint="Comma-separated dataset names. Leave blank to use the scenario's default datasets."
+                    >
+                      <Input
+                        className={styles.control}
+                        value={datasetOverride}
+                        disabled={submitting}
+                        onChange={(_, data) => setDatasetOverride(data.value)}
+                        placeholder={scenario.default_datasets.join(', ') || undefined}
+                        data-testid="dataset-override-input"
+                      />
+                    </Field>
+                    <Field label="Max dataset size" hint="Optional. Leave blank for no cap.">
+                      <Input
+                        className={styles.numberInput}
+                        type="number"
+                        min={1}
+                        value={maxDatasetSize}
+                        disabled={submitting}
+                        onChange={(_, data) => setMaxDatasetSize(data.value)}
+                        data-testid="max-dataset-size-input"
+                      />
+                    </Field>
+                    <Field label="Max concurrency">
+                      <SpinButton
+                        className={styles.numberInput}
+                        value={maxConcurrency}
+                        min={MIN_MAX_CONCURRENCY}
+                        max={MAX_MAX_CONCURRENCY}
+                        disabled={submitting}
+                        onChange={(_, data) => setMaxConcurrency(resolveSpinButtonValue(data, maxConcurrency))}
+                        data-testid="max-concurrency-input"
+                      />
+                    </Field>
+                    <Field label="Max retries">
+                      <SpinButton
+                        className={styles.numberInput}
+                        value={maxRetries}
+                        min={MIN_MAX_RETRIES}
+                        max={MAX_MAX_RETRIES}
+                        disabled={submitting}
+                        onChange={(_, data) => setMaxRetries(resolveSpinButtonValue(data, maxRetries))}
+                        data-testid="max-retries-input"
+                      />
+                    </Field>
+                  </div>
+                </AccordionPanel>
+              </AccordionItem>
+            </Accordion>
+          </form>
+
+          <aside className={styles.previewRail} aria-labelledby="run-preview-title">
+            <div className={styles.previewHeader}>
+              <Text id="run-preview-title" as="h2" size={500} weight="semibold">Run preview</Text>
+              <Text size={200} className={styles.hint}>
+                Review the exact configuration sent to the backend.
+              </Text>
             </div>
-          </AccordionPanel>
-        </AccordionItem>
-      </Accordion>
-
-      <div className={styles.actionsRow}>
-        <Button
-          className={styles.touchTarget}
-          appearance="primary"
-          disabled={submitting}
-          onClick={() => void handleSubmit()}
-          data-testid="launch-scenario-btn"
-        >
-          {submitting ? 'Launching...' : 'Launch scenario'}
-        </Button>
+            <dl className={styles.previewList}>
+              <div className={styles.previewGroup}>
+                <dt>Target</dt>
+                <dd>{targetName}</dd>
+              </div>
+              <div className={styles.previewGroup}>
+                <dt>Techniques</dt>
+                <dd>
+                  {techniqueSelection.mode === 'preset' ? (
+                    <div className={styles.previewStack}>
+                      <Text weight="semibold">Preset: {techniqueSelection.preset}</Text>
+                      {presetMembers.length > 0 && (
+                        <Text size={200} className={styles.hint}>
+                          Resolves to {presetMembers.join(', ')}
+                        </Text>
+                      )}
+                    </div>
+                  ) : techniqueSelection.techniques.length > 0 ? (
+                    <div className={styles.previewBadges}>
+                      {techniqueSelection.techniques.map((name) => (
+                        <Badge key={name} appearance="outline">{name}</Badge>
+                      ))}
+                    </div>
+                  ) : (
+                    <Text className={styles.errorText}>No custom techniques selected</Text>
+                  )}
+                </dd>
+              </div>
+              <div className={styles.previewGroup}>
+                <dt>Datasets</dt>
+                <dd>
+                  <div className={styles.previewStack}>
+                    <Text>
+                      {effectiveDatasets.length > 0 ? effectiveDatasets.join(', ') : 'No datasets declared'}
+                    </Text>
+                    <Text size={200} className={styles.hint}>
+                      {previewDatasets.length > 0 ? 'Custom override' : 'Scenario defaults'}
+                      {maxDatasetSize.trim() ? ` · capped at ${maxDatasetSize.trim()} each` : ''}
+                    </Text>
+                  </div>
+                </dd>
+              </div>
+              <div className={styles.previewGroup}>
+                <dt>Scenario parameters</dt>
+                <dd>
+                  {dynamicParameters.length > 0 ? (
+                    <dl className={styles.parameterPreview}>
+                      {dynamicParameters.map((parameter) => (
+                        <div className={styles.parameterPreviewRow} key={parameter.name}>
+                          <dt>{parameter.name}</dt>
+                          <dd>{formatParameterPreview(scenarioParamValues[parameter.name])}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    'No scenario-specific parameters'
+                  )}
+                </dd>
+              </div>
+              <div className={styles.previewGroup}>
+                <dt>Baseline</dt>
+                <dd>
+                  {isBaselineForbidden
+                    ? 'Excluded by scenario policy'
+                    : baselineChecked
+                      ? 'Included'
+                      : 'Not included'}
+                </dd>
+              </div>
+            </dl>
+            <div className={styles.estimateGroup}>
+              <Text as="h3" size={400} weight="semibold">Backend-owned size</Text>
+              <ScenarioRunEstimateDetails state={estimateState} />
+            </div>
+            <div className={styles.previewActions}>
+              <Button
+                className={styles.launchButton}
+                appearance="primary"
+                type="submit"
+                form={formId}
+                disabled={submitting || techniqueSelectionInvalid}
+                data-testid="launch-scenario-btn"
+              >
+                {submitting ? 'Launching...' : 'Launch scenario'}
+              </Button>
+            </div>
+          </aside>
+        </div>
       </div>
-    </div>
+    </section>
   )
 }
