@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pyrit.registry.components.scenario_registry import ScenarioRegistry
+from pyrit.scenario.core import BaselineAttackPolicy, ScenarioTechnique
 
 
 class _NotNoArgScenario:
@@ -21,12 +22,60 @@ class _NotNoArgScenario:
         self.required_arg = required_arg
 
 
+class _MetadataTechnique(ScenarioTechnique):
+    """Technique catalog for metadata expansion."""
+
+    ALL = ("all", {"all"})
+    DEFAULT = ("default", {"default"})
+    ONE = ("one", {"default"})
+    TWO = ("two", {"default"})
+
+    @classmethod
+    def get_aggregate_tags(cls) -> set[str]:
+        """Return aggregate tags."""
+        return {"all", "default"}
+
+    @classmethod
+    def default(cls) -> "_MetadataTechnique":
+        """Return the default aggregate."""
+        return cls.DEFAULT
+
+
+class _MetadataScenario:
+    """Minimal scenario-shaped metadata source."""
+
+    BASELINE_ATTACK_POLICY = BaselineAttackPolicy.Enabled
+
+    @classmethod
+    def supported_parameters(cls):
+        """Return no custom parameters."""
+        return []
+
+    def __init__(self) -> None:
+        self._version = 1
+        self._technique_class = _MetadataTechnique
+        self._default_technique = _MetadataTechnique.DEFAULT
+        self._default_dataset_config = MagicMock(dataset_names=["sample"])
+
+    def _resolve_scenario_techniques(self, *, scenario_techniques):
+        """Resolve the concrete defaults."""
+        return _MetadataTechnique.resolve(scenario_techniques, default=self._default_technique)
+
+
 def test_build_metadata_raises_when_scenario_requires_constructor_args() -> None:
     """Scenarios that cannot be instantiated with no args must surface a clear error."""
     registry = ScenarioRegistry()
 
     with pytest.raises(TypeError, match="must be instantiable with no arguments"):
         registry._build_metadata("not_no_arg", _NotNoArgScenario)
+
+
+def test_build_metadata_expands_ordered_default_techniques() -> None:
+    """Catalog metadata exposes concrete defaults rather than only the aggregate name."""
+    metadata = ScenarioRegistry()._build_metadata("sample", _MetadataScenario)
+
+    assert metadata.default_technique == "default"
+    assert metadata.default_techniques == ("one", "two")
 
 
 async def test_create_and_initialize_async_creates_sets_params_and_initializes() -> None:

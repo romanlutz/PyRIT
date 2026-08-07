@@ -22,6 +22,12 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pyrit.common.utils import to_sha256
 from pyrit.executor.attack import AttackScoringConfig
+from pyrit.models import (
+    ScenarioDefaultRunSizeEstimate,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.identifiers import compute_inner_attack_eval_hash
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
@@ -146,6 +152,42 @@ class AdaptiveScenario(Scenario):
             # safe fallback and matches the technique enum's value set.
             registry_overrides = {}
         return {**catalog, **registry_overrides}
+
+    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Estimate adaptive per-objective dispatch, which depends on target compatibility.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Conditional adaptive estimate.
+        """
+        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        seed_group_count = sum(len(groups) for groups in selected_groups.values())
+        components = [
+            ScenarioRunSizeComponent(
+                label="Adaptive dispatch candidates",
+                count=seed_group_count,
+                factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                note="At most one outer execution unit is planned per target-compatible seed group.",
+            )
+        ]
+        if self._include_baseline:
+            components.append(
+                ScenarioRunSizeComponent(
+                    label="Baseline",
+                    count=seed_group_count,
+                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                )
+            )
+        return ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Conditional,
+            components=components,
+            datasets=datasets,
+            note=(
+                f"Up to {sum(component.count for component in components)} planned units. "
+                "The adaptive selector chooses a technique internally, and target/technique compatibility "
+                "can remove seed groups before planning."
+            ),
+        )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

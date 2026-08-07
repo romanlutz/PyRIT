@@ -12,7 +12,14 @@ from pyrit.common import apply_defaults
 from pyrit.converter import TextJailbreakConverter
 from pyrit.datasets import TextJailBreak
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.models import AttackTechniqueSeedGroup, Parameter
+from pyrit.models import (
+    AttackTechniqueSeedGroup,
+    Parameter,
+    ScenarioDefaultRunSizeEstimate,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
+)
 from pyrit.prompt_target import CapabilityName
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
@@ -281,6 +288,80 @@ class Jailbreak(Scenario):
         metadata = super()._build_initial_scenario_metadata()
         metadata[_JAILBREAK_TEMPLATES_METADATA_KEY] = list(self._resolved_jailbreaks)
         return metadata
+
+    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Estimate the template and attempt axes, preserving the target capability caveat.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Conditional target-aware estimate.
+        """
+        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        seed_group_count = sum(len(groups) for groups in selected_groups.values())
+        template_count = len(self.params.get("jailbreak_names") or []) or (
+            self.params.get("num_jailbreaks") or _DEFAULT_NUM_JAILBREAKS
+        )
+        attempt_count = self.params.get("num_jailbreak_attempts") or 1
+        technique_names = {technique.value for technique in self._scenario_techniques}
+        converter_count = len(technique_names - {_JAILBREAK_SYSTEM_PROMPT})
+        include_system_delivery = _JAILBREAK_SYSTEM_PROMPT in technique_names
+
+        components: list[ScenarioRunSizeComponent] = []
+        if self._include_baseline:
+            components.append(
+                ScenarioRunSizeComponent(
+                    label="Baseline",
+                    count=seed_group_count,
+                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                )
+            )
+        components.append(
+            ScenarioRunSizeComponent(
+                label="Inline jailbreak delivery",
+                count=seed_group_count * template_count * attempt_count * converter_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                    ScenarioRunSizeFactor(label="jailbreak templates", count=template_count),
+                    ScenarioRunSizeFactor(label="attempts", count=attempt_count),
+                    ScenarioRunSizeFactor(label="inline delivery techniques", count=converter_count),
+                ],
+            )
+        )
+        if include_system_delivery:
+            components.append(
+                ScenarioRunSizeComponent(
+                    label="Native system-prompt jailbreak delivery",
+                    count=seed_group_count * template_count * attempt_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                        ScenarioRunSizeFactor(label="jailbreak templates", count=template_count),
+                        ScenarioRunSizeFactor(label="attempts", count=attempt_count),
+                    ],
+                    note="Included only when the objective target supports editable history and system prompts.",
+                )
+            )
+
+        guaranteed_count = sum(
+            component.count for component in components if component.label != "Native system-prompt jailbreak delivery"
+        )
+        maximum_count = sum(component.count for component in components)
+        status = (
+            ScenarioRunSizeEstimateStatus.Conditional
+            if include_system_delivery
+            else ScenarioRunSizeEstimateStatus.Exact
+        )
+        return ScenarioDefaultRunSizeEstimate(
+            status=status,
+            total_attack_count=maximum_count if status is ScenarioRunSizeEstimateStatus.Exact else None,
+            components=components,
+            datasets=datasets,
+            note=(
+                f"{guaranteed_count} planned units for target-agnostic delivery; "
+                f"{maximum_count} when native system-prompt delivery is supported."
+                if include_system_delivery
+                else "The default techniques do not require target-specific delivery capabilities."
+            ),
+        )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

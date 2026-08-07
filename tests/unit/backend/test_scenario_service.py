@@ -19,7 +19,12 @@ from pyrit.backend.services.scenario_service import (
     ScenarioService,
     get_scenario_service,
 )
-from pyrit.models import Parameter
+from pyrit.models import (
+    Parameter,
+    ScenarioDefaultRunSizeEstimate,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+)
 from pyrit.models.catalog.scenario import RegisteredScenario
 from pyrit.registry import ScenarioMetadata
 
@@ -44,6 +49,7 @@ def _make_scenario_metadata(
     class_name: str = "TestScenario",
     description: str = "A test scenario",
     default_technique: str = "default",
+    default_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     all_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     aggregate_techniques: tuple[str, ...] = ("all", "default"),
     default_datasets: tuple[str, ...] = ("test_dataset",),
@@ -57,6 +63,7 @@ def _make_scenario_metadata(
         class_module="pyrit.scenario.scenarios.test",
         class_description=description,
         default_technique=default_technique,
+        default_techniques=default_techniques,
         all_techniques=all_techniques,
         aggregate_techniques=aggregate_techniques,
         default_datasets=default_datasets,
@@ -101,11 +108,100 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].scenario_type == "TestScenario"
             assert result.items[0].description == "A test scenario"
             assert result.items[0].default_technique == "default"
+            assert result.items[0].default_techniques == ["role_play", "many_shot"]
             assert result.items[0].aggregate_techniques == ["all", "default"]
             assert result.items[0].all_techniques == ["role_play", "many_shot"]
             assert result.items[0].default_datasets == ["test_dataset"]
             assert result.items[0].baseline_policy == "enabled"
             assert result.items[0].include_baseline_by_default is True
+
+    async def test_estimate_is_offloaded_and_cached(self) -> None:
+        """Scenario-owned estimates run in a worker once and are reused by subsequent reads."""
+        metadata = _make_scenario_metadata()
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=4,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=4)],
+        )
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
+
+        with patch.object(ScenarioService, "__init__", lambda self: None):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_registered_class_metadata.return_value = metadata
+            service._registry.create_instance.return_value = scenario
+
+            first = await service.get_scenario_async(scenario_name="test.scenario")
+            second = await service.get_scenario_async(scenario_name="test.scenario")
+
+        assert first is not None
+        assert second is not None
+        assert first.default_run_size == estimate
+        assert second.default_run_size == estimate
+        service._registry.create_instance.assert_called_once_with("test.scenario")
+
+    async def test_one_failed_estimate_does_not_break_catalog(self) -> None:
+        """A scenario estimate failure is explicit and isolated from other catalog entries."""
+        metadata = [
+            _make_scenario_metadata(registry_name="test.good"),
+            _make_scenario_metadata(registry_name="test.bad"),
+        ]
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=2,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=2)],
+        )
+        good_scenario = MagicMock()
+        good_scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
+        bad_scenario = MagicMock()
+        bad_scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=RuntimeError("dataset unavailable"))
+
+        with patch.object(ScenarioService, "__init__", lambda self: None):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_all_registered_class_metadata.return_value = metadata
+            service._registry.create_instance.side_effect = lambda name: {
+                "test.good": good_scenario,
+                "test.bad": bad_scenario,
+            }[name]
+
+            result = await service.list_scenarios_async()
+
+        assert result.items[0].default_run_size.status is ScenarioRunSizeEstimateStatus.Exact
+        assert result.items[1].default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable
+        assert "RuntimeError" in result.items[1].default_run_size.note
+
+    async def test_unavailable_estimate_cache_expires(self) -> None:
+        """A transient estimate failure is retried after the unavailable-result TTL."""
+        metadata = _make_scenario_metadata()
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=1,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=1)],
+        )
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(
+            side_effect=[RuntimeError("temporary failure"), estimate]
+        )
+
+        with (
+            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch("pyrit.backend.services.scenario_service._UNAVAILABLE_CACHE_TTL_SECONDS", 0),
+        ):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_registered_class_metadata.return_value = metadata
+            service._registry.create_instance.return_value = scenario
+
+            first = await service.get_scenario_async(scenario_name="test.scenario")
+            second = await service.get_scenario_async(scenario_name="test.scenario")
+
+        assert first is not None
+        assert second is not None
+        assert first.default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable
+        assert second.default_run_size == estimate
+        assert service._registry.create_instance.call_count == 2
 
     async def test_list_scenarios_preserves_disabled_baseline_policy(self) -> None:
         metadata = _make_scenario_metadata(
@@ -291,9 +387,20 @@ class TestScenarioRoutes:
             scenario_type="RedTeamAgentScenario",
             description="Red team agent testing",
             default_technique="default",
+            default_techniques=["role_play"],
             aggregate_techniques=["all"],
             all_techniques=["role_play"],
             default_datasets=["airt_hate"],
+            default_run_size=ScenarioDefaultRunSizeEstimate(
+                status=ScenarioRunSizeEstimateStatus.Exact,
+                total_attack_count=8,
+                components=[
+                    ScenarioRunSizeComponent(
+                        label="Default technique sweep",
+                        count=8,
+                    )
+                ],
+            ),
         )
 
         with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
@@ -306,6 +413,10 @@ class TestScenarioRoutes:
             assert response.status_code == status.HTTP_200_OK
             data = response.json()
             assert data["scenario_name"] == "foundry.red_team_agent"
+            assert data["default_techniques"] == ["role_play"]
+            assert data["default_run_size"]["version"] == 1
+            assert data["default_run_size"]["status"] == "exact"
+            assert data["default_run_size"]["total_attack_count"] == 8
 
     def test_get_scenario_returns_404_when_not_found(self, client: TestClient) -> None:
         """Test that GET /api/scenarios/catalog/{name} returns 404 when not found."""

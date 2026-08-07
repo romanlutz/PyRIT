@@ -14,9 +14,10 @@ canonical models.
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pyrit.models.parameter import Parameter
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -39,13 +40,101 @@ from pyrit.models.retry_event import RetryEvent
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
 
 
+class ScenarioRunSizeEstimateStatus(str, Enum):
+    """Confidence level for a catalog default-run size estimate."""
+
+    Exact = "exact"
+    Conditional = "conditional"
+    Unavailable = "unavailable"
+
+
+class ScenarioRunSizeFactor(BaseModel):
+    """One labeled multiplicative factor in a run-size component."""
+
+    label: str = Field(..., min_length=1)
+    count: int = Field(..., ge=0)
+
+
+class ScenarioRunSizeComponent(BaseModel):
+    """One additive component of a default-run size estimate."""
+
+    label: str = Field(..., min_length=1)
+    count: int = Field(..., ge=0)
+    factors: list[ScenarioRunSizeFactor] = Field(default_factory=list)
+    note: str | None = None
+
+
+class ScenarioDatasetSummary(BaseModel):
+    """Logical seed-group counts for one default dataset or synthesized population."""
+
+    name: str = Field(..., min_length=1)
+    kind: Literal["dataset", "synthesized"] = "dataset"
+    logical_seed_group_count: int = Field(..., ge=0)
+    selected_seed_group_count: int = Field(..., ge=0)
+    selection_note: str | None = None
+
+
+class ScenarioDefaultRunSizeEstimate(BaseModel):
+    """
+    Structured estimate of default planned scenario execution units.
+
+    Counts use the same outer unit as ``ScenarioRunPlan``: one atomic-attack and
+    logical-seed-group pair. Retries and internal attack turns are excluded.
+    """
+
+    version: Literal[1] = 1
+    status: ScenarioRunSizeEstimateStatus
+    total_attack_count: int | None = Field(default=None, ge=0)
+    components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
+    datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def validate_total(self) -> "ScenarioDefaultRunSizeEstimate":
+        """
+        Ensure exact estimates expose and explain their complete total.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: The validated estimate.
+
+        Raises:
+            ValueError: If an exact estimate omits or misstates its total.
+        """
+        if self.status is ScenarioRunSizeEstimateStatus.Exact:
+            if self.total_attack_count is None:
+                raise ValueError("Exact default-run estimates require total_attack_count")
+            component_total = sum(component.count for component in self.components)
+            if component_total != self.total_attack_count:
+                raise ValueError(
+                    f"Exact default-run estimate components total {component_total}, not {self.total_attack_count}"
+                )
+        return self
+
+    @classmethod
+    def unavailable(
+        cls, *, note: str = "Default-run size estimate is unavailable."
+    ) -> "ScenarioDefaultRunSizeEstimate":
+        """
+        Build an unavailable estimate without presenting a guessed total.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: An unavailable estimate.
+        """
+        return cls(status=ScenarioRunSizeEstimateStatus.Unavailable, note=note)
+
+
 class RegisteredScenario(BaseModel):
     """Summary of a registered scenario."""
 
     scenario_name: str = Field(..., description="Scenario name  (e.g., 'foundry.red_team_agent')")
     scenario_type: str = Field(..., description="Scenario type identifier (e.g., 'RedTeamAgentScenario')")
+    scenario_version: int = Field(1, ge=1, description="Scenario definition version used for default metadata")
     description: str = Field(..., description="Human-readable description of the scenario")
     default_technique: str = Field(..., description="Default technique name used when none specified")
+    default_techniques: list[str] = Field(
+        default_factory=list,
+        description="Ordered concrete techniques selected by the scenario's default technique policy",
+    )
     aggregate_techniques: list[str] = Field(
         ..., description="Aggregate techniques that combine multiple attack approaches"
     )
@@ -57,6 +146,10 @@ class RegisteredScenario(BaseModel):
     include_baseline_by_default: bool = Field(True, description="Whether an omitted baseline flag includes it")
     supported_parameters: list[Parameter] = Field(
         default_factory=list, description="Scenario-declared custom parameters"
+    )
+    default_run_size: ScenarioDefaultRunSizeEstimate = Field(
+        default_factory=ScenarioDefaultRunSizeEstimate.unavailable,
+        description="Scenario-owned structured estimate of the default planned execution units",
     )
 
 

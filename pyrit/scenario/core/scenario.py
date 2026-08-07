@@ -37,12 +37,17 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     AttackSeedGroup,
+    ScenarioDatasetSummary,
+    ScenarioDefaultRunSizeEstimate,
     ScenarioEvaluationIdentifier,
     ScenarioIdentifier,
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
     ScenarioRunPlanSeedGroup,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
     ScenarioRunState,
     config_hash,
 )
@@ -537,6 +542,97 @@ class Scenario(ABC):
             list[ScenarioTechnique]: The concrete techniques to execute.
         """
         return self._technique_class.resolve(scenario_techniques, default=self._default_technique)
+
+    @final
+    async def get_default_run_size_estimate_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Estimate the scenario's default planned execution units without starting a run.
+
+        This resolves declared parameter defaults, concrete default techniques, and
+        default dataset selection before delegating scenario-specific shape math to
+        ``_estimate_default_run_size_async``.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Structured default-run estimate.
+        """
+        self.set_params_from_args(args={})
+        self._scenario_techniques = self._resolve_scenario_techniques(scenario_techniques=None)
+        self._dataset_config = self._default_dataset_config
+        self._include_baseline = self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Enabled
+        return await self._estimate_default_run_size_async()
+
+    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Estimate a standard technique-by-seed-group scenario.
+
+        Subclasses override this hook when their outer execution shape adds axes,
+        synthesizes technique-specific populations, or selects techniques adaptively.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Exact default sweep and baseline count.
+        """
+        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        seed_group_count = sum(len(groups) for groups in selected_groups.values())
+        technique_count = len(self._scenario_techniques)
+
+        components = [
+            ScenarioRunSizeComponent(
+                label="Default technique sweep",
+                count=seed_group_count * technique_count,
+                factors=[
+                    ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                    ScenarioRunSizeFactor(label="default concrete techniques", count=technique_count),
+                ],
+            )
+        ]
+        if self._include_baseline:
+            components.append(
+                ScenarioRunSizeComponent(
+                    label="Baseline",
+                    count=seed_group_count,
+                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count)],
+                    note="One unmodified prompt-sending unit per selected seed group.",
+                )
+            )
+
+        return ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=sum(component.count for component in components),
+            components=components,
+            datasets=datasets,
+            note="Counts planned outer execution units; retries and internal attack turns are excluded.",
+        )
+
+    async def _resolve_default_dataset_groups_for_estimate_async(
+        self,
+    ) -> tuple[dict[str, list[AttackSeedGroup]], list[ScenarioDatasetSummary]]:
+        """
+        Resolve full and effectively selected logical groups for default datasets.
+
+        Returns:
+            tuple: Selected groups keyed by population and their catalog summaries.
+        """
+        self._dataset_config = self._default_dataset_config
+        full_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=False)
+        self._dataset_config = self._default_dataset_config
+        selected_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
+
+        datasets: list[ScenarioDatasetSummary] = []
+        for name in dict.fromkeys([*full_groups, *selected_groups]):
+            logical_count = len(full_groups.get(name, []))
+            selected_count = len(selected_groups.get(name, []))
+            selection_note = None
+            if selected_count != logical_count:
+                selection_note = f"The default selection uses {selected_count} of {logical_count} logical seed groups."
+            datasets.append(
+                ScenarioDatasetSummary(
+                    name=name,
+                    logical_seed_group_count=logical_count,
+                    selected_seed_group_count=selected_count,
+                    selection_note=selection_note,
+                )
+            )
+        return selected_groups, datasets
 
     @final
     async def initialize_async(self) -> None:

@@ -11,7 +11,16 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pyrit.analytics import get_cached_results_for_technique
 from pyrit.common import apply_defaults
-from pyrit.models import AttackOutcome, AttackResult, ObjectiveTargetEvaluationIdentifier, ScenarioResult
+from pyrit.models import (
+    AttackOutcome,
+    AttackResult,
+    ObjectiveTargetEvaluationIdentifier,
+    ScenarioDefaultRunSizeEstimate,
+    ScenarioResult,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
+)
 from pyrit.models.parameter import Parameter
 from pyrit.registry import AttackTechniqueRegistry, TargetRegistry
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
@@ -185,6 +194,37 @@ class AdversarialBenchmark(Scenario):
                 max_dataset_size=8,
             ),
             scenario_result_id=scenario_result_id,
+        )
+
+    async def _estimate_default_run_size_async(self) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Expose the per-target formula because the adversarial-target axis is required at run time.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Conditional per-target estimate.
+        """
+        selected_groups, datasets = await self._resolve_default_dataset_groups_for_estimate_async()
+        seed_group_count = sum(len(groups) for groups in selected_groups.values())
+        technique_count = len(self._scenario_techniques)
+        per_target_count = seed_group_count * technique_count
+        return ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Conditional,
+            components=[
+                ScenarioRunSizeComponent(
+                    label="Per adversarial target",
+                    count=per_target_count,
+                    factors=[
+                        ScenarioRunSizeFactor(label="selected logical seed groups", count=seed_group_count),
+                        ScenarioRunSizeFactor(label="default concrete techniques", count=technique_count),
+                    ],
+                    note="Multiply this component by the required adversarial target count.",
+                )
+            ],
+            datasets=datasets,
+            note=(
+                "A total is unavailable until adversarial_targets is supplied. Baseline is forbidden. "
+                "The default use_cached=False policy does not subtract prior results."
+            ),
         )
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:

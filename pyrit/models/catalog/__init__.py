@@ -21,6 +21,11 @@ from pyrit.models.catalog.scenario import (
     AttackRetrySummary,
     RegisteredScenario,
     RunScenarioRequest,
+    ScenarioDatasetSummary,
+    ScenarioDefaultRunSizeEstimate,
+    ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimateStatus,
+    ScenarioRunSizeFactor,
     ScenarioRunSummary,
 )
 from pyrit.models.catalog.target import (
@@ -33,6 +38,11 @@ __all__ = [
     "RegisteredInitializer",
     "RegisteredScenario",
     "RunScenarioRequest",
+    "ScenarioDatasetSummary",
+    "ScenarioDefaultRunSizeEstimate",
+    "ScenarioRunSizeComponent",
+    "ScenarioRunSizeEstimateStatus",
+    "ScenarioRunSizeFactor",
     "ScenarioRunSummary",
     "TargetInstance",
 ]

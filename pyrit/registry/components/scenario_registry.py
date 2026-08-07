@@ -38,8 +38,13 @@ class ScenarioMetadata(RegistryMetadata):
     Use get_class() to get the actual class.
     """
 
+    scenario_version: int = field(kw_only=True, default=1)
+
     # The default technique name (e.g., "single_turn")
     default_technique: str = field(kw_only=True)
+
+    # Ordered concrete techniques selected by the default technique policy.
+    default_techniques: tuple[str, ...] = field(kw_only=True, default=())
 
     # All available technique names for this scenario.
     all_techniques: tuple[str, ...] = field(kw_only=True)
@@ -149,6 +154,9 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
 
         technique_class = instance._technique_class
         default_technique_value = instance._default_technique.value
+        default_techniques = tuple(
+            technique.value for technique in instance._resolve_scenario_techniques(scenario_techniques=None)
+        )
         all_techniques = tuple(s.value for s in technique_class.get_all_techniques())
         aggregate_techniques = tuple(s.value for s in technique_class.get_aggregate_techniques())
         default_datasets = tuple(instance._default_dataset_config.dataset_names)
@@ -158,7 +166,9 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             class_module=cls.__module__,
             class_description=description,
             registry_name=name,
+            scenario_version=instance._version,
             default_technique=default_technique_value,
+            default_techniques=default_techniques,
             all_techniques=all_techniques,
             aggregate_techniques=aggregate_techniques,
             default_datasets=default_datasets,
