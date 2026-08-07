@@ -433,6 +433,7 @@ export interface RetryEvent {
   component_role: string
   component_name?: string | null
   endpoint?: string | null
+  status_code?: number | null
   elapsed_seconds: number
 }
 
@@ -442,7 +443,16 @@ export interface AttackRetrySummary {
   retries: RetryEvent[]
 }
 
-export type ScenarioRunState = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+export type ScenarioRunState = 'CREATED' | 'QUEUED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+export interface ScenarioOverloadSummary {
+  component_role: string
+  count: number
+  rate_limit_count: number
+  server_error_count: number
+  status_codes: number[]
+  latest_timestamp: string
+}
 
 export interface ScenarioRunSummary {
   scenario_result_id: string
@@ -471,6 +481,9 @@ export interface ScenarioRunSummary {
   successful_attacks?: number
   error_attacks?: number
   attack_details_available?: boolean
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
 }
 
 export interface ScenarioTargetSummary {
@@ -500,6 +513,27 @@ export interface ScenarioProgressHeader {
   datasets_used?: string[]
   scenario_parameters?: Record<string, unknown>
   labels?: Record<string, string>
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
+}
+
+export interface ScenarioQueueEntry {
+  scenario_result_id: string
+  scenario_name: string
+  scenario_registry_name: string
+  created_at: string
+  enqueued_at: string
+  started_at?: string | null
+  state: ScenarioRunState
+  position?: number | null
+}
+
+export interface ScenarioQueueSnapshot {
+  revision: number
+  snapshot_at: string
+  active?: ScenarioQueueEntry | null
+  queued: ScenarioQueueEntry[]
 }
 
 /** One persisted attack attempt in ascending progress order. */

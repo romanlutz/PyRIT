@@ -36,6 +36,7 @@ from pyrit.backend.routes import (
     version,
 )
 from pyrit.backend.services.initializer_service import get_initializer_service
+from pyrit.backend.services.scenario_run_service import get_scenario_run_service
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 # Check for development mode from environment variable
@@ -84,12 +85,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if config.allow_custom_initializers:
         logger.warning("Custom initializer registration is ENABLED (allow_custom_initializers: true).")
 
+    scenario_run_service = get_scenario_run_service()
+    await scenario_run_service.reconcile_interrupted_runs_async()
+
     # Mount the bundled frontend (or print a dev/missing-frontend notice).
     # Done here rather than at module load so test imports of `pyrit.backend.main`
     # don't emit noise and don't perform filesystem side effects.
     setup_frontend()
 
-    yield
+    try:
+        yield
+    finally:
+        await scenario_run_service.shutdown_async()
 
 
 app = FastAPI(

@@ -119,6 +119,29 @@ describe('useScenarioRunProgress', () => {
     unmount()
   })
 
+  it('transitions a queued run to active progress on a later poll', async () => {
+    jest.useFakeTimers()
+    mockGetRunProgress
+      .mockResolvedValueOnce(makePage({
+        run: { ...makePage().run, status: 'QUEUED', queue_position: 1 },
+        next_cursor: 'cursor-1',
+      }))
+      .mockResolvedValueOnce(makePage({
+        run: { ...makePage().run, status: 'IN_PROGRESS', queue_position: null },
+        plan: null,
+        next_cursor: 'cursor-1',
+      }))
+
+    const { result, unmount } = renderHook(() => useScenarioRunProgress('run-1'))
+    await waitFor(() => expect(result.current.state.run?.status).toBe('QUEUED'))
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(SCENARIO_RUN_POLL_INTERVAL_MS)
+    })
+
+    expect(result.current.state.run?.status).toBe('IN_PROGRESS')
+    unmount()
+  })
+
   it('does not overlap polls while a request remains in flight', async () => {
     jest.useFakeTimers()
     let resolvePoll: ((page: ScenarioRunProgress) => void) | undefined

@@ -37,6 +37,7 @@ import {
 import { Link, useLocation, useParams } from 'react-router-dom'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
+import { useScenarioQueue } from '@/hooks/useScenarioQueue'
 import { scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
 import type {
@@ -55,12 +56,14 @@ import {
 } from '@/utils/scenarioRunProgress'
 
 import { useScenarioRunPageStyles } from './ScenarioRunPage.styles'
+import ScenarioQueue from './ScenarioQueue'
 
 const CLOCK_REFRESH_INTERVAL_MS = 1_000
 const OBJECTIVE_PREVIEW_LENGTH = 96
 
 const RUN_BADGE_COLORS: Record<ScenarioRunState, 'informative' | 'brand' | 'success' | 'danger' | 'warning'> = {
   CREATED: 'informative',
+  QUEUED: 'informative',
   IN_PROGRESS: 'brand',
   COMPLETED: 'success',
   FAILED: 'danger',
@@ -87,6 +90,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
   const styles = useScenarioRunPageStyles()
   const location = useLocation()
   const { state, retry, applyRunSummary } = useScenarioRunProgress(scenarioResultId)
+  const queue = useScenarioQueue()
   const [nowMilliseconds, setNowMilliseconds] = useState(() => Date.now())
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
@@ -222,10 +226,13 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
   }
 
   const run = state.run
-  const canCancel = run.status === 'CREATED' || run.status === 'IN_PROGRESS'
+  const queued = run.status === 'QUEUED'
+  const canCancel = run.status === 'CREATED' || queued || run.status === 'IN_PROGRESS'
   const elapsed = getElapsedMilliseconds(run, nowMilliseconds)
   const eta = getEtaMilliseconds(state, nowMilliseconds)
-  const progressText = overall.planned === null
+  const progressText = queued
+    ? `Queued${run.queue_position ? ` · Position ${run.queue_position}` : ''}`
+    : overall.planned === null
     ? `${overall.completed} known completed units; planned total unavailable`
     : `${overall.completed} of ${overall.planned} executable units completed`
 
@@ -262,7 +269,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             <div className={styles.headerActions}>
               <Button
                 appearance="secondary"
-                className={mergeClasses(styles.touchTarget, styles.wideButton)}
+                className={mergeClasses(styles.touchTarget, styles.cancelButton, styles.wideButton)}
                 icon={<StopRegular />}
                 onClick={() => {
                   setCancelError(null)
@@ -299,6 +306,12 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             <div className={styles.metadataItem}>
               <Text size={200} className={styles.metadataLabel}>PyRIT version</Text>
               <Text weight="semibold">{run.pyrit_version}</Text>
+            </div>
+          )}
+          {queued && (
+            <div className={styles.metadataItem}>
+              <Text size={200} className={styles.metadataLabel}>Waiting position</Text>
+              <Text weight="semibold">{run.queue_position ?? 'Updating'}</Text>
             </div>
           )}
         </div>
@@ -347,6 +360,23 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
           </MessageBar>
         )}
 
+        <ScenarioQueue
+          snapshot={queue.snapshot}
+          loading={queue.loading}
+          stale={queue.stale}
+          error={queue.error}
+          currentScenarioResultId={scenarioResultId}
+        />
+
+        {state.overloadSummaries.length > 0 && (
+          <MessageBar intent="warning" data-testid="scenario-overload-warning">
+            <MessageBarBody>
+              Recent target overload detected: {formatOverloadSummaries(state.overloadSummaries)}.
+              {' '}PyRIT is retrying these requests without adaptive throttling; concurrency is not automatically reduced yet.
+            </MessageBarBody>
+          </MessageBar>
+        )}
+
         {run.status === 'FAILED' && (
           <MessageBar intent="error">
             <MessageBarBody>
@@ -370,6 +400,28 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             </Text>
             <Text className={styles.sectionHint}>{progressText}</Text>
           </div>
+          {queued ? (
+            <div className={styles.progressSurface} data-testid="queued-run-progress">
+              <div className={styles.progressPrimary}>
+                <Text size={500} weight="semibold">
+                  Queued{run.queue_position ? ` · Position ${run.queue_position}` : ''}
+                </Text>
+                <Text className={styles.sectionHint}>
+                  {run.active_scenario_result_id
+                    ? `Waiting for active run ${run.active_scenario_result_id} to finish.`
+                    : 'Waiting for the scheduler to start this run.'}
+                </Text>
+              </div>
+              <div className={styles.metric}>
+                <Text size={200} className={styles.metricLabel}>Execution progress</Text>
+                <Text weight="semibold">Not started</Text>
+              </div>
+              <div className={styles.metric}>
+                <Text size={200} className={styles.metricLabel}>Estimated remaining</Text>
+                <Text weight="semibold">Available after start</Text>
+              </div>
+            </div>
+          ) : (
           <div className={styles.progressSurface}>
             <div className={styles.progressPrimary}>
               <div className={styles.progressText}>
@@ -399,8 +451,9 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
               </Text>
             </div>
           </div>
+          )}
           <span className={styles.liveStatus} aria-live="polite">
-            {isTerminalRunState(run.status) ? `Run ${formatRunState(run.status)}` : ''}
+            {queued ? progressText : isTerminalRunState(run.status) ? `Run ${formatRunState(run.status)}` : ''}
           </span>
         </section>
 
@@ -614,7 +667,9 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             <DialogTitle>Cancel this scenario run?</DialogTitle>
             <DialogContent className={styles.dialogContent}>
               <Text>
-                In-flight work will be stopped. Attempts already persisted will remain available in this dashboard.
+                {queued
+                  ? 'This run will be removed from the queue and will never execute.'
+                  : 'In-flight work will be stopped. Attempts already persisted will remain available in this dashboard.'}
               </Text>
               {cancelError && (
                 <MessageBar intent="error">
@@ -626,6 +681,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
               <Button disabled={cancelling} onClick={() => setCancelDialogOpen(false)}>Keep running</Button>
               <Button
                 appearance="primary"
+                className={styles.cancelButton}
                 disabled={cancelling}
                 icon={<StopRegular />}
                 onClick={() => void handleCancel()}
@@ -820,8 +876,22 @@ function objectivePreview(objective: string | null, fallbackId: string): string 
   if (!objective) {
     return `Objective unavailable (${fallbackId})`
   }
+
   if (objective.length <= OBJECTIVE_PREVIEW_LENGTH) {
     return objective
   }
   return `${objective.slice(0, OBJECTIVE_PREVIEW_LENGTH - 1)}…`
+}
+
+function formatOverloadSummaries(
+  summaries: import('@/types').ScenarioOverloadSummary[],
+): string {
+  return summaries.map((summary) => {
+    const codes = summary.status_codes.join('/')
+    return `${formatRole(summary.component_role)} (${summary.count} × HTTP ${codes}, latest ${formatTimestamp(summary.latest_timestamp)})`
+  }).join('; ')
+}
+
+function formatRole(role: string): string {
+  return role.replace(/_/g, ' ').replace(/^\w/, (letter: string) => letter.toUpperCase())
 }

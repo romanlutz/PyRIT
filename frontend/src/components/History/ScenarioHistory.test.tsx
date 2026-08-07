@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { labelsApi, scenariosApi } from '@/services/api'
+import { useScenarioQueue } from '@/hooks/useScenarioQueue'
 import type { ScenarioRunSummary } from '@/types'
 
 import ScenarioHistory from './ScenarioHistory'
@@ -18,8 +19,13 @@ jest.mock('@/services/api', () => ({
   },
 }))
 
+jest.mock('@/hooks/useScenarioQueue', () => ({
+  useScenarioQueue: jest.fn(),
+}))
+
 const mockedScenariosApi = scenariosApi as jest.Mocked<typeof scenariosApi>
 const mockedLabelsApi = labelsApi as jest.Mocked<typeof labelsApi>
+const mockUseScenarioQueue = useScenarioQueue as jest.Mock
 
 const RUN: ScenarioRunSummary = {
   scenario_result_id: 'run-1',
@@ -67,6 +73,13 @@ function renderHistory(props = defaultProps) {
 describe('ScenarioHistory', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockUseScenarioQueue.mockReturnValue({
+      snapshot: { revision: 0, snapshot_at: '2026-01-01T00:00:00Z', active: null, queued: [] },
+      loading: false,
+      stale: false,
+      error: null,
+      retry: jest.fn(),
+    })
     mockedScenariosApi.listCatalog.mockResolvedValue({
       items: [{ scenario_name: 'foundry.red_team' }] as Awaited<ReturnType<typeof scenariosApi.listCatalog>>['items'],
       pagination: { limit: 100, has_more: false },

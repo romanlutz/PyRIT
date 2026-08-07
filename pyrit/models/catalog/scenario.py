@@ -143,6 +143,17 @@ class AttackRetrySummary(BaseModel):
     )
 
 
+class ScenarioOverloadSummary(BaseModel):
+    """Recent structured overload signals grouped by component role."""
+
+    component_role: str = Field(..., description="Role of the component that observed overload")
+    count: int = Field(..., ge=1, description="Recent HTTP 429 and 5xx retry signals")
+    rate_limit_count: int = Field(0, ge=0, description="Recent HTTP 429 retry signals")
+    server_error_count: int = Field(0, ge=0, description="Recent HTTP 5xx retry signals")
+    status_codes: list[int] = Field(default_factory=list, description="Observed overload status codes")
+    latest_timestamp: datetime = Field(..., description="Latest overload signal timestamp")
+
+
 class ScenarioRunSummary(BaseModel):
     """Response for a scenario run (status + result details)."""
 
@@ -188,6 +199,12 @@ class ScenarioRunSummary(BaseModel):
     attack_details_available: bool = Field(
         True,
         description="Whether failed_attacks and attack_retries contain per-attempt details",
+    )
+    queue_position: int | None = Field(None, ge=1, description="Current 1-based waiting position")
+    active_scenario_result_id: str | None = Field(None, description="Currently executing scenario result ID")
+    overload_summaries: list[ScenarioOverloadSummary] = Field(
+        default_factory=list,
+        description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
     )
 
 

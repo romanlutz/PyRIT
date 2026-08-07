@@ -18,6 +18,8 @@ from pyrit.backend.main import app
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
 from pyrit.models import (
     ScenarioProgressHeader,
+    ScenarioQueueEntry,
+    ScenarioQueueSnapshot,
     ScenarioRunPlan,
     ScenarioRunProgress,
     ScenarioRunState,
@@ -197,6 +199,45 @@ class TestListScenarioRunsRoute:
         assert response.json()["detail"] == "Malformed scenario history cursor."
 
 
+class TestScenarioRunQueueRoute:
+    """Tests for GET /api/scenarios/runs/queue."""
+
+    def test_queue_returns_active_and_ordered_entries(self, client: TestClient) -> None:
+        now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        snapshot = ScenarioQueueSnapshot(
+            revision=4,
+            snapshot_at=now,
+            active=ScenarioQueueEntry(
+                scenario_result_id="active",
+                scenario_name="ActiveScenario",
+                scenario_registry_name="active.scenario",
+                state=ScenarioRunState.IN_PROGRESS,
+                created_at=now,
+                enqueued_at=now,
+                started_at=now,
+            ),
+            queued=[
+                ScenarioQueueEntry(
+                    scenario_result_id="queued",
+                    scenario_name="QueuedScenario",
+                    scenario_registry_name="queued.scenario",
+                    state=ScenarioRunState.QUEUED,
+                    position=1,
+                    created_at=now,
+                    enqueued_at=now,
+                )
+            ],
+        )
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_get.return_value.get_queue_snapshot.return_value = snapshot
+
+            response = client.get("/api/scenarios/runs/queue")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["active"]["scenario_result_id"] == "active"
+        assert response.json()["queued"][0]["position"] == 1
+
+
 class TestGetScenarioRunRoute:
     """Tests for GET /api/scenarios/runs/{id}."""
 
@@ -262,7 +303,12 @@ class TestGetScenarioRunRoute:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
             mock_service = MagicMock()
             mock_service.snapshot_active_run.side_effect = lambda **_: (
-                snapshot_thread.append(get_ident()) or MagicMock(active_group_ids=("active-group",))
+                snapshot_thread.append(get_ident())
+                or MagicMock(
+                    active_group_ids=("active-group",),
+                    queue_position=None,
+                    active_scenario_result_id="test-run-id",
+                )
             )
             mock_service.get_run_progress_from_storage.side_effect = lambda **_: (
                 storage_thread.append(get_ident()) or progress
@@ -279,6 +325,8 @@ class TestGetScenarioRunRoute:
             since=None,
             limit=25,
             active_group_ids=("active-group",),
+            queue_position=None,
+            active_scenario_result_id="test-run-id",
         )
         assert snapshot_thread[0] != storage_thread[0]
 
