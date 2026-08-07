@@ -39,6 +39,13 @@ interface MessageListProps {
   globalMarkdown?: boolean
 }
 
+const ROLE_LABELS: Record<Message['role'], string> = {
+  user: 'User',
+  simulated_assistant: 'Simulated assistant',
+  assistant: 'Assistant',
+  system: 'System',
+}
+
 /** Image that shows a spinner while loading. */
 function ImageWithSpinner({ src, alt, className, hiddenClassName, containerClassName, spinnerClassName }: {
   src: string
@@ -161,7 +168,10 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
         const isUser = message.role === 'user'
         const isSimulated = message.role === 'simulated_assistant'
         const timestamp = new Date(message.timestamp).toLocaleTimeString()
-        const avatarName = isUser ? 'User' : isSimulated ? 'Simulated' : 'Assistant'
+        const roleLabel = ROLE_LABELS[message.role]
+        const convertedLabel = message.converterClassNames?.length
+          ? `Sent after ${message.converterClassNames.join(', ')}`
+          : 'Sent to target after conversion'
 
         return (
           <div
@@ -169,13 +179,24 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
             className={mergeClasses(styles.message, isUser && styles.userMessage)}
           >
             <Avatar
-              name={avatarName}
+              name={roleLabel}
               color={isUser ? 'colorful' : isSimulated ? 'steel' : 'brand'}
             />
             <div
               className={mergeClasses(styles.messageContent, isUser && styles.userMessageContent)}
               data-testid={`message-bubble-${index}`}
             >
+              <div className={styles.messageRole}>
+                <Text weight="semibold" className={styles.roleLabel}>
+                  {roleLabel}
+                </Text>
+                {isSimulated && (
+                  <Text size={200} className={styles.roleDescription}>
+                    Generated prepended context, not a live target response
+                  </Text>
+                )}
+              </div>
+
               {/* Error rendering */}
               {message.error && (
                 <div className={styles.errorContainer}>
@@ -228,8 +249,8 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
               {(message.originalContent || message.originalAttachments) && (
                 <>
                   <div className={styles.sectionDivider} />
-                  <Tooltip content="Only the converted value was sent to the target" relationship="description">
-                    <div className={styles.convertedLabel} data-testid="converted-label">Converted</div>
+                  <Tooltip content="This is the value sent to the target after conversion" relationship="description">
+                    <div className={styles.convertedLabel} data-testid="converted-label">{convertedLabel}</div>
                   </Tooltip>
                 </>
               )}
@@ -455,7 +476,6 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
 
               <div className={styles.messageFooter}>
                 <Text className={styles.timestamp}>{timestamp}</Text>
-                <Text className={styles.role}>{message.role}</Text>
               </div>
             </div>
           </div>

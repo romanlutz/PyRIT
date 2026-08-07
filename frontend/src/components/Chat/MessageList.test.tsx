@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import MessageList from "./MessageList";
@@ -423,11 +423,21 @@ describe("MessageList", () => {
     expect(messageElements.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("should render simulated_assistant with distinct avatar", () => {
+  it("should label simulated prepended context distinctly from a live assistant response", () => {
     const simMessages: Message[] = [
+      {
+        role: "user",
+        content: "User prompt",
+        timestamp: new Date().toISOString(),
+      },
       {
         role: "simulated_assistant",
         content: "Simulated response from another conversation",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        role: "assistant",
+        content: "Live target response",
         timestamp: new Date().toISOString(),
       },
     ];
@@ -439,10 +449,24 @@ describe("MessageList", () => {
     );
 
     expect(
-      screen.getByText("Simulated response from another conversation")
+      within(screen.getByTestId("message-bubble-0")).getByText("User")
     ).toBeInTheDocument();
-    // Avatar should be labelled "Simulated" instead of "Assistant"
-    expect(screen.getByText("S")).toBeInTheDocument();
+    const simulatedBubble = screen.getByTestId("message-bubble-1");
+    expect(
+      within(simulatedBubble).getByText("Simulated assistant")
+    ).toBeInTheDocument();
+    expect(
+      within(simulatedBubble).getByText(
+        "Generated prepended context, not a live target response"
+      )
+    ).toBeInTheDocument();
+    const assistantBubble = screen.getByTestId("message-bubble-2");
+    expect(
+      within(assistantBubble).getByText("Assistant")
+    ).toBeInTheDocument();
+    expect(
+      within(assistantBubble).queryByText(/Generated prepended context/)
+    ).not.toBeInTheDocument();
   });
 
   it("should show 'Copy to input' and 'Download' buttons on assistant media attachments", () => {
@@ -1079,7 +1103,36 @@ describe("MessageList", () => {
   });
 
   describe("original vs converted display", () => {
-    it("should show original section and converted label when originalContent differs", () => {
+    it("should show the ordered converter names with the value sent to the target", () => {
+      const messages: Message[] = [
+        {
+          role: "user",
+          content: "VGVsbCBtZSBhIGpva2U=",
+          originalContent: "Tell me a joke",
+          converterClassNames: [
+            "TextJailbreakConverter",
+            "Base64Converter",
+          ],
+          timestamp: new Date().toISOString(),
+        },
+      ];
+      render(
+        <TestWrapper>
+          <MessageList messages={messages} />
+        </TestWrapper>
+      );
+
+      expect(screen.getByTestId("original-section")).toBeInTheDocument();
+      expect(screen.getByText("Tell me a joke")).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Sent after TextJailbreakConverter, Base64Converter"
+        )
+      ).toBeInTheDocument();
+      expect(screen.getByText("VGVsbCBtZSBhIGpva2U=")).toBeInTheDocument();
+    });
+
+    it("should use a safe generic label when converter names are unavailable", () => {
       const messages: Message[] = [
         {
           role: "user",
@@ -1094,10 +1147,9 @@ describe("MessageList", () => {
         </TestWrapper>
       );
 
-      expect(screen.getByTestId("original-section")).toBeInTheDocument();
-      expect(screen.getByText("Tell me a joke")).toBeInTheDocument();
-      expect(screen.getByTestId("converted-label")).toBeInTheDocument();
-      expect(screen.getByText("VGVsbCBtZSBhIGpva2U=")).toBeInTheDocument();
+      expect(
+        screen.getByText("Sent to target after conversion")
+      ).toBeInTheDocument();
     });
 
     it("should not show original section when originalContent is not set", () => {
