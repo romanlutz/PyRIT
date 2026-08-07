@@ -200,8 +200,18 @@ export const useScenarioRunPageStyles = makeStyles({
     tableLayout: 'auto',
   },
   attemptsTable: {
-    minWidth: '78rem',
+    minWidth: '68rem',
     tableLayout: 'auto',
+  },
+  clickableAttemptRow: {
+    cursor: 'pointer',
+    ':hover': {
+      backgroundColor: tokens.colorNeutralBackground1Hover,
+    },
+    ':focus-visible': {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: '-2px',
+    },
   },
   nowrap: {
     whiteSpace: 'nowrap',
@@ -214,19 +224,12 @@ export const useScenarioRunPageStyles = makeStyles({
     whiteSpace: 'nowrap',
     textOverflow: 'ellipsis',
   },
-  rowActions: {
-    display: 'flex',
-    gap: tokens.spacingHorizontalXS,
-    alignItems: 'center',
-  },
   attackLink: {
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: tokens.spacingHorizontalXS,
     minWidth: MINIMUM_TOUCH_TARGET_SIZE,
     minHeight: MINIMUM_TOUCH_TARGET_SIZE,
-    color: tokens.colorBrandForegroundLink,
     textDecorationLine: 'none',
     borderRadius: tokens.borderRadiusMedium,
     ':hover': {
@@ -236,6 +239,11 @@ export const useScenarioRunPageStyles = makeStyles({
       outline: `2px solid ${tokens.colorStrokeFocus2}`,
       outlineOffset: '2px',
     },
+  },
+  objectiveButton: {
+    maxWidth: '26rem',
+    justifyContent: 'flex-start',
+    ...mobileTouchTarget,
   },
   emptyState: {
     display: 'flex',

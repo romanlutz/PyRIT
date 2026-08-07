@@ -31,10 +31,9 @@ import {
   DismissCircleRegular,
   ErrorCircleRegular,
   EyeRegular,
-  OpenRegular,
   StopRegular,
 } from '@fluentui/react-icons'
-import { Link, useLocation, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
 import { scenariosApi } from '@/services/api'
@@ -43,7 +42,10 @@ import type {
   ScenarioProgressResult,
   ScenarioRunState,
 } from '@/types'
-import { routerPathParamValue } from '@/utils/routeParams'
+import {
+  attackRoutePath,
+  routerPathParamValue,
+} from '@/utils/routeParams'
 import {
   getAtomicGroupRollups,
   getElapsedMilliseconds,
@@ -58,6 +60,7 @@ import { useScenarioRunPageStyles } from './ScenarioRunPage.styles'
 
 const CLOCK_REFRESH_INTERVAL_MS = 1_000
 const OBJECTIVE_PREVIEW_LENGTH = 96
+const INTERACTIVE_ELEMENT_SELECTOR = 'a, button, input, select, textarea, [role="button"], [role="link"]'
 
 const RUN_BADGE_COLORS: Record<ScenarioRunState, 'informative' | 'brand' | 'success' | 'danger' | 'warning'> = {
   CREATED: 'informative',
@@ -86,6 +89,7 @@ interface ScenarioRunPageContentProps {
 function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProps) {
   const styles = useScenarioRunPageStyles()
   const location = useLocation()
+  const navigate = useNavigate()
   const { state, retry, applyRunSummary } = useScenarioRunProgress(scenarioResultId)
   const [nowMilliseconds, setNowMilliseconds] = useState(() => Date.now())
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
@@ -540,6 +544,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
               <Table size="small" className={styles.attemptsTable} aria-label="Persisted attack attempts">
                 <TableHeader>
                   <TableRow>
+                    <TableHeaderCell>Attack</TableHeaderCell>
                     <TableHeaderCell>Outcome</TableHeaderCell>
                     <TableHeaderCell>Group</TableHeaderCell>
                     <TableHeaderCell>Seed</TableHeaderCell>
@@ -547,53 +552,78 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                     <TableHeaderCell>Execution</TableHeaderCell>
                     <TableHeaderCell>Retries / error</TableHeaderCell>
                     <TableHeaderCell>Timestamp</TableHeaderCell>
-                    <TableHeaderCell>Actions</TableHeaderCell>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...state.results].reverse().map((attempt) => (
-                    <TableRow key={attempt.attack_result_id}>
-                      <TableCell>
-                        <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
-                          {formatOutcome(attempt.outcome)}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>{atomicGroupNames.get(attempt.atomic_group_id) ?? attempt.atomic_attack_name}</TableCell>
-                      <TableCell><Text className={styles.preview}>{attempt.seed_group_id}</Text></TableCell>
-                      <TableCell>
-                        <Text className={styles.preview}>
-                          {objectivePreview(seedObjectives.get(attempt.seed_group_id) ?? null, attempt.seed_group_id)}
-                        </Text>
-                      </TableCell>
-                      <TableCell className={styles.nowrap}>{formatDuration(attempt.execution_time_ms)}</TableCell>
-                      <TableCell>
-                        {attempt.outcome === 'error'
-                          ? attempt.error_message ?? attempt.error_type ?? 'Error'
-                          : `${attempt.total_retries} retries`}
-                      </TableCell>
-                      <TableCell className={styles.nowrap}>{formatTimestamp(attempt.timestamp)}</TableCell>
-                      <TableCell>
-                        <div className={styles.rowActions}>
+                  {[...state.results].reverse().map((attempt) => {
+                    const attackDestination = attackRoutePath(
+                      attempt.attack_result_id,
+                      scenarioResultId,
+                    )
+                    return (
+                      <TableRow
+                        key={attempt.attack_result_id}
+                        className={styles.clickableAttemptRow}
+                        tabIndex={0}
+                        aria-label={`Open attack ${attempt.attack_result_id}`}
+                        onClick={(event) => {
+                          if (!shouldIgnoreAttemptRowClick(event)) {
+                            navigate(attackDestination)
+                          }
+                        }}
+                        onKeyDown={(event) => {
+                          if (
+                            (event.key === 'Enter' || event.key === ' ')
+                            && !hasActivationModifier(event)
+                            && !isInteractiveTarget(event.target)
+                          ) {
+                            event.preventDefault()
+                            navigate(attackDestination)
+                          }
+                        }}
+                      >
+                        <TableCell>
+                          <Link
+                            className={styles.attackLink}
+                            to={attackDestination}
+                            aria-label={`Open attack ${attempt.attack_result_id}`}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <Text className={styles.preview} title={attempt.attack_result_id}>
+                              {attempt.attack_result_id}
+                            </Text>
+                          </Link>
+                        </TableCell>
+                        <TableCell>
+                          <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
+                            {formatOutcome(attempt.outcome)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{atomicGroupNames.get(attempt.atomic_group_id) ?? attempt.atomic_attack_name}</TableCell>
+                        <TableCell><Text className={styles.preview}>{attempt.seed_group_id}</Text></TableCell>
+                        <TableCell>
                           <Button
                             appearance="subtle"
-                            className={styles.touchTarget}
+                            className={styles.objectiveButton}
                             icon={<EyeRegular />}
                             aria-label={`View details for attack attempt ${attempt.attack_result_id}`}
                             onClick={(event) => openAttemptDetails(attempt, event.currentTarget)}
                           >
-                            Details
+                            <Text className={styles.preview}>
+                              {objectivePreview(seedObjectives.get(attempt.seed_group_id) ?? null, attempt.seed_group_id)}
+                            </Text>
                           </Button>
-                          <Link
-                            className={styles.attackLink}
-                            to={`/attacks/${encodeURIComponent(attempt.attack_result_id)}`}
-                            aria-label={`Open attack ${attempt.attack_result_id}`}
-                          >
-                            <OpenRegular /> Open
-                          </Link>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                        </TableCell>
+                        <TableCell className={styles.nowrap}>{formatDuration(attempt.execution_time_ms)}</TableCell>
+                        <TableCell>
+                          {attempt.outcome === 'error'
+                            ? attempt.error_message ?? attempt.error_type ?? 'Error'
+                            : `${attempt.total_retries} retries`}
+                        </TableCell>
+                        <TableCell className={styles.nowrap}>{formatTimestamp(attempt.timestamp)}</TableCell>
+                      </TableRow>
+                    )
+                  })}
                 </TableBody>
               </Table>
             </div>
@@ -824,4 +854,21 @@ function objectivePreview(objective: string | null, fallbackId: string): string 
     return objective
   }
   return `${objective.slice(0, OBJECTIVE_PREVIEW_LENGTH - 1)}…`
+}
+
+function shouldIgnoreAttemptRowClick(event: React.MouseEvent<HTMLTableRowElement>): boolean {
+  return event.button !== 0
+    || hasActivationModifier(event)
+    || isInteractiveTarget(event.target)
+}
+
+function hasActivationModifier(
+  event: Pick<React.MouseEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>
+    | Pick<React.KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>,
+): boolean {
+  return event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+}
+
+function isInteractiveTarget(target: EventTarget): boolean {
+  return target instanceof Element && target.closest(INTERACTIVE_ELEMENT_SELECTOR) !== null
 }
