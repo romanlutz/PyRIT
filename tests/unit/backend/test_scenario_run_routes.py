@@ -15,7 +15,12 @@ from fastapi.testclient import TestClient
 import pyrit.backend.services.scenario_run_service as _svc_mod
 from pyrit.backend.main import app
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
-from pyrit.models import ScenarioRunState
+from pyrit.models import (
+    ScenarioProgressHeader,
+    ScenarioRunPlan,
+    ScenarioRunProgress,
+    ScenarioRunState,
+)
 from pyrit.models.catalog.scenario import ScenarioRunSummary
 from unit.mocks import make_scenario_result
 
@@ -182,6 +187,51 @@ class TestGetScenarioRunRoute:
             response = client.get("/api/scenarios/runs/nonexistent")
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_progress_invalid_cursor_returns_400(self, client: TestClient) -> None:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.get_run_progress.side_effect = ValueError("Malformed scenario progress cursor.")
+            mock_get.return_value = mock_service
+
+            response = client.get("/api/scenarios/runs/test-run-id/progress?since=bad")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["detail"] == "Malformed scenario progress cursor."
+
+    def test_progress_returns_compact_plan_response(self, client: TestClient) -> None:
+        progress = ScenarioRunProgress(
+            run=ScenarioProgressHeader(
+                scenario_result_id="test-run-id",
+                scenario_name="TestScenario",
+                scenario_registry_name="test.scenario",
+                scenario_version=1,
+                status=ScenarioRunState.IN_PROGRESS,
+                created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+            plan=ScenarioRunPlan(
+                scenario_registry_name="test.scenario",
+                atomic_groups=[],
+                seed_groups=[],
+            ),
+            active_atomic_group_ids=["active-group"],
+            plan_complete=True,
+        )
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.get_run_progress.return_value = progress
+            mock_get.return_value = mock_service
+
+            response = client.get("/api/scenarios/runs/test-run-id/progress?limit=25")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["plan"]["scenario_registry_name"] == "test.scenario"
+        assert response.json()["active_atomic_group_ids"] == ["active-group"]
+        mock_service.get_run_progress.assert_called_once_with(
+            scenario_result_id="test-run-id",
+            since=None,
+            limit=25,
+        )
 
 
 class TestCancelScenarioRunRoute:

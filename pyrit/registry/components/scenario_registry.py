@@ -15,7 +15,7 @@ rather than by class name, so ``_discover``/``_get_registry_name`` are overridde
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pyrit.models import class_name_to_snake_case
 from pyrit.models.identifiers.scenario_identifier import ScenarioIdentifier
@@ -52,6 +52,10 @@ class ScenarioMetadata(RegistryMetadata):
 
     # Scenario-declared custom parameters.
     supported_parameters: tuple[Parameter, ...] = field(kw_only=True, default=())
+
+    baseline_policy: Literal["enabled", "disabled", "forbidden"] = field(kw_only=True, default="enabled")
+
+    include_baseline_by_default: bool = field(kw_only=True, default=True)
 
 
 class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
@@ -159,6 +163,8 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             aggregate_techniques=aggregate_techniques,
             default_datasets=default_datasets,
             supported_parameters=supported_parameters,
+            baseline_policy=instance.BASELINE_ATTACK_POLICY.value,
+            include_baseline_by_default=instance.BASELINE_ATTACK_POLICY.value == "enabled",
         )
 
     async def create_and_initialize_async(
@@ -208,5 +214,6 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
 
         merged_args = {**(scenario_params or {}), **initialize_kwargs}
         scenario = self._create_and_configure(name, params=merged_args, constructor_kwargs=constructor_kwargs)
+        scenario.set_scenario_registry_name(name)
         await scenario.initialize_async()
         return scenario

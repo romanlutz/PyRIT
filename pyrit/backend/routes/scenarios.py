@@ -27,6 +27,7 @@ from pyrit.models.catalog.scenario import (
     RunScenarioRequest,
     ScenarioRunSummary,
 )
+from pyrit.models.scenario_progress import ScenarioRunProgress
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
@@ -161,6 +162,42 @@ async def get_scenario_run(scenario_result_id: str) -> ScenarioRunSummary:  # py
             detail=f"Scenario run '{scenario_result_id}' not found",
         )
     return run
+
+
+@router.get(
+    "/runs/{scenario_result_id}/progress",
+    response_model=ScenarioRunProgress,
+    responses={
+        400: {"model": ProblemDetail, "description": "Invalid progress cursor"},
+        404: {"model": ProblemDetail, "description": "Run not found"},
+    },
+)
+async def get_scenario_run_progress(  # pyrit-async-suffix-exempt
+    scenario_result_id: str,
+    since: str | None = Query(None, description="Opaque ascending progress cursor"),
+    limit: int = Query(100, ge=1, le=500),
+) -> ScenarioRunProgress:
+    """
+    Get a compact, refresh-safe page of scenario progress deltas.
+
+    Returns:
+        ScenarioRunProgress: The run plan and ascending result deltas.
+    """
+    service = get_scenario_run_service()
+    try:
+        progress = service.get_run_progress(
+            scenario_result_id=scenario_result_id,
+            since=since,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    if progress is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scenario run '{scenario_result_id}' not found",
+        )
+    return progress
 
 
 @router.post(

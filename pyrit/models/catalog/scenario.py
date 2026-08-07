@@ -14,7 +14,7 @@ canonical models.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -51,6 +51,10 @@ class RegisteredScenario(BaseModel):
     )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    baseline_policy: Literal["enabled", "disabled", "forbidden"] = Field(
+        "enabled", description="Whether baseline execution is enabled, disabled, or forbidden"
+    )
+    include_baseline_by_default: bool = Field(True, description="Whether an omitted baseline flag includes it")
     supported_parameters: list[Parameter] = Field(
         default_factory=list, description="Scenario-declared custom parameters"
     )
@@ -75,6 +79,9 @@ class RunScenarioRequest(BaseModel):
     )
     max_concurrency: int = Field(10, ge=1, le=100, description="Maximum concurrent operations")
     max_retries: int = Field(0, ge=0, le=20, description="Maximum retry attempts on failure")
+    include_baseline: bool | None = Field(
+        None, description="Override the scenario baseline default; forbidden scenarios reject true"
+    )
     labels: dict[str, str] | None = Field(None, description="Labels to attach to memory entries")
     scenario_params: dict[str, Any] | None = Field(
         None,
@@ -141,6 +148,7 @@ class ScenarioRunSummary(BaseModel):
 
     scenario_result_id: str = Field(..., description="UUID of the ScenarioResult in memory")
     scenario_name: str = Field(..., description="Registry key of the scenario being run")
+    scenario_registry_name: str | None = Field(None, description="Requested scenario registry key when available")
     scenario_version: int = Field(0, ge=0, description="Version of the scenario")
     status: ScenarioRunState = Field(..., description="Current run status")
     created_at: datetime = Field(..., description="When the run was created")

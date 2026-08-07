@@ -47,6 +47,8 @@ def _make_scenario_metadata(
     all_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     aggregate_techniques: tuple[str, ...] = ("all", "default"),
     default_datasets: tuple[str, ...] = ("test_dataset",),
+    baseline_policy: str = "enabled",
+    include_baseline_by_default: bool = True,
 ) -> ScenarioMetadata:
     """Create a ScenarioMetadata instance for testing."""
     return ScenarioMetadata(
@@ -58,6 +60,8 @@ def _make_scenario_metadata(
         all_techniques=all_techniques,
         aggregate_techniques=aggregate_techniques,
         default_datasets=default_datasets,
+        baseline_policy=baseline_policy,
+        include_baseline_by_default=include_baseline_by_default,
     )
 
 
@@ -100,6 +104,24 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].aggregate_techniques == ["all", "default"]
             assert result.items[0].all_techniques == ["role_play", "many_shot"]
             assert result.items[0].default_datasets == ["test_dataset"]
+            assert result.items[0].baseline_policy == "enabled"
+            assert result.items[0].include_baseline_by_default is True
+
+    async def test_list_scenarios_preserves_disabled_baseline_policy(self) -> None:
+        metadata = _make_scenario_metadata(
+            baseline_policy="disabled",
+            include_baseline_by_default=False,
+        )
+
+        with patch.object(ScenarioService, "__init__", lambda self: None):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_all_registered_class_metadata.return_value = [metadata]
+
+            result = await service.list_scenarios_async()
+
+        assert result.items[0].baseline_policy == "disabled"
+        assert result.items[0].include_baseline_by_default is False
 
     async def test_list_scenarios_paginates_with_limit(self) -> None:
         """Test that list respects the limit parameter."""

@@ -37,6 +37,8 @@ def _metadata_to_registered_scenario(metadata: ScenarioMetadata) -> RegisteredSc
         all_techniques=list(metadata.all_techniques),
         default_datasets=list(metadata.default_datasets),
         supported_parameters=list(metadata.supported_parameters),
+        baseline_policy=metadata.baseline_policy,
+        include_baseline_by_default=metadata.include_baseline_by_default,
     )
 
 

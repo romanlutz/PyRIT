@@ -33,13 +33,18 @@ from pyrit.executor.attack import AttackExecutor, AttackExecutorResult
 from pyrit.memory import CentralMemory
 from pyrit.memory.memory_models import ScenarioResultEntry
 from pyrit.models import (
+    SCENARIO_RUN_PLAN_METADATA_KEY,
     AttackOutcome,
     AttackResult,
     AttackSeedGroup,
     ScenarioEvaluationIdentifier,
     ScenarioIdentifier,
     ScenarioResult,
+    ScenarioRunPlan,
+    ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanSeedGroup,
     ScenarioRunState,
+    config_hash,
 )
 from pyrit.models.parameter import ComponentType, Parameter, RegistryReference
 from pyrit.prompt_target import PromptTarget
@@ -218,6 +223,8 @@ class Scenario(ABC):
         self._memory = CentralMemory.get_memory_instance()
         self._atomic_attacks: list[AtomicAttack] = []
         self._scenario_result_id: str | None = str(scenario_result_id) if scenario_result_id else None
+        self._scenario_registry_name: str | None = None
+        self._active_atomic_groups: dict[str, str] = {}
 
         # Store prepared techniques for use in _build_atomic_attacks_async
         self._scenario_techniques: list[ScenarioTechnique] = []
@@ -249,6 +256,20 @@ class Scenario(ABC):
     def atomic_attack_count(self) -> int:
         """The number of atomic attacks in this scenario."""
         return len(self._atomic_attacks)
+
+    @property
+    def active_atomic_group_ids(self) -> frozenset[str]:
+        """The stable IDs of atomic groups currently executing."""
+        return frozenset(self._active_atomic_groups)
+
+    @property
+    def active_atomic_group_names(self) -> tuple[str, ...]:
+        """The names of atomic groups currently executing."""
+        return tuple(self._active_atomic_groups.values())
+
+    def set_scenario_registry_name(self, scenario_registry_name: str) -> None:
+        """Record the requested registry name for durable run-plan attribution."""
+        self._scenario_registry_name = scenario_registry_name
 
     @classmethod
     def _common_scenario_parameters(cls) -> list[Parameter]:
@@ -645,7 +666,19 @@ class Scenario(ABC):
                 stored_result=existing_results[0],
                 current_identifier=scenario_identifier,
             )
-            self._apply_persisted_objectives(stored_result=existing_results[0])
+            stored_result = existing_results[0]
+            stored_plan = self._get_stored_run_plan(stored_result=stored_result)
+            if stored_plan is not None:
+                self._apply_persisted_run_plan(stored_plan=stored_plan)
+            else:
+                self._apply_persisted_objectives(stored_result=stored_result)
+                reconstructed_plan = self._build_run_plan()
+                metadata = dict(stored_result.metadata)
+                metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = reconstructed_plan.model_dump(mode="json")
+                self._memory.update_scenario_metadata(
+                    scenario_result_id=self._scenario_result_id,
+                    metadata=metadata,
+                )
             return  # Valid resume - skip creating new scenario result
 
         # Build display group mapping from atomic attacks
@@ -680,27 +713,126 @@ class Scenario(ABC):
         chosen objective hashes here so the next ``_setup_scenario_async`` can
         replay them via ``keep_seed_groups_with_hashes``.
 
-        When ``max_dataset_size`` is not set, the sample equals the dataset and
-        nothing needs pinning; the dict is empty.
+        The normalized run plan is always stored. When ``max_dataset_size`` is not
+        set, only the run plan is needed because the full dataset is deterministic.
 
         Returns:
             dict[str, Any]: Metadata payload for the new ScenarioResult.
         """
         metadata: dict[str, Any] = {}
-        if getattr(self._dataset_config, "max_dataset_size", None) is None:
-            return metadata
-        hashes: list[str] = []
-        seen: set[str] = set()
-        for aa in self._atomic_attacks:
-            for sg in aa.seed_groups:
-                if sg.objective is None:
-                    continue
-                sha = to_sha256(sg.objective.value)
-                if sha not in seen:
-                    seen.add(sha)
-                    hashes.append(sha)
-        metadata["objective_hashes"] = hashes
+        if getattr(self._dataset_config, "max_dataset_size", None) is not None:
+            hashes: list[str] = []
+            seen: set[str] = set()
+            for aa in self._atomic_attacks:
+                for sg in aa.seed_groups:
+                    sha = to_sha256(sg.objective.value)
+                    if sha not in seen:
+                        seen.add(sha)
+                        hashes.append(sha)
+            metadata["objective_hashes"] = hashes
+        metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = self._build_run_plan().model_dump(mode="json")
         return metadata
+
+    def _build_run_plan(self) -> ScenarioRunPlan:
+        """
+        Build the normalized persistent plan for the initialized atomic attacks.
+
+        Returns:
+            ScenarioRunPlan: The versioned run plan.
+        """
+        seed_groups: dict[str, ScenarioRunPlanSeedGroup] = {}
+        atomic_groups: list[ScenarioRunPlanAtomicGroup] = []
+        for atomic_attack in self._atomic_attacks:
+            seed_group_ids: list[str] = []
+            for seed_group in atomic_attack.seed_groups:
+                seed_group_id = seed_group.logical_id
+                seed_group_ids.append(seed_group_id)
+                seed_groups.setdefault(
+                    seed_group_id,
+                    ScenarioRunPlanSeedGroup(
+                        id=seed_group_id,
+                        objective_sha256=to_sha256(seed_group.objective.value),
+                        objective=seed_group.objective.value,
+                    ),
+                )
+            technique_eval_hash = str(atomic_attack.technique_eval_hash)
+            atomic_group_id = self._get_atomic_group_id(atomic_attack=atomic_attack)
+            atomic_groups.append(
+                ScenarioRunPlanAtomicGroup(
+                    id=atomic_group_id,
+                    atomic_attack_name=atomic_attack.atomic_attack_name,
+                    display_group=atomic_attack.display_group,
+                    technique_eval_hash=technique_eval_hash,
+                    seed_group_ids=seed_group_ids,
+                )
+            )
+        return ScenarioRunPlan(
+            scenario_registry_name=self._scenario_registry_name,
+            atomic_groups=atomic_groups,
+            seed_groups=list(seed_groups.values()),
+        )
+
+    @staticmethod
+    def _get_atomic_group_id(*, atomic_attack: AtomicAttack) -> str:
+        """
+        Compute the stable ID of an atomic group from its name and technique.
+
+        Returns:
+            str: The atomic-group ID.
+        """
+        return config_hash(
+            {
+                "atomic_attack_name": atomic_attack.atomic_attack_name,
+                "technique_eval_hash": str(atomic_attack.technique_eval_hash),
+            }
+        )
+
+    @staticmethod
+    def _get_stored_run_plan(*, stored_result: ScenarioResult) -> ScenarioRunPlan | None:
+        """
+        Load and validate a stored run plan.
+
+        Returns:
+            ScenarioRunPlan | None: The plan, or None for a legacy row.
+        """
+        raw_plan = (stored_result.metadata or {}).get(SCENARIO_RUN_PLAN_METADATA_KEY)
+        if raw_plan is None:
+            return None
+        return ScenarioRunPlan.model_validate(raw_plan)
+
+    def _apply_persisted_run_plan(self, *, stored_plan: ScenarioRunPlan) -> None:
+        """
+        Validate and replay the exact logical units captured by a stored plan.
+
+        Raises:
+            ValueError: If a planned atomic or seed group cannot be reconstructed.
+        """
+        current_by_id = {
+            self._get_atomic_group_id(atomic_attack=atomic_attack): atomic_attack
+            for atomic_attack in self._atomic_attacks
+        }
+        planned_ids = {group.id for group in stored_plan.atomic_groups}
+        missing_groups = planned_ids - current_by_id.keys()
+        if missing_groups:
+            raise ValueError(
+                f"Scenario result id '{self._scenario_result_id}' cannot resume: "
+                f"{len(missing_groups)} planned atomic group(s) are no longer reconstructable."
+            )
+
+        retained_attacks: list[AtomicAttack] = []
+        for planned_group in stored_plan.atomic_groups:
+            atomic_attack = current_by_id[planned_group.id]
+            current_seed_groups = {seed_group.logical_id: seed_group for seed_group in atomic_attack.seed_groups}
+            missing_seed_groups = set(planned_group.seed_group_ids) - current_seed_groups.keys()
+            if missing_seed_groups:
+                raise ValueError(
+                    f"Scenario result id '{self._scenario_result_id}' cannot resume: atomic group "
+                    f"'{planned_group.atomic_attack_name}' is missing {len(missing_seed_groups)} planned seed group(s)."
+                )
+            atomic_attack._seed_groups = [current_seed_groups[group_id] for group_id in planned_group.seed_group_ids]
+            retained_attacks.append(atomic_attack)
+        self._atomic_attacks = retained_attacks
+        self._display_group_map = {group.atomic_attack_name: group.display_group for group in stored_plan.atomic_groups}
 
     def _apply_persisted_objectives(self, *, stored_result: ScenarioResult) -> None:
         """
@@ -1282,6 +1414,8 @@ class Scenario(ABC):
                     atomic_attack = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
+                atomic_group_id = atomic_attack.logical_group_id
+                self._active_atomic_groups[atomic_group_id] = atomic_attack.atomic_attack_name
                 try:
                     result = await atomic_attack.run_async(
                         executor=shared_executor,
@@ -1294,6 +1428,7 @@ class Scenario(ABC):
                     outcomes.append(exc)
                     stop_event.set()
                 finally:
+                    self._active_atomic_groups.pop(atomic_group_id, None)
                     pbar.update(1)
 
         # Cap workers at max_concurrency: that's also the objective-budget cap, and it's

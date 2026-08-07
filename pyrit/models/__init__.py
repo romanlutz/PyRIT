@@ -47,6 +47,7 @@ from pyrit.models.identifiers import (
     class_name_to_snake_case,
     compute_eval_hash,
     config_hash,
+    logical_seed_group_fingerprint,
     snake_case_to_class_name,
     validate_registry_name,
 )
@@ -89,6 +90,17 @@ from pyrit.models.results.attack_result import AttackOutcome, AttackResult, Atta
 from pyrit.models.results.scenario_result import ScenarioResult, ScenarioRunState
 from pyrit.models.results.strategy_result import StrategyResult, StrategyResultT
 from pyrit.models.retry_event import RetryEvent
+from pyrit.models.scenario_progress import (
+    SCENARIO_RUN_PLAN_METADATA_KEY,
+    SCENARIO_RUN_PLAN_VERSION,
+    ScenarioAttackResultDelta,
+    ScenarioProgressHeader,
+    ScenarioProgressResult,
+    ScenarioRunPlan,
+    ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanSeedGroup,
+    ScenarioRunProgress,
+)
 from pyrit.models.score import Score, ScoreType, UnvalidatedScore
 
 # Seeds - import from new seeds submodule for forward compatibility
@@ -169,6 +181,7 @@ __all__ = [
     "IdentifierFilter",
     "IdentifierType",
     "JSONValue",
+    "logical_seed_group_fingerprint",
     "COMMON_JSON_SCHEMAS",
     "JsonResponseConfig",
     "get_common_json_schema",
@@ -201,6 +214,15 @@ __all__ = [
     "ScenarioIdentifier",
     "ScenarioResult",
     "ScenarioRunState",
+    "SCENARIO_RUN_PLAN_METADATA_KEY",
+    "SCENARIO_RUN_PLAN_VERSION",
+    "ScenarioAttackResultDelta",
+    "ScenarioProgressHeader",
+    "ScenarioProgressResult",
+    "ScenarioRunPlan",
+    "ScenarioRunPlanAtomicGroup",
+    "ScenarioRunPlanSeedGroup",
+    "ScenarioRunProgress",
     "Seed",
     "AttackSeedGroup",
     "AttackTechniqueSeedGroup",
