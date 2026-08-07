@@ -172,3 +172,32 @@ class ScenarioRunSummary(BaseModel):
     )
     labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
     completed_at: datetime | None = Field(None, description="When the scenario finished")
+    pyrit_version: str | None = Field(None, description="PyRIT version that created the run")
+    target: "ScenarioTargetSummary | None" = Field(None, description="Safe objective-target identity")
+    datasets_used: list[str] = Field(default_factory=list, description="Resolved datasets selected for the run")
+    scenario_parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Safe resolved scenario parameters; sensitive fields are removed",
+    )
+    planned_total_available: bool = Field(
+        True,
+        description="Whether total_attacks comes from a complete persisted run plan",
+    )
+    successful_attacks: int = Field(0, ge=0, description="Latest successful planned units")
+    error_attacks: int = Field(0, ge=0, description="Persisted error attempts")
+    attack_details_available: bool = Field(
+        True,
+        description="Whether failed_attacks and attack_retries contain per-attempt details",
+    )
+
+
+class ScenarioTargetSummary(BaseModel):
+    """Safe target identity suitable for scenario history and run headers."""
+
+    target_type: str = Field(..., description="Target implementation type")
+    endpoint: str | None = Field(None, description="Configured endpoint, when present")
+    model_name: str | None = Field(None, description="Configured model or deployment name")
+    identifier_hash: str | None = Field(None, description="Canonical target identifier hash")
+
+
+ScenarioRunSummary.model_rebuild()

@@ -104,6 +104,9 @@ jest.mock("./components/Layout/MainLayout", () => {
         <button onClick={() => onNavigate("scenarios")} data-testid="nav-scenarios">
           Scenarios
         </button>
+        <button onClick={() => onNavigate("scenarioHistory")} data-testid="nav-scenario-history">
+          Scenario History
+        </button>
         {children}
       </div>
     );
@@ -342,6 +345,15 @@ jest.mock("./components/Scenarios/ScenarioRunPage", () => {
   };
 });
 
+jest.mock("./components/History/ScenarioHistory", () => {
+  const MockScenarioHistory = () => <div data-testid="scenario-history" />;
+  MockScenarioHistory.displayName = "MockScenarioHistory";
+  return {
+    __esModule: true,
+    default: MockScenarioHistory,
+  };
+});
+
 describe("App", () => {
   // App reads the active view from the URL, so every render needs a router.
   // initialPath lets a test deep-link straight to a view (e.g. "/config").
@@ -422,9 +434,19 @@ describe("App", () => {
 
     expect(screen.getByTestId("main-layout")).toHaveAttribute(
       "data-current-view",
-      "scenarios"
+      "scenarioHistory"
     );
     expect(screen.getByTestId("scenario-run-page")).toBeInTheDocument();
+  });
+
+  it("renders scenario history as a distinct URL-backed view", () => {
+    renderApp("/scenario-history?operator=alice");
+
+    expect(screen.getByTestId("main-layout")).toHaveAttribute(
+      "data-current-view",
+      "scenarioHistory"
+    );
+    expect(screen.getByTestId("scenario-history")).toBeInTheDocument();
   });
 
   it("switches to the scenarios view via the sidebar", () => {
@@ -437,6 +459,18 @@ describe("App", () => {
       "scenarios"
     );
     expect(screen.getByTestId("scenario-catalog")).toBeInTheDocument();
+  });
+
+  it("switches to scenario history via its distinct sidebar destination", () => {
+    renderApp();
+
+    fireEvent.click(screen.getByTestId("nav-scenario-history"));
+
+    expect(screen.getByTestId("main-layout")).toHaveAttribute(
+      "data-current-view",
+      "scenarioHistory"
+    );
+    expect(screen.getByTestId("scenario-history")).toBeInTheDocument();
   });
 
   it("passes the active target and labels to the scenario detail view", () => {

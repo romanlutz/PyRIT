@@ -437,6 +437,32 @@ def test_get_attack_result_label_condition_empty_labels_dict(memory_interface: A
     assert not any("label_" in k for k in params)
 
 
+def test_scenario_history_conditions_bind_or_within_label_and_registry_values(
+    memory_interface: AzureSQLMemory,
+) -> None:
+    """Scenario-history SQL Server conditions bind repeated values without interpolation."""
+    label_condition = memory_interface._get_scenario_result_label_condition(
+        labels={"team.name": ["alice", "bob"], "operation": "nightly"}
+    )
+    registry_condition = memory_interface._get_scenario_registry_name_condition(
+        scenario_names=["first.scenario", "second.scenario"]
+    )
+
+    assert label_condition.compile().params == {
+        "scenario_label_path_0": '$."team.name"',
+        "scenario_label_value_0_0": "alice",
+        "scenario_label_value_0_1": "bob",
+        "scenario_label_path_1": '$."operation"',
+        "scenario_label_value_1_0": "nightly",
+    }
+    assert registry_condition.compile().params == {
+        "scenario_name_0": "first.scenario",
+        "scenario_name_1": "second.scenario",
+    }
+    assert " IN (" in str(label_condition)
+    assert " AND " in str(label_condition)
+
+
 @pytest.mark.parametrize(
     "case_sensitive, partial_match, expected_sql_fragment",
     [

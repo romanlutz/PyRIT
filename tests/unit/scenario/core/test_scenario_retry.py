@@ -10,7 +10,7 @@ import pytest
 
 from pyrit.executor.attack.core import AttackExecutorResult
 from pyrit.memory import CentralMemory
-from pyrit.models import AttackOutcome, AttackResult, ComponentIdentifier
+from pyrit.models import AttackOutcome, AttackResult, AttackSeedGroup, ComponentIdentifier, SeedObjective
 from pyrit.scenario import DatasetConfiguration, ScenarioResult
 from pyrit.scenario.core import AtomicAttack, BaselineAttackPolicy, Scenario, ScenarioTechnique
 
@@ -136,6 +136,7 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
     attack = MagicMock(spec=AtomicAttack)
     attack.atomic_attack_name = name
     attack.display_group = name
+    attack.technique_eval_hash = "test-technique"
     attack._attack = mock_attack_strategy
     attack._scenario_result_id = None
 
@@ -150,7 +151,11 @@ def create_mock_atomic_attack(name: str, objectives: list[str], run_async_mock: 
 
     current_objectives = {"value": list(objectives)}
     type(attack).objectives = PropertyMock(side_effect=lambda: current_objectives["value"])
-    type(attack).seed_groups = PropertyMock(side_effect=lambda: current_objectives["value"])
+    type(attack).seed_groups = PropertyMock(
+        side_effect=lambda: [
+            AttackSeedGroup(seeds=[SeedObjective(value=objective)]) for objective in current_objectives["value"]
+        ]
+    )
 
     def drop_hashes(*, hashes):
         current_objectives["value"] = [o for o in current_objectives["value"] if to_sha256(o) not in hashes]

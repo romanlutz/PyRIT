@@ -32,7 +32,9 @@ import type {
   RegisteredScenario,
   RunScenarioRequest,
   ScenarioRunSummary,
+  ScenarioRunListResponse,
   ScenarioRunProgress,
+  ScenarioRunState,
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
@@ -338,7 +340,9 @@ export const attacksApi = {
 }
 
 export const labelsApi = {
-  getLabels: async (source: string = 'attacks'): Promise<{ source: string; labels: Record<string, string[]> }> => {
+  getLabels: async (
+    source: 'attacks' | 'scenarios' = 'attacks',
+  ): Promise<{ source: string; labels: Record<string, string[]> }> => {
     const response = await apiClient.get('/labels', { params: { source } })
     return response.data
   },
@@ -373,6 +377,22 @@ export const scenariosApi = {
 
   getRun: async (scenarioResultId: string): Promise<ScenarioRunSummary> => {
     const response = await apiClient.get(`/scenarios/runs/${encodeURIComponent(scenarioResultId)}`)
+    return response.data
+  },
+
+  listRuns: async (params?: {
+    limit?: number
+    cursor?: string
+    scenario_names?: string[]
+    run_statuses?: ScenarioRunState[]
+    label?: string[]
+  }): Promise<ScenarioRunListResponse> => {
+    const response = await apiClient.get('/scenarios/runs', {
+      params,
+      paramsSerializer: {
+        indexes: null,
+      },
+    })
     return response.data
   },
 

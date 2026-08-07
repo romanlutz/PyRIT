@@ -463,6 +463,26 @@ export interface ScenarioRunSummary {
   total_retries: number
   labels: Record<string, string>
   completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  planned_total_available?: boolean
+  successful_attacks?: number
+  error_attacks?: number
+  attack_details_available?: boolean
+}
+
+export interface ScenarioTargetSummary {
+  target_type: string
+  endpoint?: string | null
+  model_name?: string | null
+  identifier_hash?: string | null
+}
+
+export interface ScenarioRunListResponse {
+  items: ScenarioRunSummary[]
+  pagination: PaginationInfo
 }
 
 /** Compact persisted run header returned by the progress endpoint. */
@@ -474,6 +494,12 @@ export interface ScenarioProgressHeader {
   status: ScenarioRunState
   created_at: string
   completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  techniques_used?: string[]
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  labels?: Record<string, string>
 }
 
 /** One persisted attack attempt in ascending progress order. */

@@ -13,6 +13,7 @@ Route structure:
 """
 
 from fastapi import APIRouter, HTTPException, Query, status
+from starlette.concurrency import run_in_threadpool
 
 from pyrit.backend.models.common import ProblemDetail
 from pyrit.backend.models.scenarios import (
@@ -21,7 +22,7 @@ from pyrit.backend.models.scenarios import (
 )
 from pyrit.backend.services.scenario_run_service import get_scenario_run_service
 from pyrit.backend.services.scenario_service import get_scenario_service
-from pyrit.models import ScenarioResult
+from pyrit.models import ScenarioResult, ScenarioRunState
 from pyrit.models.catalog.scenario import (
     RegisteredScenario,
     RunScenarioRequest,
@@ -30,6 +31,25 @@ from pyrit.models.catalog.scenario import (
 from pyrit.models.scenario_progress import ScenarioRunProgress
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
+
+
+def _parse_labels(label_params: list[str] | None) -> dict[str, list[str]] | None:
+    """
+    Parse repeated key:value label filters with OR-within-key semantics.
+
+    Returns:
+        dict[str, str | list[str]] | None: Grouped effective label filters.
+    """
+    labels: dict[str, list[str]] = {}
+    for param in label_params or []:
+        if ":" not in param:
+            continue
+        key, value = param.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            labels.setdefault(key, []).append(value)
+    return labels or None
 
 
 # ============================================================================
@@ -123,18 +143,47 @@ async def start_scenario_run(request: RunScenarioRequest) -> ScenarioRunSummary:
     "/runs",
     response_model=ScenarioRunListResponse,
 )
-async def list_scenario_runs(limit: int = Query(100, ge=1)) -> ScenarioRunListResponse:  # pyrit-async-suffix-exempt
+async def list_scenario_runs(  # pyrit-async-suffix-exempt
+    scenario_names: list[str] | None = Query(
+        None,
+        description="Registered or persisted scenario names; repeated values are OR-matched.",
+    ),
+    run_statuses: list[ScenarioRunState] | None = Query(
+        None,
+        description="Run states; repeated values are OR-matched.",
+    ),
+    label: list[str] | None = Query(
+        None,
+        description="key:value labels; OR within a key and AND across keys.",
+    ),
+    limit: int = Query(100, ge=1, le=100, description="Maximum items per page"),
+    cursor: str | None = Query(None, description="Opaque descending history cursor"),
+) -> ScenarioRunListResponse:
     """
     List tracked scenario runs (most recent first).
 
     Args:
-        limit (int): Maximum number of runs to return. Defaults to 100.
+        scenario_names: Registered or persisted scenario names to match.
+        run_statuses: Run states to match.
+        label: Repeated key:value label filters.
+        limit: Maximum number of runs to return.
+        cursor: Opaque cursor from the previous page.
 
     Returns:
         ScenarioRunListResponse: Runs, most recent first.
     """
     service = get_scenario_run_service()
-    return service.list_runs(limit=limit)
+    try:
+        return await run_in_threadpool(
+            service.list_runs,
+            scenario_names=scenario_names,
+            statuses=run_statuses,
+            labels=_parse_labels(label),
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
 
 @router.get(
