@@ -17,6 +17,7 @@ from pyrit.scenario.core.dataset_configuration import (
     DatasetSourceKind,
     ResolvedDataset,
     forbid_inline_seeds,
+    read_only_dataset_resolution,
     require_harm_categories,
     require_inline_seeds,
     require_min_size,
@@ -326,6 +327,22 @@ class TestFetchDatasetAsync:
             with pytest.raises(DatasetConstraintError, match="auto-fetch") as exc_info:
                 await config.get_attack_seed_groups_async()
         assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+    async def test_read_only_resolution_does_not_fetch_or_persist(self, mock_memory: MagicMock) -> None:
+        """Estimate resolution reports missing data without mutating central memory."""
+        config = DatasetAttackConfiguration(dataset_names=["d1"])
+        with (
+            patch(PROVIDER_PATCH_TARGET) as provider,
+            read_only_dataset_resolution(),
+            pytest.raises(DatasetConstraintError, match="read-only resolution"),
+        ):
+            provider.get_all_dataset_names_async = AsyncMock(return_value=["d1"])
+            provider.fetch_datasets_async = AsyncMock()
+            await config.get_attack_seed_groups_async()
+
+        provider.get_all_dataset_names_async.assert_not_awaited()
+        provider.fetch_datasets_async.assert_not_awaited()
+        mock_memory.add_seed_datasets_to_memory_async.assert_not_awaited()
 
 
 class TestValidators:

@@ -11,10 +11,59 @@ from pyrit.models import (
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
+    ScenarioRunSizeEstimate,
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
+
+
+def test_run_size_estimate_compatibility_alias_is_canonical_model() -> None:
+    """The initial DTO name remains an unambiguous alias of the versioned model."""
+    assert ScenarioRunSizeEstimate is ScenarioDefaultRunSizeEstimate
+
+
+def test_run_size_estimate_accepts_legacy_fields_and_serializes_canonically() -> None:
+    """Legacy constructors parse while the wire shape remains singular and versioned."""
+    estimate = ScenarioRunSizeEstimate.model_validate(
+        {
+            "status": "exact",
+            "total": 2,
+            "components": [{"label": "Sweep", "count": 2}],
+            "datasets": [
+                {
+                    "name": "harmbench",
+                    "seed_group_count": 100,
+                    "selected_seed_group_count": 2,
+                }
+            ],
+            "caveat": "Legacy explanation.",
+        }
+    )
+
+    assert estimate.total == 2
+    assert estimate.caveat == "Legacy explanation."
+    payload = estimate.model_dump(mode="json")
+    assert payload["version"] == 1
+    assert payload["total_attack_count"] == 2
+    assert payload["note"] == "Legacy explanation."
+    assert payload["datasets"][0]["logical_seed_group_count"] == 100
+    assert "total" not in payload
+    assert "caveat" not in payload
+    assert "seed_group_count" not in payload["datasets"][0]
+
+
+def test_run_size_estimate_normalizes_legacy_componentless_exact_total() -> None:
+    estimate = ScenarioRunSizeEstimate.model_validate({"status": "exact", "total": 2})
+
+    assert estimate.total_attack_count == 2
+    assert estimate.components == [
+        ScenarioRunSizeComponent(
+            label="Legacy total",
+            count=2,
+            note="Normalized from a legacy component-less estimate.",
+        )
+    ]
 
 
 def test_exact_default_run_size_requires_component_total() -> None:
