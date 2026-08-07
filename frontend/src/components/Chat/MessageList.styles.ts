@@ -35,22 +35,6 @@ export const useMessageListStyles = makeStyles({
     backgroundColor: tokens.colorBrandBackground2,
     border: `1px solid ${tokens.colorBrandStroke2}`,
   },
-  messageRole: {
-    display: 'flex',
-    alignItems: 'baseline',
-    flexWrap: 'wrap',
-    columnGap: tokens.spacingHorizontalS,
-    rowGap: tokens.spacingVerticalXXS,
-    marginBottom: tokens.spacingVerticalS,
-  },
-  roleLabel: {
-    fontSize: tokens.fontSizeBase200,
-    lineHeight: tokens.lineHeightBase200,
-  },
-  roleDescription: {
-    color: tokens.colorNeutralForeground3,
-    lineHeight: tokens.lineHeightBase200,
-  },
   messageText: {
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
@@ -72,7 +56,7 @@ export const useMessageListStyles = makeStyles({
   },
   messageFooter: {
     display: 'flex',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
     alignItems: 'center',
     marginTop: tokens.spacingVerticalXS,
     gap: '15px',
@@ -80,6 +64,11 @@ export const useMessageListStyles = makeStyles({
   timestamp: {
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground3,
+  },
+  role: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+    fontStyle: 'italic',
   },
   loadingEllipsis: {
     fontSize: tokens.fontSizeBase500,
@@ -263,11 +252,12 @@ export const useMessageListStyles = makeStyles({
     marginBottom: tokens.spacingVerticalS,
   },
   convertedLabel: {
-    fontSize: tokens.fontSizeBase200,
+    fontSize: tokens.fontSizeBase100,
     fontWeight: tokens.fontWeightSemibold,
     color: tokens.colorBrandForeground1,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.05em',
     marginBottom: tokens.spacingVerticalXXS,
-    overflowWrap: 'anywhere',
     cursor: 'default',
   },
 })

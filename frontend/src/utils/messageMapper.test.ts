@@ -8,20 +8,7 @@ import {
   attachmentToMessagePieceRequest,
   buildMessagePieces,
 } from "./messageMapper";
-import type {
-  BackendMessage,
-  ConverterIdentifier,
-  MessageAttachment,
-} from "../types";
-
-function createConverterIdentifier(className: string): ConverterIdentifier {
-  return {
-    class_name: className,
-    class_module: `pyrit.converter.${className}`,
-    hash: `${className}-hash`,
-    pyrit_version: "0.0.0",
-  };
-}
+import type { BackendMessage, MessageAttachment } from "../types";
 
 describe("messageMapper", () => {
   describe("fileToBase64", () => {
@@ -1003,53 +990,6 @@ describe("messageMapper", () => {
       const result = backendMessageToFrontend(msg);
       expect(result.content).toBe("VGVsbCBtZSBhIGpva2U=");
       expect(result.originalContent).toBe("Tell me a joke");
-    });
-
-    it("should retain converter class names in first-seen order without duplicates", () => {
-      const textJailbreak = createConverterIdentifier(
-        "TextJailbreakConverter"
-      );
-      const msg: BackendMessage = {
-        turn_number: 1,
-        role: "user",
-        message_pieces: [
-          {
-            id: "p1",
-            original_value_data_type: "text",
-            converted_value_data_type: "text",
-            original_value: "First original",
-            converted_value: "First converted",
-            converter_identifiers: [
-              textJailbreak,
-              createConverterIdentifier("Base64Converter"),
-            ],
-            scores: [],
-            response_error: "none",
-          },
-          {
-            id: "p2",
-            original_value_data_type: "text",
-            converted_value_data_type: "text",
-            original_value: "Second original",
-            converted_value: "Second converted",
-            converter_identifiers: [
-              textJailbreak,
-              createConverterIdentifier("UnicodeConfusableConverter"),
-            ],
-            scores: [],
-            response_error: "none",
-          },
-        ],
-        created_at: "2026-02-25T00:00:00Z",
-      };
-
-      const result = backendMessageToFrontend(msg);
-
-      expect(result.converterClassNames).toEqual([
-        "TextJailbreakConverter",
-        "Base64Converter",
-        "UnicodeConfusableConverter",
-      ]);
     });
 
     it("should not set originalContent when original equals converted", () => {

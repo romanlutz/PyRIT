@@ -192,8 +192,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
   const attachments: MessageAttachment[] = []
   const originalAttachments: MessageAttachment[] = []
   const reasoningSummaries: string[] = []
-  const converterClassNames: string[] = []
-  const seenConverterClassNames = new Set<string>()
   let error: MessageError | undefined
 
   for (const piece of msg.message_pieces) {
@@ -208,14 +206,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
       const summaries = extractReasoningSummaries(piece.converted_value)
       reasoningSummaries.push(...summaries)
       continue
-    }
-
-    for (const identifier of piece.converter_identifiers ?? []) {
-      const className = identifier.class_name.trim()
-      if (className && !seenConverterClassNames.has(className)) {
-        seenConverterClassNames.add(className)
-        converterClassNames.push(className)
-      }
     }
 
     // Extract text content from text-type pieces (converted)
@@ -254,7 +244,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
   const hasTextDiff = originalContent !== '' && originalContent !== convertedContent
   const hasMediaDiff = originalAttachments.length > 0 &&
     JSON.stringify(originalAttachments.map(a => a.url)) !== JSON.stringify(attachments.map(a => a.url))
-  const hasConversionDiff = hasTextDiff || hasMediaDiff
 
   return {
     role: role as Message['role'],
@@ -265,9 +254,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     reasoningSummaries: reasoningSummaries.length > 0 ? reasoningSummaries : undefined,
     originalContent: hasTextDiff ? originalContent : undefined,
     originalAttachments: hasMediaDiff ? originalAttachments : undefined,
-    converterClassNames: hasConversionDiff && converterClassNames.length > 0
-      ? converterClassNames
-      : undefined,
   }
 }
 

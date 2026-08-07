@@ -38,8 +38,6 @@ export interface Message {
   originalContent?: string
   /** Original media attachments before conversion (when different from converted). */
   originalAttachments?: MessageAttachment[]
-  /** Ordered, deduplicated converter class names for a visible original/converted difference. */
-  converterClassNames?: string[]
 }
 
 export interface MessageError {
@@ -299,7 +297,6 @@ export interface BackendMessagePiece {
   original_filename?: string | null
   converted_filename?: string | null
   prompt_metadata?: Record<string, unknown> | null
-  converter_identifiers?: ConverterIdentifier[] | null
   scores: BackendScore[]
   response_error: string // 'none' | 'blocked' | 'processing' | 'empty' | 'unknown'
   response_error_description?: string | null
