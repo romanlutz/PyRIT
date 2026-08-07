@@ -161,17 +161,29 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
         const isUser = message.role === 'user'
         const isSimulated = message.role === 'simulated_assistant'
         const timestamp = new Date(message.timestamp).toLocaleTimeString()
-        const avatarName = isUser ? 'User' : isSimulated ? 'Simulated' : 'Assistant'
+        const avatarName = isUser ? 'User' : isSimulated ? 'Simulated assistant' : 'Assistant'
+        const avatarInitials = isUser ? 'U' : isSimulated ? 'SA' : 'A'
+        const roleDescription = isUser
+          ? 'A user or attack message sent toward the target.'
+          : isSimulated
+            ? 'Synthetic assistant content generated as prepended conversation context, not a response returned by the objective target.'
+            : 'An actual response returned by the objective target.'
 
         return (
           <div
             key={index}
             className={mergeClasses(styles.message, isUser && styles.userMessage)}
           >
-            <Avatar
-              name={avatarName}
-              color={isUser ? 'colorful' : isSimulated ? 'steel' : 'brand'}
-            />
+            <Tooltip content={roleDescription} relationship="description" withArrow>
+              <Avatar
+                name={avatarName}
+                initials={avatarInitials}
+                color={isUser ? 'colorful' : isSimulated ? 'steel' : 'brand'}
+                aria-label={avatarName}
+                tabIndex={0}
+                data-testid={`message-role-avatar-${index}`}
+              />
+            </Tooltip>
             <div
               className={mergeClasses(styles.messageContent, isUser && styles.userMessageContent)}
               data-testid={`message-bubble-${index}`}

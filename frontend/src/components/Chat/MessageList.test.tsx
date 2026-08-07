@@ -70,6 +70,7 @@ describe("MessageList", () => {
     );
 
     expect(screen.queryByText("You are a pirate.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("System")).not.toBeInTheDocument();
     expect(screen.getByText("Hello, how are you?")).toBeInTheDocument();
   });
 
@@ -423,26 +424,97 @@ describe("MessageList", () => {
     expect(messageElements.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("should render simulated_assistant with distinct avatar", () => {
-    const simMessages: Message[] = [
+  describe("role avatars", () => {
+    const roleMessages: Message[] = [
+      {
+        role: "user",
+        content: "Attack prompt",
+        timestamp: new Date().toISOString(),
+      },
+      {
+        role: "assistant",
+        content: "Objective target response",
+        timestamp: new Date().toISOString(),
+      },
       {
         role: "simulated_assistant",
-        content: "Simulated response from another conversation",
+        content: "Prepended synthetic context",
         timestamp: new Date().toISOString(),
       },
     ];
 
-    render(
-      <TestWrapper>
-        <MessageList messages={simMessages} />
-      </TestWrapper>
-    );
+    it("should render exact initials for each visible role", () => {
+      render(
+        <TestWrapper>
+          <MessageList messages={roleMessages} />
+        </TestWrapper>
+      );
 
-    expect(
-      screen.getByText("Simulated response from another conversation")
-    ).toBeInTheDocument();
-    // Avatar should be labelled "Simulated" instead of "Assistant"
-    expect(screen.getByText("S")).toBeInTheDocument();
+      expect(screen.getByTestId("message-role-avatar-0")).toHaveTextContent(/^U$/);
+      expect(screen.getByTestId("message-role-avatar-1")).toHaveTextContent(/^A$/);
+      expect(screen.getByTestId("message-role-avatar-2")).toHaveTextContent(/^SA$/);
+      expect(screen.queryByText("S")).not.toBeInTheDocument();
+    });
+
+    it("should distinguish actual and simulated assistant roles accessibly", () => {
+      render(
+        <TestWrapper>
+          <MessageList messages={roleMessages} />
+        </TestWrapper>
+      );
+
+      expect(screen.getByLabelText("Assistant")).toBeInTheDocument();
+      expect(screen.getByLabelText("Simulated assistant")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Simulated")).not.toBeInTheDocument();
+    });
+
+    it.each([
+      ["User", "A user or attack message sent toward the target."],
+      ["Assistant", "An actual response returned by the objective target."],
+      [
+        "Simulated assistant",
+        "Synthetic assistant content generated as prepended conversation context, not a response returned by the objective target.",
+      ],
+    ])("should show the %s role description on pointer hover", async (role, description) => {
+      const user = userEvent.setup();
+      render(
+        <TestWrapper>
+          <MessageList messages={roleMessages} />
+        </TestWrapper>
+      );
+
+      const avatar = screen.getByLabelText(role);
+      await user.hover(avatar);
+
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(description);
+      expect(avatar).toHaveAccessibleDescription(description);
+    });
+
+    it("should expose every role tooltip to keyboard focus in message order", async () => {
+      const user = userEvent.setup();
+      render(
+        <TestWrapper>
+          <MessageList messages={roleMessages} />
+        </TestWrapper>
+      );
+
+      const roleDescriptions = [
+        ["User", "A user or attack message sent toward the target."],
+        ["Assistant", "An actual response returned by the objective target."],
+        [
+          "Simulated assistant",
+          "Synthetic assistant content generated as prepended conversation context, not a response returned by the objective target.",
+        ],
+      ];
+
+      for (const [role, description] of roleDescriptions) {
+        await user.tab();
+        const avatar = screen.getByLabelText(role);
+        expect(avatar).toHaveFocus();
+        expect(await screen.findByRole("tooltip")).toHaveTextContent(description);
+        expect(avatar).toHaveAccessibleDescription(description);
+      }
+    });
   });
 
   it("should show 'Copy to input' and 'Download' buttons on assistant media attachments", () => {
