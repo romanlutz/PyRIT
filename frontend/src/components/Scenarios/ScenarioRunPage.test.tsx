@@ -1,7 +1,13 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
 import { useScenarioQueue } from '@/hooks/useScenarioQueue'
@@ -36,6 +42,7 @@ const mockUseScenarioQueue = useScenarioQueue as jest.Mock
 const mockCancelRun = scenariosApi.cancelRun as jest.Mock
 const mockRetry = jest.fn()
 const mockApplyRunSummary = jest.fn()
+const SCENARIO_RESULT_ID = '123e4567-e89b-12d3-a456-426614174000'
 
 const PLAN: ScenarioRunPlan = {
   version: 1,
@@ -71,7 +78,7 @@ function makeState(overrides: Partial<ScenarioRunProgressState> = {}): ScenarioR
     ...INITIAL_SCENARIO_RUN_PROGRESS_STATE,
     loadStatus: 'ready',
     run: {
-      scenario_result_id: 'run-1',
+      scenario_result_id: SCENARIO_RESULT_ID,
       scenario_name: 'TestScenario',
       scenario_registry_name: 'test.scenario',
       scenario_version: 1,
@@ -95,13 +102,23 @@ function mockHookState(state: ScenarioRunProgressState): void {
   })
 }
 
-function renderPage(path = '/scenario-history/run-1') {
+function AttackRouteProbe() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  return (
+    <div data-testid="attack-route" data-location={`${location.pathname}${location.search}`}>
+      <button onClick={() => navigate(-1)}>Browser back</button>
+    </div>
+  )
+}
+
+function renderPage(path = `/scenario-history/${SCENARIO_RESULT_ID}`) {
   return render(
     <FluentProvider theme={webLightTheme}>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/scenario-history/:scenarioResultId" element={<ScenarioRunPage />} />
-          <Route path="/attacks/:attackId" element={<div data-testid="attack-route" />} />
+          <Route path="/attacks/:attackId" element={<AttackRouteProbe />} />
         </Routes>
       </MemoryRouter>
     </FluentProvider>,
@@ -134,6 +151,7 @@ describe('ScenarioRunPage', () => {
     expect(screen.getByRole('table', { name: 'Logical seed groups' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Persisted attack attempts' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel run' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
   })
 
   it('renders contract-backed safe target and run configuration metadata', () => {
@@ -230,7 +248,7 @@ describe('ScenarioRunPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Cancel run' }))
 
     await waitFor(() => expect(mockApplyRunSummary).toHaveBeenCalledWith(cancelledRun))
-    expect(mockCancelRun).toHaveBeenCalledWith('run-1')
+    expect(mockCancelRun).toHaveBeenCalledWith(SCENARIO_RESULT_ID)
   })
 
   it('keeps the confirmation open and shows cancel conflicts', async () => {
@@ -261,13 +279,90 @@ describe('ScenarioRunPage', () => {
     await waitFor(() => expect(detailsButton).toHaveFocus())
   })
 
-  it('navigates to the existing attack route', async () => {
+  it('puts the essential attack link in the first column with bounded provenance', () => {
+    renderPage()
+
+    const attackLink = screen.getByRole('link', { name: 'Open attack attack-result-1' })
+    expect(attackLink).toHaveAttribute(
+      'href',
+      `/attacks/attack-result-1?scenarioResultId=${SCENARIO_RESULT_ID}`,
+    )
+    expect(attackLink).toHaveTextContent('attack-result-1')
+    const attemptsTable = screen.getByRole('table', { name: 'Persisted attack attempts' })
+    expect(within(attemptsTable).getByRole('columnheader', { name: 'Attack' })).toBeInTheDocument()
+    const firstBodyRow = within(attemptsTable).getAllByRole('row')[1]
+    expect(within(firstBodyRow).getAllByRole('cell')[0]).toContainElement(
+      attackLink,
+    )
+  })
+
+  it('navigates from non-interactive row content and browser Back returns to the run', async () => {
     const user = userEvent.setup()
     renderPage()
 
-    await user.click(screen.getByRole('link', { name: 'Open attack attack-result-1' }))
+    const attemptRow = screen.getByRole('row', {
+      name: 'Open attack attack-result-1',
+    })
+    await user.click(within(attemptRow).getByText('Technique One'))
 
     expect(screen.getByTestId('attack-route')).toBeInTheDocument()
+    expect(screen.getByTestId('attack-route')).toHaveAttribute(
+      'data-location',
+      `/attacks/attack-result-1?scenarioResultId=${SCENARIO_RESULT_ID}`,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Browser back' }))
+
+    expect(screen.getByRole('heading', { name: 'test.scenario', level: 1 })).toBeInTheDocument()
+  })
+
+  it('supports Enter and Space row activation', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const row = screen.getByRole('row', { name: 'Open attack attack-result-1' })
+
+    row.focus()
+    await user.keyboard('{Enter}')
+    expect(screen.getByTestId('attack-route')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Browser back' }))
+
+    const restoredRow = screen.getByRole('row', { name: 'Open attack attack-result-1' })
+    restoredRow.focus()
+    await user.keyboard(' ')
+    expect(screen.getByTestId('attack-route')).toBeInTheDocument()
+  })
+
+  it('does not hijack modified, non-primary, or nested-control clicks', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    const row = screen.getByRole('row', { name: 'Open attack attack-result-1' })
+
+    fireEvent.click(row, { ctrlKey: true })
+    fireEvent.click(row, { metaKey: true })
+    fireEvent.click(row, { shiftKey: true })
+    fireEvent.click(row, { altKey: true })
+    fireEvent.click(row, { button: 1 })
+    expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', {
+      name: 'View details for attack attempt attack-result-1',
+    }))
+    expect(screen.getByRole('dialog', { name: 'Attack attempt details' })).toBeInTheDocument()
+    expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
+  })
+
+  it('leaves modified first-column link clicks to native new-tab behavior', () => {
+    renderPage()
+    const link = screen.getByRole('link', { name: 'Open attack attack-result-1' })
+    const modifiedClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+    })
+
+    expect(link.dispatchEvent(modifiedClick)).toBe(true)
+    expect(modifiedClick.defaultPrevented).toBe(false)
+    expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
   })
 
   it('renders loading, not-found, and initial error states with accessible recovery', () => {

@@ -86,6 +86,8 @@ def _make_request(
     dataset_names: list[str] | None = None,
     max_dataset_size: int | None = None,
     dataset_filters: dict[str, list[str]] | None = None,
+    include_baseline: bool | None = None,
+    scenario_params: dict[str, Any] | None = None,
 ) -> RunScenarioRequest:
     """Create a RunScenarioRequest for testing."""
     return RunScenarioRequest(
@@ -97,6 +99,8 @@ def _make_request(
         dataset_names=dataset_names,
         max_dataset_size=max_dataset_size,
         dataset_filters=dataset_filters,
+        include_baseline=include_baseline,
+        scenario_params=scenario_params,
     )
 
 
@@ -339,6 +343,135 @@ class TestScenarioRunServiceStartRun:
 
         init_call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
         assert init_call.kwargs["scenario_techniques"] == [technique_a, technique_b]
+
+    async def test_jailbreak_explicit_selection_and_params_reach_registry_unchanged(self, mock_all_registries) -> None:
+        """An explicit Jailbreak technique never adds the default aggregate or other techniques."""
+
+        class _JailbreakTechnique(ScenarioTechnique):
+            ALL = ("all", {"all"})
+            DEFAULT = ("default", {"default"})
+            PROMPT_SENDING = ("prompt_sending", {"default"})
+            CONTEXT_COMPLIANCE = ("context_compliance", {"default"})
+
+            @classmethod
+            def get_aggregate_tags(cls) -> set[str]:
+                return {"all", "default"}
+
+        scenario_instance = mock_all_registries["scenario_instance"]
+        scenario_instance._technique_class = _JailbreakTechnique
+        objective_target = mock_all_registries["target_registry"].instances.get.return_value
+        scenario_params = {"num_jailbreaks": 2, "num_jailbreak_attempts": 1}
+
+        service = ScenarioRunService()
+        await service.start_run_async(
+            request=_make_request(
+                scenario_name="airt.jailbreak",
+                techniques=["prompt_sending"],
+                include_baseline=False,
+                scenario_params=scenario_params,
+            )
+        )
+
+        mock_all_registries["scenario_registry"].create_and_initialize_async.assert_awaited_once_with(
+            "airt.jailbreak",
+            scenario_params=scenario_params,
+            scenario_result_id=None,
+            objective_target=objective_target,
+            max_concurrency=10,
+            max_retries=0,
+            include_baseline=False,
+            scenario_techniques=[_JailbreakTechnique.PROMPT_SENDING],
+        )
+
+    async def test_exact_eight_unit_jailbreak_request_queues_behind_active_run(self, mock_all_registries) -> None:
+        """The configured eight-unit request keeps a stable ID and FIFO position while another run executes."""
+
+        class _JailbreakTechnique(ScenarioTechnique):
+            ALL = ("all", {"all"})
+            DEFAULT = ("default", {"default"})
+            PROMPT_SENDING = ("prompt_sending", {"default"})
+
+            @classmethod
+            def get_aggregate_tags(cls) -> set[str]:
+                return {"all", "default"}
+
+        service = ScenarioRunService()
+        mock_sr = mock_all_registries["scenario_registry"]
+        mock_memory = mock_all_registries["memory"]
+        mock_all_registries["scenario_instance"]._technique_class = _JailbreakTechnique
+        records: dict[str, MagicMock] = {}
+        active_started = asyncio.Event()
+        queued_started = asyncio.Event()
+        release_active = asyncio.Event()
+        started: list[str] = []
+
+        async def _create_scenario(*args: object, **kwargs: object) -> MagicMock:
+            run_id = f"run-{len(records) + 1}"
+            record = _make_db_scenario_result(
+                result_id=run_id,
+                scenario_name=str(args[0]),
+                run_state=ScenarioRunState.CREATED,
+            )
+            records[run_id] = record
+            scenario = MagicMock()
+            scenario._scenario_result_id = run_id
+            scenario.active_atomic_group_ids = set()
+
+            async def _run() -> None:
+                started.append(run_id)
+                if run_id == "run-1":
+                    active_started.set()
+                    await release_active.wait()
+                else:
+                    queued_started.set()
+                record.scenario_run_state = ScenarioRunState.COMPLETED
+
+            scenario.run_async = AsyncMock(side_effect=_run)
+            return scenario
+
+        def _get_results(*, scenario_result_ids: list[str] | None = None) -> list[MagicMock]:
+            if scenario_result_ids is None:
+                return list(records.values())
+            return [records[run_id] for run_id in scenario_result_ids if run_id in records]
+
+        def _update_state(*, scenario_result_id: str, scenario_run_state: ScenarioRunState, **_: object) -> None:
+            records[scenario_result_id].scenario_run_state = scenario_run_state
+
+        mock_sr.create_and_initialize_async = AsyncMock(side_effect=_create_scenario)
+        mock_memory.get_scenario_results.side_effect = _get_results
+        mock_memory.update_scenario_run_state.side_effect = _update_state
+
+        active_response = await service.start_run_async(request=_make_request())
+        await asyncio.wait_for(active_started.wait(), timeout=1)
+        configured_request = _make_request(
+            scenario_name="airt.jailbreak",
+            techniques=["prompt_sending"],
+            include_baseline=False,
+            scenario_params={"num_jailbreaks": 2, "num_jailbreak_attempts": 1},
+        )
+        queued_response = await service.start_run_async(request=configured_request)
+
+        assert active_response.scenario_result_id == "run-1"
+        assert queued_response.scenario_result_id == "run-2"
+        assert queued_response.status == ScenarioRunState.QUEUED
+        assert queued_response.queue_position == 1
+        assert queued_response.active_scenario_result_id == "run-1"
+        assert [(entry.scenario_result_id, entry.position) for entry in service.get_queue_snapshot().queued] == [
+            ("run-2", 1)
+        ]
+        second_init = mock_sr.create_and_initialize_async.await_args_list[1]
+        assert second_init.args == ("airt.jailbreak",)
+        assert second_init.kwargs["scenario_params"] == {
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+        assert second_init.kwargs["scenario_techniques"] == [_JailbreakTechnique.PROMPT_SENDING]
+        assert second_init.kwargs["include_baseline"] is False
+
+        release_active.set()
+        await asyncio.wait_for(queued_started.wait(), timeout=1)
+        await asyncio.wait_for(service._active_tasks["run-2"].task, timeout=1)
+        assert started == ["run-1", "run-2"]
 
     async def test_start_run_forwards_include_baseline(self, mock_all_registries) -> None:
         service = ScenarioRunService()

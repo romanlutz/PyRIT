@@ -11,8 +11,9 @@ import {
   mergeClasses,
 } from '@fluentui/react-components'
 import { ArrowDownloadRegular, ArrowReplyRegular, ArrowForwardRegular, ChatAddRegular, BranchForkRegular, OpenRegular } from '@fluentui/react-icons'
+import MarkdownContent from '@/components/Markdown/MarkdownContent'
+
 import { Message, MessageAttachment } from '../../types'
-import MarkdownContent from './MarkdownContent'
 import { useMessageListStyles } from './MessageList.styles'
 
 interface MessageListProps {

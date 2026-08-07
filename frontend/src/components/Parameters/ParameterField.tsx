@@ -46,6 +46,7 @@ export default function ParameterField({
     return (
       <Field label={label} hint={parameter.description ?? undefined}>
         <Select
+          className={styles.control}
           value={current}
           disabled={disabled}
           onChange={(_, data) => onChange(parameter.name, data.value)}
@@ -66,6 +67,7 @@ export default function ParameterField({
         <div className={styles.checkboxGroup} role="group" aria-label={parameter.name}>
           {(parameter.choices ?? []).map((choice) => (
             <Checkbox
+              className={styles.selectionControl}
               key={choice}
               label={choice}
               checked={selected.includes(choice)}
@@ -90,6 +92,7 @@ export default function ParameterField({
     return (
       <Field label={label} hint={parameter.description ?? undefined}>
         <Select
+          className={styles.control}
           value={stringValue}
           disabled={disabled}
           onChange={(_, data) => onChange(parameter.name, data.value)}
@@ -113,6 +116,7 @@ export default function ParameterField({
   return (
     <Field label={label} hint={hint}>
       <Input
+        className={styles.control}
         value={stringValue}
         type={kind === 'number' ? 'number' : 'text'}
         placeholder={placeholder}

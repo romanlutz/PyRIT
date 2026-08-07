@@ -16,24 +16,44 @@ jest.mock('@/services/api', () => ({
 
 const mockListCatalog = scenariosApi.listCatalog as jest.Mock
 
-const TestWrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <FluentProvider theme={webLightTheme}>
-    <MemoryRouter>{children}</MemoryRouter>
-  </FluentProvider>
-)
+const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
+
+function TestWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <FluentProvider theme={webLightTheme}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </FluentProvider>
+  )
+}
 
 function makeScenario(overrides: Partial<RegisteredScenario> & { scenario_name: string }): RegisteredScenario {
+  const description = overrides.description ?? 'A demo scenario.'
+  const defaultTechnique = overrides.default_technique ?? 'default_technique'
   return {
     scenario_type: 'DemoScenario',
-    description: 'A demo scenario.',
-    default_technique: 'default_technique',
+    scenario_version: 1,
     aggregate_techniques: [],
+    aggregate_technique_expansions: {},
     all_techniques: ['default_technique'],
     default_datasets: [],
+    default_dataset_summaries: [],
     baseline_policy: 'enabled',
     include_baseline_by_default: true,
     supported_parameters: [],
+    default_run_size: {
+      version: 1,
+      status: 'unavailable',
+      total_attack_count: null,
+      components: [],
+      datasets: [],
+      note: 'Default sizing is not available.',
+      retries_included: false,
+    },
     ...overrides,
+    description,
+    description_markdown: overrides.description_markdown ?? description,
+    default_technique: defaultTechnique,
+    default_techniques: overrides.default_techniques ?? [defaultTechnique],
   }
 }
 
@@ -62,6 +82,23 @@ describe('ScenarioCatalog', () => {
     expect(await screen.findByText('foundry.red_team_agent')).toBeInTheDocument()
     expect(screen.getByText('encoding.base64')).toBeInTheDocument()
     expect(mockListCatalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('explains how scenarios become backend run plans and renders a semantic comparison table', async () => {
+    mockListCatalog.mockResolvedValueOnce({
+      items: [makeScenario({ scenario_name: 'foundry.red_team_agent' })],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    expect(await screen.findByRole('table', { name: 'Registered scenarios' })).toBeInTheDocument()
+    expect(screen.getByText(/packages objective datasets, selected or aggregate techniques/i)).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Scenario / purpose' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Default run size' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Techniques' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Datasets' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Action' })).toBeInTheDocument()
   })
 
   it('follows the cursor to load every page automatically', async () => {
@@ -185,33 +222,126 @@ describe('ScenarioCatalog', () => {
     expect(card).toHaveAttribute('href', '/scenarios/foundry%2Fred_team_agent')
   })
 
-  it('renders the default technique and other techniques as badges', async () => {
+  it('keeps Markdown links out of the clipped summary until the disclosure is opened', async () => {
+    const user = userEvent.setup()
     mockListCatalog.mockResolvedValueOnce({
       items: [
         makeScenario({
-          scenario_name: 'foundry.red_team_agent',
-          default_technique: 'default_technique',
-          all_techniques: ['default_technique', 'crescendo', 'jailbreak'],
+          scenario_name: 'garak.doctor',
+          description: 'Read the [scenario guide](https://example.com/guide) before launch.',
         }),
       ],
       pagination: { limit: 200, has_more: false },
     })
 
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    const row = await screen.findByTestId('scenario-card-garak.doctor')
+    expect(screen.queryByRole('link', { name: 'scenario guide' })).not.toBeInTheDocument()
 
-    const card = await screen.findByTestId('scenario-card-foundry.red_team_agent')
-    expect(within(card).getByText('default_technique')).toBeInTheDocument()
-    expect(within(card).getByText('crescendo')).toBeInTheDocument()
-    expect(within(card).getByText('jailbreak')).toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: 'Show details' }))
+
+    const guide = screen.getByRole('link', { name: 'scenario guide' })
+    expect(guide).toHaveAttribute('target', '_blank')
+    expect(guide).toHaveAttribute('rel', 'noopener noreferrer')
   })
 
-  it('shows non-default aggregate techniques as available metadata', async () => {
+  it('keeps declared datasets visible when backend population summaries are unavailable', async () => {
+    const user = userEvent.setup()
     mockListCatalog.mockResolvedValueOnce({
       items: [
         makeScenario({
-          scenario_name: 'foundry.red_team_agent',
+          scenario_name: 'scenario.unsized',
+          default_datasets: ['harmbench'],
+          default_dataset_summaries: [],
+        }),
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    const row = await screen.findByTestId('scenario-card-scenario.unsized')
+    await user.click(within(row).getByRole('button', { name: 'Show details' }))
+
+    const details = screen.getByRole('region', { name: 'scenario.unsized details' })
+    expect(within(details).getByText('harmbench')).toBeInTheDocument()
+    expect(within(details).getByText('Population unavailable')).toBeInTheDocument()
+    expect(within(details).getByText(
+      'The backend did not supply population counts or configured caps.',
+    )).toBeInTheDocument()
+    expect(within(details).queryByText(
+      'This scenario does not declare a default dataset.',
+    )).not.toBeInTheDocument()
+  })
+
+  it('discloses every technique and dataset without an unactionable +N summary', async () => {
+    const user = userEvent.setup()
+    mockListCatalog.mockResolvedValueOnce({
+      items: [
+        makeScenario({
+          scenario_name: 'airt.jailbreak',
+          scenario_version: 4,
           default_technique: 'default',
-          aggregate_techniques: ['default', 'easy', 'moderate'],
+          default_techniques: ['prompt_sending', 'jailbreak_system_prompt'],
+          aggregate_techniques: ['default', 'easy'],
+          aggregate_technique_expansions: {
+            default: ['prompt_sending', 'jailbreak_system_prompt'],
+            easy: ['prompt_sending'],
+          },
+          all_techniques: ['prompt_sending', 'jailbreak_system_prompt', 'flip'],
+          default_datasets: ['harmbench'],
+          default_dataset_summaries: [
+            {
+              name: 'harmbench',
+              kind: 'dataset',
+              logical_seed_group_count: 5,
+              selected_seed_group_count: 4,
+              configured_caps: [
+                {
+                  label: 'Jailbreak templates',
+                  count: 2,
+                  configured_on: 'configuration',
+                  dataset_name: null,
+                },
+              ],
+              selection_note: 'One incompatible group is excluded.',
+            },
+          ],
+          default_run_size: {
+            version: 1,
+            status: 'exact',
+            total_attack_count: 8,
+            components: [
+              {
+                label: 'Default attacks',
+                count: 8,
+                factors: [
+                  { label: 'selected seed groups', count: 4 },
+                  { label: 'default techniques', count: 2 },
+                ],
+                is_baseline: false,
+                note: null,
+              },
+            ],
+            datasets: [
+              {
+                name: 'harmbench',
+                kind: 'dataset',
+                logical_seed_group_count: 5,
+                selected_seed_group_count: 4,
+                configured_caps: [
+                  {
+                    label: 'Jailbreak templates',
+                    count: 2,
+                    configured_on: 'configuration',
+                    dataset_name: null,
+                  },
+                ],
+                selection_note: 'One incompatible group is excluded.',
+              },
+            ],
+            note: 'Retries and internal turns are excluded.',
+            retries_included: false,
+          },
         }),
       ],
       pagination: { limit: 200, has_more: false },
@@ -219,9 +349,54 @@ describe('ScenarioCatalog', () => {
 
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
-    const card = await screen.findByRole('link', { name: /foundry\.red_team_agent/i })
-    expect(within(card).getByText('Aggregate techniques')).toBeInTheDocument()
-    expect(within(card).getByText('easy')).toBeInTheDocument()
-    expect(within(card).getByText('moderate')).toBeInTheDocument()
+    const row = await screen.findByTestId('scenario-card-airt.jailbreak')
+    const disclosure = within(row).getByRole('button', { name: 'Show details' })
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(disclosure)
+
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    const details = screen.getByRole('region', { name: 'airt.jailbreak details' })
+    expect(within(details).getAllByText('default').length).toBeGreaterThan(0)
+    expect(within(details).getByText('easy')).toBeInTheDocument()
+    expect(within(details).getAllByText('prompt_sending').length).toBeGreaterThan(0)
+    expect(within(details).getAllByText('jailbreak_system_prompt').length).toBeGreaterThan(0)
+    expect(within(details).getByText('flip')).toBeInTheDocument()
+    expect(within(details).getAllByText('harmbench').length).toBeGreaterThan(0)
+    expect(within(details).getAllByText('Jailbreak templates: 2 (configuration)').length)
+      .toBeGreaterThan(0)
+    expect(within(details).getAllByText('One incompatible group is excluded.').length)
+      .toBeGreaterThan(0)
+    expect(within(details).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(details).queryByText('context_compliance')).not.toBeInTheDocument()
+    expect(within(details).queryByText(/multi.?turn/i)).not.toBeInTheDocument()
+    expect(within(details).queryByText(/simulated/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/\+\d+ more/i)).not.toBeInTheDocument()
+  })
+
+  it('normalizes MyST literals while keeping scenario Markdown and raw HTML safe', async () => {
+    const user = userEvent.setup()
+    mockListCatalog.mockResolvedValueOnce({
+      items: [
+        makeScenario({
+          scenario_name: 'airt.jailbreak',
+          description: 'Configure the Jailbreak scenario.',
+          description_markdown: `Set \`\`num_jailbreaks\`\`.\n\n${RAW_IMAGE_HTML}unsafe`,
+        }),
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    const row = await screen.findByTestId('scenario-card-airt.jailbreak')
+    await user.click(within(row).getByRole('button', { name: 'Show details' }))
+
+    const details = screen.getByRole('region', { name: 'airt.jailbreak details' })
+    const literal = within(details).getByText('num_jailbreaks')
+    expect(literal.tagName).toBe('CODE')
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(
+      within(details).getByText((content: string) => content.includes(`${RAW_IMAGE_HTML}unsafe`)),
+    ).toBeInTheDocument()
   })
 })

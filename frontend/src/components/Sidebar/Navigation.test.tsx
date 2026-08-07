@@ -3,7 +3,7 @@
  * Licensed under the MIT license.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ThemeProvider, useTheme } from "../../hooks/useTheme";
 import Navigation from "./Navigation";
@@ -102,6 +102,41 @@ describe("Navigation", () => {
     expect(
       screen.getByRole("button", { name: "Scenarios" })
     ).toBeInTheDocument();
+  });
+
+  it("renders the final primary navigation order", () => {
+    renderWithProvider(<Navigation {...defaultProps} />);
+    const navigation = screen.getByRole("navigation", { name: "Primary" });
+    const labels = within(navigation)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"));
+
+    expect(labels).toEqual([
+      "Home",
+      "Chat",
+      "Attack History",
+      "Scenarios",
+      "Scenario History",
+      "Configuration",
+      "Initializers",
+    ]);
+  });
+
+  it("marks Scenario History current and navigates to its dedicated view", async () => {
+    const user = userEvent.setup();
+    const onNavigate = jest.fn();
+    renderWithProvider(
+      <Navigation
+        {...defaultProps}
+        currentView="scenarioHistory"
+        onNavigate={onNavigate}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Scenario History" });
+    expect(button).toHaveAttribute("aria-current", "page");
+    await user.click(button);
+    expect(onNavigate).toHaveBeenCalledWith("scenarioHistory");
   });
 
   it("calls onNavigate with 'scenarios' when the scenarios button is clicked", async () => {
