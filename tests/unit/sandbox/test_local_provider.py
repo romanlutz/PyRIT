@@ -163,7 +163,7 @@ async def test_closed_environment_rejects_new_operations(tmp_path: Path) -> None
 
 def test_local_registry_discovers_and_holds_provider(tmp_path: Path) -> None:
     registry = SandboxProviderRegistry()
-    assert registry.get_class_names() == ["DockerSandboxProvider", "LocalSandboxProvider"]
+    assert registry.get_class_names() == ["DockerSandboxProvider", "HyperVSandboxProvider", "LocalSandboxProvider"]
     provider = LocalSandboxProvider(config=LocalSandboxProviderConfig(workspace_root=tmp_path))
     registry.instances.register(provider, name="development")
     assert registry.instances.get("development") is provider

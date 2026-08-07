@@ -269,6 +269,237 @@ class DockerSandboxProviderConfig(BaseModel):
         return self
 
 
+class HyperVGuestOS(str, Enum):
+    """The guest operating-system family."""
+
+    WINDOWS = "windows"
+    LINUX = "linux"
+
+
+class HyperVGuestTransportKind(str, Enum):
+    """The external host facility used to reach a Hyper-V guest."""
+
+    POWERSHELL_DIRECT = "powershell_direct"
+    SSH = "ssh"
+
+
+class HyperVDiskStrategy(str, Enum):
+    """How a per-attempt virtual disk is derived from its template."""
+
+    DIFFERENCING = "differencing"
+    COPY = "copy"
+
+
+class HyperVNetworkMode(str, Enum):
+    """The network isolation mode for a sandbox VM."""
+
+    PRIVATE = "private"
+    INTERNAL = "internal"
+    EXTERNAL = "external"
+    NONE = "none"
+
+
+class HyperVSecureBootMode(str, Enum):
+    """The Generation 2 VM secure-boot policy."""
+
+    MICROSOFT_WINDOWS = "microsoft_windows"
+    MICROSOFT_UEFI_CA = "microsoft_uefi_ca"
+    DISABLED = "disabled"
+
+
+class HyperVSecretReference(BaseModel):
+    """An opaque reference resolved at runtime without persisting a credential value."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    secret_id: str = Field(min_length=1)
+
+
+class HyperVReadinessConfig(BaseModel):
+    """Guest readiness polling settings."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    timeout_seconds: float = Field(default=120.0, gt=0, le=1800)
+    poll_interval_seconds: float = Field(default=2.0, gt=0, le=60)
+    probe_argv: tuple[str, ...] | None = None
+
+
+class HyperVSecurityPolicy(BaseModel):
+    """Secure-by-default host and VM settings requiring explicit opt-in."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    allow_external_switch: bool = False
+    allow_internet_egress: bool = False
+    allow_host_filesystem_sharing: bool = False
+    allow_nested_virtualization: bool = False
+    allow_device_passthrough: bool = False
+    allow_mac_spoofing: bool = False
+    max_processor_count: int = Field(default=16, ge=1, le=64)
+    max_memory_mb: int = Field(default=32768, ge=512, le=262144)
+    max_disk_size_gb: int = Field(default=512, ge=1, le=4096)
+
+
+class HyperVComposeDelegationConfig(BaseModel):
+    """
+    Typed seam for a future Compose-inside-VM delegation.
+
+    Layer 5's Docker provider invokes a local Docker CLI and has no injectable remote
+    Docker endpoint/context. Enabling this seam therefore raises a typed error rather
+    than pretending that Compose workloads were delegated into the guest.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    docker_host: str | None = None
+    docker_context: str | None = None
+    provider_config: DockerSandboxProviderConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_endpoint(self) -> HyperVComposeDelegationConfig:
+        if self.enabled and self.docker_host is None and self.docker_context is None:
+            raise ValueError("Enabled Hyper-V Compose delegation requires docker_host or docker_context.")
+        if self.enabled and self.provider_config is None:
+            raise ValueError("Enabled Hyper-V Compose delegation requires provider_config.")
+        return self
+
+
+class HyperVEnvironmentConfig(BaseModel):
+    """Immutable VM template and guest-access configuration for one named environment."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    default: bool = False
+    base_vhdx: Path | None = None
+    template_vm: str | None = None
+    template_checkpoint: str | None = None
+    generation: int = Field(default=2, ge=1, le=2)
+    processor_count: int = Field(default=2, ge=1, le=64)
+    memory_mb: int = Field(default=2048, ge=512, le=262144)
+    dynamic_memory: bool = False
+    disk_strategy: HyperVDiskStrategy = HyperVDiskStrategy.DIFFERENCING
+    max_disk_size_gb: int = Field(default=128, ge=1, le=4096)
+    network_mode: HyperVNetworkMode = HyperVNetworkMode.PRIVATE
+    switch_name: str | None = None
+    guest_os: HyperVGuestOS = HyperVGuestOS.WINDOWS
+    transport: HyperVGuestTransportKind = HyperVGuestTransportKind.POWERSHELL_DIRECT
+    secure_boot: HyperVSecureBootMode = HyperVSecureBootMode.MICROSOFT_WINDOWS
+    credential: HyperVSecretReference | None = None
+    ssh_host: str | None = None
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    workspace_root: str = Field(default=r"C:\PyRITSandbox", min_length=1)
+    readiness: HyperVReadinessConfig = Field(default_factory=HyperVReadinessConfig)
+    setup_files: tuple[SandboxSetupFile, ...] = ()
+    setup_scripts: tuple[SandboxSetupScript, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_template_and_transport(self) -> HyperVEnvironmentConfig:
+        if (self.base_vhdx is None) == (self.template_vm is None):
+            raise ValueError("Exactly one of base_vhdx or template_vm must be configured.")
+        if self.template_checkpoint is not None and self.template_vm is None:
+            raise ValueError("template_checkpoint requires template_vm.")
+        if self.transport is HyperVGuestTransportKind.POWERSHELL_DIRECT:
+            if self.guest_os is not HyperVGuestOS.WINDOWS:
+                raise ValueError("PowerShell Direct requires a Windows guest.")
+            if self.credential is None:
+                raise ValueError("PowerShell Direct requires a credential secret reference.")
+        if self.transport is HyperVGuestTransportKind.SSH and self.credential is None:
+            raise ValueError("SSH requires a credential secret reference.")
+        if self.transport is HyperVGuestTransportKind.SSH and self.ssh_host is None:
+            raise ValueError("SSH requires an explicit ssh_host.")
+        if self.network_mode is HyperVNetworkMode.NONE and self.switch_name is not None:
+            raise ValueError("network_mode='none' cannot specify switch_name.")
+        return self
+
+
+class HyperVSandboxProviderConfig(BaseModel):
+    """Production-oriented Hyper-V provider configuration."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    environments: tuple[HyperVEnvironmentConfig, ...]
+    default_environment: str | None = None
+    allowed_switches: tuple[str, ...] = ()
+    security_policy: HyperVSecurityPolicy = Field(default_factory=HyperVSecurityPolicy)
+    compose_delegation: HyperVComposeDelegationConfig = Field(default_factory=HyperVComposeDelegationConfig)
+    powershell_executable: str = "powershell.exe"
+    ssh_executable: str = "ssh"
+    sftp_executable: str = "sftp"
+    state_dir: Path | None = None
+    vm_name_prefix: str = Field(default="pyrit-sbx", min_length=1, max_length=24, pattern=r"^[A-Za-z0-9-]+$")
+    cli_timeout_seconds: float = Field(default=180.0, gt=0, le=1800)
+    max_command_output_bytes: int = Field(default=16_777_216, gt=0, le=67_108_864)
+    retain_resources_on_close: bool = False
+    retain_resources_on_failure: bool = False
+
+    @model_validator(mode="after")
+    def _validate_environments_and_security(self) -> HyperVSandboxProviderConfig:
+        names = [environment.name for environment in self.environments]
+        if not names:
+            raise ValueError("At least one Hyper-V environment is required.")
+        if len(names) != len(set(names)):
+            raise ValueError("Hyper-V environment names must be unique.")
+        marked = [environment.name for environment in self.environments if environment.default]
+        if len(marked) > 1:
+            raise ValueError("At most one Hyper-V environment can be marked as default.")
+        if self.default_environment is not None and self.default_environment not in names:
+            raise ValueError(f"Default Hyper-V environment '{self.default_environment}' is not defined.")
+        self._validate_resource_bounds()
+        self._validate_networks()
+        return self
+
+    def resolve_default_environment(self) -> str:
+        """Return the deterministic default Hyper-V environment name."""
+        if self.default_environment is not None:
+            return self.default_environment
+        marked = [environment.name for environment in self.environments if environment.default]
+        if marked:
+            return marked[0]
+        if "default" in {environment.name for environment in self.environments}:
+            return "default"
+        return min(environment.name for environment in self.environments)
+
+    def get_environment(self, name: str) -> HyperVEnvironmentConfig:
+        """
+        Return one named environment configuration.
+
+        Returns:
+            HyperVEnvironmentConfig: The matching environment configuration.
+
+        Raises:
+            KeyError: If ``name`` is not configured.
+        """
+        for environment in self.environments:
+            if environment.name == name:
+                return environment
+        raise KeyError(name)
+
+    def _validate_resource_bounds(self) -> None:
+        policy = self.security_policy
+        for environment in self.environments:
+            if environment.processor_count > policy.max_processor_count:
+                raise ValueError(f"Environment '{environment.name}' exceeds the processor policy bound.")
+            if environment.memory_mb > policy.max_memory_mb:
+                raise ValueError(f"Environment '{environment.name}' exceeds the memory policy bound.")
+            if environment.max_disk_size_gb > policy.max_disk_size_gb:
+                raise ValueError(f"Environment '{environment.name}' exceeds the disk policy bound.")
+
+    def _validate_networks(self) -> None:
+        policy = self.security_policy
+        allowed = set(self.allowed_switches)
+        for environment in self.environments:
+            if environment.switch_name is not None and environment.switch_name not in allowed:
+                raise ValueError(f"Environment '{environment.name}' uses a switch outside allowed_switches.")
+            if environment.network_mode is HyperVNetworkMode.EXTERNAL:
+                if not policy.allow_external_switch or not policy.allow_internet_egress:
+                    raise ValueError("External networking requires explicit switch and Internet-egress opt-in.")
+                if environment.switch_name is None:
+                    raise ValueError("External networking requires an allow-listed switch_name.")
+
+
 class SandboxExecResult(BaseModel):
     """Buffered process output with explicit limit and interruption facts."""
 
