@@ -84,6 +84,8 @@ def _make_request(
     dataset_names: list[str] | None = None,
     max_dataset_size: int | None = None,
     dataset_filters: dict[str, list[str]] | None = None,
+    include_baseline: bool | None = None,
+    scenario_params: dict[str, Any] | None = None,
 ) -> RunScenarioRequest:
     """Create a RunScenarioRequest for testing."""
     return RunScenarioRequest(
@@ -95,6 +97,8 @@ def _make_request(
         dataset_names=dataset_names,
         max_dataset_size=max_dataset_size,
         dataset_filters=dataset_filters,
+        include_baseline=include_baseline,
+        scenario_params=scenario_params,
     )
 
 
@@ -308,6 +312,45 @@ class TestScenarioRunServiceStartRun:
 
         init_call = mock_all_registries["scenario_registry"].create_and_initialize_async.await_args
         assert init_call.kwargs["scenario_techniques"] == [technique_a, technique_b]
+
+    async def test_jailbreak_explicit_selection_and_params_reach_registry_unchanged(self, mock_all_registries) -> None:
+        """An explicit Jailbreak technique never adds the default aggregate or other techniques."""
+
+        class _JailbreakTechnique(ScenarioTechnique):
+            ALL = ("all", {"all"})
+            DEFAULT = ("default", {"default"})
+            PROMPT_SENDING = ("prompt_sending", {"default"})
+            CONTEXT_COMPLIANCE = ("context_compliance", {"default"})
+
+            @classmethod
+            def get_aggregate_tags(cls) -> set[str]:
+                return {"all", "default"}
+
+        scenario_instance = mock_all_registries["scenario_instance"]
+        scenario_instance._technique_class = _JailbreakTechnique
+        objective_target = mock_all_registries["target_registry"].instances.get.return_value
+        scenario_params = {"num_jailbreaks": 2, "num_jailbreak_attempts": 1}
+
+        service = ScenarioRunService()
+        await service.start_run_async(
+            request=_make_request(
+                scenario_name="airt.jailbreak",
+                techniques=["prompt_sending"],
+                include_baseline=False,
+                scenario_params=scenario_params,
+            )
+        )
+
+        mock_all_registries["scenario_registry"].create_and_initialize_async.assert_awaited_once_with(
+            "airt.jailbreak",
+            scenario_params=scenario_params,
+            scenario_result_id=None,
+            objective_target=objective_target,
+            max_concurrency=10,
+            max_retries=0,
+            include_baseline=False,
+            scenario_techniques=[_JailbreakTechnique.PROMPT_SENDING],
+        )
 
     async def test_start_run_forwards_include_baseline(self, mock_all_registries) -> None:
         service = ScenarioRunService()

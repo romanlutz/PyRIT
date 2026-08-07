@@ -305,18 +305,34 @@ class ScenarioRunService:
         Raises:
             ValueError: If the target is not found in the registry.
         """
+        return self.resolve_target_name(target_name=request.target_name)
+
+    @staticmethod
+    def resolve_target_name(*, target_name: str) -> "PromptTarget":
+        """
+        Resolve one registered target name for launch or configured estimation.
+
+        Args:
+            target_name: Registered target instance name.
+
+        Returns:
+            PromptTarget: The resolved target.
+
+        Raises:
+            ValueError: If the target is not registered.
+        """
         target_registry = TargetRegistry.get_registry_singleton()
-        objective_target = target_registry.instances.get(request.target_name)
+        objective_target = target_registry.instances.get(target_name)
         if objective_target is None:
             available_names = target_registry.instances.get_names()
             if not available_names:
                 raise ValueError(
-                    f"Target '{request.target_name}' not found. The target registry is empty. "
+                    f"Target '{target_name}' not found. The target registry is empty. "
                     "Make sure to include an initializer that registers targets "
                     "(e.g., initializers: ['target'])."
                 )
             raise ValueError(
-                f"Target '{request.target_name}' not found in registry. Available targets: {', '.join(available_names)}"
+                f"Target '{target_name}' not found in registry. Available targets: {', '.join(available_names)}"
             )
         return objective_target
 
@@ -349,73 +365,110 @@ class ScenarioRunService:
                 introspection is required to resolve techniques or dataset
                 configuration.
         """
-        init_kwargs: dict[str, Any] = {
-            "objective_target": objective_target,
-            "max_concurrency": request.max_concurrency,
-            "max_retries": request.max_retries,
-        }
-        if request.include_baseline is not None:
-            init_kwargs["include_baseline"] = request.include_baseline
-
-        if request.labels:
-            init_kwargs["memory_labels"] = request.labels
-
-        # The request model has already validated the filter keys and coerced values into
-        # lists, so the service can consume them directly.
-        dataset_filters = request.dataset_filters or {}
-
-        # Resolve techniques and dataset config from a temporary instance of the
-        # scenario. The downstream _initialize_scenario_async builds its own
-        # instance (so scenario_result_id can be passed), so this is a cheap
-        # throwaway used only for introspection. Introspection is required
-        # whenever the caller wants to override techniques, dataset names, the
-        # sample cap, or dataset filters, because each of those needs the
-        # scenario's own technique enum or dataset-config subclass to be resolved
-        # correctly.
-        needs_introspection = (
-            bool(request.techniques)
-            or bool(request.dataset_names)
-            or request.max_dataset_size is not None
-            or bool(dataset_filters)
+        return self.resolve_scenario_configuration(
+            scenario_name=request.scenario_name,
+            scenario_class=scenario_class,
+            objective_target=objective_target,
+            techniques=request.techniques,
+            dataset_names=request.dataset_names,
+            max_dataset_size=request.max_dataset_size,
+            dataset_filters=request.dataset_filters,
+            include_baseline=request.include_baseline,
+            max_concurrency=request.max_concurrency,
+            max_retries=request.max_retries,
+            memory_labels=request.labels,
         )
+
+    @classmethod
+    def resolve_scenario_configuration(
+        cls,
+        *,
+        scenario_name: str,
+        scenario_class: type[Scenario],
+        objective_target: Any | None = None,
+        techniques: list[str] | None = None,
+        dataset_names: list[str] | None = None,
+        max_dataset_size: int | None = None,
+        dataset_filters: dict[str, list[str]] | None = None,
+        include_baseline: bool | None = None,
+        max_concurrency: int | None = None,
+        max_retries: int | None = None,
+        memory_labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Resolve shared launch/estimate request fields into scenario parameters.
+
+        Args:
+            scenario_name: Registered scenario name used in validation errors.
+            scenario_class: Scenario class used for technique and dataset introspection.
+            objective_target: Optional resolved objective target.
+            techniques: Requested technique tokens.
+            dataset_names: Requested dataset names.
+            max_dataset_size: Requested logical-group selection cap.
+            dataset_filters: Validated dataset seed filters.
+            include_baseline: Optional baseline policy override.
+            max_concurrency: Optional launch concurrency.
+            max_retries: Optional launch retry count.
+            memory_labels: Optional launch memory labels.
+
+        Returns:
+            dict[str, Any]: Values accepted by ``Scenario.set_params_from_args``.
+
+        Raises:
+            ValueError: If techniques or dataset overrides are invalid.
+        """
+        resolved: dict[str, Any] = {}
+        if objective_target is not None:
+            resolved["objective_target"] = objective_target
+        if max_concurrency is not None:
+            resolved["max_concurrency"] = max_concurrency
+        if max_retries is not None:
+            resolved["max_retries"] = max_retries
+        if include_baseline is not None:
+            resolved["include_baseline"] = include_baseline
+        if memory_labels:
+            resolved["memory_labels"] = memory_labels
+
+        filters = dataset_filters or {}
+        needs_introspection = bool(techniques) or bool(dataset_names) or max_dataset_size is not None or bool(filters)
         if not needs_introspection:
-            return init_kwargs
+            return resolved
 
         try:
             introspection_instance = scenario_class()  # type: ignore[ty:missing-argument]
         except Exception as exc:
             raise ValueError(
-                f"Cannot resolve runtime configuration for scenario '{request.scenario_name}': "
+                f"Cannot resolve runtime configuration for scenario '{scenario_name}': "
                 f"scenario class is not instantiable without arguments ({exc})."
             ) from exc
 
-        if request.techniques:
+        if techniques:
             technique_class = introspection_instance._technique_class
-            technique_enums, technique_converters = self._resolve_techniques_and_converters(
-                tokens=request.techniques,
+            technique_enums, technique_converters = cls._resolve_techniques_and_converters(
+                tokens=techniques,
                 technique_class=technique_class,
-                scenario_name=request.scenario_name,
+                scenario_name=scenario_name,
             )
-            init_kwargs["scenario_techniques"] = technique_enums
+            resolved["scenario_techniques"] = technique_enums
             if technique_converters:
-                init_kwargs["technique_converters"] = technique_converters
+                resolved["technique_converters"] = technique_converters
 
-        if request.dataset_names or request.max_dataset_size is not None or dataset_filters:
+        if dataset_names or max_dataset_size is not None or filters:
             default_config = introspection_instance._default_dataset_config
 
-            if request.dataset_names:
+            if dataset_names:
                 # Construct a fresh instance of the scenario's own dataset-config
                 # class so subclass-specific behavior is preserved.
                 default_config_class = type(default_config)
                 try:
-                    init_kwargs["dataset_config"] = default_config_class(
-                        dataset_names=request.dataset_names,
-                        max_dataset_size=request.max_dataset_size,
-                        filters=dataset_filters or None,
+                    resolved["dataset_config"] = default_config_class(
+                        dataset_names=dataset_names,
+                        max_dataset_size=max_dataset_size,
+                        filters=filters or None,
                     )
                 except TypeError as exc:
                     raise ValueError(
-                        f"Scenario '{request.scenario_name}' does not support overriding dataset names through "
+                        f"Scenario '{scenario_name}' does not support overriding dataset names through "
                         f"its {default_config_class.__name__} configuration: {exc}"
                     ) from exc
             else:
@@ -423,16 +476,17 @@ class ScenarioRunService:
                 # the scenario's own default dataset names) and override only the
                 # sample cap and/or filters. Safe because the introspection instance
                 # is throwaway.
-                if request.max_dataset_size is not None:
-                    default_config.max_dataset_size = request.max_dataset_size
-                if dataset_filters:
-                    default_config.update_filters(filters=dataset_filters)
-                init_kwargs["dataset_config"] = default_config
+                if max_dataset_size is not None:
+                    default_config.max_dataset_size = max_dataset_size
+                if filters:
+                    default_config.update_filters(filters=filters)
+                resolved["dataset_config"] = default_config
 
-        return init_kwargs
+        return resolved
 
+    @classmethod
     def _resolve_techniques_and_converters(
-        self,
+        cls,
         *,
         tokens: list[str],
         technique_class: type[Any],
@@ -477,7 +531,7 @@ class ScenarioRunService:
                 ) from None
             technique_enums.append(technique_enum)
 
-            converters = self._resolve_converter_modifiers(modifiers=modifiers, token=token)
+            converters = cls._resolve_converter_modifiers(modifiers=modifiers, token=token)
             if not converters:
                 continue
 
@@ -486,7 +540,8 @@ class ScenarioRunService:
 
         return technique_enums, technique_converters
 
-    def _resolve_converter_modifiers(self, *, modifiers: list[str], token: str) -> list["Converter"]:
+    @staticmethod
+    def _resolve_converter_modifiers(*, modifiers: list[str], token: str) -> list["Converter"]:
         """
         Resolve the converter modifiers of a single technique token to converter instances.
 

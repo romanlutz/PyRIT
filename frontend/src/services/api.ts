@@ -31,6 +31,8 @@ import type {
   ListRegisteredScenariosResponse,
   RegisteredScenario,
   RunScenarioRequest,
+  ScenarioDefaultRunSizeEstimate,
+  ScenarioRunSizeEstimateRequest,
   ScenarioRunSummary,
   ScenarioRunProgress,
 } from '../types'
@@ -368,6 +370,19 @@ export const scenariosApi = {
 
   startRun: async (request: RunScenarioRequest): Promise<ScenarioRunSummary> => {
     const response = await apiClient.post('/scenarios/runs', request)
+    return response.data
+  },
+
+  estimateRun: async (
+    scenarioName: string,
+    request: ScenarioRunSizeEstimateRequest,
+    signal?: AbortSignal,
+  ): Promise<ScenarioDefaultRunSizeEstimate> => {
+    const response = await apiClient.post(
+      `/scenarios/catalog/${encodeURIComponent(scenarioName)}/estimate`,
+      request,
+      { signal },
+    )
     return response.data
   },
 

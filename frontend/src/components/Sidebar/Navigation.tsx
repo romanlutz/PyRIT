@@ -86,17 +86,6 @@ export default function Navigation({ currentView, onNavigate, onOpenFeedback }: 
 
         <Button
           className={styles.navButton}
-          data-active={currentView === 'scenarios'}
-          appearance="subtle"
-          icon={<ScriptRegular />}
-          title="Scenarios"
-          aria-label="Scenarios"
-          aria-current={currentView === 'scenarios' ? 'page' : undefined}
-          onClick={() => onNavigate('scenarios')}
-        />
-
-        <Button
-          className={styles.navButton}
           data-active={currentView === 'history'}
           appearance="subtle"
           icon={<HistoryRegular />}
@@ -104,6 +93,17 @@ export default function Navigation({ currentView, onNavigate, onOpenFeedback }: 
           aria-label="Attack History"
           aria-current={currentView === 'history' ? 'page' : undefined}
           onClick={() => onNavigate('history')}
+        />
+
+        <Button
+          className={styles.navButton}
+          data-active={currentView === 'scenarios'}
+          appearance="subtle"
+          icon={<ScriptRegular />}
+          title="Scenarios"
+          aria-label="Scenarios"
+          aria-current={currentView === 'scenarios' ? 'page' : undefined}
+          onClick={() => onNavigate('scenarios')}
         />
 
         <Button

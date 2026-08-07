@@ -127,6 +127,38 @@ class TestStartScenarioRunRoute:
 
         assert response.status_code == status.HTTP_202_ACCEPTED
 
+    def test_start_jailbreak_run_preserves_explicit_selection_and_params(self, client: TestClient) -> None:
+        """The route parses the exact Jailbreak selection without adding catalog defaults."""
+        mock_response = _mock_run_response()
+
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.start_run_async = AsyncMock(return_value=mock_response)
+            mock_get.return_value = mock_service
+
+            response = client.post(
+                "/api/scenarios/runs",
+                json={
+                    "scenario_name": "airt.jailbreak",
+                    "target_name": "my_target",
+                    "techniques": ["prompt_sending"],
+                    "include_baseline": False,
+                    "scenario_params": {
+                        "num_jailbreaks": 2,
+                        "num_jailbreak_attempts": 1,
+                    },
+                },
+            )
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        request = mock_service.start_run_async.await_args.kwargs["request"]
+        assert request.techniques == ["prompt_sending"]
+        assert request.include_baseline is False
+        assert request.scenario_params == {
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+
 
 class TestListScenarioRunsRoute:
     """Tests for GET /api/scenarios/runs."""

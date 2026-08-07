@@ -384,14 +384,20 @@ export interface ChangeMainConversationResponse {
 export interface RegisteredScenario {
   scenario_name: string
   scenario_type: string
+  scenario_version: number
   description: string
+  description_markdown: string
   default_technique: string
+  default_techniques: string[]
   aggregate_techniques: string[]
+  aggregate_technique_expansions: Record<string, string[]>
   all_techniques: string[]
   default_datasets: string[]
+  default_dataset_summaries: ScenarioDatasetSummary[]
   baseline_policy: 'enabled' | 'disabled' | 'forbidden'
   include_baseline_by_default: boolean
   supported_parameters: Parameter[]
+  default_run_size: ScenarioDefaultRunSizeEstimate
 }
 
 export interface ListRegisteredScenariosResponse {
@@ -415,6 +421,140 @@ export interface RunScenarioRequest {
   initializer_args?: Record<string, Record<string, unknown>> | null
   scenario_result_id?: string | null
 }
+
+export type ScenarioRunSizeEstimateStatus = 'exact' | 'conditional' | 'unavailable'
+
+export interface ScenarioRunSizeFactor {
+  label: string
+  count: number
+}
+
+export interface ScenarioRunSizeComponent {
+  label: string
+  count: number
+  factors: ScenarioRunSizeFactor[]
+  is_baseline: boolean
+  note: string | null
+}
+
+export interface ScenarioDatasetSizeCap {
+  label: string
+  count: number
+  configured_on: 'dataset' | 'configuration' | 'compound'
+  dataset_name: string | null
+}
+
+export interface ScenarioDatasetSummary {
+  name: string
+  kind: 'dataset' | 'synthesized'
+  logical_seed_group_count: number
+  selected_seed_group_count: number
+  configured_caps: ScenarioDatasetSizeCap[]
+  selection_note: string | null
+}
+
+export interface ScenarioDefaultRunSizeEstimate {
+  version: 1
+  status: ScenarioRunSizeEstimateStatus
+  total_attack_count: number | null
+  components: ScenarioRunSizeComponent[]
+  datasets: ScenarioDatasetSummary[]
+  note: string | null
+  retries_included: false
+}
+
+export interface ScenarioRunSizeEstimateRequest {
+  target_name?: string | null
+  techniques?: string[] | null
+  dataset_names?: string[] | null
+  max_dataset_size?: number | null
+  dataset_filters?: Record<string, string[]> | null
+  include_baseline?: boolean | null
+  scenario_params?: Record<string, unknown> | null
+}
+
+export interface ScenarioRunEstimateFactor {
+  id: string
+  label: string
+  count: number
+}
+
+export interface ScenarioRunEstimateComponent {
+  id: string
+  label: string
+  count: number
+  factors: ScenarioRunEstimateFactor[]
+  isBaseline: boolean
+  note: string | null
+}
+
+export interface ScenarioRunEstimateDatasetCap {
+  id: string
+  label: string
+  count: number
+  configuredOn: 'dataset' | 'configuration' | 'compound'
+  datasetName: string | null
+}
+
+export interface ScenarioRunEstimateDataset {
+  id: string
+  name: string
+  kind: 'dataset' | 'synthesized'
+  logicalSeedGroupCount: number
+  selectedSeedGroupCount: number
+  configuredCaps: ScenarioRunEstimateDatasetCap[]
+  selectionNote: string | null
+}
+
+export interface ScenarioRunEstimate {
+  version: number
+  scope: 'default' | 'request'
+  total: number | null
+  components: ScenarioRunEstimateComponent[]
+  datasets: ScenarioRunEstimateDataset[]
+  note: string | null
+  retriesIncluded: boolean
+}
+
+export type ScenarioRunEstimateResult =
+  | {
+      status: 'available'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'conditional'
+      estimate: ScenarioRunEstimate
+    }
+  | {
+      status: 'unavailable'
+      scope: 'default' | 'request'
+      label: string
+      note?: string
+    }
+
+export type ScenarioRunEstimateState =
+  | {
+      status: 'loading'
+      scope: 'default' | 'request'
+    }
+  | {
+      status: 'refreshing'
+      estimate: ScenarioRunEstimate
+      label: string
+    }
+  | {
+      status: 'stale'
+      estimate: ScenarioRunEstimate
+      label: string
+      error: string
+    }
+  | ScenarioRunEstimateResult
+
+export type ScenarioRunEstimator = (
+  scenarioName: string,
+  request: ScenarioRunSizeEstimateRequest,
+  signal?: AbortSignal,
+) => Promise<ScenarioDefaultRunSizeEstimate>
 
 export interface AttackErrorSummary {
   atomic_attack_name: string
