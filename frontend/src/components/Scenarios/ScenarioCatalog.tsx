@@ -75,6 +75,48 @@ function formatCount(value: number): string {
   return value.toLocaleString()
 }
 
+function formatSeedGroupCount(value: number): string {
+  return `${formatCount(value)} selected seed group${value === 1 ? '' : 's'}`
+}
+
+function DefaultDatasetSizeSummary({
+  datasets,
+  hasDeclaredDatasets,
+}: {
+  datasets: ScenarioDatasetSummary[]
+  hasDeclaredDatasets: boolean
+}) {
+  const styles = useScenarioCatalogStyles()
+
+  if (datasets.length === 0) {
+    return (
+      <Text weight="semibold">
+        {hasDeclaredDatasets ? 'Population counts unavailable' : 'No default dataset'}
+      </Text>
+    )
+  }
+
+  if (datasets.length === 1) {
+    const dataset = datasets[0]
+    return (
+      <div className={styles.compactStack}>
+        <Text weight="semibold">{formatSeedGroupCount(dataset.selected_seed_group_count)}</Text>
+        <Text size={200} className={styles.secondaryText}>
+          of {formatCount(dataset.logical_seed_group_count)} available · {dataset.name}
+        </Text>
+      </div>
+    )
+  }
+
+  return (
+    <Text size={200} weight="semibold">
+      {datasets
+        .map((dataset) => `${dataset.name}: ${formatCount(dataset.selected_seed_group_count)}`)
+        .join(' · ')}
+    </Text>
+  )
+}
+
 function baselineDescription(scenario: RegisteredScenario): string {
   if (scenario.baseline_policy === 'forbidden') {
     return 'Baseline execution is not supported for this scenario.'
@@ -171,36 +213,32 @@ function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRow
           className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
         >
           <Text className={styles.mobileLabel} size={200} weight="semibold">
+            Default dataset size
+          </Text>
+          <DefaultDatasetSizeSummary
+            datasets={scenario.default_dataset_summaries}
+            hasDeclaredDatasets={scenario.default_datasets.length > 0}
+          />
+        </TableCell>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
+          <Text className={styles.mobileLabel} size={200} weight="semibold">
+            Default techniques
+          </Text>
+          <Text weight="semibold">
+            {defaultConcreteTechniques.length === 0
+              ? 'No default techniques'
+              : `${defaultConcreteTechniques.length} technique${defaultConcreteTechniques.length === 1 ? '' : 's'}`}
+          </Text>
+        </TableCell>
+        <TableCell
+          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        >
+          <Text className={styles.mobileLabel} size={200} weight="semibold">
             Default run size
           </Text>
           <ScenarioRunEstimateSummary state={estimateState} />
-        </TableCell>
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Techniques
-          </Text>
-          <div className={styles.compactStack}>
-            <Badge appearance="tint" color="brand">{scenario.default_technique}</Badge>
-            <Text size={200} className={styles.secondaryText}>
-              {aggregateTechniques.length} aggregate preset{aggregateTechniques.length === 1 ? '' : 's'}
-              {' · '}
-              {concreteTechniques.length} compatible concrete
-            </Text>
-          </div>
-        </TableCell>
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Datasets
-          </Text>
-          <Text>
-            {scenario.default_datasets.length === 0
-              ? 'No default datasets'
-              : `${scenario.default_datasets.length} default dataset${scenario.default_datasets.length === 1 ? '' : 's'}`}
-          </Text>
         </TableCell>
         <TableCell
           className={mergeClasses(
@@ -514,12 +552,12 @@ export default function ScenarioCatalog() {
                 </TableHeaderCell>
                 <TableHeaderCell
                   className={mergeClasses(
-                    styles.sizeColumn,
+                    styles.datasetColumn,
                     styles.tableHeaderCell,
                     'scenario-catalog-cell-padding',
                   )}
                 >
-                  Default run size
+                  Default dataset size
                 </TableHeaderCell>
                 <TableHeaderCell
                   className={mergeClasses(
@@ -528,16 +566,16 @@ export default function ScenarioCatalog() {
                     'scenario-catalog-cell-padding',
                   )}
                 >
-                  Techniques
+                  Default techniques
                 </TableHeaderCell>
                 <TableHeaderCell
                   className={mergeClasses(
-                    styles.datasetColumn,
+                    styles.sizeColumn,
                     styles.tableHeaderCell,
                     'scenario-catalog-cell-padding',
                   )}
                 >
-                  Datasets
+                  Default run size
                 </TableHeaderCell>
                 <TableHeaderCell
                   className={mergeClasses(

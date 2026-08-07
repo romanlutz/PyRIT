@@ -99,6 +99,13 @@ describe('ScenarioCatalog', () => {
     expect(screen.getByText(/packages objective datasets, selected or aggregate techniques/i)).toBeInTheDocument()
     const headers = within(table).getAllByRole('columnheader')
     expect(headers).toHaveLength(5)
+    expect(headers.map((header) => header.textContent)).toEqual([
+      'Scenario / purpose',
+      'Default dataset size',
+      'Default techniques',
+      'Default run size',
+      'Action',
+    ])
     expect(headers.every((cell) => cell.classList.contains('scenario-catalog-cell-padding'))).toBe(true)
     const cells = within(screen.getByTestId('scenario-card-foundry.red_team_agent')).getAllByRole('cell')
     expect(cells).toHaveLength(5)
@@ -226,6 +233,42 @@ describe('ScenarioCatalog', () => {
     expect(card).toHaveAttribute('href', '/scenarios/foundry%2Fred_team_agent')
   })
 
+  it('shows multiple default populations separately instead of summing them', async () => {
+    mockListCatalog.mockResolvedValueOnce({
+      items: [
+        makeScenario({
+          scenario_name: 'scenario.compound',
+          default_datasets: ['population-a', 'population-b'],
+          default_dataset_summaries: [
+            {
+              name: 'population-a',
+              kind: 'dataset',
+              logical_seed_group_count: 100,
+              selected_seed_group_count: 4,
+              configured_caps: [],
+              selection_note: null,
+            },
+            {
+              name: 'population-b',
+              kind: 'synthesized',
+              logical_seed_group_count: 20,
+              selected_seed_group_count: 2,
+              configured_caps: [],
+              selection_note: null,
+            },
+          ],
+        }),
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    const row = await screen.findByTestId('scenario-card-scenario.compound')
+    expect(within(row).getByText('population-a: 4 · population-b: 2')).toBeInTheDocument()
+    expect(within(row).queryByText('6 selected seed groups')).not.toBeInTheDocument()
+  })
+
   it('keeps Markdown links out of the clipped summary until the disclosure is opened', async () => {
     const user = userEvent.setup()
     mockListCatalog.mockResolvedValueOnce({
@@ -264,6 +307,7 @@ describe('ScenarioCatalog', () => {
 
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
     const row = await screen.findByTestId('scenario-card-scenario.unsized')
+    expect(within(row).getByText('Population counts unavailable')).toBeInTheDocument()
     await user.click(within(row).getByRole('button', { name: 'Show details' }))
 
     const details = screen.getByRole('region', { name: 'scenario.unsized details' })
@@ -297,7 +341,7 @@ describe('ScenarioCatalog', () => {
             {
               name: 'harmbench',
               kind: 'dataset',
-              logical_seed_group_count: 5,
+              logical_seed_group_count: 400,
               selected_seed_group_count: 4,
               configured_caps: [
                 {
@@ -333,7 +377,7 @@ describe('ScenarioCatalog', () => {
               {
                 name: 'harmbench',
                 kind: 'dataset',
-                logical_seed_group_count: 5,
+                logical_seed_group_count: 400,
                 selected_seed_group_count: 4,
                 configured_caps: [
                   {
@@ -359,6 +403,13 @@ describe('ScenarioCatalog', () => {
     const row = await screen.findByTestId('scenario-card-airt.jailbreak')
     const disclosure = within(row).getByRole('button', { name: 'Show details' })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(within(row).getByText('4 selected seed groups')).toBeInTheDocument()
+    expect(within(row).getByText('of 400 available · harmbench')).toBeInTheDocument()
+    expect(within(row).getByText('2 techniques')).toBeInTheDocument()
+    expect(within(row).getByText('12–20 planned attacks')).toBeInTheDocument()
+    expect(within(row).queryByText('default')).not.toBeInTheDocument()
+    expect(within(row).queryByText(/aggregate presets|compatible concrete/i)).not.toBeInTheDocument()
+    expect(within(row).queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
 
     await user.click(disclosure)
 
@@ -375,7 +426,6 @@ describe('ScenarioCatalog', () => {
     expect(within(details).getAllByText('One incompatible group is excluded.').length)
       .toBeGreaterThan(0)
     expect(within(details).getByText('12–20 planned attacks')).toBeInTheDocument()
-    expect(within(details).getByText('Final count depends on target capabilities.')).toBeInTheDocument()
     expect(within(details).getAllByText('Included by default')).not.toHaveLength(0)
     expect(within(details).queryByText(/Backend estimate|Conditional estimate|Backend formula/i))
       .not.toBeInTheDocument()

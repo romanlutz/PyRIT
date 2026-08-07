@@ -384,8 +384,8 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
-    expect(within(preview).getByText('Final count set at launch')).toBeInTheDocument()
     expect(within(preview).getByText('Run size is confirmed at launch.')).toBeInTheDocument()
+    expect(within(preview).queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
     expect(within(preview).queryByText(/planned attacks/)).not.toBeInTheDocument()
   })
 

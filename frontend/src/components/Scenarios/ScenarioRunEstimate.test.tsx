@@ -90,10 +90,11 @@ describe('ScenarioRunEstimate', () => {
       'Prompt sending: 4 selected seed groups × 2 jailbreak templates × 1 techniques × 1 attempts = 8 + Baseline attack: 2; planned total = 8',
     )).toBeInTheDocument()
     expect(screen.getByText('The planned total is authoritative.')).toBeInTheDocument()
-    expect(screen.getByText('Run size calculated')).toBeInTheDocument()
     expect(screen.getByText('How this count is calculated')).toBeInTheDocument()
     expect(screen.getByText('Retries are not included. Estimate schema v1.')).toBeInTheDocument()
-    expect(screen.queryByText(/Backend estimate|Conditional estimate|Backend formula/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(
+      /Run size calculated|Final count set at launch|Backend estimate|Conditional estimate|Backend formula/i,
+    )).not.toBeInTheDocument()
   })
 
   it('renders bounded and upper-only conditional estimates from structured bounds', () => {
@@ -112,8 +113,7 @@ describe('ScenarioRunEstimate', () => {
     )
 
     expect(screen.getByText('12–20 planned attacks')).toBeInTheDocument()
-    expect(screen.getByText('Final count set at launch')).toBeInTheDocument()
-    expect(screen.getByText('Final count depends on target capabilities.')).toBeInTheDocument()
+    expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
 
     const upperOnly = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,
@@ -128,9 +128,8 @@ describe('ScenarioRunEstimate', () => {
         <ScenarioRunEstimateSummary state={upperOnly} />
       </TestWrapper>,
     )
-
     expect(screen.getByText('Up to 20 planned attacks')).toBeInTheDocument()
-    expect(screen.getByText('Final count is confirmed at launch.')).toBeInTheDocument()
+    expect(screen.getByText('Up to 20 planned attacks')).toBeInTheDocument()
   })
 
   it('renders an equal bounded estimate as one number', () => {
@@ -178,9 +177,8 @@ describe('ScenarioRunEstimate', () => {
         <ScenarioRunEstimateDetails state={conditional} />
       </TestWrapper>,
     )
-    expect(screen.getByText('Final count set at launch')).toBeInTheDocument()
-    expect(screen.getByText('Choose a target to calculate the run size.')).toBeInTheDocument()
-    expect(screen.getByText('Final count is confirmed at launch.')).toBeInTheDocument()
+    expect(screen.getByText('Select targets to calculate')).toBeInTheDocument()
+    expect(screen.queryByText(/Run size calculated|Final count set at launch/i)).not.toBeInTheDocument()
     expect(screen.getByText(
       'Component breakdown unavailable; final count is set at launch',
     )).toBeInTheDocument()
@@ -203,7 +201,7 @@ describe('ScenarioRunEstimate', () => {
       </TestWrapper>,
     )
     expect(screen.getByText('Run size is confirmed at launch.')).toBeInTheDocument()
-    expect(screen.queryByText('Choose a target to calculate the run size.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Select targets to calculate')).not.toBeInTheDocument()
 
     const unavailable = mapScenarioRunEstimate({
       ...EXACT_ESTIMATE,

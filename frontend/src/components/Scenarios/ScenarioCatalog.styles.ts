@@ -133,13 +133,13 @@ export const useScenarioCatalogStyles = makeStyles({
     width: '30%',
   },
   sizeColumn: {
-    width: '17%',
+    width: '18%',
   },
   techniqueColumn: {
-    width: '22%',
+    width: '15%',
   },
   datasetColumn: {
-    width: '14%',
+    width: '20%',
   },
   actionColumn: {
     width: '17%',

@@ -36,14 +36,14 @@ function scopeLabel(state: ScenarioRunEstimateState): string {
   return scope === 'default' ? 'Default configuration' : 'Current configuration'
 }
 
-function statusLabel(state: ScenarioRunEstimateState): string {
+function statusLabel(state: ScenarioRunEstimateState): string | null {
   switch (state.status) {
     case 'loading':
       return 'Loading estimate'
     case 'available':
-      return 'Run size calculated'
+      return null
     case 'conditional':
-      return 'Final count set at launch'
+      return null
     case 'refreshing':
       return 'Updating estimate'
     case 'stale':
@@ -86,17 +86,8 @@ function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
     return `At least ${formatEstimateValue(estimate.minimum)} planned attacks`
   }
   return estimate.scope === 'default'
-    ? 'Choose a target to calculate the run size.'
+    ? 'Select targets to calculate'
     : 'Run size is confirmed at launch.'
-}
-
-function estimateSupportingCopy(state: ScenarioRunEstimateState, estimate: ScenarioRunEstimate | undefined): string {
-  if (state.status !== 'conditional' || !estimate) {
-    return scopeLabel(state)
-  }
-  return estimate.condition === 'target_capabilities'
-    ? 'Final count depends on target capabilities.'
-    : 'Final count is confirmed at launch.'
 }
 
 function formatComponentFormula(component: ScenarioRunEstimateComponent): string {
@@ -122,18 +113,18 @@ function formatCalculation(estimate: ScenarioRunEstimate): string {
 export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummaryProps) {
   const styles = useScenarioRunEstimateStyles()
   const estimate = stateEstimate(state)
+  const label = statusLabel(state)
 
   return (
     <div className={styles.summary} aria-live="polite">
       <div className={styles.summaryHeader}>
-        <Badge appearance="tint" color={statusColor(state)}>{statusLabel(state)}</Badge>
+        {label && <Badge appearance="tint" color={statusColor(state)}>{label}</Badge>}
         {estimate && (
           <Text className={styles.total} weight="semibold">
             {formatEstimateSummary(estimate)}
           </Text>
         )}
       </div>
-      <Text size={200} className={styles.muted}>{estimateSupportingCopy(state, estimate)}</Text>
     </div>
   )
 }
