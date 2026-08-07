@@ -333,12 +333,12 @@ jest.mock("./components/Scenarios/ScenarioDetail", () => {
   };
 });
 
-jest.mock("./components/Scenarios/ScenarioRunStarted", () => {
-  const MockScenarioRunStarted = () => <div data-testid="scenario-run-started" />;
-  MockScenarioRunStarted.displayName = "MockScenarioRunStarted";
+jest.mock("./components/Scenarios/ScenarioRunPage", () => {
+  const MockScenarioRunPage = () => <div data-testid="scenario-run-page" />;
+  MockScenarioRunPage.displayName = "MockScenarioRunPage";
   return {
     __esModule: true,
-    default: MockScenarioRunStarted,
+    default: MockScenarioRunPage,
   };
 });
 
@@ -417,14 +417,14 @@ describe("App", () => {
     expect(screen.getByTestId("scenario-detail")).toBeInTheDocument();
   });
 
-  it("renders the scenario run-started shell and marks the sidebar current when deep-linked to /scenario-history/:id", () => {
+  it("renders the scenario run dashboard and marks the sidebar current when deep-linked to /scenario-history/:id", () => {
     renderApp("/scenario-history/sr-123");
 
     expect(screen.getByTestId("main-layout")).toHaveAttribute(
       "data-current-view",
       "scenarios"
     );
-    expect(screen.getByTestId("scenario-run-started")).toBeInTheDocument();
+    expect(screen.getByTestId("scenario-run-page")).toBeInTheDocument();
   });
 
   it("switches to the scenarios view via the sidebar", () => {

@@ -12,7 +12,7 @@ import Initializers from './components/Initializers/Initializers'
 import AttackHistory from './components/History/AttackHistory'
 import ScenarioCatalog from './components/Scenarios/ScenarioCatalog'
 import ScenarioDetail from './components/Scenarios/ScenarioDetail'
-import ScenarioRunStarted from './components/Scenarios/ScenarioRunStarted'
+import ScenarioRunPage from './components/Scenarios/ScenarioRunPage'
 import FeedbackDialog from './components/Feedback/FeedbackDialog'
 import type { HistoryFilters } from './components/History/historyFilters'
 import { ConnectionBanner } from './components/ConnectionBanner'
@@ -423,7 +423,7 @@ function App() {
                   />
                 }
               />
-              <Route path="/scenario-history/:scenarioResultId" element={<ScenarioRunStarted />} />
+              <Route path="/scenario-history/:scenarioResultId" element={<ScenarioRunPage />} />
               <Route
                 path="/history"
                 element={
