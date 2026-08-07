@@ -244,14 +244,19 @@ class AdversarialBenchmark(Scenario):
                 )
             )
 
-        if self._use_cached:
+        if self._use_cached or self._estimate_has_binding_size_cap:
+            reasons = []
+            if self._use_cached:
+                reasons.append("Live behavioral-cache hits can suppress work")
+            if self._estimate_has_binding_size_cap:
+                reasons.append("a binding randomized dataset cap may select a different compatibility mix at launch")
             return ScenarioDefaultRunSizeEstimate(
                 status=ScenarioRunSizeEstimateStatus.Conditional,
                 components=components,
                 datasets=datasets,
                 note=(
-                    "Components describe the uncached candidate population. Live behavioral-cache hits can "
-                    "suppress work, so the authoritative total is unavailable before launch."
+                    f"Components describe the candidate population. {'; '.join(reasons)}, "
+                    "so the authoritative total is unavailable before launch."
                 ),
             )
         return ScenarioDefaultRunSizeEstimate(

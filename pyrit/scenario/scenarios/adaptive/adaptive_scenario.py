@@ -269,15 +269,28 @@ class AdaptiveScenario(Scenario):
                 factors=[ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_group_count)],
             ),
         ]
+        status = (
+            ScenarioRunSizeEstimateStatus.Conditional
+            if self._estimate_has_binding_size_cap
+            else ScenarioRunSizeEstimateStatus.Exact
+        )
+        total_attack_count = (
+            None
+            if status is ScenarioRunSizeEstimateStatus.Conditional
+            else sum(component.count for component in components)
+        )
+        note = (
+            f"Each planned unit is one persisted adaptive envelope. Up to {max_attempts} selected technique "
+            "attempts may run inside that unit; inner attempts and retries are excluded."
+        )
+        if status is ScenarioRunSizeEstimateStatus.Conditional:
+            note += " A binding randomized dataset cap may select a different compatibility mix at launch."
         return ScenarioDefaultRunSizeEstimate(
-            status=ScenarioRunSizeEstimateStatus.Exact,
-            total_attack_count=sum(component.count for component in components),
+            status=status,
+            total_attack_count=total_attack_count,
             components=components,
             datasets=datasets,
-            note=(
-                f"Each planned unit is one persisted adaptive envelope. Up to {max_attempts} selected technique "
-                "attempts may run inside that unit; inner attempts and retries are excluded."
-            ),
+            note=note,
         )
 
     def _build_techniques_dict(

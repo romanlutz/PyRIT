@@ -218,6 +218,7 @@ class Scenario(ABC):
         self._objective_target: PromptTarget | None = None
         self._objective_target_identifier: ComponentIdentifier | None = None
         self._estimate_target_is_configured = False
+        self._estimate_has_binding_size_cap = False
         self._memory_labels: dict[str, str] = {}
         self._max_concurrency: int | None = None
         self._max_retries: int = 0
@@ -613,12 +614,25 @@ class Scenario(ABC):
                 )
             )
 
+        status = (
+            ScenarioRunSizeEstimateStatus.Conditional
+            if self.RUN_SIZE_USES_FACTORY_COMPATIBILITY and self._estimate_has_binding_size_cap
+            else ScenarioRunSizeEstimateStatus.Exact
+        )
+        total_attack_count = (
+            None
+            if status is ScenarioRunSizeEstimateStatus.Conditional
+            else sum(component.count for component in components)
+        )
+        note = "Counts planned outer execution units; retries and internal attack turns are excluded."
+        if status is ScenarioRunSizeEstimateStatus.Conditional:
+            note += " A binding randomized dataset cap may select a different compatibility mix at launch."
         return ScenarioDefaultRunSizeEstimate(
-            status=ScenarioRunSizeEstimateStatus.Exact,
-            total_attack_count=sum(component.count for component in components),
+            status=status,
+            total_attack_count=total_attack_count,
             components=components,
             datasets=datasets,
-            note="Counts planned outer execution units; retries and internal attack turns are excluded.",
+            note=note,
         )
 
     def _build_technique_size_components(
@@ -720,6 +734,9 @@ class Scenario(ABC):
                     selection_note=selection_note,
                 )
             )
+        self._estimate_has_binding_size_cap = bool(configured_caps) and sum(
+            dataset.selected_seed_group_count for dataset in datasets
+        ) < sum(dataset.logical_seed_group_count for dataset in datasets)
         return selected_groups, datasets
 
     def _resolve_runtime_configuration(self, *, require_objective_target: bool) -> None:
@@ -750,6 +767,9 @@ class Scenario(ABC):
                 self._objective_target = objective_target
                 self._objective_target_identifier = objective_target.get_identifier()
                 type(self).TARGET_REQUIREMENTS.validate(target=objective_target)
+            else:
+                self._objective_target = None
+                self._objective_target_identifier = None
 
         dataset_config = params.get("dataset_config")
         self._dataset_config_provided = dataset_config is not None

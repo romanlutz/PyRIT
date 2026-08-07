@@ -275,6 +275,31 @@ async def test_matrix_estimate_filters_each_technique_seed_population_like_execu
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_matrix_estimate_with_binding_cap_and_compatibility_is_conditional() -> None:
+    """A randomized binding cap cannot promise the same compatibility mix at launch."""
+    scenario = _CompatibilityMatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(args={"include_baseline": False})
+
+    async def resolve_groups() -> tuple[dict[str, list[AttackSeedGroup]], list[ScenarioDatasetSummary]]:
+        scenario._estimate_has_binding_size_cap = True
+        return _resolved_groups({"sample": 1})
+
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(side_effect=resolve_groups)
+    factory = MagicMock()
+    factory.seed_technique = None
+
+    with patch(
+        "pyrit.scenario.core.matrix_atomic_attack_builder.resolve_technique_factories_for_techniques",
+        return_value={"one": factory, "two": factory},
+    ):
+        estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
+    assert estimate.total_attack_count is None
+    assert "binding randomized dataset cap" in estimate.note
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_techniques() -> None:
     """Adaptive techniques are selected internally rather than forming an outer axis."""
     with patch.object(TextAdaptive, "get_technique_class", return_value=_TwoTechniqueDefault):
@@ -318,6 +343,12 @@ async def test_adaptive_estimate_counts_exact_compatible_outer_envelopes_with_ta
     assert estimate.total_attack_count == 2
     assert [component.count for component in estimate.components] == [2]
     assert "7 selected technique attempts" in estimate.note
+
+    scenario.set_params_from_args(args={"include_baseline": False})
+    estimate_without_target = await scenario.get_run_size_estimate_async()
+
+    assert estimate_without_target.status is ScenarioRunSizeEstimateStatus.Conditional
+    assert estimate_without_target.total_attack_count is None
 
 
 @pytest.mark.usefixtures("patch_central_database")
