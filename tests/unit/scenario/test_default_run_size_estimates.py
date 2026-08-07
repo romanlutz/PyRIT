@@ -151,6 +151,24 @@ async def test_configured_estimate_reuses_technique_and_baseline_resolution_with
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_configured_estimate_expands_requested_aggregate() -> None:
+    """Configured previews expand aggregate technique tokens through the scenario path."""
+    scenario = _MatrixEstimateScenario(objective_scorer=_scorer())
+    scenario.set_params_from_args(
+        args={
+            "scenario_techniques": [_TwoTechniqueDefault.DEFAULT],
+            "include_baseline": False,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 4
+    assert [factor.count for factor in estimate.components[0].factors] == [2, 2]
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_configured_estimate_applies_dataset_selection_and_cap() -> None:
     """Configured estimates use the requested dataset population rather than scenario defaults."""
     scenario = _MatrixEstimateScenario(objective_scorer=_scorer())
@@ -255,6 +273,34 @@ async def test_jailbreak_configured_estimate_uses_target_capability() -> None:
     assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
     assert estimate.total_attack_count == 8
     assert [component.count for component in estimate.components] == [0, 8]
+    objective_target.send_prompt_async.assert_not_called()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_jailbreak_configured_estimate_rejects_incapable_system_delivery() -> None:
+    """System-only delivery is invalid when the selected target lacks native capabilities."""
+    with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):
+        scenario = Jailbreak(objective_scorer=_scorer())
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 4}))
+    objective_target = MagicMock(spec=PromptTarget)
+    objective_target.get_identifier.return_value = ComponentIdentifier(
+        class_name="IncapableTarget", class_module="test"
+    )
+    objective_target.configuration.includes.return_value = False
+    scenario.set_params_from_args(
+        args={
+            "objective_target": objective_target,
+            "scenario_techniques": [_JailbreakDefault.SYSTEM_PROMPT],
+            "include_baseline": False,
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+    )
+
+    with pytest.raises(ValueError, match="requires an objective target with editable history"):
+        await scenario.get_run_size_estimate_async()
+
+    objective_target.send_prompt_async.assert_not_called()
 
 
 @pytest.mark.usefixtures("patch_central_database")
