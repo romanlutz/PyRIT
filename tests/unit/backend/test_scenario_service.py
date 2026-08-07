@@ -65,6 +65,7 @@ def _make_scenario_metadata(
     registry_name: str = "test.scenario",
     class_name: str = "TestScenario",
     description: str = "A test scenario",
+    description_markdown: str = "A test scenario",
     default_technique: str = "default",
     default_techniques: tuple[str, ...] = ("role_play", "many_shot"),
     all_techniques: tuple[str, ...] = ("role_play", "many_shot"),
@@ -79,6 +80,7 @@ def _make_scenario_metadata(
         class_name=class_name,
         class_module="pyrit.scenario.scenarios.test",
         class_description=description,
+        description_markdown=description_markdown,
         default_technique=default_technique,
         default_techniques=default_techniques,
         all_techniques=all_techniques,
@@ -124,6 +126,7 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].scenario_name == "test.scenario"
             assert result.items[0].scenario_type == "TestScenario"
             assert result.items[0].description == "A test scenario"
+            assert result.items[0].description_markdown == "A test scenario"
             assert result.items[0].default_technique == "default"
             assert result.items[0].default_techniques == ["role_play", "many_shot"]
             assert result.items[0].aggregate_techniques == ["all", "default"]
@@ -408,6 +411,7 @@ class TestScenarioRoutes:
             scenario_name="foundry.red_team_agent",
             scenario_type="RedTeamAgentScenario",
             description="Red team agent testing",
+            description_markdown='<script>alert("untrusted")</script>',
             default_technique="default",
             aggregate_techniques=["all", "default"],
             all_techniques=["role_play", "many_shot"],
@@ -432,6 +436,7 @@ class TestScenarioRoutes:
             item = data["items"][0]
             assert item["scenario_name"] == "foundry.red_team_agent"
             assert item["scenario_type"] == "RedTeamAgentScenario"
+            assert item["description_markdown"] == '<script>alert("untrusted")</script>'
             assert item["default_technique"] == "default"
             assert item["aggregate_techniques"] == ["all", "default"]
             assert item["all_techniques"] == ["role_play", "many_shot"]

@@ -62,6 +62,18 @@ class _MetadataScenario:
         return _MetadataTechnique.resolve(scenario_techniques, default=self._default_technique)
 
 
+class _MarkdownMetadataScenario(_MetadataScenario):
+    """
+    First paragraph with ``literal`` text.
+
+    - Item one
+    - [Split link](
+      https://example.com)
+
+    <script>alert("untrusted")</script>
+    """
+
+
 def test_build_metadata_raises_when_scenario_requires_constructor_args() -> None:
     """Scenarios that cannot be instantiated with no args must surface a clear error."""
     registry = ScenarioRegistry()
@@ -76,6 +88,20 @@ def test_build_metadata_expands_ordered_default_techniques() -> None:
 
     assert metadata.default_technique == "default"
     assert metadata.default_techniques == ("one", "two")
+
+
+def test_build_metadata_preserves_structured_markdown_separately() -> None:
+    """Scenario metadata keeps plain compatibility text and Markdown source."""
+    metadata = ScenarioRegistry()._build_metadata("markdown", _MarkdownMetadataScenario)
+
+    assert "\n" not in metadata.class_description
+    assert metadata.description_markdown == (
+        "First paragraph with ``literal`` text.\n\n"
+        "- Item one\n"
+        "- [Split link](\n"
+        "  https://example.com)\n\n"
+        '<script>alert("untrusted")</script>'
+    )
 
 
 async def test_create_and_initialize_async_creates_sets_params_and_initializes() -> None:

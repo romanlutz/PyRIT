@@ -148,6 +148,13 @@ class RegisteredScenario(BaseModel):
     scenario_type: str = Field(..., description="Scenario type identifier (e.g., 'RedTeamAgentScenario')")
     scenario_version: int = Field(1, ge=1, description="Scenario definition version used for default metadata")
     description: str = Field(..., description="Human-readable description of the scenario")
+    description_markdown: str = Field(
+        "",
+        description=(
+            "Dedented Markdown source preserving the scenario docstring structure. "
+            "Clients must treat embedded HTML as untrusted text."
+        ),
+    )
     default_technique: str = Field(..., description="Default technique name used when none specified")
     default_techniques: list[str] = Field(
         default_factory=list,

@@ -46,6 +46,9 @@ class ScenarioMetadata(RegistryMetadata):
     # Ordered concrete techniques selected by the default technique policy.
     default_techniques: tuple[str, ...] = field(kw_only=True, default=())
 
+    # Dedented class docstring with Markdown structure preserved.
+    description_markdown: str = field(kw_only=True, default="")
+
     # All available technique names for this scenario.
     all_techniques: tuple[str, ...] = field(kw_only=True)
 
@@ -138,6 +141,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             TypeError: If ``cls()`` cannot be called with no arguments.
         """
         description = RegistryMetadata.description_from_docstring(cls, fallback="No description available")
+        description_markdown = RegistryMetadata.markdown_from_docstring(cls, fallback=description)
 
         supported_parameters = tuple(cls.supported_parameters())
 
@@ -169,6 +173,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             scenario_version=instance._version,
             default_technique=default_technique_value,
             default_techniques=default_techniques,
+            description_markdown=description_markdown,
             all_techniques=all_techniques,
             aggregate_techniques=aggregate_techniques,
             default_datasets=default_datasets,

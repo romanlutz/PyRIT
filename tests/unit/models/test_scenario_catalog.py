@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pyrit.models import (
+    ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateRequest,
@@ -69,6 +70,35 @@ def test_default_run_size_serializes_versioned_api_shape() -> None:
         "datasets": [],
         "note": None,
     }
+
+
+def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:
+    """Conditionality and effective dataset selection are machine-readable."""
+    estimate = ScenarioDefaultRunSizeEstimate(
+        status=ScenarioRunSizeEstimateStatus.Conditional,
+        datasets=[
+            ScenarioDatasetSummary(
+                name="harmbench",
+                logical_seed_group_count=100,
+                selected_seed_group_count=4,
+                selection_note="The default selection uses 4 of 100 logical seed groups.",
+            )
+        ],
+        note="The final total depends on target capabilities.",
+    )
+
+    payload = estimate.model_dump(mode="json")
+    assert payload["status"] == "conditional"
+    assert payload["total_attack_count"] is None
+    assert payload["datasets"] == [
+        {
+            "name": "harmbench",
+            "kind": "dataset",
+            "logical_seed_group_count": 100,
+            "selected_seed_group_count": 4,
+            "selection_note": "The default selection uses 4 of 100 logical seed groups.",
+        }
+    ]
 
 
 def test_estimate_request_reuses_dataset_filter_validation() -> None:

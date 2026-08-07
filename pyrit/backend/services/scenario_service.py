@@ -53,6 +53,7 @@ def _metadata_to_registered_scenario(
         scenario_type=metadata.class_name,
         scenario_version=metadata.scenario_version,
         description=metadata.class_description,
+        description_markdown=metadata.description_markdown,
         default_technique=metadata.default_technique,
         default_techniques=list(metadata.default_techniques),
         aggregate_techniques=list(metadata.aggregate_techniques),
