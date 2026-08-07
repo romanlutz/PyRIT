@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from pyrit.models.parameter import Parameter
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -87,7 +87,11 @@ class ScenarioDatasetSummary(BaseModel):
 
     name: str = Field(..., min_length=1)
     kind: Literal["dataset", "synthesized"] = "dataset"
-    logical_seed_group_count: int = Field(..., ge=0)
+    logical_seed_group_count: int = Field(
+        ...,
+        ge=0,
+        validation_alias=AliasChoices("logical_seed_group_count", "seed_group_count"),
+    )
     selected_seed_group_count: int = Field(..., ge=0)
     selection_note: str | None = None
 
@@ -102,10 +106,47 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
 
     version: Literal[1] = 1
     status: ScenarioRunSizeEstimateStatus
-    total_attack_count: int | None = Field(default=None, ge=0)
+    total_attack_count: int | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("total_attack_count", "total"),
+    )
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
-    note: str | None = None
+    note: str | None = Field(default=None, validation_alias=AliasChoices("note", "caveat"))
+
+    @property
+    def total(self) -> int | None:
+        """The legacy Python attribute for total_attack_count."""
+        return self.total_attack_count
+
+    @property
+    def caveat(self) -> str | None:
+        """The legacy Python attribute for note."""
+        return self.note
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_total(cls, data: Any) -> Any:
+        """
+        Explain component-less legacy exact totals in the canonical shape.
+
+        Returns:
+            Any: The normalized input when it is a legacy exact estimate; otherwise the original input.
+        """
+        if not isinstance(data, dict) or "total" not in data or "components" in data:
+            return data
+        if data.get("status") != ScenarioRunSizeEstimateStatus.Exact and data.get("status") != "exact":
+            return data
+        normalized = dict(data)
+        normalized["components"] = [
+            {
+                "label": "Legacy total",
+                "count": data["total"],
+                "note": "Normalized from a legacy component-less estimate.",
+            }
+        ]
+        return normalized
 
     @model_validator(mode="after")
     def validate_total(self) -> "ScenarioDefaultRunSizeEstimate":
@@ -141,6 +182,10 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
         return cls(status=ScenarioRunSizeEstimateStatus.Unavailable, note=note)
 
 
+# Backward-compatible catalog name from the initial run-size DTO.
+ScenarioRunSizeEstimate = ScenarioDefaultRunSizeEstimate
+
+
 class RegisteredScenario(BaseModel):
     """Summary of a registered scenario."""
 
@@ -165,6 +210,10 @@ class RegisteredScenario(BaseModel):
     )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    default_dataset_summaries: list[ScenarioDatasetSummary] = Field(
+        default_factory=list,
+        description="Compatibility projection of default_run_size.datasets",
+    )
     baseline_policy: Literal["enabled", "disabled", "forbidden"] = Field(
         "enabled", description="Whether baseline execution is enabled, disabled, or forbidden"
     )

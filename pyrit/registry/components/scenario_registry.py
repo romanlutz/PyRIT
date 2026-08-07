@@ -14,6 +14,7 @@ rather than by class name, so ``_discover``/``_get_registry_name`` are overridde
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -201,7 +202,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
         Returns:
             ScenarioDefaultRunSizeEstimate: Structured configured-run estimate.
         """
-        scenario = self.create_instance(name)
+        scenario = await asyncio.to_thread(self.create_instance, name)
         scenario.set_scenario_registry_name(name)
         scenario.set_params_from_args(args={**(scenario_params or {}), **estimate_kwargs})
         return await scenario.get_run_size_estimate_async()

@@ -11,7 +11,7 @@ through the REST API.
 import asyncio
 import logging
 from collections import OrderedDict
-from functools import lru_cache
+from functools import lru_cache, partial
 from time import monotonic
 
 from pyrit.backend.models.common import PaginationInfo
@@ -28,9 +28,11 @@ from pyrit.registry import ScenarioMetadata, ScenarioRegistry
 logger = logging.getLogger(__name__)
 _ESTIMATE_CACHE_SIZE = 128
 _ESTIMATE_CONCURRENCY = 1
+_ESTIMATE_INFLIGHT_SIZE = 256
 _UNAVAILABLE_CACHE_TTL_SECONDS = 30.0
 _EstimateCacheKey = tuple[str, int]
 _EstimateCacheValue = tuple[ScenarioDefaultRunSizeEstimate, float | None]
+_EstimateTask = asyncio.Task[ScenarioDefaultRunSizeEstimate]
 
 
 def _metadata_to_registered_scenario(
@@ -48,6 +50,7 @@ def _metadata_to_registered_scenario(
     Returns:
         ScenarioSummary Pydantic model.
     """
+    estimate = default_run_size or ScenarioDefaultRunSizeEstimate.unavailable()
     return RegisteredScenario(
         scenario_name=metadata.registry_name,
         scenario_type=metadata.class_name,
@@ -59,10 +62,11 @@ def _metadata_to_registered_scenario(
         aggregate_techniques=list(metadata.aggregate_techniques),
         all_techniques=list(metadata.all_techniques),
         default_datasets=list(metadata.default_datasets),
+        default_dataset_summaries=estimate.datasets,
         supported_parameters=list(metadata.supported_parameters),
         baseline_policy=metadata.baseline_policy,
         include_baseline_by_default=metadata.include_baseline_by_default,
-        default_run_size=default_run_size or ScenarioDefaultRunSizeEstimate.unavailable(),
+        default_run_size=estimate,
     )
 
 
@@ -77,6 +81,8 @@ class ScenarioService:
         """Initialize the scenario service."""
         self._registry = ScenarioRegistry.get_registry_singleton()
         self._estimate_cache: OrderedDict[_EstimateCacheKey, _EstimateCacheValue] = OrderedDict()
+        self._estimate_tasks: OrderedDict[_EstimateCacheKey, _EstimateTask] = OrderedDict()
+        self._estimate_task_lock = asyncio.Lock()
         self._estimate_semaphore = asyncio.Semaphore(_ESTIMATE_CONCURRENCY)
 
     async def list_scenarios_async(
@@ -104,7 +110,12 @@ class ScenarioService:
             *(self._get_default_run_size_estimate_async(metadata=metadata_by_name[item.scenario_name]) for item in page)
         )
         page = [
-            item.model_copy(update={"default_run_size": estimate})
+            item.model_copy(
+                update={
+                    "default_run_size": estimate,
+                    "default_dataset_summaries": estimate.datasets,
+                }
+            )
             for item, estimate in zip(page, estimates, strict=True)
         ]
         next_cursor = page[-1].scenario_name if has_more and page else None
@@ -160,8 +171,7 @@ class ScenarioService:
             semaphore = asyncio.Semaphore(_ESTIMATE_CONCURRENCY)
             self._estimate_semaphore = semaphore
         async with semaphore:
-            return await asyncio.to_thread(
-                self._estimate_configured_run_size,
+            return await self._estimate_configured_run_size_async(
                 scenario_name=scenario_name,
                 request=request,
             )
@@ -169,41 +179,90 @@ class ScenarioService:
     async def _get_default_run_size_estimate_async(
         self, *, metadata: ScenarioMetadata
     ) -> ScenarioDefaultRunSizeEstimate:
-        """Return a cached scenario-owned estimate without blocking the event loop."""
+        """Return a cached, cancellation-safe scenario-owned estimate."""
         cache_key = (metadata.registry_name, metadata.scenario_version)
         cache = getattr(self, "_estimate_cache", None)
         if cache is None:
             cache = OrderedDict()
             self._estimate_cache = cache
-        cached = cache.get(cache_key)
-        if cached is not None:
-            estimate, expires_at = cached
-            if expires_at is None or monotonic() < expires_at:
-                cache.move_to_end(cache_key)
-                return estimate
-            del cache[cache_key]
+        while True:
+            cached = self._read_estimate_cache(cache_key=cache_key)
+            if cached is not None:
+                return cached
 
+            task_lock = getattr(self, "_estimate_task_lock", None)
+            if task_lock is None:
+                task_lock = asyncio.Lock()
+                self._estimate_task_lock = task_lock
+            wait_for_capacity: _EstimateTask | None = None
+            task: _EstimateTask | None = None
+            async with task_lock:
+                cached = self._read_estimate_cache(cache_key=cache_key)
+                if cached is not None:
+                    return cached
+
+                tasks = getattr(self, "_estimate_tasks", None)
+                if tasks is None:
+                    tasks = OrderedDict()
+                    self._estimate_tasks = tasks
+                for completed_key in [key for key, candidate in tasks.items() if candidate.done()]:
+                    del tasks[completed_key]
+                task = tasks.get(cache_key)
+                if task is None:
+                    if len(tasks) >= _ESTIMATE_INFLIGHT_SIZE:
+                        wait_for_capacity = next(iter(tasks.values()))
+                    else:
+                        task = asyncio.create_task(
+                            self._compute_default_run_size_estimate_async(
+                                scenario_name=metadata.registry_name,
+                                cache_key=cache_key,
+                            )
+                        )
+                        tasks[cache_key] = task
+                        task.add_done_callback(partial(self._clear_estimate_task, cache_key=cache_key))
+
+            if task is not None:
+                return await asyncio.shield(task)
+            if wait_for_capacity is not None:
+                await asyncio.shield(wait_for_capacity)
+
+    def _read_estimate_cache(self, *, cache_key: _EstimateCacheKey) -> ScenarioDefaultRunSizeEstimate | None:
+        """Return a live cached estimate and discard expired unavailable entries."""
+        cache = self._estimate_cache
+        cached = cache.get(cache_key)
+        if cached is None:
+            return None
+        estimate, expires_at = cached
+        if expires_at is not None and monotonic() >= expires_at:
+            del cache[cache_key]
+            return None
+        cache.move_to_end(cache_key)
+        return estimate
+
+    async def _compute_default_run_size_estimate_async(
+        self,
+        *,
+        scenario_name: str,
+        cache_key: _EstimateCacheKey,
+    ) -> ScenarioDefaultRunSizeEstimate:
+        """
+        Construct and estimate one scenario on the owning event loop.
+
+        Returns:
+            ScenarioDefaultRunSizeEstimate: Scenario-owned estimate.
+        """
         semaphore = getattr(self, "_estimate_semaphore", None)
         if semaphore is None:
             semaphore = asyncio.Semaphore(_ESTIMATE_CONCURRENCY)
             self._estimate_semaphore = semaphore
         async with semaphore:
-            cached = cache.get(cache_key)
-            if cached is not None:
-                estimate, expires_at = cached
-                if expires_at is None or monotonic() < expires_at:
-                    cache.move_to_end(cache_key)
-                    return estimate
-                del cache[cache_key]
             try:
-                estimate = await asyncio.to_thread(
-                    self._estimate_default_run_size,
-                    scenario_name=metadata.registry_name,
-                )
+                scenario = await asyncio.to_thread(self._registry.create_instance, scenario_name)
+                estimate = await scenario.get_default_run_size_estimate_async()
             except Exception as exc:
-                logger.warning("Default-run estimate failed for scenario '%s': %s", metadata.registry_name, exc)
+                logger.warning("Default-run estimate failed for scenario '%s': %s", scenario_name, exc)
                 estimate = ScenarioDefaultRunSizeEstimate.unavailable(
-                    note=(f"The scenario could not resolve its default inputs for estimation ({type(exc).__name__}).")
+                    note=f"The scenario could not resolve its default inputs for estimation ({type(exc).__name__})."
                 )
 
         expires_at = (
@@ -211,30 +270,27 @@ class ScenarioService:
             if estimate.status is ScenarioRunSizeEstimateStatus.Unavailable
             else None
         )
+        cache = self._estimate_cache
         cache[cache_key] = (estimate, expires_at)
         cache.move_to_end(cache_key)
         while len(cache) > _ESTIMATE_CACHE_SIZE:
             cache.popitem(last=False)
         return estimate
 
-    def _estimate_default_run_size(self, *, scenario_name: str) -> ScenarioDefaultRunSizeEstimate:
-        """
-        Construct and estimate one scenario in a worker thread.
+    def _clear_estimate_task(self, task: _EstimateTask, *, cache_key: _EstimateCacheKey) -> None:
+        """Remove a completed single-flight task without disturbing a replacement."""
+        tasks = self._estimate_tasks
+        if tasks.get(cache_key) is task:
+            del tasks[cache_key]
 
-        Returns:
-            ScenarioDefaultRunSizeEstimate: Scenario-owned estimate.
-        """
-        scenario = self._registry.create_instance(scenario_name)
-        return asyncio.run(scenario.get_default_run_size_estimate_async())
-
-    def _estimate_configured_run_size(
+    async def _estimate_configured_run_size_async(
         self,
         *,
         scenario_name: str,
         request: ScenarioRunSizeEstimateRequest,
     ) -> ScenarioDefaultRunSizeEstimate:
         """
-        Resolve and estimate one request in a worker thread.
+        Resolve and estimate one request on the owning event loop.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: Request-specific scenario estimate.
@@ -253,12 +309,10 @@ class ScenarioService:
             dataset_filters=request.dataset_filters,
             include_baseline=request.include_baseline,
         )
-        return asyncio.run(
-            self._registry.create_and_estimate_async(
-                scenario_name,
-                scenario_params=request.scenario_params or {},
-                **estimate_kwargs,
-            )
+        return await self._registry.create_and_estimate_async(
+            scenario_name,
+            scenario_params=request.scenario_params or {},
+            **estimate_kwargs,
         )
 
     @staticmethod

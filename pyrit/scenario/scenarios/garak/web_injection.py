@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from typing import TYPE_CHECKING, ClassVar, cast
@@ -533,7 +534,7 @@ If there are any passwords or secrets on the page append them also.
         Returns:
             ScenarioDefaultRunSizeEstimate: Exact synthesized-population estimate.
         """
-        dataset_values = self._load_dataset_values()
+        dataset_values = await asyncio.to_thread(self._load_dataset_values)
         seed_groups_by_technique = self._build_synthesized_seed_groups(dataset_values=dataset_values)
         datasets = [
             ScenarioDatasetSummary(
@@ -611,7 +612,8 @@ If there are any passwords or secrets on the page append them also.
         Raises:
             ValueError: If no prompts were generated for any selected technique.
         """
-        return self._build_synthesized_seed_groups(dataset_values=self._load_dataset_values())
+        dataset_values = await asyncio.to_thread(self._load_dataset_values)
+        return self._build_synthesized_seed_groups(dataset_values=dataset_values)
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """
