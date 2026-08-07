@@ -6,7 +6,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
 from pyrit.models.results.attack_result import AttackOutcome
@@ -42,6 +42,37 @@ class ScenarioRunPlan(BaseModel):
     scenario_registry_name: str | None = None
     atomic_groups: list[ScenarioRunPlanAtomicGroup]
     seed_groups: list[ScenarioRunPlanSeedGroup]
+
+    @model_validator(mode="after")
+    def _validate_normalized_plan(self) -> "ScenarioRunPlan":
+        """
+        Reject ambiguous IDs and invalid normalized references.
+
+        Returns:
+            ScenarioRunPlan: The validated normalized plan.
+
+        Raises:
+            ValueError: If IDs are duplicated or a group references an unknown seed.
+        """
+        atomic_group_ids = [group.id for group in self.atomic_groups]
+        if len(atomic_group_ids) != len(set(atomic_group_ids)):
+            raise ValueError("Scenario run plan contains duplicate atomic group IDs.")
+
+        seed_group_ids = [seed.id for seed in self.seed_groups]
+        if len(seed_group_ids) != len(set(seed_group_ids)):
+            raise ValueError("Scenario run plan contains duplicate seed group IDs.")
+
+        known_seed_group_ids = set(seed_group_ids)
+        for group in self.atomic_groups:
+            if len(group.seed_group_ids) != len(set(group.seed_group_ids)):
+                raise ValueError(f"Scenario run plan atomic group '{group.id}' contains duplicate seed group IDs.")
+            missing_seed_group_ids = set(group.seed_group_ids) - known_seed_group_ids
+            if missing_seed_group_ids:
+                raise ValueError(
+                    f"Scenario run plan atomic group '{group.id}' references unknown seed group IDs: "
+                    f"{', '.join(sorted(missing_seed_group_ids))}."
+                )
+        return self
 
 
 class ScenarioProgressHeader(BaseModel):
