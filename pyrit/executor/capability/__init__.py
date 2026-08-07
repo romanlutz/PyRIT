@@ -3,6 +3,7 @@
 
 """Provider-neutral capability-task execution."""
 
+from pyrit.executor.capability.evidence import CapabilityEvidenceSink, InMemoryCapabilityEvidenceSink
 from pyrit.executor.capability.executor import CapabilityTaskExecutor
 from pyrit.executor.capability.models import (
     ApprovalDecisionKind,
@@ -23,6 +24,7 @@ from pyrit.executor.capability.models import (
     ExpectedEvidence,
     LifecycleEventKind,
     LifecycleEvidence,
+    SandboxOperationEvidence,
     TimingEvidence,
     ToolExecutionEvidence,
     ToolExecutionPolicy,
@@ -54,6 +56,7 @@ __all__ = [
     "ArtifactEvidence",
     "CapabilityCase",
     "CapabilityEvidence",
+    "CapabilityEvidenceSink",
     "CapabilityLimits",
     "CapabilityOutcome",
     "CapabilityRequestOptionsFactory",
@@ -71,6 +74,8 @@ __all__ = [
     "ExpectedEvidence",
     "LifecycleEventKind",
     "LifecycleEvidence",
+    "InMemoryCapabilityEvidenceSink",
+    "SandboxOperationEvidence",
     "MessageScorerAdapter",
     "OpenAIResponsesCapabilityRequestOptionsFactory",
     "TimingEvidence",

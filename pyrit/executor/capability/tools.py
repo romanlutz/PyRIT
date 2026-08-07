@@ -19,6 +19,7 @@ from pyrit.executor.capability.models import (
     ApprovalDecisionKind,
     ApprovalEvidence,
     ArtifactEvidence,
+    CapabilityEvidence,
     ErrorEvidence,
     ToolExecutionEvidence,
     ToolExecutionStatus,
@@ -68,6 +69,7 @@ class ToolExecutionOutput(BaseModel):
 
     output: JSONValue
     artifacts: tuple[ToolArtifact, ...] = ()
+    evidence: tuple[CapabilityEvidence, ...] = ()
     side_effect_completed: bool = False
 
 
@@ -109,6 +111,8 @@ class ToolExecutionError(Exception):
         retryable: bool = False,
         side_effect_completed: bool | None = False,
         details: JSONValue = None,
+        status: ToolExecutionStatus = ToolExecutionStatus.FAILED,
+        evidence: tuple[CapabilityEvidence, ...] = (),
     ) -> None:
         """Initialize a declared tool failure."""
         super().__init__(message)
@@ -117,6 +121,8 @@ class ToolExecutionError(Exception):
         self.retryable = retryable
         self.side_effect_completed = side_effect_completed
         self.details = details
+        self.status = status
+        self.evidence = evidence
 
 
 class CooperativeCancellationError(Exception):
@@ -270,6 +276,7 @@ class ToolExecutionRecord:
     execution_evidence: tuple[ToolExecutionEvidence, ...] = ()
     error_evidence: tuple[ErrorEvidence, ...] = ()
     artifact_evidence: tuple[ArtifactEvidence, ...] = ()
+    additional_evidence: tuple[CapabilityEvidence, ...] = ()
 
 
 class CapabilityToolRuntime:
@@ -500,6 +507,7 @@ class CapabilityToolRuntime:
             raise RuntimeError("Validated tool call is incomplete.")
         execution_evidence: list[ToolExecutionEvidence] = []
         errors: list[ErrorEvidence] = []
+        additional_evidence: list[CapabilityEvidence] = []
         max_attempts = 1 + (call.binding.declaration.max_retries if call.binding.declaration.idempotent else 0)
         for attempt_number in range(1, max_attempts + 1):
             context = self._context(
@@ -514,11 +522,13 @@ class CapabilityToolRuntime:
             record = await self._execute_attempt_async(call=call, context=context)
             execution_evidence.append(record.execution_evidence[0])
             errors.extend(record.error_evidence)
+            additional_evidence.extend(record.additional_evidence)
             if record.result.error is None:
                 return replace(
                     record,
                     execution_evidence=tuple(execution_evidence),
                     error_evidence=tuple(errors),
+                    additional_evidence=tuple(additional_evidence),
                 )
             evidence = record.execution_evidence[0]
             should_retry = self._should_retry(
@@ -532,6 +542,7 @@ class CapabilityToolRuntime:
                     record,
                     execution_evidence=tuple(execution_evidence),
                     error_evidence=tuple(errors),
+                    additional_evidence=tuple(additional_evidence),
                 )
         raise RuntimeError("Tool retry loop ended without a result.")
 
@@ -566,7 +577,7 @@ class CapabilityToolRuntime:
                 call=call,
                 context=context,
                 started_at=started_at,
-                status=ToolExecutionStatus.FAILED,
+                status=error.status,
                 error=error,
             )
         except CooperativeCancellationError:
@@ -609,7 +620,12 @@ class CapabilityToolRuntime:
             )
             for artifact in output.artifacts
         )
-        return ToolExecutionRecord(result=result, execution_evidence=(evidence,), artifact_evidence=artifacts)
+        return ToolExecutionRecord(
+            result=result,
+            execution_evidence=(evidence,),
+            artifact_evidence=artifacts,
+            additional_evidence=output.evidence,
+        )
 
     @staticmethod
     async def _await_execution_async(
@@ -691,6 +707,7 @@ class CapabilityToolRuntime:
             result=ToolCallResult(call_id=call.request.call_id, output=error.message, error=tool_error),
             execution_evidence=(evidence,),
             error_evidence=(error_evidence,),
+            additional_evidence=error.evidence,
         )
 
     @staticmethod

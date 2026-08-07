@@ -541,6 +541,7 @@ class CapabilityTaskExecutor:
             )
             state.evidence.extend(record.error_evidence)
             state.evidence.extend(record.artifact_evidence)
+            state.evidence.extend(record.additional_evidence)
         return Message(message_pieces=pieces)
 
     async def _persist_result_message_async(

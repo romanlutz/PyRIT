@@ -246,6 +246,29 @@ class ArtifactEvidence(BaseModel):
     metadata: dict[str, JSONValue] = Field(default_factory=dict)
 
 
+class SandboxOperationEvidence(BaseModel):
+    """An authoritative fact emitted by a sandbox lifecycle or environment operation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_type: Literal["sandbox_operation"] = "sandbox_operation"
+    provider: str
+    operation: str
+    outcome: str
+    started_at: AwareDatetime
+    ended_at: AwareDatetime
+    session_id: str | None = None
+    environment_name: str | None = None
+    call_id: str | None = None
+    attempt_id: uuid.UUID | None = None
+    error_code: str | None = None
+    input_size_bytes: int | None = Field(default=None, ge=0)
+    output_size_bytes: int | None = Field(default=None, ge=0)
+    sha256: str | None = None
+    artifact_ids: tuple[str, ...] = ()
+    metadata: dict[str, JSONValue] = Field(default_factory=dict)
+
+
 CapabilityEvidence = Annotated[
     ToolExecutionEvidence
     | ApprovalEvidence
@@ -254,7 +277,8 @@ CapabilityEvidence = Annotated[
     | TimingEvidence
     | ErrorEvidence
     | LifecycleEvidence
-    | ArtifactEvidence,
+    | ArtifactEvidence
+    | SandboxOperationEvidence,
     Field(discriminator="evidence_type"),
 ]
 
