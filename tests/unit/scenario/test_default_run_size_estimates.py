@@ -396,6 +396,31 @@ async def test_jailbreak_configured_estimate_counts_prompt_sending_without_basel
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_jailbreak_configured_estimate_counts_prompt_sending_with_baseline() -> None:
+    """Two templates over four groups plus baseline produce twelve planned units."""
+    with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):
+        scenario = Jailbreak(objective_scorer=_scorer())
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=_resolved_groups({"harmbench": 4}))
+    scenario.set_params_from_args(
+        args={
+            "scenario_techniques": [_JailbreakDefault.PROMPT_SENDING],
+            "include_baseline": True,
+            "num_jailbreaks": 2,
+            "num_jailbreak_attempts": 1,
+        }
+    )
+
+    estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
+    assert estimate.total_attack_count == 12
+    assert [component.count for component in estimate.components] == [4, 8]
+    assert estimate.components[0].is_baseline is True
+    assert [factor.count for factor in estimate.components[1].factors] == [4, 2, 1, 1]
+    assert "Baseline adds one unit per selected seed group (4 units)" in estimate.note
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_jailbreak_configured_estimate_uses_target_capability() -> None:
     """A capable selected target makes native system-prompt delivery exact."""
     with patch("pyrit.scenario.scenarios.airt.jailbreak._build_jailbreak_technique", return_value=_JailbreakDefault):

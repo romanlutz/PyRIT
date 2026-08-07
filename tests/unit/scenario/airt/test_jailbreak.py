@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.common.path import JAILBREAK_TEMPLATES_PATH
 from pyrit.converter import TextJailbreakConverter
 from pyrit.datasets import TextJailBreak
@@ -808,17 +809,27 @@ class TestJailbreakTechniqueModel:
 
     def test_registry_metadata_omits_incompatible_techniques(self):
         metadata = ScenarioRegistry()._build_metadata("airt.jailbreak", Jailbreak)
-        assert metadata.scenario_version == 4
-        assert set(metadata.default_techniques) == {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT}
-        assert "flip" in metadata.all_techniques
-        assert {
+        incompatible = {
             "context_compliance",
             "role_play_movie_script",
             "crescendo_simulated",
             "red_teaming",
             "tap",
             "many_shot",
-        }.isdisjoint(metadata.all_techniques)
+        }
+        assert metadata.scenario_version == 4
+        assert metadata.default_techniques == (_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT)
+        assert incompatible.isdisjoint(metadata.default_techniques)
+        assert "flip" in metadata.all_techniques
+        assert incompatible.isdisjoint(metadata.all_techniques)
+
+    def test_configured_estimate_rejects_context_compliance(self):
+        with pytest.raises(ValueError, match="Technique 'context_compliance' not found"):
+            ScenarioRunService.resolve_scenario_configuration(
+                scenario_name="airt.jailbreak",
+                scenario_class=Jailbreak,
+                techniques=["context_compliance"],
+            )
 
     def test_scenario_version_is_four(self):
         assert Jailbreak.VERSION == 4

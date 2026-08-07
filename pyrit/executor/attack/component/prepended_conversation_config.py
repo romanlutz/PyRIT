@@ -4,15 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from pyrit.message_normalizer import (
     ConversationContextNormalizer,
     MessageStringNormalizer,
 )
-
-if TYPE_CHECKING:
-    from pyrit.models import ChatMessageRole
+from pyrit.models import ChatMessageRole  # noqa: TC001 - public annotation must resolve at runtime
 
 
 @dataclass
