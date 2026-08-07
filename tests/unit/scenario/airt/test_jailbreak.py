@@ -16,6 +16,7 @@ from pyrit.models import AttackSeedGroup, ComponentIdentifier, SeedObjective, Se
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry import TargetRegistry
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
+from pyrit.registry.components.scenario_registry import ScenarioRegistry
 from pyrit.scenario.core import BaselineAttackPolicy
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.scenario.scenarios.airt.jailbreak import (
@@ -328,9 +329,7 @@ class TestJailbreakAttackGeneration:
 
             assert captured, "Expected factory.create to be called"
             converters = [c for extra in captured if extra for cc in extra for c in cc.converters]
-            assert any(isinstance(c, TextJailbreakConverter) for c in converters), (
-                "Expected a TextJailbreakConverter to be threaded to factory.create"
-            )
+            assert sum(isinstance(c, TextJailbreakConverter) for c in converters) == 1
 
             # The objective seed groups themselves carry no jailbreak framing (converter delivery only).
             for attack in scenario._atomic_attacks:
@@ -376,49 +375,61 @@ class TestJailbreakAttackGeneration:
                 "Jailbreak converter must be applied before caller-supplied converters"
             )
 
-    async def test_simulated_conversation_techniques_produce_attacks_with_jailbreak(
+    async def test_stale_incompatible_technique_is_rejected(
         self, mock_objective_target, mock_objective_scorer, mock_memory_seed_groups
     ):
-        """Regression: simulated-conversation techniques (``role_play_*``, ``crescendo_*``) must still
-        produce atomic attacks when crossed with a jailbreak template, and each must receive the
-        jailbreak converter.
-
-        Converter delivery leaves the objective seed group unframed, so it stays compatible with the
-        simulated-conversation seed technique. (Delivering the jailbreak as a system-role framing seed
-        instead collided with that technique's seed range and silently produced zero attacks.)
-        """
-        technique_class = _build_jailbreak_technique()
-        techniques = [
-            technique_class("role_play_movie_script"),
-            technique_class("crescendo_simulated"),
-        ]
-        captured: list[Any] = []
-        original_create = AttackTechniqueFactory.create
-
-        def _spy_create(self, **kwargs):
-            captured.append(kwargs.get("extra_request_converters"))
-            return original_create(self, **kwargs)
-
+        registry_factories = list(AttackTechniqueRegistry.get_registry_singleton().get_factories_or_raise().values())
+        legacy_class = AttackTechniqueRegistry.build_technique_class_from_factories(
+            class_name="LegacyJailbreakTechnique",
+            factories=registry_factories,
+        )
         with _patch_seed_groups(mock_memory_seed_groups):
-            with patch.object(AttackTechniqueFactory, "create", _spy_create):
+            scenario = Jailbreak(objective_scorer=mock_objective_scorer)
+            scenario.set_params_from_args(
+                args=_default_args(
+                    mock_objective_target,
+                    scenario_techniques=[legacy_class("tap")],
+                    jailbreak_names=["aim.yaml"],
+                )
+            )
+            with pytest.raises(ValueError, match="stale or incompatible"):
+                await scenario.initialize_async()
+
+    async def test_incompatible_runtime_factory_is_rejected(
+        self, mock_objective_target, mock_objective_scorer, mock_memory_seed_groups
+    ):
+        incompatible = AttackTechniqueFactory(
+            name="legacy_multi_turn",
+            attack_class=PromptSendingAttack,
+            technique_tags=["multi_turn"],
+            supports_request_converter_composition=True,
+        )
+        with _patch_seed_groups(mock_memory_seed_groups):
+            with patch(
+                "pyrit.scenario.scenarios.airt.jailbreak.resolve_technique_factories",
+                return_value={_PROMPT_SENDING: incompatible},
+            ):
                 scenario = Jailbreak(objective_scorer=mock_objective_scorer)
+                technique_class = _build_jailbreak_technique()
                 scenario.set_params_from_args(
                     args=_default_args(
-                        mock_objective_target, scenario_techniques=techniques, jailbreak_names=["aim.yaml"]
+                        mock_objective_target,
+                        scenario_techniques=[technique_class(_PROMPT_SENDING)],
+                        jailbreak_names=["aim.yaml"],
                     )
                 )
-                await scenario.initialize_async()
-            names = {a.atomic_attack_name for a in scenario._atomic_attacks}
-            assert "role_play_movie_script_aim_harmbench" in names
-            assert "crescendo_simulated_aim_harmbench" in names
-            # Every build of a simulated-conversation technique must still carry the jailbreak
-            # converter. Assert both techniques captured a non-empty converter stack (so the check
-            # can't pass vacuously on a dropped/None stack) and each contains the jailbreak converter.
-            populated = [extra for extra in captured if extra]
-            assert len(populated) == 2, "Expected both simulated-conversation techniques to receive converters"
-            assert all(
-                any(isinstance(c, TextJailbreakConverter) for cc in extra for c in cc.converters) for extra in populated
-            ), "Each simulated-conversation technique must receive the jailbreak converter"
+                with pytest.raises(ValueError, match="cannot compose"):
+                    await scenario.initialize_async()
+
+    async def test_missing_runtime_factory_is_rejected(
+        self, mock_objective_target, mock_objective_scorer, mock_memory_seed_groups
+    ):
+        with _patch_seed_groups(mock_memory_seed_groups):
+            with patch("pyrit.scenario.scenarios.airt.jailbreak.resolve_technique_factories", return_value={}):
+                scenario = Jailbreak(objective_scorer=mock_objective_scorer)
+                scenario.set_params_from_args(args=_default_args(mock_objective_target, jailbreak_names=["aim.yaml"]))
+                with pytest.raises(ValueError, match="no longer available.*prompt_sending"):
+                    await scenario.initialize_async()
 
     async def test_all_templates_produce_attacks(
         self, mock_objective_target, mock_objective_scorer, mock_memory_seed_groups
@@ -708,15 +719,41 @@ class TestJailbreakTechniqueModel:
         assert default_values == set(_DEFAULT_TECHNIQUES)
         assert default_values == {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT}
 
-    def test_registry_techniques_are_available(self):
+    def test_only_compatible_direct_registry_techniques_are_available(self):
         technique_class = _technique_class()
         available = {t.value for t in technique_class.get_all_techniques()}
-        assert {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT}.issubset(available)
-        # The "normal ones available like from rapid response" are exposed as opt-in techniques.
-        assert {"role_play_movie_script", "many_shot", "tap"}.issubset(available)
+        incompatible = {
+            "context_compliance",
+            "role_play_movie_script",
+            "role_play_video_game",
+            "role_play_trivia_game",
+            "role_play_persuasion",
+            "role_play_persuasion_written",
+            "crescendo_simulated",
+            "crescendo_movie_director",
+            "crescendo_history_lecture",
+            "crescendo_journalist_interview",
+            "red_teaming",
+            "tap",
+            "many_shot",
+            "pair",
+        }
+        assert {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT, "flip"}.issubset(available)
+        assert incompatible.isdisjoint(available)
 
-    def test_scenario_version_is_three(self):
-        assert Jailbreak.VERSION == 3
+    def test_registry_metadata_omits_incompatible_techniques(self):
+        metadata = ScenarioRegistry()._build_metadata("airt.jailbreak", Jailbreak)
+        assert {
+            "context_compliance",
+            "role_play_movie_script",
+            "crescendo_simulated",
+            "red_teaming",
+            "tap",
+            "many_shot",
+        }.isdisjoint(metadata.all_techniques)
+
+    def test_scenario_version_is_four(self):
+        assert Jailbreak.VERSION == 4
 
     def test_default_dataset_is_harmbench(self):
         assert Jailbreak.required_datasets() == ["harmbench"]

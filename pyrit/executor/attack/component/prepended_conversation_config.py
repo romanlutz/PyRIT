@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import get_args
+from typing import TYPE_CHECKING
 
 from pyrit.message_normalizer import (
     ConversationContextNormalizer,
     MessageStringNormalizer,
 )
-from pyrit.models import ChatMessageRole
+
+if TYPE_CHECKING:
+    from pyrit.models import ChatMessageRole
 
 
 @dataclass
@@ -27,10 +29,9 @@ class PrependedConversationConfig:
     first turn (via ``message_normalizer``; default: ConversationContextNormalizer).
     """
 
-    # Roles for which request converters should be applied to prepended messages.
-    # By default, converters are applied to all roles.
-    # Example: ["user"] to apply converters only to user messages.
-    apply_converters_to_roles: list[ChatMessageRole] = field(default_factory=lambda: list(get_args(ChatMessageRole)))
+    # Request converters default to prepended user messages only. Assistant history is
+    # simulated target output and must be explicitly opted in with ["assistant"].
+    apply_converters_to_roles: list[ChatMessageRole] = field(default_factory=lambda: ["user"])
 
     # Optional normalizer to format conversation history into a single text block.
     # Must implement MessageStringNormalizer (e.g., TokenizerTemplateNormalizer or ConversationContextNormalizer).
