@@ -38,7 +38,8 @@ class _EstimateTechnique(ScenarioTechnique):
     ALL = ("all", {"all"})
     DEFAULT = ("default", {"default"})
     PROMPT_SENDING = ("prompt_sending", {"default"})
-    CONTEXT_COMPLIANCE = ("context_compliance", {"default"})
+    JAILBREAK_SYSTEM_PROMPT = ("jailbreak_system_prompt", {"default"})
+    FLIP = ("flip", {"direct"})
 
     @classmethod
     def get_aggregate_tags(cls) -> set[str]:
@@ -351,6 +352,29 @@ class TestScenarioServiceGetScenario:
         assert dataset_config.dataset_names == ["harmbench"]
         assert dataset_config.max_dataset_size == 3
         assert dataset_config.filters == {"harm_categories": ["violence"]}
+
+    async def test_configured_estimate_rejects_incompatible_v4_jailbreak_technique(self) -> None:
+        """Request previews reject techniques omitted by Jailbreak's v4 compatibility policy."""
+        metadata = _make_scenario_metadata(registry_name="airt.jailbreak")
+        introspection_instance = MagicMock()
+        introspection_instance._technique_class = _EstimateTechnique
+        introspection_instance._default_dataset_config = DatasetAttackConfiguration(dataset_names=["harmbench"])
+        scenario_class = MagicMock(return_value=introspection_instance)
+
+        with patch.object(ScenarioService, "__init__", lambda self: None):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_registered_class_metadata.return_value = metadata
+            service._registry.get_class.return_value = scenario_class
+            service._registry.create_and_estimate_async = AsyncMock()
+
+            with pytest.raises(ValueError, match="context_compliance"):
+                await service.estimate_scenario_run_size_async(
+                    scenario_name="airt.jailbreak",
+                    request=ScenarioRunSizeEstimateRequest(techniques=["context_compliance"]),
+                )
+
+        service._registry.create_and_estimate_async.assert_not_awaited()
 
     async def test_get_scenario_returns_matching_scenario(self) -> None:
         """Test that get returns the matching scenario."""

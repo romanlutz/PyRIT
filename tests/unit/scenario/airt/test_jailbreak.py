@@ -743,6 +743,9 @@ class TestJailbreakTechniqueModel:
 
     def test_registry_metadata_omits_incompatible_techniques(self):
         metadata = ScenarioRegistry()._build_metadata("airt.jailbreak", Jailbreak)
+        assert metadata.scenario_version == 4
+        assert set(metadata.default_techniques) == {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT}
+        assert "flip" in metadata.all_techniques
         assert {
             "context_compliance",
             "role_play_movie_script",
