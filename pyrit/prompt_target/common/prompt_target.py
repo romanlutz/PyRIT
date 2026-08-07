@@ -17,6 +17,7 @@ from pyrit.models import (
     MessagePiece,
     TargetIdentifier,
     TargetInvocation,
+    TargetResponseMetadata,
 )
 from pyrit.prompt_target.common.request_options import TargetRequestOptions
 from pyrit.prompt_target.common.target_capabilities import (
@@ -41,6 +42,9 @@ _CURRENT_REQUEST_OPTIONS: ContextVar[TargetRequestOptions | None] = ContextVar(
 )
 _CURRENT_REQUEST_OVERRIDES: ContextVar[TargetRequestOptions | None] = ContextVar(
     "pyrit_current_target_request_overrides", default=None
+)
+_CURRENT_RESPONSE_METADATA: ContextVar[list[TargetResponseMetadata] | None] = ContextVar(
+    "pyrit_current_target_response_metadata", default=None
 )
 
 
@@ -231,12 +235,16 @@ class PromptTarget(Identifiable):
         )
         token = _CURRENT_REQUEST_OPTIONS.set(resolved)
         overrides_token = _CURRENT_REQUEST_OVERRIDES.set(requested)
+        response_metadata: list[TargetResponseMetadata] = []
+        response_metadata_token = _CURRENT_RESPONSE_METADATA.set(response_metadata)
         try:
             responses = await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
         finally:
             _CURRENT_REQUEST_OPTIONS.reset(token)
             _CURRENT_REQUEST_OVERRIDES.reset(overrides_token)
+            _CURRENT_RESPONSE_METADATA.reset(response_metadata_token)
 
+        invocation = invocation.model_copy(update={"responses": tuple(response_metadata)})
         return _TargetSendResult(responses=responses, invocation=invocation)
 
     def _get_default_request_options(self) -> TargetRequestOptions:
@@ -274,6 +282,12 @@ class PromptTarget(Identifiable):
         if not isinstance(options, option_type):
             raise TypeError(f"Expected {option_type.__name__}, received {type(options).__name__}.")
         return options
+
+    def _record_response_metadata(self, *, metadata: TargetResponseMetadata) -> None:
+        """Record metadata for one successful provider generation."""
+        responses = _CURRENT_RESPONSE_METADATA.get()
+        if responses is not None:
+            responses.append(metadata)
 
     @abc.abstractmethod
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:

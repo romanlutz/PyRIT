@@ -1078,10 +1078,13 @@ async def test_build_input_for_multi_modal_async_preserves_missing_artifact_fiel
         original_value_data_type=data_type,
     )
 
-    with pytest.raises(KeyError) as exc_info:
-        await target._build_input_for_multi_modal_async([Message(message_pieces=[piece])])
-
-    assert exc_info.value.args == (missing_field,)
+    if data_type == "tool_call":
+        with pytest.raises(KeyError) as exc_info:
+            await target._build_input_for_multi_modal_async([Message(message_pieces=[piece])])
+        assert exc_info.value.args == (missing_field,)
+    else:
+        with pytest.raises(ValueError, match="must have type|must be a string"):
+            await target._build_input_for_multi_modal_async([Message(message_pieces=[piece])])
 
 
 async def test_build_input_for_multi_modal_async_preserves_empty_conversation_error(target: OpenAIResponseTarget):

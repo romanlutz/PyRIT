@@ -134,6 +134,7 @@ class OpenAIResponsesNamedToolChoice(BaseModel):
 
 
 OpenAIResponsesToolChoice = Literal["none", "auto", "required"] | OpenAIResponsesNamedToolChoice | dict[str, JSONValue]
+ToolExecutionMode = Literal["single_generation", "legacy_auto"]
 
 
 class OpenAIResponsesRequestOptions(TextGenerationRequestOptions):
@@ -146,6 +147,7 @@ class OpenAIResponsesRequestOptions(TextGenerationRequestOptions):
     tools: tuple[OpenAIResponsesTool, ...] | None | UnsetValue = UNSET
     tool_choice: OpenAIResponsesToolChoice | None | UnsetValue = UNSET
     parallel_tool_calls: bool | None | UnsetValue = UNSET
+    tool_execution_mode: ToolExecutionMode | UnsetValue = UNSET
     extra_body_parameters: dict[str, object] | None | UnsetValue = UNSET
 
 

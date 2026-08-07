@@ -17,6 +17,8 @@ from pyrit.models import (
     JsonResponseConfig,
     Message,
     MessagePiece,
+    TargetResponseMetadata,
+    TargetStopReason,
 )
 from pyrit.prompt_target.common.chat_completions_message_builder import (
     build_multimodal_chat_messages_async,
@@ -90,7 +92,13 @@ class OpenAIChatTarget(OpenAITarget):
             supports_multi_message_pieces=True,
             supports_system_prompt=True,
             input_modalities=frozenset(
-                {frozenset({"text"}), frozenset({"image_path"}), frozenset({"text", "image_path"})}
+                {
+                    frozenset({"text"}),
+                    frozenset({"image_path"}),
+                    frozenset({"text", "image_path"}),
+                    frozenset({"function_call"}),
+                    frozenset({"function_call_output"}),
+                }
             ),
         )
     )
@@ -235,8 +243,6 @@ class OpenAIChatTarget(OpenAITarget):
             "generativelanguage.googleapis.com": "https://generativelanguage.googleapis.com/v1beta/openai",
         }
 
-    @limit_requests_per_minute
-    @pyrit_target_retry
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously sends a message and handles the response within a managed conversation context.
@@ -257,12 +263,47 @@ class OpenAIChatTarget(OpenAITarget):
 
         body = await self._construct_request_body_async(conversation=normalized_conversation, json_config=json_config)
 
-        # Use unified error handling - automatically detects ChatCompletion and validates
-        response = await self._handle_openai_request_async(
-            api_call=lambda: self._client.chat.completions.create(**body),
-            request=message,
-        )
+        response = await self._generate_once_async(body=body, request=message)
         return [response]
+
+    @limit_requests_per_minute
+    @pyrit_target_retry
+    async def _generate_once_async(self, *, body: dict[str, Any], request: Message) -> Message:
+        """
+        Run exactly one retryable Chat Completions provider generation.
+
+        Returns:
+            The normalized provider response.
+        """
+        raw_response: ChatCompletion | None = None
+
+        async def _api_call_async() -> ChatCompletion:
+            nonlocal raw_response
+            raw_response = await self._client.chat.completions.create(**body)
+            return raw_response
+
+        response = await self._handle_openai_request_async(api_call=_api_call_async, request=request)
+        if raw_response is not None:
+            self._record_response_metadata(metadata=self._get_response_metadata(response=raw_response))
+        return response
+
+    @staticmethod
+    def _get_response_metadata(*, response: ChatCompletion) -> TargetResponseMetadata:
+        raw_finish_reason = get_finish_reason(response=response)
+        finish_reason = raw_finish_reason if isinstance(raw_finish_reason, str) else None
+        stop_reasons: dict[str, TargetStopReason] = {
+            "stop": "completed",
+            "tool_calls": "tool_calls",
+            "length": "length",
+            "content_filter": "content_filter",
+        }
+        raw_response_id = getattr(response, "id", None)
+        provider_response_id = raw_response_id if isinstance(raw_response_id, str) else None
+        return TargetResponseMetadata(
+            provider_response_id=provider_response_id,
+            stop_reason=stop_reasons.get(finish_reason, "unknown"),
+            provider_stop_reason=finish_reason,
+        )
 
     def _check_content_filter(self, response: Any) -> bool:
         """

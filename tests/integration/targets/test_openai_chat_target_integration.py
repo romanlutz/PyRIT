@@ -9,14 +9,13 @@ These tests verify:
 - Tool calling functionality with function definitions
 """
 
-import json
 import os
 import uuid
 
 import pytest
 
 from pyrit.common.path import HOME_PATH
-from pyrit.models import MessagePiece, TokenUsage
+from pyrit.models import MessagePiece, TokenUsage, ToolCallRequest
 from pyrit.prompt_target import OpenAIChatAudioConfig, OpenAIChatTarget, TargetCapabilities, TargetConfiguration
 
 # Path to sample audio file for testing
@@ -216,9 +215,9 @@ async def test_openai_chat_target_tool_calling_multiple_tools(sqlite_instance, a
     assert len(tool_call_pieces) >= 1, "Response should contain at least one tool call"
 
     # Verify it selected the stock price tool
-    tool_call_data = json.loads(tool_call_pieces[0].converted_value)
-    assert tool_call_data["function"]["name"] == "get_stock_price"
-    assert "msft" in tool_call_data["function"]["arguments"].lower()
+    tool_call = ToolCallRequest.from_json(tool_call_pieces[0].converted_value)
+    assert tool_call.name == "get_stock_price"
+    assert "msft" in tool_call.arguments.lower()
 
 
 # ============================================================================

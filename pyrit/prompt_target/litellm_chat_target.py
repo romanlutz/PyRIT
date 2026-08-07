@@ -61,7 +61,7 @@ _TEXT_INPUT: frozenset[frozenset[PromptDataType]] = cast(
 )
 
 
-def _build_input_modalities(*, image: bool, audio: bool) -> frozenset[frozenset[PromptDataType]]:
+def _build_input_modalities(*, image: bool, audio: bool, tools: bool) -> frozenset[frozenset[PromptDataType]]:
     """
     Build the set of supported input-modality combinations from capability flags.
 
@@ -71,6 +71,7 @@ def _build_input_modalities(*, image: bool, audio: bool) -> frozenset[frozenset[
     Args:
         image (bool): Whether image input is supported.
         audio (bool): Whether audio input is supported.
+        tools (bool): Whether function-tool conversations are supported.
 
     Returns:
         frozenset[frozenset[PromptDataType]]: The supported input-modality combinations.
@@ -84,6 +85,8 @@ def _build_input_modalities(*, image: bool, audio: bool) -> frozenset[frozenset[
     combos = [
         frozenset(combo) for size in range(1, len(present) + 1) for combo in itertools.combinations(present, size)
     ]
+    if tools:
+        combos.extend([frozenset({"function_call"}), frozenset({"function_call_output"})])
     return frozenset(combos)
 
 
@@ -314,6 +317,7 @@ class LiteLLMChatTarget(PromptTarget):
         except Exception:
             supported_params = []
         supports_json_output = supports_json_schema or ("response_format" in supported_params)
+        supports_tools = "tools" in supported_params
 
         return TargetCapabilities(
             supports_multi_turn=True,
@@ -322,7 +326,11 @@ class LiteLLMChatTarget(PromptTarget):
             supports_system_prompt=True,
             supports_json_output=supports_json_output,
             supports_json_schema=supports_json_schema,
-            input_modalities=_build_input_modalities(image=supports_vision, audio=supports_audio_input),
+            input_modalities=_build_input_modalities(
+                image=supports_vision,
+                audio=supports_audio_input,
+                tools=supports_tools,
+            ),
             output_modalities=_build_output_modalities(audio=supports_audio_output),
         )
 

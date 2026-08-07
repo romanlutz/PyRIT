@@ -15,7 +15,7 @@ from pyrit.exceptions import (
     RateLimitException,
     get_retry_max_num_attempts,
 )
-from pyrit.models import JsonResponseConfig, Message, MessagePiece
+from pyrit.models import JsonResponseConfig, Message, MessagePiece, ToolCallRequest
 from pyrit.prompt_target import (
     LiteLLMRequestOptions,
     OpenAIChatAudioConfig,
@@ -53,6 +53,7 @@ def _make_litellm_stub(
     supports_response_schema: bool = False,
     supports_audio_input: bool = False,
     supports_audio_output: bool = False,
+    supports_tools: bool = False,
 ):
     mod = types.ModuleType("litellm")
     mod.acompletion = AsyncMock(name="litellm.acompletion")
@@ -60,9 +61,10 @@ def _make_litellm_stub(
     mod.supports_response_schema = MagicMock(return_value=supports_response_schema)
     mod.supports_audio_input = MagicMock(return_value=supports_audio_input)
     mod.supports_audio_output = MagicMock(return_value=supports_audio_output)
-    mod.get_supported_openai_params = MagicMock(
-        return_value=["temperature", "top_p", "max_tokens", "response_format", "seed", "n", "stop"]
-    )
+    supported_params = ["temperature", "top_p", "max_tokens", "response_format", "seed", "n", "stop"]
+    if supports_tools:
+        supported_params.append("tools")
+    mod.get_supported_openai_params = MagicMock(return_value=supported_params)
 
     exc_mod = types.ModuleType("litellm.exceptions")
     for name in _EXCEPTION_NAMES:
@@ -232,6 +234,14 @@ def test_capabilities_text_only_model_excludes_image(patch_central_database):
 def test_capabilities_json_output_derived_from_supported_params(target):
     # stub get_supported_openai_params includes "response_format"
     assert target.capabilities.supports_json_output is True
+
+
+def test_capabilities_tool_model_includes_canonical_tool_history(patch_central_database):
+    mod, exc_mod = _make_litellm_stub(supports_tools=True)
+    with patch.dict(sys.modules, {"litellm": mod, "litellm.exceptions": exc_mod}):
+        target = LiteLLMChatTarget(model_name="openai/gpt-4o")
+    assert frozenset({"function_call"}) in target.capabilities.input_modalities
+    assert frozenset({"function_call_output"}) in target.capabilities.input_modalities
 
 
 def test_capabilities_audio_model_includes_audio_modalities(patch_central_database):
@@ -414,8 +424,8 @@ async def test_send_prompt_handles_tool_calls(target, litellm_stub):
 
     piece = result[0].message_pieces[0]
     assert piece.converted_value_data_type == "function_call"
-    parsed = json.loads(piece.converted_value)
-    assert parsed["function"]["name"] == "get_weather"
+    parsed = ToolCallRequest.from_json(piece.converted_value)
+    assert parsed.name == "get_weather"
 
 
 async def test_send_prompt_captures_token_usage(target, litellm_stub):

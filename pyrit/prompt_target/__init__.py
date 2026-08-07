@@ -34,6 +34,7 @@ from pyrit.prompt_target.common.request_options import (
     OpenAIVideoRequestOptions,
     TargetRequestOptions,
     TextGenerationRequestOptions,
+    ToolExecutionMode,
     UnsetValue,
 )
 from pyrit.prompt_target.common.target_capabilities import (
@@ -137,6 +138,7 @@ __all__ = [
     "TargetRequestOptions",
     "TargetRequirements",
     "TextGenerationRequestOptions",
+    "ToolExecutionMode",
     "UnsupportedCapabilityBehavior",
     "UNSET",
     "UnsetValue",

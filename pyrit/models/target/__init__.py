@@ -28,7 +28,7 @@ from pyrit.models.target.json_schema_definition import (
     unregister_common_json_schema,
 )
 from pyrit.models.target.target_capabilities import CapabilityName, TargetCapabilities
-from pyrit.models.target.target_invocation import TargetInvocation
+from pyrit.models.target.target_invocation import TargetInvocation, TargetResponseMetadata, TargetStopReason
 from pyrit.models.target.token_usage import TokenUsage, read_usage_int, read_usage_value
 
 __all__ = [
@@ -40,6 +40,8 @@ __all__ = [
     "SEED_RESPONSE_JSON_SCHEMA_METADATA_KEY",
     "TargetCapabilities",
     "TargetInvocation",
+    "TargetResponseMetadata",
+    "TargetStopReason",
     "TokenUsage",
     "get_common_json_schema",
     "read_usage_int",

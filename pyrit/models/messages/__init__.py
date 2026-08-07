@@ -29,6 +29,12 @@ from pyrit.models.messages.conversations import (
 )
 from pyrit.models.messages.message import Message
 from pyrit.models.messages.message_piece import MessagePiece, sort_message_pieces
+from pyrit.models.messages.tool_message import (
+    ToolCallError,
+    ToolCallProvenance,
+    ToolCallRequest,
+    ToolCallResult,
+)
 
 __all__ = [
     "ALLOWED_CHAT_MESSAGE_ROLES",
@@ -40,6 +46,10 @@ __all__ = [
     "Message",
     "MessagePiece",
     "ToolCall",
+    "ToolCallError",
+    "ToolCallProvenance",
+    "ToolCallRequest",
+    "ToolCallResult",
     "construct_response_from_request",
     "flatten_to_message_pieces",
     "get_all_values",

@@ -20,14 +20,13 @@ They verify:
 - Token-usage metadata capture (parsed back through ``TokenUsage``)
 """
 
-import json
 import os
 import uuid
 
 import pytest
 
 from pyrit.common.path import HOME_PATH
-from pyrit.models import Message, MessagePiece, TokenUsage
+from pyrit.models import Message, MessagePiece, TokenUsage, ToolCallRequest
 from pyrit.prompt_target import (
     LiteLLMChatTarget,
     OpenAIChatAudioConfig,
@@ -152,9 +151,9 @@ async def test_litellm_chat_target_tool_calling(sqlite_instance, azure_gpt5_lite
 
     tool_call_pieces = [p for p in result[0].message_pieces if p.converted_value_data_type == "function_call"]
     assert len(tool_call_pieces) >= 1, "Response should contain at least one tool call"
-    tool_call_data = json.loads(tool_call_pieces[0].converted_value)
-    assert tool_call_data["function"]["name"] == "get_stock_price"
-    assert "msft" in tool_call_data["function"]["arguments"].lower()
+    tool_call = ToolCallRequest.from_json(tool_call_pieces[0].converted_value)
+    assert tool_call.name == "get_stock_price"
+    assert "msft" in tool_call.arguments.lower()
 
 
 @pytest.mark.run_only_if_all_tests

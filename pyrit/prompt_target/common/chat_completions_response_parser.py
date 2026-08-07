@@ -11,7 +11,6 @@ shared across every target that speaks that format.
 """
 
 import base64
-import json
 import logging
 from typing import Any
 
@@ -27,6 +26,7 @@ from pyrit.models import (
     Message,
     MessagePiece,
     TokenUsage,
+    ToolCallRequest,
     construct_response_from_request,
     read_usage_int,
     read_usage_value,
@@ -143,18 +143,23 @@ def _build_tool_pieces(*, message: Any, request: MessagePiece) -> list[MessagePi
         return pieces
 
     for tool_call in tool_calls:
-        tool_call_data = {
-            "type": "function",
-            "id": tool_call.id,
-            "function": {
-                "name": tool_call.function.name,
-                "arguments": tool_call.function.arguments,
+        tool_call_data = ToolCallRequest.from_openai_chat(
+            call_id=tool_call.id,
+            name=tool_call.function.name,
+            arguments=tool_call.function.arguments,
+            raw={
+                "type": "function",
+                "id": tool_call.id,
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                },
             },
-        }
+        )
         pieces.append(
             construct_response_from_request(
                 request=request,
-                response_text_pieces=[json.dumps(tool_call_data)],
+                response_text_pieces=[tool_call_data.to_json()],
                 response_type="function_call",
             ).message_pieces[0]
         )

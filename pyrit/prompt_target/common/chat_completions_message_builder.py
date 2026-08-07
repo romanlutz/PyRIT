@@ -21,6 +21,8 @@ from pyrit.models import (
     JsonResponseConfig,
     Message,
     MessagePiece,
+    ToolCallRequest,
+    ToolCallResult,
 )
 
 # Data types that render as a plain text content part.
@@ -208,6 +210,8 @@ async def build_multimodal_chat_messages_async(
         has_text_piece = any(mp.converted_value_data_type == "text" for mp in message_pieces)
 
         content: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
         role = None
         for message_piece in message_pieces:
             role = message_piece.api_role
@@ -227,13 +231,30 @@ async def build_multimodal_chat_messages_async(
                 content.append(await build_image_content_entry_async(message_piece=message_piece))
             elif data_type == "audio_path":
                 content.append(await build_audio_content_entry_async(message_piece=message_piece))
+            elif data_type == "function_call":
+                tool_calls.append(
+                    dict(ToolCallRequest.from_json(message_piece.converted_value).to_openai_chat_tool_call())
+                )
+            elif data_type == "function_call_output":
+                tool_results.append(
+                    dict(ToolCallResult.from_json(message_piece.converted_value).to_openai_chat_message())
+                )
             else:
                 raise ValueError(f"Multimodal data type {data_type} is not yet supported.")
 
         if not role:
             raise ValueError("No role could be determined from the message pieces.")
 
-        chat_messages.append(ChatMessage(role=role, content=content).model_dump(exclude_none=True))
+        if tool_results:
+            if content or tool_calls:
+                raise ValueError("Tool results cannot share a Message with content or tool calls.")
+            chat_messages.extend(tool_results)
+            continue
+
+        chat_message: dict[str, Any] = {"role": role, "content": content or None}
+        if tool_calls:
+            chat_message["tool_calls"] = tool_calls
+        chat_messages.append(chat_message)
 
     return chat_messages
 

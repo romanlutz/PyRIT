@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyrit.exceptions import EmptyResponseException, PyritException
-from pyrit.models import JsonResponseConfig, Message, MessagePiece
+from pyrit.models import JsonResponseConfig, Message, MessagePiece, ToolCallRequest, ToolCallResult
 from pyrit.prompt_target.common.chat_completions_message_builder import (
     build_multimodal_chat_messages_async,
     build_response_format,
@@ -377,6 +377,46 @@ async def test_build_multimodal_chat_messages_includes_audio():
         result = await build_multimodal_chat_messages_async([message], prefer_transcript_for_history=False)
     content_types = [part["type"] for part in result[0]["content"]]
     assert content_types == ["text", "input_audio"]
+
+
+async def test_build_multimodal_chat_messages_round_trips_multiple_tool_calls_and_results():
+    calls = Message(
+        message_pieces=[
+            MessagePiece(
+                role="assistant",
+                original_value=ToolCallRequest(call_id="call-1", name="first", arguments="{}").to_json(),
+                original_value_data_type="function_call",
+            ),
+            MessagePiece(
+                role="assistant",
+                original_value=ToolCallRequest(call_id="call-2", name="second", arguments='{"x":2}').to_json(),
+                original_value_data_type="function_call",
+            ),
+        ]
+    )
+    results = Message(
+        message_pieces=[
+            MessagePiece(
+                role="tool",
+                original_value=ToolCallResult(call_id="call-1", output="one").to_json(),
+                original_value_data_type="function_call_output",
+            ),
+            MessagePiece(
+                role="tool",
+                original_value=ToolCallResult(call_id="call-2", output="two").to_json(),
+                original_value_data_type="function_call_output",
+            ),
+        ]
+    )
+
+    serialized = await build_multimodal_chat_messages_async([calls, results])
+
+    assert [call["id"] for call in serialized[0]["tool_calls"]] == ["call-1", "call-2"]
+    assert serialized[0]["content"] is None
+    assert serialized[1:] == [
+        {"role": "tool", "tool_call_id": "call-1", "content": "one"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "two"},
+    ]
 
 
 async def test_save_audio_response_async_wav():

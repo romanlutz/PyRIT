@@ -26,7 +26,7 @@ from pyrit.exceptions.exception_classes import (
     RateLimitException,
 )
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.models import JsonResponseConfig, Message, MessagePiece, flatten_to_message_pieces
+from pyrit.models import JsonResponseConfig, Message, MessagePiece, TargetInvocation, flatten_to_message_pieces
 from pyrit.prompt_target import (
     OpenAIChatAudioConfig,
     OpenAIChatTarget,
@@ -2044,10 +2044,10 @@ async def test_construct_message_from_response_with_tool_calls(
 
     # Verify the serialized tool call data
     tool_call_data = json.loads(piece.converted_value)
-    assert tool_call_data["type"] == "function"
-    assert tool_call_data["id"] == "call_abc123"
-    assert tool_call_data["function"]["name"] == "get_current_weather"
-    assert tool_call_data["function"]["arguments"] == '{"location": "Seattle, WA"}'
+    assert tool_call_data["type"] == "function_call"
+    assert tool_call_data["call_id"] == "call_abc123"
+    assert tool_call_data["name"] == "get_current_weather"
+    assert tool_call_data["arguments"] == '{"location": "Seattle, WA"}'
 
 
 async def test_construct_message_from_response_with_multiple_tool_calls(
@@ -2067,8 +2067,8 @@ async def test_construct_message_from_response_with_multiple_tool_calls(
     tool_call_data_1 = json.loads(result.message_pieces[0].converted_value)
     tool_call_data_2 = json.loads(result.message_pieces[1].converted_value)
 
-    assert tool_call_data_1["function"]["name"] == "get_weather"
-    assert tool_call_data_2["function"]["name"] == "get_time"
+    assert tool_call_data_1["name"] == "get_weather"
+    assert tool_call_data_2["name"] == "get_time"
 
 
 async def test_send_prompt_with_tool_calls(target: OpenAIChatTarget):
@@ -2098,7 +2098,7 @@ async def test_send_prompt_with_tool_calls(target: OpenAIChatTarget):
     assert result[0].message_pieces[0].converted_value_data_type == "function_call"
 
     tool_call_data = json.loads(result[0].message_pieces[0].converted_value)
-    assert tool_call_data["function"]["name"] == "search_web"
+    assert tool_call_data["name"] == "search_web"
 
 
 def test_construct_request_body_with_tools(patch_central_database):
@@ -2187,3 +2187,19 @@ async def test_construct_message_from_response_token_usage_omits_missing_attrs(
     assert piece.prompt_metadata["token_usage_total_tokens"] == 15
     assert "token_usage_cached_tokens" not in piece.prompt_metadata
     assert "token_usage_reasoning_tokens" not in piece.prompt_metadata
+
+
+async def test_send_prompt_records_chat_response_identity_and_stop_reason(target: OpenAIChatTarget):
+    response = create_mock_completion(content="Hello", finish_reason="stop")
+    response.id = "chatcmpl-metadata"
+    request = Message.from_prompt(prompt="hello", role="user")
+    request.message_pieces[0].conversation_id = "chat-metadata"
+
+    with patch.object(target._client.chat.completions, "create", new=AsyncMock(return_value=response)):
+        await target.send_prompt_async(message=request)
+
+    invocation = TargetInvocation.from_metadata(metadata=request.message_pieces[0].prompt_metadata)
+    assert invocation is not None
+    assert invocation.responses[0].provider_response_id == "chatcmpl-metadata"
+    assert invocation.responses[0].stop_reason == "completed"
+    assert invocation.responses[0].provider_stop_reason == "stop"
