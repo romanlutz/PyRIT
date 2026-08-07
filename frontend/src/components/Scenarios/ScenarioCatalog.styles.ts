@@ -119,9 +119,9 @@ export const useScenarioCatalogStyles = makeStyles({
     },
   },
   tableHeaderCell: {
-    paddingTop: tokens.spacingVerticalM,
+    paddingTop: tokens.spacingVerticalL,
     paddingRight: tokens.spacingHorizontalL,
-    paddingBottom: tokens.spacingVerticalM,
+    paddingBottom: tokens.spacingVerticalL,
     paddingLeft: tokens.spacingHorizontalL,
   },
   tableBody: {
@@ -178,7 +178,7 @@ export const useScenarioCatalogStyles = makeStyles({
       gap: tokens.spacingHorizontalM,
       height: 'auto',
       width: 'auto',
-      padding: `${tokens.spacingVerticalM} ${tokens.spacingHorizontalM}`,
+      padding: `${tokens.spacingVerticalL} ${tokens.spacingHorizontalM}`,
       borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
       ':last-child': {
         borderBottom: 0,
@@ -186,9 +186,9 @@ export const useScenarioCatalogStyles = makeStyles({
     },
   },
   tableCellPadding: {
-    paddingTop: tokens.spacingVerticalM,
+    paddingTop: tokens.spacingVerticalL,
     paddingRight: tokens.spacingHorizontalL,
-    paddingBottom: tokens.spacingVerticalM,
+    paddingBottom: tokens.spacingVerticalL,
     paddingLeft: tokens.spacingHorizontalL,
   },
   mobileLabel: {
