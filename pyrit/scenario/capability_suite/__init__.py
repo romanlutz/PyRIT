@@ -1,0 +1,173 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+"""
+Strict, native capability-suite manifests, static compilers, and a bounded-concurrency runner.
+
+A capability suite is a versioned, immutable, JSON-serializable manifest describing a
+set of ``pyrit.executor.capability`` tasks -- their objectives/messages/modalities,
+staged assets, symbolic tool declarations, sandbox provider configuration, setup,
+execution limits, scorers, and run policy (attempts/epochs/concurrency). This package
+never imports or executes Inspect AI / ``inspect_evals``, or any other third-party
+executable evaluation code; every resolvable symbolic name (sandbox provider, tool
+implementation, scorer) is resolved through an explicit, caller-populated registry
+(see ``pyrit.scenario.capability_suite.registries``).
+
+See ``doc/code/scenarios/4_capability_suite.md`` for a concise overview and the
+security/portability boundary this package draws around sandbox providers and static
+compilation.
+"""
+
+from pyrit.scenario.capability_suite.aggregation import CapabilitySuiteAggregate, aggregate_attempts
+from pyrit.scenario.capability_suite.compiler import (
+    BuildContextAssetSource,
+    CheckedOutEvalRepoCompiler,
+    CompatibilityReport,
+    HuggingFaceDatasetSuiteCompiler,
+    LocalCsvSuiteCompiler,
+    LocalJsonlSuiteCompiler,
+    LocalJsonSuiteCompiler,
+    ManifestCompiler,
+    RecordAssetMapping,
+    RecordFieldMapping,
+    RecordSplit,
+    SeedDatasetCompiler,
+    UnsafeAssetPathError,
+    UnsupportedExecutableMethodologyError,
+    compile_build_context_assets,
+    scan_checked_out_eval_repo,
+)
+from pyrit.scenario.capability_suite.expansion import CaseRunUnit, expand_suite
+from pyrit.scenario.capability_suite.manifest import (
+    CURRENT_MANIFEST_SCHEMA_VERSION,
+    AssetMode,
+    BuildContextAssetKind,
+    BuildContextAssetManifest,
+    CapabilityCaseManifest,
+    CapabilitySuiteManifest,
+    CaseAssetManifest,
+    CaseMessageManifest,
+    CaseScorerManifest,
+    CaseSetupStepManifest,
+    CaseToolManifest,
+    DockerSandboxProviderManifestConfig,
+    HyperVSandboxProviderManifestConfig,
+    LocalSandboxProviderManifestConfig,
+    RunPolicyManifest,
+    SandboxProviderManifest,
+    SuiteProvenance,
+    ToolImplementationManifest,
+    validate_safe_relative_path,
+)
+from pyrit.scenario.capability_suite.registries import (
+    CapabilitySuiteScorerFactoryRegistry,
+    SandboxProviderFactoryRegistry,
+    ToolImplementationFactoryRegistry,
+    UnknownRegistryKeyError,
+    build_default_sandbox_provider_registry,
+    build_default_scorer_registry,
+)
+from pyrit.scenario.capability_suite.results import (
+    AttemptOutcomeKind,
+    CapabilitySuiteAttemptRecord,
+    CapabilitySuiteProgress,
+    CapabilitySuiteRunResult,
+)
+from pyrit.scenario.capability_suite.runner import (
+    AssetSourceResolver,
+    CapabilitySuiteProgressSink,
+    CapabilitySuiteRunner,
+    LocalAssetSourceResolver,
+)
+from pyrit.scenario.capability_suite.scorers import (
+    CapabilitySuiteScorer,
+    ResultOnlyScorerAdapter,
+    SandboxCommandScorer,
+    SandboxFileScorer,
+    TextMatchMode,
+    TextMatchScorer,
+    ToolEvidenceScorer,
+)
+from pyrit.scenario.capability_suite.serialization import (
+    JSONDict,
+    ManifestMigration,
+    UnsupportedManifestVersionError,
+    canonical_bytes,
+    dump_manifest_json,
+    load_manifest_file,
+    load_manifest_json,
+    manifest_hash,
+    register_migration,
+)
+
+__all__ = [
+    "AssetMode",
+    "AssetSourceResolver",
+    "AttemptOutcomeKind",
+    "BuildContextAssetKind",
+    "BuildContextAssetManifest",
+    "BuildContextAssetSource",
+    "CURRENT_MANIFEST_SCHEMA_VERSION",
+    "CapabilityCaseManifest",
+    "CapabilitySuiteAggregate",
+    "CapabilitySuiteAttemptRecord",
+    "CapabilitySuiteProgress",
+    "CapabilitySuiteProgressSink",
+    "CapabilitySuiteManifest",
+    "CapabilitySuiteRunResult",
+    "CapabilitySuiteRunner",
+    "CapabilitySuiteScorer",
+    "CapabilitySuiteScorerFactoryRegistry",
+    "CaseAssetManifest",
+    "CaseRunUnit",
+    "CaseMessageManifest",
+    "CaseScorerManifest",
+    "CaseSetupStepManifest",
+    "CaseToolManifest",
+    "CheckedOutEvalRepoCompiler",
+    "CompatibilityReport",
+    "DockerSandboxProviderManifestConfig",
+    "HyperVSandboxProviderManifestConfig",
+    "HuggingFaceDatasetSuiteCompiler",
+    "JSONDict",
+    "LocalCsvSuiteCompiler",
+    "LocalJsonSuiteCompiler",
+    "LocalJsonlSuiteCompiler",
+    "LocalSandboxProviderManifestConfig",
+    "LocalAssetSourceResolver",
+    "ManifestCompiler",
+    "ManifestMigration",
+    "RecordAssetMapping",
+    "RecordFieldMapping",
+    "RecordSplit",
+    "ResultOnlyScorerAdapter",
+    "RunPolicyManifest",
+    "SandboxCommandScorer",
+    "SandboxFileScorer",
+    "SandboxProviderFactoryRegistry",
+    "SandboxProviderManifest",
+    "SeedDatasetCompiler",
+    "SuiteProvenance",
+    "TextMatchMode",
+    "TextMatchScorer",
+    "ToolEvidenceScorer",
+    "ToolImplementationFactoryRegistry",
+    "ToolImplementationManifest",
+    "UnknownRegistryKeyError",
+    "UnsafeAssetPathError",
+    "UnsupportedExecutableMethodologyError",
+    "UnsupportedManifestVersionError",
+    "aggregate_attempts",
+    "build_default_sandbox_provider_registry",
+    "build_default_scorer_registry",
+    "canonical_bytes",
+    "compile_build_context_assets",
+    "dump_manifest_json",
+    "expand_suite",
+    "load_manifest_json",
+    "load_manifest_file",
+    "manifest_hash",
+    "register_migration",
+    "scan_checked_out_eval_repo",
+    "validate_safe_relative_path",
+]

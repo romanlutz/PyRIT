@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from pyrit.exceptions import RateLimitException
 from pyrit.executor.capability import (
     ApprovalDecisionKind,
     ArtifactEvidence,
@@ -34,6 +35,7 @@ from pyrit.executor.capability import (
     ToolExecutionStatus,
     ToolRegistry,
 )
+from pyrit.executor.capability.executor import _root_exception_name
 from pyrit.models import (
     JSONValue,
     Message,
@@ -57,6 +59,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
+
+
+def test_root_exception_name_unwraps_only_generic_wrappers() -> None:
+    semantic = RateLimitException()
+    wrapper = Exception("normalizer wrapper")
+    wrapper.__cause__ = semantic
+    assert _root_exception_name(wrapper) == "RateLimitException"
+    assert _root_exception_name(semantic) == "RateLimitException"
 
 
 class FakeRequestOptionsFactory:

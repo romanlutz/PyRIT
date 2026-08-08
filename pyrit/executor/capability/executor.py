@@ -374,7 +374,13 @@ class CapabilityTaskExecutor:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            state.evidence.append(ErrorEvidence(phase="executor", code=type(error).__name__, message=str(error)))
+            state.evidence.append(
+                ErrorEvidence(
+                    phase="executor",
+                    code=_root_exception_name(error),
+                    message=str(error),
+                )
+            )
             return await self._finish_async(
                 case=case,
                 conversation_id=conversation_id,
@@ -753,3 +759,23 @@ class CapabilityTaskExecutor:
             piece.sequence = -1
             piece.conversation_id = None
         return materialized
+
+
+def _root_exception_name(error: BaseException) -> str:
+    """
+    Unwrap generic ``Exception`` wrappers while preserving semantic exception types.
+
+    Returns:
+        str: The exception type name suitable for retry classification.
+    """
+    current = error
+    visited: set[int] = set()
+    while type(current) is Exception and id(current) not in visited:
+        visited.add(id(current))
+        next_error = current.__cause__
+        if next_error is None and not current.__suppress_context__:
+            next_error = current.__context__
+        if next_error is None:
+            break
+        current = next_error
+    return type(current).__name__
