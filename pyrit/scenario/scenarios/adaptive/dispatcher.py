@@ -46,7 +46,7 @@ ADAPTIVE_ATTEMPT_LABEL: str = "_adaptive_attempt"
 """1-based attempt index within the per-objective loop."""
 
 ADAPTIVE_TECHNIQUE_ID_LABEL: str = "_adaptive_technique_id"
-"""Canonical ``AttackTechniqueFactory`` identifier hash for the selected arm."""
+"""Joined registered-factory and behavioral-history identity for the selected arm."""
 
 ADAPTIVE_TECHNIQUE_NAME_LABEL: str = "_adaptive_technique_name"
 """Registered technique name for human-readable result attribution."""
@@ -103,7 +103,7 @@ class AdaptiveTechniqueDispatcher:
         Args:
             objective_target (PromptTarget): The target inner attacks run against.
             techniques (dict[str, TechniqueBundle]): Mapping from
-                canonical factory identifier hash to its bundle. Must be non-empty.
+                joined Adaptive technique identity to its bundle. Must be non-empty.
             selector (TechniqueSelector): Stateless technique selector.
             objective_scorer (TrueFalseScorer | None): Scorer forwarded
                 to inner attacks that generate simulated conversations.
@@ -137,7 +137,7 @@ class AdaptiveTechniqueDispatcher:
         techniques before building atomic attacks.
 
         Returns:
-            list[str]: Canonical factory identifier hashes in declaration order.
+            list[str]: Joined Adaptive technique identities in declaration order.
         """
         return [
             name

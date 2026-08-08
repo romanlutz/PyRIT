@@ -10,6 +10,7 @@ from pyrit.scenario.scenarios.adaptive.selectors import (
     EpsilonGreedyTechniqueSelector,
     SelectorScope,
 )
+from pyrit.scenario.scenarios.adaptive.technique_identity import AdaptiveTechniqueIdentifier
 
 TECHNIQUES = ["a", "b", "c", "d"]
 
@@ -130,6 +131,18 @@ class TestEpsilonGreedyTechniqueSelectorSelect:
 
 
 class TestEpsilonGreedySelectorScope:
+    @patch(_COMPUTE_PATH, side_effect=_empty_rates)
+    async def test_forwards_full_technique_eval_hash_for_cross_scenario_history(self, mock_compute):
+        arm = AdaptiveTechniqueIdentifier(
+            factory_hash="factory-hash",
+            technique_eval_hash="full-technique-eval-hash",
+        ).serialize()
+        selector = _seeded_selector()
+
+        await selector.select_async(technique_identifiers=[arm], objective="obj")
+
+        assert mock_compute.call_args.kwargs["technique_eval_hashes_by_identifier"] == {arm: "full-technique-eval-hash"}
+
     @patch(_COMPUTE_PATH, side_effect=_empty_rates)
     async def test_default_scope_passes_none_scenario_result_id(self, mock_compute):
         selector = _seeded_selector()

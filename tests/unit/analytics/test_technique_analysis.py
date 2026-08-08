@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -11,6 +12,7 @@ from pyrit.models import AttackOutcome
 
 def _make_result(*, eval_hash: str | None, outcome: AttackOutcome) -> MagicMock:
     r = MagicMock()
+    r.attack_result_id = str(uuid4())
     if eval_hash is None:
         r.atomic_attack_identifier = None
     else:
@@ -198,3 +200,30 @@ class TestComputeLabeledTechniqueStats:
         )
 
         assert stats == {}
+
+    def test_merges_labeled_and_normal_scenario_history_without_double_counting(self, _patch_memory):
+        label_name = "_adaptive_technique_id"
+        labeled = _make_labeled_result(
+            label_name=label_name,
+            technique_identifier="factory-arm",
+            outcome=AttackOutcome.SUCCESS,
+        )
+        labeled.atomic_attack_identifier = MagicMock(eval_hash="inner-attack-hash")
+        normal = _make_result(eval_hash="full-technique-hash", outcome=AttackOutcome.FAILURE)
+        _patch_memory.get_attack_results.side_effect = [
+            [labeled],
+            [labeled, normal],
+        ]
+
+        stats = compute_labeled_technique_stats(
+            technique_identifiers=["factory-arm"],
+            label_name=label_name,
+            technique_eval_hashes_by_identifier={"factory-arm": "full-technique-hash"},
+        )
+
+        assert stats["factory-arm"].successes == 1
+        assert stats["factory-arm"].failures == 1
+        assert stats["factory-arm"].total_decided == 2
+        assert _patch_memory.get_attack_results.call_args_list[1].kwargs["atomic_attack_eval_hashes"] == [
+            "full-technique-hash"
+        ]

@@ -12,7 +12,7 @@ from pyrit.memory import CentralMemory
 from pyrit.models import AttackOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from pyrit.memory.memory_interface import MemoryInterface
 
@@ -88,17 +88,23 @@ def compute_labeled_technique_stats(
     *,
     technique_identifiers: Sequence[str],
     label_name: str,
+    technique_eval_hashes_by_identifier: Mapping[str, str] | None = None,
     scenario_result_id: str | None = None,
     targeted_harm_categories: Sequence[str] | None = None,
     memory: MemoryInterface | None = None,
 ) -> dict[str, AttackStats]:
     """
-    Compute per-technique outcome statistics from a persisted identity label.
+    Compute per-technique statistics from identity labels and eval-hash history.
 
     Args:
         technique_identifiers (Sequence[str]): Stable technique identifiers to
             aggregate. Returned dict is keyed by these identifiers.
         label_name (str): Result-label key containing the technique identifier.
+        technique_eval_hashes_by_identifier (Mapping[str, str] | None):
+            Optional mapping from requested selector identifiers to the full
+            ``AttackTechnique`` eval hashes persisted by normal scenarios.
+            Matching labeled and eval-hash rows are merged by result ID so a
+            row visible through both paths is counted once.
         scenario_result_id (str | None): Restrict to a single scenario run.
             Defaults to ``None`` (aggregate across all runs).
         targeted_harm_categories (Sequence[str] | None): Restrict to results
@@ -115,28 +121,50 @@ def compute_labeled_technique_stats(
 
     if memory is None:
         memory = CentralMemory.get_memory_instance()
-    results = memory.get_attack_results(
+    labeled_results = memory.get_attack_results(
         labels={label_name: list(technique_identifiers)},
         scenario_result_id=scenario_result_id,
         targeted_harm_categories=targeted_harm_categories,
     )
+    eval_results = (
+        memory.get_attack_results(
+            atomic_attack_eval_hashes=sorted(set(technique_eval_hashes_by_identifier.values())),
+            scenario_result_id=scenario_result_id,
+            targeted_harm_categories=targeted_harm_categories,
+        )
+        if technique_eval_hashes_by_identifier
+        else []
+    )
 
     requested = set(technique_identifiers)
+    identifiers_by_eval_hash: dict[str, list[str]] = {}
+    for technique_identifier, eval_hash in (technique_eval_hashes_by_identifier or {}).items():
+        if technique_identifier in requested:
+            identifiers_by_eval_hash.setdefault(eval_hash, []).append(technique_identifier)
+
+    unique_results = {result.attack_result_id: result for result in [*labeled_results, *eval_results]}
     counts: dict[str, tuple[int, int, int, int]] = {}
-    for result in results:
-        technique_identifier = result.labels.get(label_name)
-        if technique_identifier is None or technique_identifier not in requested:
+    for result in unique_results.values():
+        labeled_identifier = result.labels.get(label_name)
+        if labeled_identifier in requested:
+            matching_identifiers = [labeled_identifier]
+        else:
+            result_identifier = result.atomic_attack_identifier
+            result_eval_hash = result_identifier.eval_hash if result_identifier is not None else None
+            matching_identifiers = identifiers_by_eval_hash.get(result_eval_hash or "", [])
+        if not matching_identifiers:
             continue
 
-        s, f, u, e = counts.get(technique_identifier, (0, 0, 0, 0))
-        if result.outcome == AttackOutcome.SUCCESS:
-            counts[technique_identifier] = (s + 1, f, u, e)
-        elif result.outcome == AttackOutcome.FAILURE:
-            counts[technique_identifier] = (s, f + 1, u, e)
-        elif result.outcome == AttackOutcome.ERROR:
-            counts[technique_identifier] = (s, f, u, e + 1)
-        else:
-            counts[technique_identifier] = (s, f, u + 1, e)
+        for technique_identifier in matching_identifiers:
+            s, f, u, e = counts.get(technique_identifier, (0, 0, 0, 0))
+            if result.outcome == AttackOutcome.SUCCESS:
+                counts[technique_identifier] = (s + 1, f, u, e)
+            elif result.outcome == AttackOutcome.FAILURE:
+                counts[technique_identifier] = (s, f + 1, u, e)
+            elif result.outcome == AttackOutcome.ERROR:
+                counts[technique_identifier] = (s, f, u, e + 1)
+            else:
+                counts[technique_identifier] = (s, f, u + 1, e)
 
     return {
         technique_identifier: _compute_stats(successes=s, failures=f, undetermined=u, errors=e)

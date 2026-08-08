@@ -85,8 +85,8 @@ class TechniqueSelector(Protocol):
         Return techniques in priority order (try first, try second, …).
 
         Args:
-            technique_identifiers (Sequence[str]): Available canonical factory
-                identifier hashes.
+            technique_identifiers (Sequence[str]): Available stable Adaptive
+                technique identities.
             objective (str): The objective text for this selection.
             num_top_techniques (int): Max techniques to return. Defaults to 1.
             scenario_result_id (str | None): The current scenario run ID,
@@ -95,7 +95,7 @@ class TechniqueSelector(Protocol):
                 ``current_run_only=True``.
 
         Returns:
-            Sequence[str]: Up to ``num_top_techniques`` factory identifier hashes
+            Sequence[str]: Up to ``num_top_techniques`` technique identities
                 in priority order. Fewer if not enough techniques are
                 available.
         """

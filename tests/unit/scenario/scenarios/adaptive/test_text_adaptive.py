@@ -18,6 +18,7 @@ from pyrit.registry.components.attack_technique_registry import AttackTechniqueR
 from pyrit.scenario.core.dataset_configuration import CompoundDatasetAttackConfiguration
 from pyrit.scenario.core.scenario import BaselineAttackPolicy
 from pyrit.scenario.scenarios.adaptive.dispatcher import AdaptiveTechniqueDispatcher
+from pyrit.scenario.scenarios.adaptive.technique_identity import AdaptiveTechniqueIdentifier
 from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
 from pyrit.score import TrueFalseScorer
 
@@ -100,6 +101,7 @@ def _make_fake_factory(
     scoring_config_type=None,
     attack_identifier: ComponentIdentifier | None = None,
     factory_identifier: ComponentIdentifier | None = None,
+    technique_identifier: ComponentIdentifier | None = None,
 ) -> MagicMock:
     """Return a stub attack-technique factory that produces a fake ``AttackTechnique``.
 
@@ -118,6 +120,9 @@ def _make_fake_factory(
     )
     fake_technique.attack = fake_attack
     fake_technique.seed_technique = seed_technique
+    fake_technique.get_identifier.return_value = technique_identifier or ComponentIdentifier(
+        class_name=f"FakeTechnique{fake_id}", class_module="test_text_adaptive"
+    )
     factory = MagicMock()
     factory.create.return_value = fake_technique
     factory.adversarial_chat = adversarial_chat
@@ -406,6 +411,10 @@ class TestTextAdaptiveAtomicAttacks:
 
         assert len(techniques) == 9
         assert {bundle.name for bundle in techniques.values()} == _LIGHT_TECHNIQUES
+        parsed_identifiers = [AdaptiveTechniqueIdentifier.parse(identifier) for identifier in techniques]
+        assert all(identifier is not None for identifier in parsed_identifiers)
+        assert len({identifier.factory_hash for identifier in parsed_identifiers if identifier is not None}) == 9
+        assert len({identifier.technique_eval_hash for identifier in parsed_identifiers if identifier is not None}) == 9
         assert estimate.adaptive_details is not None
         assert estimate.adaptive_details.selected_candidate_technique_count == 9
         assert estimate.adaptive_details.candidate_technique_count == 9

@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, ClassVar
 from pyrit.common.utils import to_sha256
 from pyrit.executor.attack import AttackScoringConfig
 from pyrit.models import (
+    AtomicAttackEvaluationIdentifier,
+    AtomicAttackIdentifier,
     ScenarioAdaptiveRunSizeDetails,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -36,6 +38,7 @@ from pyrit.scenario.core.scenario import Scenario
 from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target
 from pyrit.scenario.scenarios.adaptive.dispatcher import AdaptiveTechniqueDispatcher, TechniqueBundle
 from pyrit.scenario.scenarios.adaptive.selectors import EpsilonGreedyTechniqueSelector, TechniqueSelector
+from pyrit.scenario.scenarios.adaptive.technique_identity import AdaptiveTechniqueIdentifier
 
 if TYPE_CHECKING:
     from pyrit.models import AttackSeedGroup
@@ -338,17 +341,17 @@ class AdaptiveScenario(Scenario):
         objective_target: PromptTarget,
     ) -> dict[str, TechniqueBundle]:
         """
-        Resolve selected techniques into a ``{factory_hash: TechniqueBundle}`` map.
+        Resolve selected techniques into a ``{adaptive_id: TechniqueBundle}`` map.
 
         Each bundle carries the inner attack technique along with the factory's
         ``seed_technique`` and ``adversarial_chat`` so the dispatcher can
         reproduce the static ``AtomicAttack`` execution path per attempt.
 
-        Technique keys are canonical factory identifier hashes. Factory identity
-        includes the registered technique name and meaningful configuration, so
-        distinct registered techniques remain distinct selector arms even when
-        they share the same inner attack implementation. The dispatcher persists
-        this identity on each child result for selector history and attribution.
+        Technique keys join the canonical factory identifier hash with the full
+        ``AttackTechnique`` eval hash. Factory identity keeps distinct registered
+        configurations as separate arms even when they share an inner attack;
+        technique eval identity links those arms to normal-scenario history.
+        The dispatcher persists this joined identity on each child result.
 
         For factories whose attack class narrows ``attack_scoring_config`` to a
         specific subtype (e.g. ``TAPAttackScoringConfig`` for TAP), this method
@@ -358,7 +361,7 @@ class AdaptiveScenario(Scenario):
         are dropped with a warning so the rest of the pool continues to run.
 
         Returns:
-            dict[str, TechniqueBundle]: Mapping from factory identifier hash to its
+            dict[str, TechniqueBundle]: Mapping from joined Adaptive identity to its
                 bundle, in the order selected techniques were resolved.
 
         Raises:
@@ -394,7 +397,13 @@ class AdaptiveScenario(Scenario):
                 skipped_incompatible[technique_name] = str(exc)
                 logger.warning(f"Skipping technique '{technique_name}': {type(exc).__name__}: {exc}")
                 continue
-            technique_identifier = factory.get_identifier().hash
+            technique_eval_hash = AtomicAttackEvaluationIdentifier(
+                AtomicAttackIdentifier.build(technique_identifier=technique.get_identifier())
+            ).eval_hash
+            technique_identifier = AdaptiveTechniqueIdentifier(
+                factory_hash=factory.get_identifier().hash,
+                technique_eval_hash=technique_eval_hash,
+            ).serialize()
             adversarial_chat = factory.adversarial_chat
             if adversarial_chat is None and factory.uses_adversarial:
                 adversarial_chat = get_default_adversarial_target()

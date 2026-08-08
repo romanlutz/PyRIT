@@ -12,6 +12,7 @@ from pyrit.scenario.scenarios.adaptive.dispatcher import (
     TechniqueBundle,
 )
 from pyrit.scenario.scenarios.adaptive.selectors import EpsilonGreedyTechniqueSelector, SelectorScope, TechniqueSelector
+from pyrit.scenario.scenarios.adaptive.technique_identity import AdaptiveTechniqueIdentifier
 from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "ADAPTIVE_TECHNIQUE_ID_LABEL",
     "ADAPTIVE_TECHNIQUE_NAME_LABEL",
     "AdaptiveScenario",
+    "AdaptiveTechniqueIdentifier",
     "AdaptiveTechniqueDispatcher",
     "EpsilonGreedyTechniqueSelector",
     "SelectorScope",
