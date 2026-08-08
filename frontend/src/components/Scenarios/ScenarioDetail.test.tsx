@@ -424,7 +424,7 @@ describe('ScenarioDetail', () => {
     )).toBeInTheDocument()
     expect(within(preview).getByText('Preview service unavailable')).toBeInTheDocument()
     expect(screen.getByTestId('scenario-target-select')).toHaveValue('target-b')
-    expect(screen.getByTestId('launch-scenario-btn')).not.toBeDisabled()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
   })
 
   it('hides stale arithmetic and blocks launch after a configuration request error', async () => {
@@ -618,6 +618,119 @@ describe('ScenarioDetail', () => {
       name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
     })).toBeInTheDocument()
     expect(screen.queryByText('Exact total unavailable')).not.toBeInTheDocument()
+  })
+
+  it('updates Adaptive estimates for subset, restored, single, and failed dataset requests', async () => {
+    jest.useFakeTimers()
+    const scenario = makeAdaptiveScenario()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    const objectiveCounts = new Map([
+      ['airt_hate', 4],
+      ['airt_fairness', 1],
+      ['airt_violence', 3],
+      ['airt_sexual', 3],
+      ['airt_harassment', 3],
+      ['airt_misinformation', 3],
+      ['airt_leakage', 4],
+    ])
+    let failNextRequest = false
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(async (_scenarioName, request: ScenarioRunSizeEstimateRequest) => {
+      if (failNextRequest) {
+        failNextRequest = false
+        throw {
+          isAxiosError: true,
+          response: { status: 503, data: { detail: 'Current estimate failed' } },
+        }
+      }
+      const datasetNames = request.dataset_names ?? scenario.default_datasets
+      const objectiveCount = datasetNames.reduce(
+        (count, datasetName) => count + (objectiveCounts.get(datasetName) ?? 0),
+        0,
+      )
+      return {
+        ...makeEstimate(null),
+        minimum_attack_count: objectiveCount,
+        maximum_attack_count: objectiveCount * 2,
+        components: [
+          {
+            label: 'Baseline',
+            count: objectiveCount,
+            factors: [{ label: 'objectives', count: objectiveCount }],
+            is_baseline: true,
+            condition: null,
+            note: null,
+          },
+          {
+            label: 'Adaptive objectives',
+            count: objectiveCount,
+            factors: [{ label: 'objectives', count: objectiveCount }],
+            is_baseline: false,
+            condition: null,
+            note: null,
+          },
+        ],
+        adaptive_details: {
+          objective_count: objectiveCount,
+          candidate_technique_count: 2,
+          max_attempts_per_objective: 3,
+          techniques_per_objective_upper_bound: 2,
+          technique_attempt_count_upper_bound: objectiveCount * 2,
+          stop_on_first_success: true,
+          compatibility_may_reduce_attempts: true,
+        },
+      }
+    })
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(screen.getByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
+
+    await user.click(screen.getByTestId('dataset-airt_fairness'))
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names).toEqual([
+      'airt_hate',
+      'airt_violence',
+      'airt_sexual',
+      'airt_harassment',
+      'airt_misinformation',
+      'airt_leakage',
+    ])
+    expect(screen.getByRole('group', {
+      name: '20 objectives multiplied by up to 2 techniques per objective equals up to 40 technique attempts.',
+    })).toBeInTheDocument()
+
+    await user.click(screen.getByTestId('restore-default-datasets'))
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('dataset_names')
+    expect(screen.getByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
+
+    for (const datasetName of scenario.default_datasets.filter((name) => name !== 'airt_fairness')) {
+      await user.click(screen.getByTestId(`dataset-${datasetName}`))
+    }
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names).toEqual(['airt_fairness'])
+    expect(screen.getByRole('group', {
+      name: '1 objective multiplied by up to 2 techniques per objective equals up to 2 technique attempts.',
+    })).toBeInTheDocument()
+
+    failNextRequest = true
+    await user.click(screen.getByTestId('dataset-airt_hate'))
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(within(preview).getByText('Current estimate failed')).toBeInTheDocument()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
   })
 
   it('explains Adaptive technique sets, progress objectives, and bounded attempt work', async () => {
