@@ -450,6 +450,7 @@ export interface ScenarioRunSizeComponent {
 
 export interface ScenarioAdaptiveRunSizeDetails {
   objective_count: number
+  selected_candidate_technique_count: number
   candidate_technique_count: number
   max_attempts_per_objective: number
   techniques_per_objective_upper_bound: number
@@ -516,6 +517,7 @@ export interface ScenarioRunEstimateComponent {
 
 export interface ScenarioRunEstimateAdaptiveDetails {
   objectiveCount: number
+  selectedCandidateTechniqueCount: number
   candidateTechniqueCount: number
   maxAttemptsPerObjective: number
   techniquesPerObjectiveUpperBound: number

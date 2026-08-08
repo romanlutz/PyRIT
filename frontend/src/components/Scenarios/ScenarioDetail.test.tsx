@@ -587,6 +587,7 @@ describe('ScenarioDetail', () => {
       datasets: [],
       adaptive_details: {
         objective_count: 21,
+        selected_candidate_technique_count: 2,
         candidate_technique_count: 2,
         max_attempts_per_objective: 3,
         techniques_per_objective_upper_bound: 2,
@@ -615,7 +616,7 @@ describe('ScenarioDetail', () => {
       expect.any(AbortSignal),
     ))
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
     expect(screen.queryByText('Exact total unavailable')).not.toBeInTheDocument()
   })
@@ -672,6 +673,7 @@ describe('ScenarioDetail', () => {
         ],
         adaptive_details: {
           objective_count: objectiveCount,
+          selected_candidate_technique_count: 2,
           candidate_technique_count: 2,
           max_attempts_per_objective: 3,
           techniques_per_objective_upper_bound: 2,
@@ -687,7 +689,7 @@ describe('ScenarioDetail', () => {
     await advanceTimers(300)
     await flushRenderedPromises()
     expect(screen.getByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
 
     await user.click(screen.getByTestId('dataset-airt_fairness'))
@@ -702,7 +704,7 @@ describe('ScenarioDetail', () => {
       'airt_leakage',
     ])
     expect(screen.getByRole('group', {
-      name: '20 objectives multiplied by up to 2 techniques per objective equals up to 40 technique attempts.',
+      name: '20 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 40 technique attempts.',
     })).toBeInTheDocument()
 
     await user.click(screen.getByTestId('restore-default-datasets'))
@@ -710,7 +712,7 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
     expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('dataset_names')
     expect(screen.getByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
 
     for (const datasetName of scenario.default_datasets.filter((name) => name !== 'airt_fairness')) {
@@ -720,7 +722,7 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
     expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names).toEqual(['airt_fairness'])
     expect(screen.getByRole('group', {
-      name: '1 objective multiplied by up to 2 techniques per objective equals up to 2 technique attempts.',
+      name: '1 objective multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 2 technique attempts.',
     })).toBeInTheDocument()
 
     failNextRequest = true
@@ -742,7 +744,8 @@ describe('ScenarioDetail', () => {
         request: ScenarioRunSizeEstimateRequest,
       ): Promise<ScenarioDefaultRunSizeEstimate> => {
         const selectedSet = request.techniques?.[0] ?? 'default'
-        const candidateCount = scenario.aggregate_technique_expansions[selectedSet]?.length ?? 0
+        const selectedCandidateCount = scenario.aggregate_technique_expansions[selectedSet]?.length ?? 0
+        const candidateCount = selectedSet === 'core' ? 5 : selectedCandidateCount
         const configuredMax = Number(request.scenario_params?.max_attempts_per_objective ?? 3)
         const perObjective = Math.min(candidateCount, configuredMax)
         return {
@@ -769,6 +772,7 @@ describe('ScenarioDetail', () => {
           ],
           adaptive_details: {
             objective_count: 21,
+            selected_candidate_technique_count: selectedCandidateCount,
             candidate_technique_count: candidateCount,
             max_attempts_per_objective: configuredMax,
             techniques_per_objective_upper_bound: perObjective,
@@ -807,49 +811,44 @@ describe('ScenarioDetail', () => {
     expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
 
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
 
-    await user.click(screen.getByLabelText('All (17 techniques)'))
-    expect(screen.getByLabelText('All (17 techniques)')).toBeChecked()
+    await user.click(screen.getByLabelText('Core (14 techniques)'))
+    expect(screen.getByLabelText('Core (14 techniques)')).toBeChecked()
     const selectedMembers = screen.getByTestId('selected-technique-set-members')
-    expect(within(selectedMembers).getByText('all_member_15')).toBeInTheDocument()
+    expect(within(selectedMembers).getByText('core_member_14')).toBeInTheDocument()
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 3 techniques per objective equals up to 63 technique attempts.',
+      name: '21 objectives multiplied by up to 3 techniques per objective, the smaller of 5 compatible candidates from 14 selected and limit 3, equals up to 63 technique attempts.',
     })).toBeInTheDocument()
+    expect(screen.getByText('min(5 compatible candidates from 14 selected, limit 3)')).toBeInTheDocument()
 
-    await user.click(screen.getByLabelText('Recommended (default) — 2 techniques'))
-    expect(screen.getByLabelText('Recommended (default) — 2 techniques')).toBeChecked()
-    expect(within(selectedMembers).queryByText('all_member_15')).not.toBeInTheDocument()
-    expect(within(selectedMembers).getByText('role_play_movie_script')).toBeInTheDocument()
-    expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
-    })).toBeInTheDocument()
-
-    const maxAttempts = screen.getByRole('spinbutton', { name: 'Techniques tried per objective' })
+    const maxAttempts = screen.getByRole('spinbutton', { name: 'Maximum techniques per objective' })
     expect(screen.getByText(
-      /Maximum different compatible techniques Adaptive may try for one objective/,
+      /This is a per-objective limit, not a total-run budget/,
     )).toBeInTheDocument()
+    expect(screen.getByText(/incompatible techniques are skipped/)).toBeInTheDocument()
     expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
     expect(screen.getByText(
       'Maximum times to resume the scenario after an exception. This is separate from Adaptive trying another technique.',
     )).toBeInTheDocument()
     await user.clear(maxAttempts)
-    await user.type(maxAttempts, '5')
+    await user.type(maxAttempts, '1')
     expect(screen.getByText(
-      /may try up to 5 compatible techniques for that objective, stopping after the first success/,
+      /may try up to 1 compatible technique for that objective, stopping after the first success/,
     )).toBeInTheDocument()
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 1 technique per objective, the smaller of 5 compatible candidates from 14 selected and limit 1, equals up to 21 technique attempts.',
     })).toBeInTheDocument()
+    expect(screen.getByText('min(5 compatible candidates from 14 selected, limit 1)')).toBeInTheDocument()
 
     await user.clear(maxAttempts)
     expect(screen.getByText(
       /may try up to 3 compatible techniques for that objective, stopping after the first success/,
     )).toBeInTheDocument()
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 3 techniques per objective, the smaller of 5 compatible candidates from 14 selected and limit 3, equals up to 63 technique attempts.',
     })).toBeInTheDocument()
 
     await user.type(maxAttempts, '0')
@@ -862,7 +861,7 @@ describe('ScenarioDetail', () => {
     const user = userEvent.setup()
     renderDetail('/scenarios/adaptive.text_adaptive')
 
-    const maxAttempts = await screen.findByRole('spinbutton', { name: 'Techniques tried per objective' })
+    const maxAttempts = await screen.findByRole('spinbutton', { name: 'Maximum techniques per objective' })
     expect(screen.queryByText('max_attempts_per_objective')).not.toBeInTheDocument()
     expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
 

@@ -251,6 +251,7 @@ class AdaptiveScenario(Scenario):
                 datasets=datasets,
                 adaptive_details=ScenarioAdaptiveRunSizeDetails(
                     objective_count=selected_count,
+                    selected_candidate_technique_count=selected_candidate_count,
                     candidate_technique_count=selected_candidate_count,
                     max_attempts_per_objective=max_attempts,
                     techniques_per_objective_upper_bound=selected_attempt_bound,
@@ -323,6 +324,7 @@ class AdaptiveScenario(Scenario):
             datasets=datasets,
             adaptive_details=ScenarioAdaptiveRunSizeDetails(
                 objective_count=adaptive_objective_bound,
+                selected_candidate_technique_count=selected_candidate_count,
                 candidate_technique_count=candidate_count,
                 max_attempts_per_objective=max_attempts,
                 techniques_per_objective_upper_bound=technique_attempt_bound,

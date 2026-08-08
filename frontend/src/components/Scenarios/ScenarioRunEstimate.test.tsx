@@ -186,6 +186,7 @@ describe('ScenarioRunEstimate', () => {
       components: [],
       adaptive_details: {
         objective_count: 21,
+        selected_candidate_technique_count: 2,
         candidate_technique_count: 2,
         max_attempts_per_objective: 3,
         techniques_per_objective_upper_bound: 2,
@@ -204,10 +205,11 @@ describe('ScenarioRunEstimate', () => {
 
     expect(screen.getByText('21 objectives · up to 42 technique attempts')).toBeInTheDocument()
     expect(screen.getByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
+    expect(screen.getByText('min(2 compatible candidates, limit 3)')).toBeInTheDocument()
     expect(screen.getByText(
-      'Progress tracks 21 objectives. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
+      'Progress tracks 21 objectives. Adaptive technique-attempt counts exclude multi-turn target exchanges and retries. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
     )).toBeInTheDocument()
   })
 
@@ -235,6 +237,7 @@ describe('ScenarioRunEstimate', () => {
       ],
       adaptive_details: {
         objective_count: 21,
+        selected_candidate_technique_count: 2,
         candidate_technique_count: 2,
         max_attempts_per_objective: 3,
         techniques_per_objective_upper_bound: 2,
@@ -253,7 +256,10 @@ describe('ScenarioRunEstimate', () => {
 
     expect(screen.getByText('21–42 planned attacks · up to 42 technique attempts')).toBeInTheDocument()
     expect(screen.getByText(
-      'Progress tracks 21–42 planned attacks: 21 direct baseline sends plus up to 21 adaptive objectives. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
+      'Attempt ceiling: 21 direct baseline sends + up to 42 adaptive technique attempts = up to 63 attack starts.',
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      'Progress tracks 21–42 planned attacks: 21 direct baseline sends plus up to 21 adaptive objectives. Adaptive technique-attempt counts exclude multi-turn target exchanges and retries. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
     )).toBeInTheDocument()
     expect(screen.queryByText(/objective envelope|logical seed groups|selected seed groups/i)).not.toBeInTheDocument()
   })
@@ -265,17 +271,18 @@ describe('ScenarioRunEstimate', () => {
       components: [],
       adaptive_details: {
         objective_count: 21,
+        selected_candidate_technique_count: 14,
         candidate_technique_count: 5,
-        max_attempts_per_objective: 2,
-        techniques_per_objective_upper_bound: 2,
-        technique_attempt_count_upper_bound: 42,
+        max_attempts_per_objective: 3,
+        techniques_per_objective_upper_bound: 3,
+        technique_attempt_count_upper_bound: 63,
         stop_on_first_success: true,
         compatibility_may_reduce_attempts: true,
       },
     }))
 
-    expect(screen.getByText('techniques per objective of 5 candidates')).toBeInTheDocument()
-    expect(screen.getByText('up to 42')).toBeInTheDocument()
+    expect(screen.getByText('min(5 compatible candidates from 14 selected, limit 3)')).toBeInTheDocument()
+    expect(screen.getByText('up to 63')).toBeInTheDocument()
   })
 
   it('uses the candidate pool when it is lower than the adaptive max', () => {
@@ -285,6 +292,7 @@ describe('ScenarioRunEstimate', () => {
       components: [],
       adaptive_details: {
         objective_count: 21,
+        selected_candidate_technique_count: 2,
         candidate_technique_count: 2,
         max_attempts_per_objective: 5,
         techniques_per_objective_upper_bound: 2,
@@ -295,7 +303,7 @@ describe('ScenarioRunEstimate', () => {
     }))
 
     expect(screen.getByText('techniques per objective')).toBeInTheDocument()
-    expect(screen.queryByText(/of 2 candidates/)).not.toBeInTheDocument()
+    expect(screen.getByText('min(2 compatible candidates, limit 5)')).toBeInTheDocument()
     expect(screen.getByText('up to 42')).toBeInTheDocument()
   })
 

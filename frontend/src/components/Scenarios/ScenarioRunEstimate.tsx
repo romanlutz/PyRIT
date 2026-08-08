@@ -22,6 +22,7 @@ interface CalculationOperand {
   id: string
   value: string
   label: string
+  detail?: string
   result?: boolean
 }
 
@@ -37,6 +38,7 @@ type CalculationPart =
 interface RunCalculation {
   parts: CalculationPart[]
   accessibleLabel: string
+  summary?: string
   context?: string
 }
 
@@ -140,8 +142,8 @@ function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
   return formatPlannedAttackSummary(estimate)
 }
 
-function operand(id: string, value: string, label: string, result = false): CalculationPart {
-  return { kind: 'operand', operand: { id, value, label, result } }
+function operand(id: string, value: string, label: string, result = false, detail?: string): CalculationPart {
+  return { kind: 'operand', operand: { id, value, label, detail, result } }
 }
 
 function operator(id: string, symbol: CalculationOperator['symbol']): CalculationPart {
@@ -231,9 +233,20 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   const attemptLabel = details.techniqueAttemptCountUpperBound === 1
     ? 'technique attempt'
     : 'technique attempts'
-  const poolLimit = details.maxAttemptsPerObjective < details.candidateTechniqueCount
-    ? ` of ${formatCount(details.candidateTechniqueCount)} candidates`
+  const compatibleCandidateLabel = countLabel(
+    details.candidateTechniqueCount,
+    'compatible candidate',
+    'compatible candidates',
+  )
+  const selectedCandidateContext = details.candidateTechniqueCount < details.selectedCandidateTechniqueCount
+    ? ` from ${formatCount(details.selectedCandidateTechniqueCount)} selected`
     : ''
+  const effectiveCapRule = `min(${compatibleCandidateLabel}${selectedCandidateContext}, limit ${
+    formatCount(details.maxAttemptsPerObjective)
+  })`
+  const accessibleCapRule = `the smaller of ${compatibleCandidateLabel}${selectedCandidateContext} and limit ${
+    formatCount(details.maxAttemptsPerObjective)
+  }`
   const directBaselineCount = baselineCount(estimate)
   const hasPlannedAttackBound = estimate.total !== null
     || estimate.minimum !== null
@@ -254,6 +267,22 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   const compatibilityContext = details.compatibilityMayReduceAttempts
     ? ' Compatibility may reduce how many candidates each objective can try.'
     : ''
+  const attemptSummary = directBaselineCount > 0
+    ? `Attempt ceiling: ${countLabel(
+      directBaselineCount,
+      'direct baseline send',
+      'direct baseline sends',
+    )} + up to ${countLabel(
+      details.techniqueAttemptCountUpperBound,
+      'adaptive technique attempt',
+      'adaptive technique attempts',
+    )} = up to ${countLabel(
+      directBaselineCount + details.techniqueAttemptCountUpperBound,
+      'attack start',
+      'attack starts',
+    )}.`
+    : undefined
+  const attemptScopeContext = ' Adaptive technique-attempt counts exclude multi-turn target exchanges and retries.'
   return {
     parts: [
       operand('adaptive-objectives', formatCount(details.objectiveCount), objectiveLabel),
@@ -261,7 +290,9 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
       operand(
         'adaptive-techniques',
         `up to ${formatCount(details.techniquesPerObjectiveUpperBound)}`,
-        `${techniqueLabel}${poolLimit}`,
+        techniqueLabel,
+        false,
+        effectiveCapRule,
       ),
       operator('adaptive-equals', '='),
       operand(
@@ -273,10 +304,11 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
     ],
     accessibleLabel: `${countLabel(details.objectiveCount, 'objective', 'objectives')} multiplied by up to ${
       countLabel(details.techniquesPerObjectiveUpperBound, 'technique per objective', 'techniques per objective')
-    } equals up to ${
+    }, ${accessibleCapRule}, equals up to ${
       countLabel(details.techniqueAttemptCountUpperBound, 'technique attempt', 'technique attempts')
     }.`,
-    context: `${progressContext} Each adaptive objective stops after the first successful technique.${compatibilityContext}`,
+    summary: attemptSummary,
+    context: `${progressContext}${attemptScopeContext} Each adaptive objective stops after the first successful technique.${compatibilityContext}`,
   }
 }
 
@@ -452,9 +484,17 @@ function RunCalculationView({
           >
             <Text className={styles.operandValue} weight="semibold">{part.operand.value}</Text>
             <Text size={200}>{part.operand.label}</Text>
+            {part.operand.detail && (
+              <Text className={styles.operandDetail} size={100}>{part.operand.detail}</Text>
+            )}
           </span>
         ))}
       </div>
+      {calculation.summary && (
+        <Text size={200} weight="semibold" className={styles.calculationContext}>
+          {calculation.summary}
+        </Text>
+      )}
       {calculation.context && (
         <Text size={200} className={styles.calculationContext}>{calculation.context}</Text>
       )}

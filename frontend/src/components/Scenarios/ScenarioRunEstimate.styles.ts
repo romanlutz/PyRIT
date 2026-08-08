@@ -69,6 +69,10 @@ export const useScenarioRunEstimateStyles = makeStyles({
   operandValue: {
     fontVariantNumeric: 'tabular-nums',
   },
+  operandDetail: {
+    flexBasis: '100%',
+    color: tokens.colorNeutralForeground3,
+  },
   operator: {
     display: 'inline-flex',
     alignItems: 'center',

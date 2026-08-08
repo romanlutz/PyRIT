@@ -96,6 +96,8 @@ export function mapScenarioRunEstimate(
     adaptiveDetails: response.adaptive_details
       ? {
           objectiveCount: response.adaptive_details.objective_count,
+          selectedCandidateTechniqueCount: response.adaptive_details.selected_candidate_technique_count
+            ?? response.adaptive_details.candidate_technique_count,
           candidateTechniqueCount: response.adaptive_details.candidate_technique_count,
           maxAttemptsPerObjective: response.adaptive_details.max_attempts_per_objective,
           techniquesPerObjectiveUpperBound: response.adaptive_details.techniques_per_objective_upper_bound,

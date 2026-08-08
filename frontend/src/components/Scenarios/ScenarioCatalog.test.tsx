@@ -343,6 +343,7 @@ describe('ScenarioCatalog', () => {
             datasets: [],
             adaptive_details: {
               objective_count: 21,
+              selected_candidate_technique_count: 2,
               candidate_technique_count: 2,
               max_attempts_per_objective: 3,
               techniques_per_objective_upper_bound: 2,

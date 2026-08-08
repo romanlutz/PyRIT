@@ -316,6 +316,7 @@ async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_tec
     assert [component.count for component in estimate.components] == [3, 3]
     assert estimate.adaptive_details is not None
     assert estimate.adaptive_details.objective_count == 3
+    assert estimate.adaptive_details.selected_candidate_technique_count == 2
     assert estimate.adaptive_details.candidate_technique_count == 2
     assert estimate.adaptive_details.max_attempts_per_objective == 3
     assert estimate.adaptive_details.techniques_per_objective_upper_bound == 2
@@ -354,6 +355,7 @@ async def test_adaptive_estimate_counts_exact_compatible_outer_envelopes_with_ta
     assert "Up to 1 selected technique attempts" in estimate.note
     assert estimate.adaptive_details is not None
     assert estimate.adaptive_details.objective_count == 2
+    assert estimate.adaptive_details.selected_candidate_technique_count == 2
     assert estimate.adaptive_details.candidate_technique_count == 1
     assert estimate.adaptive_details.techniques_per_objective_upper_bound == 1
     assert estimate.adaptive_details.technique_attempt_count_upper_bound == 2
@@ -397,6 +399,7 @@ async def test_adaptive_estimate_caps_attempts_below_candidate_pool() -> None:
 
     assert estimate.adaptive_details is not None
     assert estimate.adaptive_details.objective_count == 3
+    assert estimate.adaptive_details.selected_candidate_technique_count == 2
     assert estimate.adaptive_details.candidate_technique_count == 2
     assert estimate.adaptive_details.max_attempts_per_objective == 1
     assert estimate.adaptive_details.techniques_per_objective_upper_bound == 1

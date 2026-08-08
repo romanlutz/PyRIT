@@ -85,10 +85,11 @@ const ESTIMATE_DEBOUNCE_MS = 300
 const TEXT_ADAPTIVE_SCENARIO_NAME = 'adaptive.text_adaptive'
 const CUSTOM_TECHNIQUE_SET_VALUE = '__custom__'
 const MAX_ATTEMPTS_PARAMETER_NAME = 'max_attempts_per_objective'
-const MAX_ATTEMPTS_DISPLAY_LABEL = 'Techniques tried per objective'
+const MAX_ATTEMPTS_DISPLAY_LABEL = 'Maximum techniques per objective'
 const MAX_ATTEMPTS_DISPLAY_HINT = [
-  'Maximum different compatible techniques Adaptive may try for one objective.',
-  'Adaptive stops after the first success. This is separate from retries.',
+  'This is a per-objective limit, not a total-run budget.',
+  'Adaptive stops after the first success, and incompatible techniques are skipped.',
+  'This is separate from retries.',
 ].join(' ')
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
@@ -170,10 +171,10 @@ function formatParameterPreview(value: ParameterFormValue | undefined): string {
 function effectivePositiveInteger(
   value: ParameterFormValue | undefined,
   fallback: unknown,
-): string | undefined {
+): number | undefined {
   const candidate = typeof value === 'string' && value.trim().length > 0 ? value : fallback
   const parsed = typeof candidate === 'number' ? candidate : Number(candidate)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed.toLocaleString() : undefined
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 interface BuildRunRequestInput {
@@ -1006,7 +1007,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                     <MessageBarBody>
                       Adaptive uses these as a candidate pool. It tracks one progress step per compatible objective
                       {effectiveMaxAdaptiveAttempts
-                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible techniques for that objective, stopping after the first success`
+                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible ${
+                          effectiveMaxAdaptiveAttempts === 1 ? 'technique' : 'techniques'
+                        } for that objective, stopping after the first success`
                         : ''}
                       . Adding techniques changes the candidate pool, not the number of progress steps; compatibility
                       can still change how many objectives can run.

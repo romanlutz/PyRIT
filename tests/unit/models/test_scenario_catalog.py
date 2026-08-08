@@ -186,6 +186,7 @@ def test_adaptive_run_size_details_serialize_derived_attempt_bounds() -> None:
     """Adaptive estimates expose progress objectives and underlying attempt bounds separately."""
     details = ScenarioAdaptiveRunSizeDetails(
         objective_count=21,
+        selected_candidate_technique_count=2,
         candidate_technique_count=2,
         max_attempts_per_objective=3,
         techniques_per_objective_upper_bound=2,
@@ -194,6 +195,7 @@ def test_adaptive_run_size_details_serialize_derived_attempt_bounds() -> None:
 
     assert details.model_dump(mode="json") == {
         "objective_count": 21,
+        "selected_candidate_technique_count": 2,
         "candidate_technique_count": 2,
         "max_attempts_per_objective": 3,
         "techniques_per_objective_upper_bound": 2,
@@ -208,7 +210,36 @@ def test_adaptive_run_size_details_reject_inconsistent_attempt_bounds() -> None:
     with pytest.raises(ValidationError, match="min\\(candidate_technique_count, max_attempts_per_objective\\)"):
         ScenarioAdaptiveRunSizeDetails(
             objective_count=21,
+            selected_candidate_technique_count=2,
             candidate_technique_count=2,
+            max_attempts_per_objective=3,
+            techniques_per_objective_upper_bound=3,
+            technique_attempt_count_upper_bound=63,
+        )
+
+
+def test_adaptive_run_size_details_accept_legacy_version_one_payload() -> None:
+    """Version-one payloads without the additive selected count remain readable."""
+    details = ScenarioAdaptiveRunSizeDetails.model_validate(
+        {
+            "objective_count": 21,
+            "candidate_technique_count": 2,
+            "max_attempts_per_objective": 3,
+            "techniques_per_objective_upper_bound": 2,
+            "technique_attempt_count_upper_bound": 42,
+        }
+    )
+
+    assert details.selected_candidate_technique_count == 2
+
+
+def test_adaptive_run_size_details_reject_more_compatible_than_selected_candidates() -> None:
+    """Resolved compatible candidates cannot exceed the concrete selected pool."""
+    with pytest.raises(ValidationError, match="cannot exceed selected_candidate_technique_count"):
+        ScenarioAdaptiveRunSizeDetails(
+            objective_count=21,
+            selected_candidate_technique_count=2,
+            candidate_technique_count=3,
             max_attempts_per_objective=3,
             techniques_per_objective_upper_bound=3,
             technique_attempt_count_upper_bound=63,

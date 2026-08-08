@@ -115,12 +115,33 @@ class ScenarioAdaptiveRunSizeDetails(BaseModel):
     """Structured work bounds for an adaptive scenario estimate."""
 
     objective_count: int = Field(..., ge=0)
+    selected_candidate_technique_count: int = Field(..., ge=1)
     candidate_technique_count: int = Field(..., ge=1)
     max_attempts_per_objective: int = Field(..., ge=1)
     techniques_per_objective_upper_bound: int = Field(..., ge=1)
     technique_attempt_count_upper_bound: int = Field(..., ge=0)
     stop_on_first_success: Literal[True] = True
     compatibility_may_reduce_attempts: Literal[True] = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_selected_candidate_count(cls, data: Any) -> Any:
+        """
+        Preserve version-1 payload compatibility when the selected count is absent.
+
+        Returns:
+            Any: Input data with the selected count defaulted to the compatible count.
+        """
+        if (
+            isinstance(data, dict)
+            and "selected_candidate_technique_count" not in data
+            and "candidate_technique_count" in data
+        ):
+            return {
+                **data,
+                "selected_candidate_technique_count": data["candidate_technique_count"],
+            }
+        return data
 
     @model_validator(mode="after")
     def validate_attempt_bounds(self) -> "ScenarioAdaptiveRunSizeDetails":
@@ -133,6 +154,8 @@ class ScenarioAdaptiveRunSizeDetails(BaseModel):
         Raises:
             ValueError: If either derived upper bound is inconsistent.
         """
+        if self.candidate_technique_count > self.selected_candidate_technique_count:
+            raise ValueError("candidate_technique_count cannot exceed selected_candidate_technique_count")
         expected_per_objective = min(self.candidate_technique_count, self.max_attempts_per_objective)
         if self.techniques_per_objective_upper_bound != expected_per_objective:
             raise ValueError(
