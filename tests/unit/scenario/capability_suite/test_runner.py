@@ -208,9 +208,25 @@ class ProbeScorer:
     def __init__(self, *, events: list[tuple[str, str]]) -> None:
         self._events = events
 
-    async def score_async(self, *, result, objective, session):
+    async def score_async(self, *, result, objective, session, cancellation_event=None):
+        del cancellation_event
         self._events.append(("score", getattr(session, "label", "?")))
         return []
+
+
+class CancellingScorer:
+    def __init__(self, *, started: asyncio.Event, events: list[tuple[str, str]]) -> None:
+        self._started = started
+        self._events = events
+
+    async def score_async(self, *, result, objective, session, cancellation_event=None):
+        del result, objective
+        if cancellation_event is None:
+            raise AssertionError("runner must propagate its cancellation event to scorers")
+        self._events.append(("score", getattr(session, "label", "?")))
+        self._started.set()
+        await cancellation_event.wait()
+        raise asyncio.CancelledError
 
 
 class StaticAssetResolver:
@@ -409,6 +425,35 @@ async def test_runner_scorer_runs_before_cleanup_while_session_still_open() -> N
     result = await runner.run_async()
 
     assert result.attempts[0].outcome_kind is AttemptOutcomeKind.SUCCESS
+    assert events == [("initialize", "s1"), ("score", "s1"), ("close", "s1")]
+
+
+async def test_runner_cancellation_during_scoring_closes_session() -> None:
+    events: list[tuple[str, str]] = []
+    scorer_started = asyncio.Event()
+    cancellation_event = asyncio.Event()
+    provider = FakeSandboxProvider(
+        session_factory=lambda spec: FakeSandboxSession(spec=spec, events=events, label="s1")
+    )
+    scorer_registry = CapabilitySuiteScorerFactoryRegistry()
+    scorer_registry.register(
+        kind="cancelling_scorer",
+        factory=lambda config: CancellingScorer(started=scorer_started, events=events),
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(_case(scorers=(CaseScorerManifest(kind="cancelling_scorer"),)),)),
+        target=FakeCapabilityTarget(responses=[_text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+        scorer_registry=scorer_registry,
+    )
+
+    run_task = asyncio.create_task(runner.run_async(cancellation_event=cancellation_event))
+    await scorer_started.wait()
+    cancellation_event.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
     assert events == [("initialize", "s1"), ("score", "s1"), ("close", "s1")]
 
 

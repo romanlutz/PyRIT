@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from pyrit.compat.inspect_ai import PINNED_INSPECT_EVALS_PROFILE, run_inspect_eval_async
+from pyrit.compat.inspect_ai import PINNED_INSPECT_EVALS_PROFILE, load_inspect_eval, run_inspect_eval_async
 from pyrit.models import Message, TargetResponseMetadata
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 
@@ -71,3 +71,40 @@ async def test_user_supplied_pinned_checkout_runs_unchanged_arc_source(sqlite_in
     task_result = execution.result.attempts[0].task_result
     assert task_result is not None
     assert task_result.scores[0].score_value == "True"
+
+
+@pytest.mark.run_only_if_all_tests
+def test_user_supplied_pinned_checkout_constructs_unchanged_in_house_ctf_source() -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    loaded = load_inspect_eval(
+        source_root=Path(source_value),
+        task_spec="gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf",
+        task_parameters={"challenges": "ssh", "epochs": 1},
+    )
+
+    assert loaded.report.source_revision_verified is True
+    assert loaded.suite.cases[0].case_id == "ssh"
+    assert loaded.suite.cases[0].scorers[0].kind == "inspect_check_flag"
+
+
+@pytest.mark.run_only_if_all_tests
+def test_user_supplied_pinned_checkout_constructs_unchanged_intercode_ctf_source() -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    cache_value = os.getenv("PYRIT_INSPECT_EVALS_CACHE_DIR")
+    if not source_value or not cache_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT and PYRIT_INSPECT_EVALS_CACHE_DIR to exact pinned inputs.")
+
+    loaded = load_inspect_eval(
+        source_root=Path(source_value),
+        task_spec="gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
+        task_parameters={"sample_ids": [2]},
+        inspect_evals_cache_dir=Path(cache_value),
+    )
+
+    assert loaded.report.source_revision_verified is True
+    assert loaded.suite.cases[0].source is not None
+    assert loaded.suite.cases[0].source.source_id == "2"
+    assert [tool.declaration.name for tool in loaded.suite.cases[0].tools] == ["bash", "python", "submit"]

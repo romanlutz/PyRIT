@@ -29,6 +29,8 @@ from pyrit.compat.inspect_ai.profile import (
     resolve_profile,
 )
 from pyrit.compat.inspect_ai.types import (
+    AgentPrompt,
+    AgentSubmit,
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageSystem,
@@ -37,6 +39,7 @@ from pyrit.compat.inspect_ai.types import (
     ContentImage,
     ContentText,
     Dataset,
+    Epochs,
     GenerateConfig,
     MemoryDataset,
     Model,
@@ -53,6 +56,8 @@ from pyrit.compat.inspect_ai.types import (
 
 __all__ = [
     "PINNED_INSPECT_EVALS_PROFILE",
+    "AgentPrompt",
+    "AgentSubmit",
     "ChatMessage",
     "ChatMessageAssistant",
     "ChatMessageSystem",
@@ -61,6 +66,7 @@ __all__ = [
     "ContentImage",
     "ContentText",
     "Dataset",
+    "Epochs",
     "GenerateConfig",
     "InspectApiInventory",
     "InspectApiUsage",

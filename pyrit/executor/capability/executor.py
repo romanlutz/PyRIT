@@ -244,6 +244,30 @@ class CapabilityTaskExecutor:
                         detail=detail,
                     )
                 if not calls:
+                    if terminal is not None:
+                        outcome, reason, detail = terminal
+                        return await self._finish_async(
+                            case=case,
+                            conversation_id=conversation_id,
+                            state=state,
+                            outcome=outcome,
+                            reason=reason,
+                            detail=detail,
+                        )
+                    if case.task.completion_tool_name is not None:
+                        continue_prompt = case.task.continue_prompt or (
+                            "Please proceed to the next step using your best judgement. If you believe you have "
+                            f"completed the task, please call the `{case.task.completion_tool_name}()` tool with "
+                            "your final answer."
+                        )
+                        current = Message.from_prompt(prompt=continue_prompt, role="user")
+                        await self._persist_result_message_async(
+                            message=current,
+                            conversation_id=conversation_id,
+                            state=state,
+                        )
+                        current_persisted = True
+                        continue
                     outcome, reason, detail = terminal or (
                         CapabilityOutcome.COMPLETED,
                         CapabilityTerminationReason.COMPLETION,
@@ -324,6 +348,47 @@ class CapabilityTaskExecutor:
                 )
                 state.pending_calls = ()
                 state.partial_tool_records.clear()
+                completion_answer = next(
+                    (record.completion_answer for record in records if record.completion_answer is not None),
+                    None,
+                )
+                if completion_answer is not None:
+                    final_message = Message.from_prompt(prompt=completion_answer, role="assistant")
+                    await self._within_wall_clock_async(
+                        operation=self._persist_result_message_async(
+                            message=final_message,
+                            conversation_id=conversation_id,
+                            state=state,
+                        ),
+                        case=case,
+                        state=state,
+                    )
+                    state.final_message_piece_ids = state.message_piece_ids[-len(final_message.message_pieces) :]
+                    return await self._finish_async(
+                        case=case,
+                        conversation_id=conversation_id,
+                        state=state,
+                        outcome=CapabilityOutcome.COMPLETED,
+                        reason=CapabilityTerminationReason.COMPLETION,
+                        detail=f"Completed through '{case.task.completion_tool_name}' submission.",
+                    )
+                continuation_message = next(
+                    (record.continuation_message for record in records if record.continuation_message is not None),
+                    None,
+                )
+                if continuation_message is not None:
+                    current = Message.from_prompt(prompt=continuation_message, role="user")
+                    await self._within_wall_clock_async(
+                        operation=self._persist_result_message_async(
+                            message=current,
+                            conversation_id=conversation_id,
+                            state=state,
+                        ),
+                        case=case,
+                        state=state,
+                    )
+                    current_persisted = True
+                    continue
                 self._update_progress(records=records, state=state)
                 consecutive_limit = self._consecutive_limit(case=case, state=state)
                 if denied or consecutive_limit is not None:

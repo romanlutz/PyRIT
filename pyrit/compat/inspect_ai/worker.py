@@ -31,6 +31,9 @@ def main() -> int:
             task_parameters=request["task_parameters"],
             profile_id=request["profile_id"],
             dataset_records=request["dataset_records"],
+            inspect_evals_cache_dir=(
+                Path(request["inspect_evals_cache_dir"]) if request["inspect_evals_cache_dir"] is not None else None
+            ),
             allow_network=request["allow_network"],
             verify_source_revision=request["verify_source_revision"],
             source_verification_timeout_seconds=request["source_verification_timeout_seconds"],

@@ -588,6 +588,19 @@ async def test_truncated_tool_generation_never_executes_call() -> None:
     assert persisted[0][1].error.code == "generation_incomplete"
 
 
+async def test_truncated_completion_agent_response_does_not_continue() -> None:
+    response = _text_message("partial")
+    response.get_piece().mark_as_truncated()
+    target = FakeCapabilityTarget(responses=[response])
+
+    result = await _executor(target=target).execute_task_async(
+        task=CapabilityTask(objective="truncate", completion_tool_name="submit")
+    )
+
+    assert result.termination_reason is CapabilityTerminationReason.LIMIT
+    assert result.model_generations == 1
+
+
 async def test_idempotent_tool_retries_declared_retryable_failure() -> None:
     tool = RecordingTool(
         failures=[

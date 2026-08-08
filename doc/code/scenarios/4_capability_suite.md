@@ -91,7 +91,7 @@ conversation/tool loop, retry policy, evidence model, sandbox providers, and sco
 aggregation. A matching dataset and prompt does not by itself imply matching agent,
 browser, tool timeout, container image, scorer, or epoch semantics.
 
-### Opt-in unchanged-source ARC compatibility
+### Opt-in unchanged-source compatibility
 
 `pyrit.compat.inspect_ai` is an isolated construction facade for
 [`inspect_evals@b935c0e5cfa04710f016f925db75d8e81413e2cf`](https://github.com/UKGovernmentBEIS/inspect_evals/tree/b935c0e5cfa04710f016f925db75d8e81413e2cf).
@@ -108,9 +108,9 @@ Inspect installation, and disappear with the worker on success or failure. A con
 source finder validates every imported `inspect_evals.*` Python module before executing
 it. Static API inventory runs before execution and unknown symbols raise
 `UnsupportedInspectFeatureError` with the symbol, profile, and remediation.
-The pinned `inspect_evals.utils.huggingface.hf_dataset` wrapper path is bound directly
-to the facade's offline-first dataset loader, avoiding the wrapper's unrelated telemetry
-and retry dependencies while preserving its pinned arguments and record mapper.
+Pinned Hugging Face and local JSON dataset helpers are bound directly to offline-first
+facade loaders. GDM InterCode requires a pre-populated `inspect_evals_cache_dir`; the
+compatibility worker never downloads its corpus.
 
 This is **source containment, not a security sandbox**. The selected module path and
 `inspect_evals.*` imports must resolve beneath the supplied checkout, but the worker is
@@ -133,6 +133,13 @@ loaded = load_inspect_eval(
     dataset_loader=local_pinned_dataset_loader,
 )
 
+ctf = load_inspect_eval(
+    source_root=checkout,
+    task_spec="gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
+    task_parameters={"sample_ids": [2]},
+    inspect_evals_cache_dir=pinned_cache,
+)
+
 execution = await run_inspect_eval_async(
     source_root=checkout,
     task_spec="arc/arc.py@arc_challenge",
@@ -141,19 +148,21 @@ execution = await run_inspect_eval_async(
 )
 ```
 
-The implemented execution surface is ARC's dataset record mapper,
-`multiple_choice()`, `choice()`, task variants/parameters, messages, and native target
-dispatch/scoring. Prompts and scoring preserve Inspect 0.3.233's `ANSWER: <letter>`
-contract, including its case/whitespace/trailing-period parsing rules; a bare answer
-letter is incorrect. Non-default task generation configuration, task-level limits,
-multiple-answer/shuffled choices, and dataset transforms fail explicitly rather than
-being silently approximated. Model calls only use the injected PyRIT `PromptTarget`. Agent/React
-loops, bash/Python tools, custom scorer execution, stores/hooks/EvalLog parity, GDM CTF
-execution, and provider implementations are intentionally excluded. AWS/Bedrock/
-SageMaker/EC2, GCP, Modal, Daytona, and other non-Azure cloud providers are not
-implemented by this compatibility layer. Native ARC cases use the explicit
-`case_timeout_seconds` execution bound (300 seconds by default), which is recorded in the
-compatibility report and manifest because Inspect's default task time limit is unbounded.
+The unchanged-source surface supports ARC Easy/Challenge plus
+`gdm_intercode_ctf@gdm_intercode_ctf` and
+`gdm_in_house_ctf@gdm_in_house_ctf`. The GDM tasks compile standard ReAct,
+`bash`, `python`, and `submit` construction nodes to the native capability executor.
+InterCode preserves files, setup, submission retries, and includes scoring. In-house
+preserves per-sample Compose topology, default service and user selection, target address,
+epochs, and scorer-only live flag reads before sandbox cleanup. Tool implementations and
+the in-house scorer are selected through explicit registries; the scorer proxy allows one
+bounded command in its declared service and exposes no credentials or host-file access.
+
+Model calls only use the injected PyRIT `PromptTarget`, and Docker remains an external
+runtime prerequisite. Stores, hooks, checkpoints, EvalLog parity, model providers, and
+non-pinned callbacks remain unsupported. AWS/Bedrock/SageMaker/EC2, GCP, Modal, Daytona,
+Kubernetes, and other cloud providers are not implemented. Every native case uses the
+explicit `case_timeout_seconds` execution bound (300 seconds by default).
 
 ## Security and portability boundary
 

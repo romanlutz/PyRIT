@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, overload
 
@@ -78,7 +78,7 @@ class Sample:
     choices: list[str] | None = None
     id: str | int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    sandbox: SandboxSpec | str | None = None
+    sandbox: SandboxSpec | tuple[str, str] | str | None = None
     setup: str | None = None
     files: dict[str, str] | None = None
 
@@ -123,6 +123,15 @@ class Dataset(Sequence[Sample]):
         """Return the number of samples."""
         return len(self._samples)
 
+    def filter(self, predicate: Callable[[Sample], bool]) -> Dataset:
+        """Return a dataset containing samples accepted by ``predicate``."""
+        return Dataset(
+            (sample for sample in self._samples if predicate(sample)),
+            name=self.name,
+            location=self.location,
+            metadata=dict(self.metadata),
+        )
+
 
 class MemoryDataset(Dataset):
     """An in-memory Inspect-shaped dataset."""
@@ -153,11 +162,50 @@ class ToolSpec:
 
 
 @dataclass(frozen=True, kw_only=True)
+class AgentPrompt:
+    """Prompt fragments used to construct a ReAct agent."""
+
+    instructions: str | None = None
+    handoff_prompt: str | None = None
+    assistant_prompt: str | None = None
+    submit_prompt: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class AgentSubmit:
+    """Submission-tool behavior used by a ReAct agent."""
+
+    name: str | None = None
+    description: str | None = None
+    answer_only: bool = False
+    answer_delimiter: str = "\n\n"
+    keep_in_messages: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
 class SandboxSpec:
     """A declarative Inspect sandbox reference."""
 
     type: str
     config: str | dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class Epochs:
+    """Inspect-shaped epoch count and reducer reference."""
+
+    epochs: int
+    reducer: str | list[str] | None = None
+
+    def __post_init__(self) -> None:
+        """
+        Validate the positive epoch count.
+
+        Raises:
+            ValueError: If the epoch count is not positive.
+        """
+        if self.epochs <= 0:
+            raise ValueError("Epochs must be greater than zero.")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -219,9 +267,9 @@ class Task:
     dataset: Dataset | Sequence[Sample]
     solver: SolverSpec | Sequence[SolverSpec]
     scorer: ScorerSpec | Sequence[ScorerSpec]
-    sandbox: SandboxSpec | str | None = None
+    sandbox: SandboxSpec | tuple[str, str] | str | None = None
     config: GenerateConfig | None = None
-    epochs: int | None = None
+    epochs: int | Epochs | None = None
     fail_on_error: bool | float | None = None
     message_limit: int | None = None
     token_limit: int | None = None
@@ -234,3 +282,9 @@ class Task:
 Solver = SolverSpec
 Scorer = ScorerSpec
 Tool = ToolSpec
+Agent = SolverSpec
+Generate = Callable[..., object]
+
+
+class TaskState:
+    """Construction-only type marker for pinned callback annotations."""

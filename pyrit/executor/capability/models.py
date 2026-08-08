@@ -122,6 +122,8 @@ class CapabilityTask(BaseModel):
     limits: CapabilityLimits = Field(default_factory=CapabilityLimits)
     source: CapabilitySource | None = None
     expected_evidence: tuple[ExpectedEvidence, ...] = ()
+    completion_tool_name: str | None = None
+    continue_prompt: str | None = None
 
 
 class CapabilityCase(BaseModel):

@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
-from collections.abc import Callable, Iterable, Mapping
+import random
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +23,8 @@ from typing import Any, TypeVar, cast
 
 from pyrit.compat.inspect_ai.profile import InspectCompatibilityProfile, UnsupportedInspectFeatureError
 from pyrit.compat.inspect_ai.types import (
+    AgentPrompt,
+    AgentSubmit,
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageSystem,
@@ -28,6 +33,7 @@ from pyrit.compat.inspect_ai.types import (
     ContentImage,
     ContentText,
     Dataset,
+    Epochs,
     GenerateConfig,
     MemoryDataset,
     Model,
@@ -41,6 +47,7 @@ from pyrit.compat.inspect_ai.types import (
     SolverSpec,
     Target,
     Task,
+    TaskState,
     Tool,
     ToolSpec,
 )
@@ -59,6 +66,7 @@ _ACTIVE_DATASET_LOADER: ContextVar[DatasetLoader | None] = ContextVar(
 )
 _ACTIVE_ALLOW_NETWORK: ContextVar[bool] = ContextVar("inspect_compat_allow_network", default=False)
 _ACTIVE_SOURCE_ROOT: ContextVar[Path | None] = ContextVar("inspect_compat_source_root", default=None)
+_ACTIVE_DATA_ROOT: ContextVar[Path | None] = ContextVar("inspect_compat_data_root", default=None)
 _ACTIVE_PROFILE: ContextVar[InspectCompatibilityProfile | None] = ContextVar(
     "inspect_compat_profile",
     default=None,
@@ -73,6 +81,7 @@ class FacadeContextTokens:
     dataset_loader: Token[DatasetLoader | None]
     allow_network: Token[bool]
     source_root: Token[Path | None]
+    data_root: Token[Path | None]
     profile: Token[InspectCompatibilityProfile | None]
 
 
@@ -101,6 +110,7 @@ def activate_facade_context(
     dataset_loader: DatasetLoader | None,
     allow_network: bool,
     source_root: Path,
+    data_root: Path | None,
     profile: InspectCompatibilityProfile,
 ) -> FacadeContextTokens:
     """Activate per-load facade state and return reset tokens."""
@@ -109,6 +119,7 @@ def activate_facade_context(
         dataset_loader=_ACTIVE_DATASET_LOADER.set(dataset_loader),
         allow_network=_ACTIVE_ALLOW_NETWORK.set(allow_network),
         source_root=_ACTIVE_SOURCE_ROOT.set(source_root),
+        data_root=_ACTIVE_DATA_ROOT.set(data_root),
         profile=_ACTIVE_PROFILE.set(profile),
     )
 
@@ -119,6 +130,7 @@ def deactivate_facade_context(tokens: FacadeContextTokens) -> None:
     _ACTIVE_DATASET_LOADER.reset(tokens.dataset_loader)
     _ACTIVE_ALLOW_NETWORK.reset(tokens.allow_network)
     _ACTIVE_SOURCE_ROOT.reset(tokens.source_root)
+    _ACTIVE_DATA_ROOT.reset(tokens.data_root)
     _ACTIVE_PROFILE.reset(tokens.profile)
 
 
@@ -176,14 +188,13 @@ def _active_profile() -> InspectCompatibilityProfile:
 
 
 def solver(func: F | None = None, *, name: str | None = None) -> F | Callable[[F], F]:
-    """Mark a custom solver factory without executing it."""
+    """Capture a custom solver factory as a declarative graph node."""
     return _component_decorator(func=func, kind="solver", name=name)
 
 
 def scorer(func: F | None = None, *, name: str | None = None, metrics: object = None) -> F | Callable[[F], F]:
-    """Mark a custom scorer factory without executing it."""
-    del metrics
-    return _component_decorator(func=func, kind="scorer", name=name)
+    """Capture a custom scorer factory as a declarative graph node."""
+    return _component_decorator(func=func, kind="scorer", name=name, metrics=metrics)
 
 
 def tool(func: F | None = None, *, name: str | None = None) -> F | Callable[[F], F]:
@@ -196,11 +207,31 @@ def _component_decorator(
     func: F | None,
     kind: str,
     name: str | None,
+    metrics: object = None,
 ) -> F | Callable[[F], F]:
-    del kind, name
-
     def _decorate(factory: F) -> F:
-        return factory
+        component_name = name or _factory_name(factory)
+        source_module = getattr(factory, "__module__", None)
+        source_qualname = getattr(factory, "__qualname__", None)
+        if not isinstance(source_module, str) or not isinstance(source_qualname, str):
+            raise TypeError("Inspect component factories must have string source identity attributes.")
+
+        def _capture(*args: Any, **kwargs: Any) -> SolverSpec | ScorerSpec | ToolSpec:
+            bound = inspect.signature(factory).bind(*args, **kwargs)
+            bound.apply_defaults()
+            config = {
+                "factory_arguments": _json_compatible(dict(bound.arguments)),
+                "source_identity": f"{source_module}.{source_qualname}",
+            }
+            if metrics is not None:
+                config["metrics"] = _json_compatible(metrics)
+            spec_type = {"solver": SolverSpec, "scorer": ScorerSpec, "tool": ToolSpec}[kind]
+            return spec_type(name=component_name, config=config)
+
+        _capture.__name__ = _factory_name(factory)
+        _capture.__qualname__ = source_qualname
+        _capture.__module__ = source_module
+        return cast("F", _capture)
 
     return _decorate(func) if func is not None else _decorate
 
@@ -244,6 +275,113 @@ def chain_of_thought(*, template: str | None = None) -> SolverSpec:
 
 
 Generate = Callable[..., object]
+Agent = SolverSpec
+CORRECT = "C"
+INCORRECT = "I"
+
+
+def react(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    prompt: str | AgentPrompt | None = None,
+    tools: Iterable[ToolSpec] | None = None,
+    model: object = None,
+    attempts: int = 1,
+    submit: AgentSubmit | bool | None = None,
+    on_continue: str | None = None,
+    retry_refusals: int | None = None,
+    compaction: object = None,
+    truncation: str = "disabled",
+    approval: object = None,
+) -> SolverSpec:
+    """Construct the pinned ReAct agent graph consumed by the CTF tasks."""
+    unsupported = {
+        "name": name,
+        "description": description,
+        "model": model,
+        "on_continue": on_continue,
+        "retry_refusals": retry_refusals,
+        "compaction": compaction,
+        "approval": approval,
+    }
+    requested = next((key for key, value in unsupported.items() if value is not None), None)
+    if requested is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.agent.react({requested}=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    if truncation != "disabled":
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.agent.react(truncation=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    if attempts <= 0:
+        raise ValueError("react attempts must be greater than zero.")
+    prompt_value = prompt if isinstance(prompt, AgentPrompt) else AgentPrompt(instructions=prompt)
+    submit_value = AgentSubmit() if submit in (None, True) else submit
+    if submit_value is False:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.agent.react(submit=False)",
+            source_profile=_active_profile().profile_id,
+        )
+    return SolverSpec(
+        name="react",
+        config={
+            "prompt": _json_compatible(prompt_value),
+            "tools": [_json_compatible(tool) for tool in tools or ()],
+            "attempts": attempts,
+            "submit": _json_compatible(submit_value),
+        },
+    )
+
+
+def as_solver(agent: SolverSpec) -> SolverSpec:
+    """Return an agent graph as its solver graph."""
+    return agent
+
+
+def bash(
+    *,
+    timeout: float | None = None,
+    user: str | None = None,
+    sandbox: str | None = None,
+    background: bool = False,
+) -> ToolSpec:
+    """Construct the pinned standard bash tool."""
+    if background:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.tool.bash(background=True)",
+            source_profile=_active_profile().profile_id,
+        )
+    return ToolSpec(name="bash", config={"timeout": timeout, "user": user, "sandbox": sandbox})
+
+
+def python(
+    *,
+    timeout: float | None = None,
+    user: str | None = None,
+    sandbox: str | None = None,
+) -> ToolSpec:
+    """Construct the pinned standard Python tool."""
+    return ToolSpec(name="python", config={"timeout": timeout, "user": user, "sandbox": sandbox})
+
+
+@contextmanager
+def message_limit(limit: int) -> Iterator[None]:
+    """Provide the construction-time context shape used by the pinned solver callback."""
+    if limit <= 0:
+        raise ValueError("message_limit must be greater than zero.")
+    yield
+
+
+def sandbox(name: str | None = None) -> object:
+    """Reject direct sandbox use in the construction worker."""
+    raise UnsupportedInspectFeatureError(
+        symbol=f"inspect_ai.util.sandbox({name or 'default'}) runtime",
+        source_profile=_active_profile().profile_id,
+        remediation="Use the native bounded compatibility callback proxy during scoring.",
+    )
 
 
 def choice() -> ScorerSpec:
@@ -328,22 +466,75 @@ def hf_dataset(
 
 def json_dataset(
     *,
-    json_file: str,
+    json_file: str | None = None,
+    file_path: str | None = None,
     sample_fields: Callable[[dict[str, Any]], Sample] | None = None,
     name: str | None = None,
+    shuffle: bool = False,
+    seed: int | None = None,
+    limit: int | bool | None = None,
+    **kwargs: Any,
 ) -> Dataset:
     """Materialize a source-contained JSON or JSONL dataset."""
-    path = _resolve_source_path(json_file)
+    if kwargs:
+        option = sorted(kwargs)[0]
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.dataset.json_dataset({option}=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    source = file_path or json_file
+    if source is None:
+        raise TypeError("json_dataset() requires 'json_file' or 'file_path'.")
+    path = _resolve_source_path(source)
     if path.suffix.lower() == ".jsonl":
         records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     else:
         records = json.loads(path.read_text(encoding="utf-8"))
-    return _map_records(
+    dataset = _map_records(
         raw=records,
         sample_fields=sample_fields,
         name=name,
-        location=json_file,
-        metadata={"source_type": "json", "path": json_file},
+        location=source,
+        metadata={"source_type": "json", "path": source},
+    )
+    samples = list(dataset)
+    if shuffle:
+        random.Random(seed).shuffle(samples)
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        samples = samples[:limit]
+    return Dataset(samples, name=dataset.name, location=dataset.location, metadata=dataset.metadata)
+
+
+def load_json_dataset(
+    file_path: str,
+    eval_name: str,
+    sample_fields: Callable[[dict[str, Any]], Sample],
+    *,
+    shuffle: bool = False,
+    **kwargs: Any,
+) -> Dataset:
+    """Provide the pinned inspect-evals local JSON helper over the strict facade loader."""
+    unsupported = sorted(set(kwargs).difference({"cache_tag", "encoding", "fs_options", "refresh"}))
+    if unsupported:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_evals.utils.load_json_dataset({unsupported[0]}=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    return json_dataset(
+        file_path=file_path,
+        sample_fields=sample_fields,
+        name=eval_name,
+        shuffle=shuffle,
+    )
+
+
+def download_and_verify(*args: Any, **kwargs: Any) -> None:
+    """Reject construction-time downloads; compatibility requires a pinned local cache."""
+    del args, kwargs
+    raise UnsupportedInspectFeatureError(
+        symbol="inspect_evals.utils.download_and_verify runtime",
+        source_profile=_active_profile().profile_id,
+        remediation="Provide a pre-populated pinned INSPECT_EVALS_CACHE_DIR.",
     )
 
 
@@ -399,7 +590,12 @@ def _resolve_source_path(value: str) -> Path:
         raise RuntimeError("Source-contained datasets can only be loaded inside the compatibility loader.")
     candidate = Path(value)
     if candidate.is_absolute():
-        raise ValueError(f"Dataset path must be relative to the trusted source root: '{value}'.")
+        resolved = candidate.resolve()
+        data_root = _ACTIVE_DATA_ROOT.get()
+        allowed_roots = tuple(root for root in (root, data_root) if root is not None)
+        if not any(resolved == allowed or allowed in resolved.parents for allowed in allowed_roots):
+            raise ValueError(f"Dataset path is outside the trusted source/data roots: '{value}'.")
+        return resolved
     resolved = (root / candidate).resolve()
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"Dataset path '{value}' escapes the trusted source root.")
@@ -412,6 +608,7 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
         name: CompatibilityModule(name=name, profile=profile, is_package=True)
         for name in (
             "inspect_ai",
+            "inspect_ai.agent",
             "inspect_ai._util",
             "inspect_ai._util.registry",
             "inspect_ai.dataset",
@@ -420,9 +617,20 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "inspect_ai.scorer",
             "inspect_ai.solver",
             "inspect_ai.tool",
+            "inspect_ai.util",
         )
     }
-    _export(modules["inspect_ai"], {"Task": Task, "task": task})
+    _export(modules["inspect_ai"], {"Epochs": Epochs, "Task": Task, "task": task})
+    _export(
+        modules["inspect_ai.agent"],
+        {
+            "Agent": Agent,
+            "AgentPrompt": AgentPrompt,
+            "AgentSubmit": AgentSubmit,
+            "as_solver": as_solver,
+            "react": react,
+        },
+    )
     _export(
         modules["inspect_ai._util.registry"],
         {
@@ -461,6 +669,8 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
     _export(
         modules["inspect_ai.scorer"],
         {
+            "CORRECT": CORRECT,
+            "INCORRECT": INCORRECT,
             "Score": Score,
             "Scorer": Scorer,
             "ScorerSpec": ScorerSpec,
@@ -479,13 +689,25 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "Generate": Generate,
             "Solver": Solver,
             "SolverSpec": SolverSpec,
+            "TaskState": TaskState,
             "chain_of_thought": chain_of_thought,
             "generate": generate,
             "multiple_choice": multiple_choice,
             "solver": solver,
         },
     )
-    _export(modules["inspect_ai.tool"], {"Tool": Tool, "ToolSpec": ToolSpec, "tool": tool})
+    _export(
+        modules["inspect_ai.tool"],
+        {"Tool": Tool, "ToolSpec": ToolSpec, "bash": bash, "python": python, "tool": tool},
+    )
+    _export(
+        modules["inspect_ai.util"],
+        {
+            "SandboxEnvironmentSpec": SandboxSpec,
+            "message_limit": message_limit,
+            "sandbox": sandbox,
+        },
+    )
     for name, module in modules.items():
         if "." not in name:
             continue
@@ -497,3 +719,16 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
 def _export(module: ModuleType, symbols: Mapping[str, object]) -> None:
     module.__dict__.update(symbols)
     module.__dict__["__all__"] = tuple(sorted(symbols))
+
+
+def _json_compatible(value: object) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    if hasattr(value, "__dataclass_fields__"):
+        field_names = cast("Mapping[str, object]", value.__dataclass_fields__)
+        return {name: _json_compatible(getattr(value, name)) for name in field_names}
+    raise TypeError(f"Inspect compatibility value '{type(value).__name__}' is not JSON serializable.")

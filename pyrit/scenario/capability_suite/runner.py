@@ -181,17 +181,31 @@ class CapabilitySuiteRunner:
             raise ValueError(f"Capability suite contains non-runnable cases: {details}")
         content_hash = manifest_hash(self._manifest)
         run_id = run_id or f"capability-suite-{content_hash[:32]}"
-        provider = self._sandbox_provider_registry.build(self._manifest.sandbox_provider)
-        await provider.prepare_async()
+        has_case_providers = any(case.sandbox_provider is not None for case in self._manifest.cases)
+        if has_case_providers:
+            providers = {
+                case.case_id: self._sandbox_provider_registry.build(
+                    case.sandbox_provider or self._manifest.sandbox_provider
+                )
+                for case in self._manifest.cases
+            }
+        else:
+            providers = {"__shared__": self._sandbox_provider_registry.build(self._manifest.sandbox_provider)}
         task_specs = {
             case.case_id: SandboxTaskSpec(task_id=f"{run_id}:{case.case_id}") for case in self._manifest.cases
         }
-        prepared_tasks: list[SandboxTaskSpec] = []
+        prepared_tasks: list[tuple[SandboxProvider, SandboxTaskSpec]] = []
+        prepared_providers: list[SandboxProvider] = []
         provider_cleanup_error: str | None = None
         try:
-            for task_spec in task_specs.values():
+            for provider in providers.values():
+                await provider.prepare_async()
+                prepared_providers.append(provider)
+            for case in self._manifest.cases:
+                provider = providers[case.case_id] if has_case_providers else providers["__shared__"]
+                task_spec = task_specs[case.case_id]
                 await provider.prepare_task_async(task_spec)
-                prepared_tasks.append(task_spec)
+                prepared_tasks.append((provider, task_spec))
             units = expand_suite(self._manifest)
             semaphore = asyncio.Semaphore(self._manifest.run_policy.max_concurrency)
             progress_lock = asyncio.Lock()
@@ -203,7 +217,7 @@ class CapabilitySuiteRunner:
                     records = await self._run_unit_async(
                         unit=unit,
                         run_id=run_id,
-                        provider=provider,
+                        provider=providers[unit.case.case_id] if has_case_providers else providers["__shared__"],
                         task_spec=task_specs[unit.case.case_id],
                         cancellation_event=cancellation_event,
                     )
@@ -222,15 +236,16 @@ class CapabilitySuiteRunner:
             unit_results = await asyncio.gather(*(_run_unit_bounded_async(unit) for unit in units))
         finally:
             cleanup_errors: list[str] = []
-            for task_spec in reversed(prepared_tasks):
+            for provider, task_spec in reversed(prepared_tasks):
                 try:
                     await provider.cleanup_task_async(task_spec)
                 except Exception as error:
                     cleanup_errors.append(f"{type(error).__name__}: {error}")
-            try:
-                await provider.cleanup_async()
-            except Exception as error:
-                cleanup_errors.append(f"{type(error).__name__}: {error}")
+            for provider in reversed(prepared_providers):
+                try:
+                    await provider.cleanup_async()
+                except Exception as error:
+                    cleanup_errors.append(f"{type(error).__name__}: {error}")
             if cleanup_errors:
                 provider_cleanup_error = "; ".join(cleanup_errors)
 
@@ -239,7 +254,10 @@ class CapabilitySuiteRunner:
             run_id=run_id,
             manifest_hash=content_hash,
             attempts=attempts,
-            aggregate=aggregate_attempts(attempts),
+            aggregate=aggregate_attempts(
+                attempts,
+                epoch_reducer=self._manifest.run_policy.epoch_reducer,
+            ),
             provider_cleanup_error=provider_cleanup_error,
         )
 
@@ -397,7 +415,13 @@ class CapabilitySuiteRunner:
                 conversation_id=str(attempt_id),
                 cancellation_event=cancellation_event,
             )
-            task_result = await self._apply_scorers_async(case=case, result=task_result, session=session)
+            if task_result.outcome is not CapabilityOutcome.CANCELLED:
+                task_result = await self._apply_scorers_async(
+                    case=case,
+                    result=task_result,
+                    session=session,
+                    cancellation_event=cancellation_event,
+                )
         except asyncio.CancelledError:
             with suppress(Exception):
                 await session.close_async()
@@ -490,11 +514,14 @@ class CapabilitySuiteRunner:
     ) -> SandboxSessionSpec:
         environment_names = {asset.environment or "default" for asset in case.assets}
         environment_names.update(step.environment or "default" for step in case.setup)
+        environment_names.update(environment for tool in case.tools for environment in tool.required_environments)
         environment_names.update(environment for scorer in case.scorers for environment in scorer.required_environments)
         if case.sandbox_tools_default_environment is not None:
             environment_names.add(case.sandbox_tools_default_environment)
         environment_names.update(case.sandbox_tools_allowed_environments)
-        environment_names.add("default")
+        environment_names.update(case.sandbox_environment_workdirs)
+        if not environment_names:
+            environment_names.add("default")
 
         setup_files: dict[str, list[SandboxSetupFile]] = {name: [] for name in environment_names}
         for asset in case.assets:
@@ -534,6 +561,11 @@ class CapabilitySuiteRunner:
                 default=(name == "default"),
                 setup_files=tuple(setup_files[name]),
                 setup_scripts=tuple(setup_scripts[name]),
+                metadata=(
+                    {"docker_workdir": case.sandbox_environment_workdirs[name]}
+                    if name in case.sandbox_environment_workdirs
+                    else {}
+                ),
             )
             for name in sorted(environment_names)
         )
@@ -542,6 +574,10 @@ class CapabilitySuiteRunner:
             attempt_id=attempt_id,
             task=task_spec,
             environments=environments,
+            default_environment=(
+                case.sandbox_tools_default_environment
+                or ("default" if "default" in environment_names else min(environment_names))
+            ),
         )
 
     def _bind_tools(self, *, case: CapabilityCaseManifest, session: SandboxSession, registry: ToolRegistry) -> None:
@@ -599,6 +635,10 @@ class CapabilitySuiteRunner:
         environment_references = {asset.environment or "default" for asset in case.assets} | {
             step.environment or "default" for step in case.setup
         }
+        environment_references.update(environment for tool in case.tools for environment in tool.required_environments)
+        environment_references.update(
+            environment for scorer in case.scorers for environment in scorer.required_environments
+        )
         return CapabilityTask(
             objective=case.objective,
             initial_messages=initial_messages,
@@ -608,6 +648,8 @@ class CapabilitySuiteRunner:
             limits=case.limits,
             source=source,
             expected_evidence=case.expected_evidence,
+            completion_tool_name=case.completion_tool_name,
+            continue_prompt=case.continue_prompt,
         )
 
     async def _apply_scorers_async(
@@ -616,6 +658,7 @@ class CapabilitySuiteRunner:
         case: CapabilityCaseManifest,
         result: CapabilityTaskResult,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None,
     ) -> CapabilityTaskResult:
         if not case.scorers:
             return result
@@ -626,7 +669,14 @@ class CapabilitySuiteRunner:
         for scorer_manifest in case.scorers:
             try:
                 scorer = self._scorer_registry.build(kind=scorer_manifest.kind, config=scorer_manifest.config)
-                scores.extend(await scorer.score_async(result=result, objective=case.objective, session=session))
+                scores.extend(
+                    await scorer.score_async(
+                        result=result,
+                        objective=case.objective,
+                        session=session,
+                        cancellation_event=cancellation_event,
+                    )
+                )
             except Exception as error:
                 errors.append(
                     ErrorEvidence(

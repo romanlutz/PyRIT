@@ -382,14 +382,13 @@ def test_inventory_is_deterministic_and_reports_unknown_symbol(arc_source_root: 
     assert first.unsupported_symbols == ()
 
     source = arc_source_root / "src" / "inspect_evals" / "arc" / "unknown.py"
-    source.write_text("from inspect_ai.agent import Agent\n", encoding="utf-8")
+    source.write_text("from inspect_ai.agent import handoff\n", encoding="utf-8")
     inventory = inventory_inspect_api_usage(
         source_root=arc_source_root,
         profile=profile,
         source_files=(source,),
     )
-    assert "inspect_ai.agent" in inventory.unsupported_symbols
-    assert "inspect_ai.agent.Agent" in inventory.unsupported_symbols
+    assert "inspect_ai.agent.handoff" in inventory.unsupported_symbols
 
 
 def test_loader_rejects_unknown_symbol_in_imported_source_module(tmp_path: Path) -> None:
@@ -397,7 +396,7 @@ def test_loader_rejects_unknown_symbol_in_imported_source_module(tmp_path: Path)
     package = root / "src" / "inspect_evals"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "helper.py").write_text("from inspect_ai.agent import Agent\n", encoding="utf-8")
+    (package / "helper.py").write_text("from inspect_ai.agent import handoff\n", encoding="utf-8")
     (package / "task.py").write_text(
         "from inspect_ai import Task, task\nfrom inspect_evals import helper\n",
         encoding="utf-8",
@@ -410,7 +409,7 @@ def test_loader_rejects_unknown_symbol_in_imported_source_module(tmp_path: Path)
             verify_source_revision=False,
         )
 
-    assert error.value.symbol == "inspect_ai.agent"
+    assert error.value.symbol == "inspect_ai.agent.handoff"
 
 
 def test_loader_rejects_unknown_symbols_before_execution(tmp_path: Path) -> None:
@@ -421,7 +420,7 @@ def test_loader_rejects_unknown_symbols_before_execution(tmp_path: Path) -> None
     sentinel = tmp_path / "executed"
     (package / "unknown.py").write_text(
         f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n"
-        "from inspect_ai.agent import Agent\n",
+        "from inspect_ai.agent import handoff\n",
         encoding="utf-8",
     )
 
@@ -432,7 +431,7 @@ def test_loader_rejects_unknown_symbols_before_execution(tmp_path: Path) -> None
             verify_source_revision=False,
         )
 
-    assert error.value.symbol == "inspect_ai.agent"
+    assert error.value.symbol == "inspect_ai.agent.handoff"
     assert error.value.source_profile == PINNED_INSPECT_EVALS_PROFILE.profile_id
     assert "Remediation:" in str(error.value)
     assert not sentinel.exists()

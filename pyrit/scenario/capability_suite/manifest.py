@@ -179,6 +179,13 @@ class CaseToolManifest(BaseModel):
 
     declaration: ToolDeclaration
     implementation: ToolImplementationManifest
+    required_environments: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_unique_required_environments(self) -> CaseToolManifest:
+        if len(self.required_environments) != len(set(self.required_environments)):
+            raise ValueError(f"Tool '{self.declaration.name}' has duplicate required environment names.")
+        return self
 
 
 class CaseSetupStepManifest(BaseModel):
@@ -256,6 +263,7 @@ class RunPolicyManifest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     epochs: int = Field(default=1, gt=0)
+    epoch_reducer: Literal["mean", "at_least_1"] = "mean"
     attempts: int = Field(default=1, gt=0)
     max_retries: int = Field(default=0, ge=0)
     max_concurrency: int = Field(default=1, gt=0)
@@ -273,14 +281,18 @@ class CapabilityCaseManifest(BaseModel):
     modalities: tuple[PromptDataType, ...] = ()
     assets: tuple[CaseAssetManifest, ...] = ()
     tools: tuple[CaseToolManifest, ...] = ()
+    sandbox_provider: SandboxProviderManifest | None = None
     sandbox_tools_prefix: str | None = None
     sandbox_tools_default_environment: str | None = None
     sandbox_tools_allowed_environments: tuple[str, ...] = ()
     sandbox_tools_default_user: str | None = None
     sandbox_tools_allow_user_override: bool = True
     sandbox_tools_include_file_tools: bool = True
+    sandbox_environment_workdirs: dict[str, str] = Field(default_factory=dict)
     setup: tuple[CaseSetupStepManifest, ...] = ()
     limits: CapabilityLimits = Field(default_factory=CapabilityLimits)
+    completion_tool_name: str | None = None
+    continue_prompt: str | None = None
     scorers: tuple[CaseScorerManifest, ...] = ()
     expected_evidence: tuple[ExpectedEvidence, ...] = ()
     source: CapabilitySource | None = None
@@ -323,6 +335,8 @@ class CapabilityCaseManifest(BaseModel):
                 raise ValueError("Sandbox tool default environment must be present in the allowed environment list.")
         if self.sandbox_tools_default_user is not None and self.sandbox_tools_include_file_tools:
             raise ValueError("Sandbox file tools must be disabled when a default execution user is configured.")
+        if any(not path.startswith("/") for path in self.sandbox_environment_workdirs.values()):
+            raise ValueError("Sandbox environment working directories must be absolute container paths.")
         if self.runnable == (self.unsupported_reason is not None):
             raise ValueError("Non-runnable cases require exactly one 'unsupported_reason'.")
         return self

@@ -24,7 +24,11 @@ class CapabilitySuiteAggregate:
     score_distribution: dict[str, int] = field(default_factory=dict)
 
 
-def aggregate_attempts(attempts: tuple[CapabilitySuiteAttemptRecord, ...]) -> CapabilitySuiteAggregate:
+def aggregate_attempts(
+    attempts: tuple[CapabilitySuiteAttemptRecord, ...],
+    *,
+    epoch_reducer: str = "mean",
+) -> CapabilitySuiteAggregate:
     """
     Compute aggregate counts, rates, and score statistics over every preserved attempt.
 
@@ -37,12 +41,16 @@ def aggregate_attempts(attempts: tuple[CapabilitySuiteAttemptRecord, ...]) -> Ca
 
     Returns:
         CapabilitySuiteAggregate: The computed aggregate.
+
+    Raises:
+        ValueError: If ``epoch_reducer`` is unknown.
     """
     outcome_counts: dict[str, int] = {}
     task_outcome_counts: dict[str, int] = {}
     score_values: list[float] = []
     score_distribution: dict[str, int] = {}
 
+    grouped_score_values: dict[tuple[str, int, int], list[tuple[float, str]]] = {}
     for attempt in attempts:
         outcome_counts[attempt.outcome_kind.value] = outcome_counts.get(attempt.outcome_kind.value, 0) + 1
         if attempt.task_result is None:
@@ -50,7 +58,7 @@ def aggregate_attempts(attempts: tuple[CapabilitySuiteAttemptRecord, ...]) -> Ca
         task_outcome_counts[attempt.task_result.outcome.value] = (
             task_outcome_counts.get(attempt.task_result.outcome.value, 0) + 1
         )
-        for score in attempt.task_result.scores:
+        for score_index, score in enumerate(attempt.task_result.scores):
             if score.score_type == "true_false":
                 value = 1.0 if score.score_value.lower() == "true" else 0.0
                 bucket = score.score_value.lower()
@@ -59,8 +67,20 @@ def aggregate_attempts(attempts: tuple[CapabilitySuiteAttemptRecord, ...]) -> Ca
                 bucket = f"{round(value, 1):.1f}"
             else:
                 continue
+            if epoch_reducer == "at_least_1" and attempt.outcome_kind is not AttemptOutcomeKind.RETRY:
+                key = (attempt.case_id, attempt.repetition, score_index)
+                grouped_score_values.setdefault(key, []).append((value, bucket))
+            else:
+                score_values.append(value)
+                score_distribution[bucket] = score_distribution.get(bucket, 0) + 1
+
+    if epoch_reducer == "at_least_1":
+        for values in grouped_score_values.values():
+            value, bucket = max(values, key=lambda item: item[0])
             score_values.append(value)
             score_distribution[bucket] = score_distribution.get(bucket, 0) + 1
+    elif epoch_reducer != "mean":
+        raise ValueError(f"Unsupported epoch reducer '{epoch_reducer}'.")
 
     total_attempts = len(attempts)
     final_attempts = [attempt for attempt in attempts if attempt.outcome_kind is not AttemptOutcomeKind.RETRY]

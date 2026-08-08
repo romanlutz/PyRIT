@@ -37,6 +37,7 @@ from pyrit.sandbox import SandboxExecRequest, SandboxOperationStatus
 from pyrit.scenario.capability_suite.manifest import validate_safe_relative_path
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Mapping
 
     from pyrit.executor.capability import CapabilityResultScorer, CapabilityTaskResult
@@ -52,6 +53,7 @@ class CapabilitySuiteScorer(Protocol):
         result: CapabilityTaskResult,
         objective: str,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None = None,
     ) -> list[Score]:
         """Score a completed attempt, optionally using the still-open sandbox session."""
 
@@ -69,6 +71,7 @@ class ResultOnlyScorerAdapter:
         result: CapabilityTaskResult,
         objective: str,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None = None,
     ) -> list[Score]:
         """
         Score using only the completed result, ignoring the sandbox session.
@@ -76,7 +79,7 @@ class ResultOnlyScorerAdapter:
         Returns:
             list[Score]: Scores produced by the wrapped result scorer.
         """
-        _ = session
+        _ = session, cancellation_event
         return await self._scorer.score_result_async(result=result, objective=objective)
 
 
@@ -359,6 +362,7 @@ class SandboxFileScorer:
         result: CapabilityTaskResult,
         objective: str,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None = None,
     ) -> list[Score]:
         """
         Read the configured file from the live sandbox and compare hash/content.
@@ -366,6 +370,7 @@ class SandboxFileScorer:
         Returns:
             list[Score]: A single ``true_false`` score.
         """
+        del cancellation_event
         environment = session.get_environment(self._environment)
         read_result = await environment.read_file_async(path=self._path)
         matched = read_result.status is SandboxOperationStatus.SUCCEEDED
@@ -437,6 +442,7 @@ class SandboxCommandScorer:
         result: CapabilityTaskResult,
         objective: str,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None = None,
     ) -> list[Score]:
         """
         Run the configured command in the live sandbox and compare its exit code.
@@ -446,7 +452,8 @@ class SandboxCommandScorer:
         """
         environment = session.get_environment(self._environment)
         exec_result = await environment.exec_async(
-            request=SandboxExecRequest(argv=self._argv, shell_script=self._shell_script)
+            request=SandboxExecRequest(argv=self._argv, shell_script=self._shell_script),
+            cancellation_event=cancellation_event,
         )
         matched = (
             exec_result.status is SandboxOperationStatus.SUCCEEDED and exec_result.exit_code == self._expected_exit_code
@@ -522,6 +529,7 @@ class SandboxStateMatchScorer:
         result: CapabilityTaskResult,
         objective: str,
         session: SandboxSession,
+        cancellation_event: asyncio.Event | None = None,
     ) -> list[Score]:
         """
         Read sandbox state before cleanup and compare it with the submitted response.
@@ -531,7 +539,8 @@ class SandboxStateMatchScorer:
         """
         environment = session.get_environment(self._environment)
         exec_result = await environment.exec_async(
-            request=SandboxExecRequest(argv=self._argv, shell_script=self._shell_script)
+            request=SandboxExecRequest(argv=self._argv, shell_script=self._shell_script),
+            cancellation_event=cancellation_event,
         )
         state = exec_result.stdout.decode("utf-8", errors="replace").strip()
         response = _final_message_text(result=result, memory=self._memory).strip()

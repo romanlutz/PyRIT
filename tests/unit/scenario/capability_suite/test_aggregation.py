@@ -48,12 +48,13 @@ def _attempt(
     task_result: CapabilityTaskResult | None = None,
     case_id: str = "case-1",
     attempt_number: int = 1,
+    epoch: int = 1,
 ) -> CapabilitySuiteAttemptRecord:
     return CapabilitySuiteAttemptRecord(
         attempt_key=f"{case_id}:epoch1:run1:try{attempt_number}",
         attempt_id=uuid.uuid4(),
         case_id=case_id,
-        epoch=1,
+        epoch=epoch,
         repetition=1,
         attempt_number=attempt_number,
         outcome_kind=outcome_kind,
@@ -148,3 +149,29 @@ def test_aggregate_attempts_score_mean_and_distribution_float_scale() -> None:
     assert aggregate.score_count == 2
     assert aggregate.score_mean == 0.5
     assert aggregate.score_distribution == {"0.2": 1, "0.8": 1}
+
+
+def test_aggregate_attempts_at_least_one_reduces_epochs_per_case() -> None:
+    attempts = (
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(outcome=CapabilityOutcome.COMPLETED, scores=(_score(value="False"),)),
+            epoch=1,
+        ),
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(outcome=CapabilityOutcome.COMPLETED, scores=(_score(value="True"),)),
+            epoch=2,
+        ),
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(outcome=CapabilityOutcome.COMPLETED, scores=(_score(value="False"),)),
+            epoch=3,
+        ),
+    )
+
+    aggregate = aggregate_attempts(attempts, epoch_reducer="at_least_1")
+
+    assert aggregate.score_count == 1
+    assert aggregate.score_mean == 1.0
+    assert aggregate.score_distribution == {"true": 1}

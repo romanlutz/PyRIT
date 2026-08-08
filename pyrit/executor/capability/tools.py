@@ -71,6 +71,8 @@ class ToolExecutionOutput(BaseModel):
     artifacts: tuple[ToolArtifact, ...] = ()
     evidence: tuple[CapabilityEvidence, ...] = ()
     side_effect_completed: bool = False
+    completion_answer: str | None = None
+    continuation_message: str | None = None
 
 
 class ToolExecutionContext(BaseModel):
@@ -277,6 +279,8 @@ class ToolExecutionRecord:
     error_evidence: tuple[ErrorEvidence, ...] = ()
     artifact_evidence: tuple[ArtifactEvidence, ...] = ()
     additional_evidence: tuple[CapabilityEvidence, ...] = ()
+    completion_answer: str | None = None
+    continuation_message: str | None = None
 
 
 class CapabilityToolRuntime:
@@ -625,6 +629,8 @@ class CapabilityToolRuntime:
             execution_evidence=(evidence,),
             artifact_evidence=artifacts,
             additional_evidence=output.evidence,
+            completion_answer=output.completion_answer,
+            continuation_message=output.continuation_message,
         )
 
     @staticmethod
