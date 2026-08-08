@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ class _ExecutionState:
     """Mutable state kept private while constructing an immutable result."""
 
     started_at: datetime
+    started_at_monotonic: float = field(default_factory=time.monotonic)
     message_piece_ids: list[uuid.UUID] = field(default_factory=list)
     final_message_piece_ids: list[uuid.UUID] = field(default_factory=list)
     evidence: list[CapabilityEvidence] = field(default_factory=list)
@@ -198,7 +200,6 @@ class CapabilityTaskExecutor:
                 usage_limit = self._usage_limit(case=case, state=state)
                 calls = self._extract_tool_calls(response=response)
                 tool_limit = self._tool_call_limit(case=case, state=state, additional_calls=len(calls))
-                state.tool_calls += len(calls)
                 if usage_limit is not None:
                     if calls:
                         result_message = self._error_results_message(
@@ -306,6 +307,7 @@ class CapabilityTaskExecutor:
                         reason=CapabilityTerminationReason.LIMIT,
                         detail=tool_limit,
                     )
+                state.tool_calls += len(calls)
                 prepared, approvals = await self._within_wall_clock_async(
                     operation=self._tool_runtime.prepare_calls_async(
                         calls=calls,
@@ -462,7 +464,7 @@ class CapabilityTaskExecutor:
         case: CapabilityCase,
         state: _ExecutionState,
     ) -> _AwaitedT:
-        elapsed = (datetime.now(tz=timezone.utc) - state.started_at).total_seconds()
+        elapsed = time.monotonic() - state.started_at_monotonic
         remaining = max(0, case.task.limits.max_wall_clock_seconds - elapsed)
         try:
             return await asyncio.wait_for(operation, timeout=remaining)
@@ -787,7 +789,7 @@ class CapabilityTaskExecutor:
             detail = f"Turn limit of {limits.max_turns} reached."
         elif state.model_generations >= limits.max_model_generations:
             detail = f"Model-generation limit of {limits.max_model_generations} reached."
-        elif (datetime.now(tz=timezone.utc) - state.started_at).total_seconds() >= limits.max_wall_clock_seconds:
+        elif time.monotonic() - state.started_at_monotonic >= limits.max_wall_clock_seconds:
             detail = f"Wall-clock limit of {limits.max_wall_clock_seconds} seconds reached."
         else:
             detail = CapabilityTaskExecutor._usage_limit(case=case, state=state)

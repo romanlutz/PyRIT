@@ -26,14 +26,19 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import shutil
+import signal
+import stat
+import subprocess
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
+from appdirs import user_state_dir
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from pyrit.executor.capability.models import SandboxOperationEvidence
@@ -64,11 +69,13 @@ if TYPE_CHECKING:
     from pyrit.models import JSONValue
 
 _ENVIRONMENT_LABEL = "com.pyrit.sandbox.environment"
+_RESOURCE_OWNER_LABEL = "com.pyrit.sandbox.owner"
 _COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 _COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 _MAX_CLI_OUTPUT_BYTES = 4_194_304
 _DEFAULT_IDLE_COMMAND: tuple[str, ...] = ("sleep", "infinity")
 _PROJECT_NAME_INVALID_CHARS = re.compile(r"[^a-z0-9_-]")
+_OWNERSHIP_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _DANGEROUS_CAPABILITIES = frozenset(
     {
         "ALL",
@@ -106,6 +113,7 @@ _DAEMON_UNAVAILABLE_MARKERS = (
     "dockerdesktoplinuxengine",
     "pipe/docker_engine",
 )
+_RETRYABLE_LIFECYCLE_OPERATIONS = frozenset({"config", "network_ls", "ps", "volume_ls"})
 
 
 class DockerSandboxError(RuntimeError):
@@ -171,6 +179,17 @@ class DockerSecurityPolicyViolationError(DockerSandboxError):
                 "corresponding DockerSecurityPolicy 'allow_*' flag to opt in explicitly."
             ),
             error_code="docker_security_policy_violation",
+        )
+
+
+class DockerStateSecurityError(DockerSandboxError):
+    """Durable Docker sandbox state is not safe to trust."""
+
+    def __init__(self, *, detail: str) -> None:
+        """Initialize a fail-closed state security error."""
+        super().__init__(
+            message=f"Docker sandbox state is not safe to use: {detail}",
+            error_code="docker_state_untrusted",
         )
 
 
@@ -267,6 +286,7 @@ async def _run_cli_async(
         _CliOutput: Captured stdout and stderr, bounded to an upper byte limit.
 
     Raises:
+        asyncio.CancelledError: If the caller cancels the invocation after its process starts.
         DockerCliUnavailableError: If the executable could not be found.
         _CliInvocationError: If the command timed out or exited non-zero.
     """
@@ -278,16 +298,28 @@ async def _run_cli_async(
                 stdin=asyncio.subprocess.PIPE if input_bytes is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name != "nt",
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
         except FileNotFoundError as error:
             raise DockerCliUnavailableError(tool=argv[0], detail=str(error)) from error
+        communication = asyncio.create_task(process.communicate(input=input_bytes))
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(input=input_bytes), timeout=timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-            raise _CliInvocationError(argv=argv, returncode=None, stdout=b"", stderr=b"", timed_out=True) from None
+            await _terminate_cli_process_tree_async(process=process)
+            stdout, stderr = await communication
+            raise _CliInvocationError(
+                argv=argv,
+                returncode=None,
+                stdout=stdout[:_MAX_CLI_OUTPUT_BYTES],
+                stderr=stderr[:_MAX_CLI_OUTPUT_BYTES],
+                timed_out=True,
+            ) from None
+        except asyncio.CancelledError:
+            await _terminate_cli_process_tree_async(process=process)
+            await communication
+            raise
     stdout = stdout[:_MAX_CLI_OUTPUT_BYTES]
     stderr = stderr[:_MAX_CLI_OUTPUT_BYTES]
     if process.returncode != 0:
@@ -295,6 +327,32 @@ async def _run_cli_async(
             argv=argv, returncode=process.returncode, stdout=stdout, stderr=stderr, timed_out=False
         )
     return _CliOutput(stdout=stdout, stderr=stderr)
+
+
+async def _terminate_cli_process_tree_async(*, process: Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name != "nt":
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        return
+    try:
+        terminator = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(process.pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await terminator.wait()
+        if terminator.returncode != 0 and process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+    except OSError:
+        with suppress(ProcessLookupError):
+            process.kill()
 
 
 def _is_transient_cli_error(error: BaseException) -> bool:
@@ -307,9 +365,17 @@ def _is_transient_cli_error(error: BaseException) -> bool:
     if not isinstance(error, _CliInvocationError):
         return False
     if error.timed_out:
-        return True
+        return False
     stderr_text = error.stderr.decode("utf-8", errors="replace").lower()
     return any(marker in stderr_text for marker in _TRANSIENT_STDERR_MARKERS)
+
+
+def _cli_failure_detail(*, error: _CliInvocationError, timeout_seconds: float) -> str:
+    output = _stderr_excerpt(error.stderr) or _stderr_excerpt(error.stdout)
+    if error.timed_out:
+        prefix = f"timed out after {timeout_seconds:g} seconds"
+        return f"{prefix}: {output}" if output else prefix
+    return output or f"exit code {error.returncode}"
 
 
 def _is_daemon_unavailable_error(error: _CliInvocationError) -> bool:
@@ -344,6 +410,20 @@ def _project_name_for_session(*, prefix: str, session_id: str, attempt_id: str) 
     collision_suffix = _hash_bytes(f"{session_id}\0{attempt_id}".encode())[:12]
     available_session_length = max(1, 63 - len(prefix) - len(collision_suffix) - 2)
     return f"{prefix}-{sanitized[:available_session_length]}-{collision_suffix}"
+
+
+def _is_provider_project_name(*, project_name: str, prefix: str) -> bool:
+    """
+    Check whether a durable-state key could have been generated by this provider.
+
+    Returns:
+        bool: True for a bounded Compose project name under the configured prefix.
+    """
+    return (
+        0 < len(project_name) <= 63
+        and project_name.startswith(f"{prefix}-")
+        and _PROJECT_NAME_INVALID_CHARS.search(project_name) is None
+    )
 
 
 def _resolve_build_context(*, build_context: Path, project_context: Path) -> Path:
@@ -432,6 +512,78 @@ def _synthesize_compose_document(
     return document
 
 
+def _service_network_names(service: Mapping[str, Any]) -> tuple[str, ...]:
+    """
+    Return the Compose networks used by one service.
+
+    Returns:
+        tuple[str, ...]: Referenced top-level network names. An empty tuple means
+            networking is explicitly disabled with ``network_mode: none``.
+    """
+    network_mode = str(service.get("network_mode") or "")
+    if network_mode == "none":
+        return ()
+    raw_networks = service.get("networks")
+    if raw_networks is None:
+        return ("default",)
+    if isinstance(raw_networks, dict):
+        return tuple(str(name) for name in raw_networks)
+    if isinstance(raw_networks, list):
+        return tuple(str(name) for name in raw_networks)
+    return ()
+
+
+def _synthesize_policy_overlay(
+    *,
+    resolved_document: Mapping[str, Any],
+    policy: DockerSecurityPolicy,
+    ownership_id: str,
+) -> dict[str, Any]:
+    """
+    Build the final Compose overlay for network and cleanup ownership policy.
+
+    Existing service-to-network relationships are left intact. When egress is
+    denied, every provider-managed network is made internal, preserving service
+    DNS and connectivity without retaining an external route.
+
+    Returns:
+        dict[str, Any]: A JSON-serializable Compose overlay.
+    """
+    resolved_services = resolved_document.get("services")
+    services = resolved_services if isinstance(resolved_services, dict) else {}
+    overlay: dict[str, Any] = {
+        "services": {str(name): {"labels": {_RESOURCE_OWNER_LABEL: ownership_id}} for name in services}
+    }
+
+    resolved_networks = resolved_document.get("networks")
+    networks = resolved_networks if isinstance(resolved_networks, dict) else {}
+    network_names = {str(name) for name in networks}
+    for service in services.values():
+        if isinstance(service, dict):
+            network_names.update(_service_network_names(service))
+    network_overlay: dict[str, Any] = {}
+    for name in sorted(network_names):
+        definition = networks.get(name)
+        if isinstance(definition, dict) and definition.get("external"):
+            continue
+        network_overlay[name] = {"labels": {_RESOURCE_OWNER_LABEL: ownership_id}}
+        if not policy.allow_egress:
+            network_overlay[name]["internal"] = True
+    if network_overlay:
+        overlay["networks"] = network_overlay
+
+    resolved_volumes = resolved_document.get("volumes")
+    volumes = resolved_volumes if isinstance(resolved_volumes, dict) else {}
+    volume_overlay = {
+        str(name): {"labels": {_RESOURCE_OWNER_LABEL: ownership_id}}
+        for name, definition in volumes.items()
+        if not isinstance(definition, dict) or not definition.get("external")
+    }
+    if volume_overlay:
+        overlay["volumes"] = volume_overlay
+    return overlay
+
+
 def _write_json_file(*, path: Path, document: dict[str, Any]) -> None:
     """Write a JSON document to disk (invoked only via ``asyncio.to_thread``)."""
     path.write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -507,6 +659,25 @@ def _scan_security_violations(*, resolved_document: Mapping[str, Any], policy: D
     services: Mapping[str, Any] = resolved_document.get("services", {})
     for name, service in services.items():
         violations.extend(_scan_service_violations(name=name, service=service, policy=policy))
+    if not policy.allow_egress:
+        networks: Mapping[str, Any] = resolved_document.get("networks", {})
+        for name, service in services.items():
+            network_mode = str(service.get("network_mode") or "")
+            if network_mode and network_mode != "none":
+                violations.append(
+                    f"service '{name}' uses network_mode: {network_mode}, which bypasses internal Compose networks"
+                )
+                continue
+            for network_name in _service_network_names(service):
+                definition = networks.get(network_name)
+                if not isinstance(definition, dict):
+                    violations.append(
+                        f"service '{name}' uses network '{network_name}' without an internal network definition"
+                    )
+                elif definition.get("external"):
+                    violations.append(f"service '{name}' uses external network '{network_name}'")
+                elif definition.get("internal") is not True:
+                    violations.append(f"service '{name}' uses network '{network_name}' with internal: false")
     secrets: Mapping[str, Any] = resolved_document.get("secrets", {})
     if not policy.allow_unrestricted_secrets:
         for secret_name, secret_def in secrets.items():
@@ -582,6 +753,83 @@ def _unlock_file(handle: Any) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _validate_state_owner(*, metadata: os.stat_result, description: str) -> None:
+    """
+    Reject a POSIX state object owned by another account.
+
+    Raises:
+        DockerStateSecurityError: If the state object belongs to another user.
+    """
+    get_effective_user_id = getattr(os, "geteuid", None)
+    if get_effective_user_id is not None and metadata.st_uid != get_effective_user_id():
+        raise DockerStateSecurityError(detail=f"{description} is owned by another user")
+
+
+def _ensure_private_state_directory(path: Path) -> None:
+    """
+    Create or validate a private, non-symlink state directory.
+
+    Raises:
+        DockerStateSecurityError: If the directory cannot be trusted.
+    """
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise DockerStateSecurityError(detail=f"state directory '{path}' is not a real directory")
+    _validate_state_owner(metadata=metadata, description=f"state directory '{path}'")
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def _open_state_file(path: Path) -> TextIO:
+    """
+    Open a private regular state file without following POSIX symlinks.
+
+    Returns:
+        TextIO: The securely opened state file.
+
+    Raises:
+        DockerStateSecurityError: If the file cannot be trusted or opened securely.
+    """
+    _ensure_private_state_directory(path.parent)
+    if path.is_symlink():
+        raise DockerStateSecurityError(detail=f"state file '{path}' is a symbolic link")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise DockerStateSecurityError(detail=f"state file '{path}' could not be opened securely ({error})") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise DockerStateSecurityError(detail=f"state file '{path}' is not a regular file")
+        _validate_state_owner(metadata=metadata, description=f"state file '{path}'")
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, "r+", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _decode_state(raw: str) -> dict[str, Any]:
+    """
+    Decode and validate the durable state document.
+
+    Returns:
+        dict[str, Any]: The decoded state mapping.
+
+    Raises:
+        DockerStateSecurityError: If the state root is not an object.
+    """
+    decoded = json.loads(raw) if raw.strip() else {}
+    if not isinstance(decoded, dict):
+        raise DockerStateSecurityError(detail="state document root is not an object")
+    return decoded
+
+
 def _read_state_file(path: Path) -> dict[str, Any]:
     """
     Read the durable provider state file under a cross-process advisory lock.
@@ -591,16 +839,14 @@ def _read_state_file(path: Path) -> dict[str, Any]:
     Returns:
         dict[str, Any]: The current project-name-to-record state mapping.
     """
-    if not path.exists():
-        return {}
-    with open(path, "a+", encoding="utf-8") as handle:
+    with _open_state_file(path) as handle:
         _lock_file(handle)
         try:
             handle.seek(0)
             raw = handle.read()
         finally:
             _unlock_file(handle)
-    return json.loads(raw) if raw.strip() else {}
+    return _decode_state(raw)
 
 
 def _update_state_file(path: Path, mutate: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
@@ -609,13 +855,12 @@ def _update_state_file(path: Path, mutate: Callable[[dict[str, Any]], dict[str, 
 
     Invoked only via ``asyncio.to_thread``.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+", encoding="utf-8") as handle:
+    with _open_state_file(path) as handle:
         _lock_file(handle)
         try:
             handle.seek(0)
             raw = handle.read()
-            state = json.loads(raw) if raw.strip() else {}
+            state = _decode_state(raw)
             updated = mutate(state)
             handle.seek(0)
             handle.truncate()
@@ -665,6 +910,50 @@ def _is_container_running(record: Mapping[str, Any]) -> bool:
         bool: True if the container's reported state is "running".
     """
     return str(record.get("State", "")).lower() == "running"
+
+
+def _process_is_alive(process_id: int) -> bool:
+    """
+    Conservatively determine whether a durable-state owner may still be alive.
+
+    Permission errors and PID reuse fail closed by retaining the state record.
+
+    Returns:
+        bool: True when cleanup must not treat the owner as crashed.
+    """
+    if process_id <= 0:
+        return True
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        invalid_parameter = 87
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(process_query_limited_information, False, process_id)
+        if not handle:
+            return ctypes.get_last_error() != invalid_parameter
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _container_health_state(record: Mapping[str, Any]) -> str | None:
@@ -2007,17 +2296,18 @@ class DockerSandboxProvider(SandboxProvider):
     contexts are resolved to absolute paths before synthesis, preserving the caller's
     intended relative context regardless of where the temporary file lives), and any
     ``DockerSandboxProviderConfig.compose_files`` are layered on top via repeated
-    ``-f`` flags. The combined definition is resolved once with
-    ``docker compose config --format json`` (which works without a running daemon) and
+    ``-f`` flags. The combined definition is resolved with
+    ``docker compose config --format json`` (which works without a running daemon),
+    hardened with a final network and ownership-label overlay, resolved again, and
     scanned against ``DockerSandboxProviderConfig.security_policy`` before any
     container is ever created.
 
     Per-attempt sessions get a collision-resistant Compose project name derived from
     the session's UUID4 identifier, so concurrent attempts never collide. A durable,
-    advisory-locked JSON state file records every live project so that
-    ``cleanup_orphans_async`` can find and remove containers/networks/volumes left
-    behind by a crashed process, strictly scoped to this provider's own generated
-    project names — it never touches unrelated Docker resources.
+    advisory-locked JSON state file in the user's state directory records every live
+    project so that ``cleanup_orphans_async`` can find resources left behind by a
+    crashed process. Cleanup requires both that private record and the corresponding
+    random PyRIT ownership label on each Docker resource.
     """
 
     def __init__(
@@ -2034,7 +2324,9 @@ class DockerSandboxProvider(SandboxProvider):
         self._project_context = (self._config.project_context or Path.cwd()).resolve()
         self._compose_file_paths: tuple[Path, ...] = ()
         self._synthesized_compose_path: Path | None = None
+        self._policy_overlay_path: Path | None = None
         self._synthesized_temp_dir: Path | None = None
+        self._ownership_id = secrets.token_hex(16)
         self._resolved_services: dict[str, Any] = {}
         self._service_names: tuple[str, ...] = ()
         self._images_ready = False
@@ -2050,8 +2342,24 @@ class DockerSandboxProvider(SandboxProvider):
         return "docker"
 
     def _resolve_state_path(self) -> Path:
-        state_dir = self._config.state_dir or Path(tempfile.gettempdir()) / "pyrit-sandbox-docker"
+        state_dir = self._config.state_dir or Path(user_state_dir("pyrit")) / "sandbox" / "docker"
         return state_dir / f"{self._config.project_name_prefix}.state.json"
+
+    async def _ensure_synthesized_temp_dir_async(self) -> Path:
+        """
+        Create the private temporary Compose directory once.
+
+        Returns:
+            Path: The provider's temporary Compose directory.
+        """
+        if self._synthesized_temp_dir is None:
+            temp_dir = await asyncio.to_thread(
+                tempfile.mkdtemp,
+                "",
+                f"{self._config.project_name_prefix}-compose-",
+            )
+            self._synthesized_temp_dir = Path(str(temp_dir))
+        return self._synthesized_temp_dir
 
     async def _check_cli_available_async(self) -> None:
         """
@@ -2085,10 +2393,20 @@ class DockerSandboxProvider(SandboxProvider):
             project_context=self._project_context,
             security_policy=self._config.security_policy,
         )
-        temp_dir = await asyncio.to_thread(tempfile.mkdtemp, "", f"{self._config.project_name_prefix}-compose-")
-        self._synthesized_temp_dir = Path(str(temp_dir))
-        self._synthesized_compose_path = self._synthesized_temp_dir / "compose.json"
+        temp_dir = await self._ensure_synthesized_temp_dir_async()
+        self._synthesized_compose_path = temp_dir / "compose.json"
         await asyncio.to_thread(_write_json_file, path=self._synthesized_compose_path, document=document)
+
+    async def _synthesize_policy_overlay_async(self, *, resolved_document: Mapping[str, Any]) -> None:
+        """Write the final network and resource-ownership Compose overlay."""
+        document = _synthesize_policy_overlay(
+            resolved_document=resolved_document,
+            policy=self._config.security_policy,
+            ownership_id=self._ownership_id,
+        )
+        temp_dir = await self._ensure_synthesized_temp_dir_async()
+        self._policy_overlay_path = temp_dir / "policy-overlay.json"
+        await asyncio.to_thread(_write_json_file, path=self._policy_overlay_path, document=document)
 
     def _compose_file_args(self) -> list[str]:
         """
@@ -2105,6 +2423,8 @@ class DockerSandboxProvider(SandboxProvider):
             args.extend(["-f", str(self._synthesized_compose_path)])
         for compose_file in self._compose_file_paths:
             args.extend(["-f", str(compose_file)])
+        if self._policy_overlay_path is not None:
+            args.extend(["-f", str(self._policy_overlay_path)])
         return args
 
     def _compose_base_argv(self, *, project_name: str) -> list[str]:
@@ -2139,11 +2459,9 @@ class DockerSandboxProvider(SandboxProvider):
         """
         Run one lifecycle CLI command with narrow, pre-side-effect transient retry.
 
-        This is the only place a retry policy is applied, and only for idempotent
-        lifecycle/infrastructure commands (``config``/``build``/``up``/``down``,
-        ``ps``, ``network``/``volume`` list/remove) — never for ``docker exec`` against
-        a running workload, which uses a separate single-attempt path so no
-        model-visible side effect is ever silently duplicated.
+        This is the only place a retry policy is applied. Retries are restricted to
+        read-only ``config``/``ps``/resource-list operations. Mutating lifecycle commands
+        and ``docker exec`` use a single attempt so side effects are not duplicated.
 
         Returns:
             _CliOutput: Captured stdout and stderr.
@@ -2156,7 +2474,7 @@ class DockerSandboxProvider(SandboxProvider):
         """
         timeout = timeout_seconds or self._config.cli_timeout_seconds
         retryer: AsyncRetrying[Any] = AsyncRetrying(
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(3 if operation in _RETRYABLE_LIFECYCLE_OPERATIONS else 1),
             wait=wait_exponential(multiplier=0.5, max=4.0),
             retry=retry_if_exception(_is_transient_cli_error),
             reraise=True,
@@ -2171,11 +2489,12 @@ class DockerSandboxProvider(SandboxProvider):
                 semaphore=self._cli_semaphore,
             )
         except _CliInvocationError as error:
-            if _is_daemon_unavailable_error(error):
+            detail = _cli_failure_detail(error=error, timeout_seconds=timeout)
+            if not error.timed_out and _is_daemon_unavailable_error(error):
                 raise DockerDaemonUnavailableError(detail=_stderr_excerpt(error.stderr)) from error
             if error_factory is not None:
-                raise error_factory(_stderr_excerpt(error.stderr)) from error
-            raise DockerLifecycleError(operation=operation, detail=_stderr_excerpt(error.stderr)) from error
+                raise error_factory(detail) from error
+            raise DockerLifecycleError(operation=operation, detail=detail) from error
 
     async def _resolve_compose_config_async(self) -> dict[str, Any]:
         """
@@ -2206,6 +2525,8 @@ class DockerSandboxProvider(SandboxProvider):
         started_at = _now()
         await self._check_cli_available_async()
         await self._synthesize_compose_if_needed_async()
+        resolved = await self._resolve_compose_config_async()
+        await self._synthesize_policy_overlay_async(resolved_document=resolved)
         resolved = await self._resolve_compose_config_async()
         self._resolved_services = resolved.get("services", {})
         self._service_names = tuple(self._resolved_services)
@@ -2328,6 +2649,8 @@ class DockerSandboxProvider(SandboxProvider):
                 "session_id": session_id,
                 "task_id": task_id,
                 "created_at": _now().isoformat(),
+                "owner_process_id": os.getpid(),
+                "ownership_id": self._ownership_id,
             }
             return state
 
@@ -2344,7 +2667,12 @@ class DockerSandboxProvider(SandboxProvider):
         async with self._state_lock:
             await asyncio.to_thread(_update_state_file, self._state_path, mutate)
 
-    async def _list_containers_by_project_async(self, *, project_name: str) -> list[dict[str, Any]]:
+    async def _list_containers_by_project_async(
+        self,
+        *,
+        project_name: str,
+        ownership_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         List every container (any state) belonging to one Compose project.
 
@@ -2360,22 +2688,25 @@ class DockerSandboxProvider(SandboxProvider):
             "-a",
             "--filter",
             f"label={_COMPOSE_PROJECT_LABEL}={project_name}",
+            "--filter",
+            f"label={_RESOURCE_OWNER_LABEL}={ownership_id or self._ownership_id}",
             "--format",
             "{{json .}}",
         ]
         output = await self._run_lifecycle_cli_async(operation="ps", argv=argv)
         return _parse_ndjson(output.stdout)
 
-    async def _force_remove_project_resources_async(self, *, project_name: str) -> None:
+    async def _force_remove_project_resources_async(self, *, project_name: str, ownership_id: str) -> None:
         """
         Forcibly remove every container, network, and volume for one Compose project.
 
-        Every lookup is strictly scoped to
-        ``label=com.docker.compose.project=<project_name>``, and project names are
-        always generated by this provider (``<prefix>-<sanitized-session-id>``), so
-        this can never touch unrelated Docker resources.
+        Every lookup requires both the Compose project label and the unguessable
+        PyRIT ownership label recorded in private durable state.
         """
-        containers = await self._list_containers_by_project_async(project_name=project_name)
+        containers = await self._list_containers_by_project_async(
+            project_name=project_name,
+            ownership_id=ownership_id,
+        )
         container_ids = [record["ID"] for record in containers if "ID" in record]
         if container_ids:
             await self._run_lifecycle_cli_async(
@@ -2383,7 +2714,10 @@ class DockerSandboxProvider(SandboxProvider):
                 argv=[self._config.docker_executable, "rm", "-f", "-v", *container_ids],
             )
         network_ids = await self._list_project_resource_ids_async(
-            resource="network", project_name=project_name, format_field="{{.ID}}"
+            resource="network",
+            project_name=project_name,
+            ownership_id=ownership_id,
+            format_field="{{.ID}}",
         )
         if network_ids:
             await self._run_lifecycle_cli_async(
@@ -2391,7 +2725,10 @@ class DockerSandboxProvider(SandboxProvider):
                 argv=[self._config.docker_executable, "network", "rm", *network_ids],
             )
         volume_names = await self._list_project_resource_ids_async(
-            resource="volume", project_name=project_name, format_field="{{.Name}}"
+            resource="volume",
+            project_name=project_name,
+            ownership_id=ownership_id,
+            format_field="{{.Name}}",
         )
         if volume_names:
             await self._run_lifecycle_cli_async(
@@ -2400,7 +2737,12 @@ class DockerSandboxProvider(SandboxProvider):
             )
 
     async def _list_project_resource_ids_async(
-        self, *, resource: str, project_name: str, format_field: str
+        self,
+        *,
+        resource: str,
+        project_name: str,
+        ownership_id: str,
+        format_field: str,
     ) -> list[str]:
         """
         List resource identifiers (networks/volumes) scoped to one Compose project.
@@ -2414,6 +2756,8 @@ class DockerSandboxProvider(SandboxProvider):
             "ls",
             "--filter",
             f"label={_COMPOSE_PROJECT_LABEL}={project_name}",
+            "--filter",
+            f"label={_RESOURCE_OWNER_LABEL}={ownership_id}",
             "--format",
             format_field,
         ]
@@ -2431,11 +2775,32 @@ class DockerSandboxProvider(SandboxProvider):
         state = await asyncio.to_thread(_read_state_file, self._state_path)
         async with self._sessions_lock:
             active_projects = {session.project_name for session in self._sessions.values()}
-        orphan_projects = [project_name for project_name in state if project_name not in active_projects]
+        orphan_projects: list[tuple[str, str]] = []
+        for project_name, record in state.items():
+            if project_name in active_projects or not isinstance(record, dict):
+                continue
+            owner_process_id = record.get("owner_process_id")
+            ownership_id = record.get("ownership_id")
+            if (
+                not _is_provider_project_name(
+                    project_name=project_name,
+                    prefix=self._config.project_name_prefix,
+                )
+                or not isinstance(owner_process_id, int)
+                or not isinstance(ownership_id, str)
+                or _OWNERSHIP_ID_PATTERN.fullmatch(ownership_id) is None
+            ):
+                continue
+            if await asyncio.to_thread(_process_is_alive, owner_process_id):
+                continue
+            orphan_projects.append((project_name, ownership_id))
         cleaned_count = 0
-        for project_name in orphan_projects:
+        for project_name, ownership_id in orphan_projects:
             try:
-                await self._force_remove_project_resources_async(project_name=project_name)
+                await self._force_remove_project_resources_async(
+                    project_name=project_name,
+                    ownership_id=ownership_id,
+                )
             except DockerSandboxError:
                 continue
             await self._unregister_session_state_async(project_name=project_name)

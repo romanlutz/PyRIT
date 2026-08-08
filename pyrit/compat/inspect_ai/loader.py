@@ -96,6 +96,21 @@ if TYPE_CHECKING:
 _IMPORT_LOCK = threading.RLock()
 _MODULE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _TASK_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_WORKER_ENVIRONMENT_ALLOWLIST = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+)
 _CONTINUE_PROMPT = (
     "\nPlease proceed to the next step using your best judgement. If you believe you have completed the task, "
     "please call the `submit()` tool with your final answer.\n"
@@ -230,8 +245,9 @@ def load_inspect_eval(
     """
     Execute one trusted pinned task factory and convert its graph to a native suite.
 
-    The source is arbitrary Python and executes with the current process identity.
-    Only source/profile/import containment is provided; this is not a sandbox.
+    The source is arbitrary Python and executes in an isolated worker subprocess
+    with the current operating-system identity. Source/profile/import containment
+    and environment minimization are provided; this is not a security sandbox.
 
     Returns:
         LoadedInspectEval: The compatibility graph, report, and native suite.
@@ -721,16 +737,9 @@ def _run_worker(
         request_path = Path(directory) / "request.json"
         response_path = Path(directory) / "response.json"
         request_path.write_text(json.dumps(request), encoding="utf-8")
-        process_environment = os.environ.copy()
-        process_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        process_environment = _worker_environment()
         completed = _run_worker_process(
-            argv=(
-                sys.executable,
-                "-m",
-                "pyrit.compat.inspect_ai.worker",
-                str(request_path),
-                str(response_path),
-            ),
+            argv=_worker_command(request_path=request_path, response_path=response_path),
             environment=process_environment,
             timeout_seconds=worker_timeout_seconds,
             cancel_event=worker_cancel_event,
@@ -757,6 +766,22 @@ def _run_worker(
         limitations=loaded.report.limitations,
     )
     return LoadedInspectEval(task=loaded.task, suite=loaded.suite, report=report)
+
+
+def _worker_environment() -> dict[str, str]:
+    return {name: value for name in _WORKER_ENVIRONMENT_ALLOWLIST if (value := os.environ.get(name)) is not None}
+
+
+def _worker_command(*, request_path: Path, response_path: Path) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        "-I",
+        "-B",
+        "-m",
+        "pyrit.compat.inspect_ai.worker",
+        str(request_path),
+        str(response_path),
+    )
 
 
 def _run_worker_process(

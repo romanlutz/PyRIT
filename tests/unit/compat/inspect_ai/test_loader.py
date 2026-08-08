@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+import pyrit.compat.inspect_ai.loader as inspect_loader
 from pyrit.compat.inspect_ai import (
     PINNED_INSPECT_EVALS_PROFILE,
     InspectProfileMismatchError,
@@ -32,6 +33,26 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
+
+
+def test_worker_process_uses_isolated_python_and_minimal_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("PYTHONPATH", "untrusted-import-root")
+    monkeypatch.setenv("PATH", "worker-path")
+
+    environment = inspect_loader._worker_environment()
+    command = inspect_loader._worker_command(
+        request_path=tmp_path / "request.json",
+        response_path=tmp_path / "response.json",
+    )
+
+    assert environment["PATH"] == "worker-path"
+    assert "OPENAI_API_KEY" not in environment
+    assert "PYTHONPATH" not in environment
+    assert command[1:4] == ("-I", "-B", "-m")
 
 
 _ARC_SOURCE = """

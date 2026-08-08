@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import itertools
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -301,6 +302,42 @@ async def test_runner_happy_path_single_case_success() -> None:
     assert result.manifest_hash == manifest_hash(manifest)
     assert result.aggregate.total_attempts == 1
     assert result.aggregate.success_rate == 1.0
+
+
+async def test_runner_deduplicates_equivalent_providers_and_builds_off_event_loop() -> None:
+    events: list[tuple[str, str]] = []
+    built_providers: list[FakeSandboxProvider] = []
+    build_threads: list[int] = []
+    registry = SandboxProviderFactoryRegistry()
+
+    def build_provider(config: object) -> FakeSandboxProvider:
+        del config
+        build_threads.append(threading.get_ident())
+        provider = FakeSandboxProvider(
+            session_factory=lambda spec: FakeSandboxSession(spec=spec, events=events, label="shared")
+        )
+        built_providers.append(provider)
+        return provider
+
+    registry.register(provider_type="local", factory=build_provider)
+    manifest = _manifest(
+        cases=(
+            _case("case-1", sandbox_provider=LocalSandboxProviderManifestConfig()),
+            _case("case-2"),
+        )
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=manifest,
+        target=FakeCapabilityTarget(responses=[_text_message(), _text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=registry,
+    )
+
+    result = await runner.run_async()
+
+    assert all(attempt.outcome_kind is AttemptOutcomeKind.SUCCESS for attempt in result.attempts)
+    assert len(built_providers) == 1
+    assert build_threads != [threading.get_ident()]
 
 
 async def test_runner_bounded_concurrency_caps_active_attempts() -> None:

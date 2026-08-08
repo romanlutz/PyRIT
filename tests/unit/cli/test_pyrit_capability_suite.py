@@ -8,10 +8,15 @@ import pytest
 
 from pyrit.cli import pyrit_capability_suite
 from pyrit.compat.inspect_ai import cli as inspect_cli
+from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
 from pyrit.models import Message, TargetResponseMetadata
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
+
+
+def test_default_profile_matches_pinned_compatibility_contract() -> None:
+    assert PINNED_INSPECT_EVALS_PROFILE.profile_id == pyrit_capability_suite._DEFAULT_INSPECT_PROFILE_ID
 
 
 class _ArcTarget(PromptTarget):

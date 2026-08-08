@@ -227,11 +227,9 @@ def construct_response_from_request(
         Message: Constructed response message.
 
     """
-    if request.prompt_metadata:
-        request_metadata = {key: value for key, value in request.prompt_metadata.items() if key != "target_invocation"}
-        prompt_metadata = {**request_metadata, **(prompt_metadata or {})}
-    if prompt_metadata:
-        prompt_metadata.pop("target_invocation", None)
+    request_metadata = {key: value for key, value in request.prompt_metadata.items() if key != "target_invocation"}
+    supplied_metadata = {key: value for key, value in (prompt_metadata or {}).items() if key != "target_invocation"}
+    response_metadata = {**request_metadata, **supplied_metadata}
 
     return Message(
         message_pieces=[
@@ -241,7 +239,7 @@ def construct_response_from_request(
                 conversation_id=request.conversation_id,
                 original_value_data_type=response_type,
                 converted_value_data_type=response_type,
-                prompt_metadata=prompt_metadata or {},
+                prompt_metadata=dict(response_metadata),
                 response_error=error,
             )
             for resp_text in response_text_pieces

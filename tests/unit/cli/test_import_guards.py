@@ -107,6 +107,16 @@ class TestImportGuards:
             f"Move these imports to point-of-use (inside a function/method)."
         )
 
+    def test_capability_suite_help_does_not_load_heavy_modules(self):
+        loaded = _check_forbidden_imports(
+            import_statement="from pyrit.cli.pyrit_capability_suite import _build_parser; _build_parser()",
+            forbidden=_CLI_FORBIDDEN,
+        )
+        assert not loaded, (
+            f"Capability-suite help loaded heavy modules: {loaded}. "
+            f"Move these imports to point-of-use (inside a function/method)."
+        )
+
     def test_import_pyrit_does_not_load_heavy_modules(self):
         """
         `import pyrit` must stay fast and not pull in database or ML libraries.

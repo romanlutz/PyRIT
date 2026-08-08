@@ -180,8 +180,37 @@ async def test_send_prompt_async_request_response_added_to_memory(mock_memory_in
         mock_memory_instance.add_message_to_memory.call_args_list[1][1]["request"].message_pieces[0].original_value
         == "test_response"
     )
+    mock_memory_instance.update_prompt_metadata_by_id.assert_not_called()
 
     assert mock_memory_instance.add_message_to_memory.call_args_list[1].called_after(prompt_target.send_prompt_async)
+
+
+@pytest.mark.parametrize(
+    ("persistence_kwargs", "expected_add_count"),
+    [
+        ({"request_already_persisted": True}, 1),
+        ({"persist_request_before_send": True}, 2),
+    ],
+)
+async def test_send_prompt_async_updates_only_requests_persisted_before_send(
+    mock_memory_instance,
+    seed_group,
+    persistence_kwargs,
+    expected_add_count,
+):
+    prompt_target = MagicMock()
+    prompt_target.get_identifier.return_value = get_mock_target_identifier("MockTarget")
+    prompt_target.send_prompt_async = AsyncMock(
+        return_value=[MessagePiece(role="assistant", original_value="test_response").to_message()]
+    )
+    mock_memory_instance.update_prompt_metadata_by_id.return_value = True
+    normalizer = PromptNormalizer()
+    message = Message.from_prompt(prompt=seed_group.prompts[0].value, role="user")
+
+    await normalizer.send_prompt_async(message=message, target=prompt_target, **persistence_kwargs)
+
+    assert mock_memory_instance.add_message_to_memory.call_count == expected_add_count
+    mock_memory_instance.update_prompt_metadata_by_id.assert_called_once()
 
 
 async def test_send_prompt_async_exception(mock_memory_instance, seed_group):

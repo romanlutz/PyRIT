@@ -10,6 +10,8 @@ import json
 import sys
 from pathlib import Path
 
+_DEFAULT_INSPECT_PROFILE_ID = "inspect-evals-b935c0e-inspect-api-0.3.233"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -114,15 +116,13 @@ def _add_run_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
 
 
 def _add_task_args(parser: argparse.ArgumentParser) -> None:
-    from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
-
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument(
         "--task",
         required=True,
         help="Relative module/file and factory, e.g. arc/arc.py@arc_challenge.",
     )
-    parser.add_argument("--profile", default=PINNED_INSPECT_EVALS_PROFILE.profile_id)
+    parser.add_argument("--profile", default=_DEFAULT_INSPECT_PROFILE_ID)
     parser.add_argument("--task-param", action="append", default=[], metavar="NAME=JSON_VALUE")
     parser.add_argument("--data", type=Path, help="Local ARC JSON records; never executed.")
     parser.add_argument("--inspect-evals-cache-dir", type=Path, help="Prepared external task data/assets root.")

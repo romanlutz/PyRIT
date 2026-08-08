@@ -13,6 +13,7 @@ from pyrit.sandbox.docker_provider import (
     DockerSandboxProvider,
     DockerSecurityPolicyViolationError,
     DockerServiceSelectionError,
+    DockerStateSecurityError,
     register_process_exit_cleanup,
 )
 from pyrit.sandbox.hyperv_provider import (
@@ -87,6 +88,7 @@ __all__ = [
     "DockerSecurityPolicyViolationError",
     "DockerServiceBuildSpec",
     "DockerServiceSelectionError",
+    "DockerStateSecurityError",
     "EnvironmentHyperVSecretResolver",
     "HyperVCliUnavailableError",
     "HyperVComposeDelegationConfig",

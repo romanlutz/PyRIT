@@ -722,6 +722,7 @@ async def test_count_limits_terminate_explicitly(
     assert len(persisted) == 1
     if limits.max_tool_calls == 0:
         assert not tool.calls
+        assert result.tool_calls == 0
         assert persisted[0][1].error is not None
     else:
         execution = [e for e in result.evidence if e.evidence_type == "tool_execution"]
@@ -832,7 +833,7 @@ async def test_usage_limit_closes_out_requested_tool_calls() -> None:
     )
 
     persisted = _tool_results(target, conversation_id=result.conversation_id)
-    assert result.tool_calls == 1
+    assert result.tool_calls == 0
     assert not tool.calls
     assert persisted[0][1].error is not None
     assert persisted[0][1].error.code == "usage_limit"

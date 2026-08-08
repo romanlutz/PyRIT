@@ -58,6 +58,69 @@ def test_prepare_source_offline_requires_content_addressed_cache(tmp_path: Path)
         source.prepare_inspect_source(cache_dir=tmp_path, offline=True)
 
 
+def test_prepare_source_repairs_invalid_owned_checkout_online(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = PINNED_INSPECT_EVALS_PROFILE.inspect_evals_revision
+    checkout = tmp_path / revision / "checkout"
+    checkout.mkdir(parents=True)
+    dirty_file = checkout / "untrusted.py"
+    dirty_file.write_text("modified", encoding="utf-8")
+    verification = source.InspectSourceVerification(
+        source_root=str(checkout),
+        repository="fixture",
+        revision=revision,
+        tree_hash="tree",
+        license="MIT",
+        license_sha256="license",
+        clean=True,
+    )
+    validation_count = 0
+
+    def validate(*, source_root: Path, timeout_seconds: float) -> source.InspectSourceVerification:
+        nonlocal validation_count
+        del timeout_seconds
+        assert source_root == checkout
+        validation_count += 1
+        if dirty_file.exists():
+            raise InspectProfileMismatchError("dirty owned cache")
+        return verification
+
+    def fetch(*, checkout: Path, timeout_seconds: float) -> None:
+        del timeout_seconds
+        assert not checkout.exists()
+        checkout.mkdir(parents=True)
+
+    monkeypatch.setattr(source, "validate_inspect_source", validate)
+    monkeypatch.setattr(source, "_fetch_checkout", fetch)
+
+    assert source.prepare_inspect_source(cache_dir=tmp_path) == verification
+    assert validation_count == 2
+    assert not dirty_file.exists()
+
+
+def test_prepare_source_offline_does_not_mutate_invalid_owned_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = tmp_path / PINNED_INSPECT_EVALS_PROFILE.inspect_evals_revision / "checkout"
+    checkout.mkdir(parents=True)
+    dirty_file = checkout / "untrusted.py"
+    dirty_file.write_text("modified", encoding="utf-8")
+
+    def reject_invalid_checkout(**kwargs: object) -> None:
+        del kwargs
+        raise InspectProfileMismatchError("dirty owned cache")
+
+    monkeypatch.setattr(source, "validate_inspect_source", reject_invalid_checkout)
+
+    with pytest.raises(InspectProfileMismatchError, match="dirty owned cache"):
+        source.prepare_inspect_source(cache_dir=tmp_path, offline=True)
+
+    assert dirty_file.read_text(encoding="utf-8") == "modified"
+
+
 def test_source_lock_is_released_and_reusable(tmp_path: Path) -> None:
     lock_path = tmp_path / "source.lock"
     first = source._acquire_lock(lock_path=lock_path, timeout_seconds=1)

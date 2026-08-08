@@ -734,6 +734,29 @@ def test_construct_response_from_request_combines_metadata():
     assert response_piece.response_error == "none"
 
 
+def test_construct_response_from_request_does_not_mutate_or_alias_metadata():
+    request_metadata = {"request": "preserved", "target_invocation": "request-only"}
+    additional_metadata = {"additional": "preserved", "target_invocation": "additional-only"}
+    request = MessagePiece(
+        role="user",
+        original_value="test prompt",
+        conversation_id="123",
+        prompt_metadata=request_metadata,
+    )
+
+    response = construct_response_from_request(
+        request=request,
+        response_text_pieces=["first", "second"],
+        prompt_metadata=additional_metadata,
+    )
+
+    assert request.prompt_metadata == request_metadata
+    assert additional_metadata == {"additional": "preserved", "target_invocation": "additional-only"}
+    assert response.message_pieces[0].prompt_metadata == {"request": "preserved", "additional": "preserved"}
+    response.message_pieces[0].prompt_metadata["piece"] = "first-only"
+    assert "piece" not in response.message_pieces[1].prompt_metadata
+
+
 def test_construct_response_from_request_no_metadata():
     request = MessagePiece(role="user", original_value="test prompt", conversation_id="123")
 

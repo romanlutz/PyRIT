@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from enum import Enum
 from pathlib import Path  # noqa: TC003 (Pydantic resolves this annotation at runtime)
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pyrit.executor.capability.models import SandboxOperationEvidence  # noqa: TC001
 from pyrit.models import JSONValue  # noqa: TC001
+
+_ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SandboxOperationStatus(str, Enum):
@@ -89,6 +92,17 @@ class SandboxExecRequest(BaseModel):
     cwd: str | None = None
     user: str | None = None
     timeout_seconds: float | None = Field(default=None, gt=0)
+
+    @field_validator("environment")
+    @classmethod
+    def _validate_environment_keys(cls, environment: dict[str, str]) -> dict[str, str]:
+        invalid_keys = sorted(key for key in environment if not _ENVIRONMENT_KEY_PATTERN.fullmatch(key))
+        if invalid_keys:
+            raise ValueError(
+                "Environment variable names must match ^[A-Za-z_][A-Za-z0-9_]*$: "
+                + ", ".join(repr(key) for key in invalid_keys)
+            )
+        return environment
 
     @model_validator(mode="after")
     def _validate_command(self) -> SandboxExecRequest:
@@ -216,10 +230,11 @@ class DockerSecurityPolicy(BaseModel):
     """
     Security defaults enforced for every Docker sandbox service.
 
-    Every ``allow_*`` flag defaults to a rejecting posture. A synthesized service is
-    always compliant; an explicit user-supplied Compose file is validated against this
-    policy after resolution and rejected (``DockerSecurityPolicyViolationError``) unless
-    the corresponding flag is explicitly enabled.
+    Host escape surfaces default to a rejecting posture. Network egress remains enabled
+    by default for compatibility and can be disabled explicitly. Synthesized services
+    are compliant by construction; explicit user-supplied Compose files are hardened
+    with a final policy overlay, validated after resolution, and rejected
+    (``DockerSecurityPolicyViolationError``) when enforcement cannot be proven.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

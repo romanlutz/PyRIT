@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -181,16 +182,18 @@ class CapabilitySuiteRunner:
             raise ValueError(f"Capability suite contains non-runnable cases: {details}")
         content_hash = manifest_hash(self._manifest)
         run_id = run_id or f"capability-suite-{content_hash[:32]}"
-        has_case_providers = any(case.sandbox_provider is not None for case in self._manifest.cases)
-        if has_case_providers:
-            providers = {
-                case.case_id: self._sandbox_provider_registry.build(
-                    case.sandbox_provider or self._manifest.sandbox_provider
-                )
-                for case in self._manifest.cases
-            }
-        else:
-            providers = {"__shared__": self._sandbox_provider_registry.build(self._manifest.sandbox_provider)}
+        provider_configs = {
+            case.case_id: case.sandbox_provider or self._manifest.sandbox_provider for case in self._manifest.cases
+        }
+        provider_keys = {
+            case_id: json.dumps(config.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+            for case_id, config in provider_configs.items()
+        }
+        unique_configs = {provider_keys[case_id]: config for case_id, config in provider_configs.items()}
+        providers_by_key: dict[str, SandboxProvider] = {}
+        for key, config in unique_configs.items():
+            providers_by_key[key] = await asyncio.to_thread(self._sandbox_provider_registry.build, config)
+        providers = {case_id: providers_by_key[key] for case_id, key in provider_keys.items()}
         task_specs = {
             case.case_id: SandboxTaskSpec(task_id=f"{run_id}:{case.case_id}") for case in self._manifest.cases
         }
@@ -198,11 +201,11 @@ class CapabilitySuiteRunner:
         prepared_providers: list[SandboxProvider] = []
         provider_cleanup_error: str | None = None
         try:
-            for provider in providers.values():
+            for provider in providers_by_key.values():
                 await provider.prepare_async()
                 prepared_providers.append(provider)
             for case in self._manifest.cases:
-                provider = providers[case.case_id] if has_case_providers else providers["__shared__"]
+                provider = providers[case.case_id]
                 task_spec = task_specs[case.case_id]
                 await provider.prepare_task_async(task_spec)
                 prepared_tasks.append((provider, task_spec))
@@ -217,7 +220,7 @@ class CapabilitySuiteRunner:
                     records = await self._run_unit_async(
                         unit=unit,
                         run_id=run_id,
-                        provider=providers[unit.case.case_id] if has_case_providers else providers["__shared__"],
+                        provider=providers[unit.case.case_id],
                         task_spec=task_specs[unit.case.case_id],
                         cancellation_event=cancellation_event,
                     )

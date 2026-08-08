@@ -55,6 +55,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+@pytest.mark.parametrize("environment_key", ["", "1INVALID", "BAD NAME", "BAD;NAME", "BAD=NAME", "BAD-NAME"])
+def test_exec_request_rejects_unsafe_environment_variable_names(environment_key: str) -> None:
+    with pytest.raises(ValidationError, match="Environment variable names"):
+        SandboxExecRequest(argv=("true",), environment={environment_key: "value"})
+
+
 class _FakePowerShellRunner(PowerShellCommandRunner):
     def __init__(self, *, fail_create_at: int | None = None, fail_remove: bool = False) -> None:
         self.calls: list[dict[str, object]] = []

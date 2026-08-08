@@ -130,6 +130,7 @@ class PromptNormalizer:
         if persist_request_before_send:
             self.memory.add_message_to_memory(request=request)
             request_persisted = True
+        persisted_before_send = request_persisted
 
         try:
             if request_options is None:
@@ -143,16 +144,12 @@ class PromptNormalizer:
                     request_options=request_options,
                     request_already_persisted=request_persisted,
                 )
-            if not request_persisted:
-                self.memory.add_message_to_memory(request=request)
-                request_persisted = True
         except EmptyResponseException:
             # Empty responses are retried, but we don't want them to stop execution
             self._finalize_request_persistence(
                 request=request,
-                already_persisted=request_persisted,
+                already_persisted=persisted_before_send,
             )
-            request_persisted = True
 
             responses = [
                 construct_response_from_request(
@@ -167,7 +164,7 @@ class PromptNormalizer:
             # Ensure request to memory before processing exception
             self._finalize_request_persistence(
                 request=request,
-                already_persisted=request_persisted,
+                already_persisted=persisted_before_send,
             )
 
             error_response = construct_response_from_request(
@@ -181,16 +178,17 @@ class PromptNormalizer:
             self.memory.add_message_to_memory(request=error_response)
             cid = request.message_pieces[0].conversation_id if request and request.message_pieces else None
             raise Exception(f"Error sending prompt with conversation ID: {cid}") from ex
+        else:
+            self._finalize_request_persistence(
+                request=request,
+                already_persisted=persisted_before_send,
+            )
 
         # handling empty responses message list and None responses
         if not responses or not any(responses):
             # An empty list is valid for write-only targets (e.g., TextTarget)
             # that don't produce responses. Return the request as-is.
             if responses is not None and len(responses) == 0:
-                self._finalize_request_persistence(
-                    request=request,
-                    already_persisted=request_persisted,
-                )
                 return request
             empty_response = construct_response_from_request(
                 request=request.message_pieces[0],
@@ -200,10 +198,6 @@ class PromptNormalizer:
             )
             await self._calc_hash_async(request=empty_response)
             self.memory.add_message_to_memory(request=empty_response)
-            self._finalize_request_persistence(
-                request=request,
-                already_persisted=request_persisted,
-            )
             return empty_response
 
         # Process all response messages (targets return list[Message])
@@ -222,11 +216,6 @@ class PromptNormalizer:
                 )
             await self._calc_hash_async(request=resp)
             self.memory.add_message_to_memory(request=resp)
-
-        self._finalize_request_persistence(
-            request=request,
-            already_persisted=request_persisted,
-        )
 
         # Return the last response for backward compatibility
         return responses[-1]

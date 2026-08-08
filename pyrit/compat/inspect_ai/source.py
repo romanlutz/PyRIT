@@ -125,6 +125,7 @@ def prepare_inspect_source(
 
     Raises:
         FileNotFoundError: If offline mode is requested before the source is cached.
+        InspectProfileMismatchError: If a cached checkout fails pinned identity verification.
         TimeoutError: If cache locking or Git acquisition exceeds the timeout.
         ValueError: If the timeout is not positive.
     """
@@ -133,9 +134,11 @@ def prepare_inspect_source(
     revision = PINNED_INSPECT_EVALS_PROFILE.inspect_evals_revision
     cache_root = (cache_dir or default_inspect_source_cache_dir()).resolve()
     checkout = cache_root / revision / "checkout"
-    if checkout.is_dir():
-        return validate_inspect_source(source_root=checkout, timeout_seconds=timeout_seconds)
     if offline:
+        if checkout.is_symlink():
+            raise InspectProfileMismatchError(f"Pinned source cache checkout '{checkout}' must not be a symbolic link.")
+        if checkout.is_dir():
+            return validate_inspect_source(source_root=checkout, timeout_seconds=timeout_seconds)
         raise FileNotFoundError(
             f"Pinned Inspect-evals source is not cached at '{checkout}'. "
             "Run 'inspect-evals source prepare' with network access or pass --source."
@@ -144,8 +147,13 @@ def prepare_inspect_source(
     lock_path = cache_root / f"{revision}.lock"
     lock_fd = _acquire_lock(lock_path=lock_path, timeout_seconds=timeout_seconds)
     try:
+        if checkout.is_symlink() or (checkout.exists() and not checkout.is_dir()):
+            _remove_owned_checkout(checkout=checkout)
         if checkout.is_dir():
-            return validate_inspect_source(source_root=checkout, timeout_seconds=timeout_seconds)
+            try:
+                return validate_inspect_source(source_root=checkout, timeout_seconds=timeout_seconds)
+            except InspectProfileMismatchError:
+                _remove_owned_checkout(checkout=checkout)
         _fetch_checkout(checkout=checkout, timeout_seconds=timeout_seconds)
         return validate_inspect_source(source_root=checkout, timeout_seconds=timeout_seconds)
     finally:
@@ -179,6 +187,13 @@ def _fetch_checkout(*, checkout: Path, timeout_seconds: float) -> None:
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+
+
+def _remove_owned_checkout(*, checkout: Path) -> None:
+    if checkout.is_symlink() or not checkout.is_dir():
+        checkout.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(checkout)
 
 
 def _acquire_lock(*, lock_path: Path, timeout_seconds: float) -> int:
