@@ -511,6 +511,65 @@ describe('ScenarioDetail', () => {
     expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
   })
 
+  it('renders the initial Adaptive conditional estimate instead of an unavailable exact total', async () => {
+    mockGetScenario.mockResolvedValue(makeAdaptiveScenario())
+    mockEstimateRun.mockResolvedValue({
+      version: 1,
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      condition: null,
+      components: [
+        {
+          label: 'Baseline',
+          count: 21,
+          factors: [{ label: 'selected logical seed groups', count: 21 }],
+          is_baseline: true,
+          condition: null,
+          note: null,
+        },
+        {
+          label: 'Adaptive attack envelopes',
+          count: 21,
+          factors: [{ label: 'compatible logical seed groups', count: 21 }],
+          is_baseline: false,
+          condition: null,
+          note: null,
+        },
+      ],
+      datasets: [],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 3,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+      note: 'Compatibility and early success may reduce the underlying attempt count.',
+      retries_included: false,
+    } satisfies ScenarioDefaultRunSizeEstimate)
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenCalledWith(
+      'adaptive.text_adaptive',
+      {
+        target_name: 'target-a',
+        techniques: ['default'],
+        include_baseline: true,
+        scenario_params: { max_attempts_per_objective: 3 },
+      },
+      expect.any(AbortSignal),
+    ))
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
+    expect(screen.queryByText('Exact total unavailable')).not.toBeInTheDocument()
+  })
+
   it('explains Adaptive technique sets, progress objectives, and bounded attempt work', async () => {
     const scenario = makeAdaptiveScenario()
     mockGetScenario.mockResolvedValue(scenario)

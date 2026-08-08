@@ -594,6 +594,54 @@ describe("api service", () => {
       expect(result.total_attack_count).toBe(8);
     });
 
+    it("preserves Adaptive conditional work metadata in the initial estimate response", async () => {
+      const mockResponse = {
+        data: {
+          version: 1,
+          status: "conditional",
+          total_attack_count: null,
+          minimum_attack_count: null,
+          maximum_attack_count: null,
+          condition: null,
+          components: [],
+          datasets: [],
+          adaptive_details: {
+            objective_count: 21,
+            candidate_technique_count: 2,
+            max_attempts_per_objective: 3,
+            techniques_per_objective_upper_bound: 2,
+            technique_attempt_count_upper_bound: 42,
+            stop_on_first_success: true,
+            compatibility_may_reduce_attempts: true,
+          },
+          note: null,
+          retries_included: false,
+        },
+      };
+      (apiClient.post as jest.Mock).mockResolvedValueOnce(mockResponse);
+      const controller = new AbortController();
+      const request = {
+        target_name: "target-a",
+        techniques: ["default"],
+        include_baseline: true,
+        scenario_params: { max_attempts_per_objective: 3 },
+      };
+
+      const result = await scenariosApi.estimateRun(
+        "adaptive.text_adaptive",
+        request,
+        controller.signal
+      );
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        "/scenarios/catalog/adaptive.text_adaptive/estimate",
+        request,
+        { signal: controller.signal }
+      );
+      expect(result.adaptive_details).toEqual(mockResponse.data.adaptive_details);
+      expect(result.total_attack_count).toBeNull();
+    });
+
     it("posts the exact RunScenarioRequest payload to start a run", async () => {
       const mockResponse = {
         data: {
