@@ -30,7 +30,7 @@ import {
   type ParameterFormValue,
 } from '@/components/Parameters/parameterForm'
 import type { ViewName } from '@/components/Sidebar/Navigation'
-import { scenariosApi, targetsApi } from '@/services/api'
+import { datasetsApi, scenariosApi, targetsApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
 import type {
   Parameter,
@@ -83,6 +83,13 @@ const DEFAULT_MAX_CONCURRENCY = 10
 const DEFAULT_MAX_RETRIES = 0
 const ESTIMATE_DEBOUNCE_MS = 300
 const TEXT_ADAPTIVE_SCENARIO_NAME = 'adaptive.text_adaptive'
+const CUSTOM_TECHNIQUE_SET_VALUE = '__custom__'
+const MAX_ATTEMPTS_PARAMETER_NAME = 'max_attempts_per_objective'
+const MAX_ATTEMPTS_DISPLAY_LABEL = 'Techniques tried per objective'
+const MAX_ATTEMPTS_DISPLAY_HINT = [
+  'Maximum different compatible techniques Adaptive may try inside one objective envelope.',
+  'Adaptive stops after the first success. This is separate from retries.',
+].join(' ')
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
@@ -102,13 +109,13 @@ type TechniqueSelection =
     }
   | {
       mode: 'custom'
-      techniques: string[]
     }
 
 interface TechniqueOptions {
   presets: string[]
   concrete: string[]
   defaultSelection: TechniqueSelection
+  initialCustomTechniques: string[]
 }
 
 /** Options rendered for technique selection: exclusive presets first, then concrete techniques. */
@@ -136,8 +143,9 @@ function uniqueTechniqueOptions(scenario: RegisteredScenario): TechniqueOptions 
   }
   const defaultSelection: TechniqueSelection = defaultIsPreset
     ? { mode: 'preset', preset: scenario.default_technique }
-    : { mode: 'custom', techniques: [scenario.default_technique] }
-  return { presets, concrete, defaultSelection }
+    : { mode: 'custom' }
+  const initialCustomTechniques = defaultIsPreset ? [] : [scenario.default_technique]
+  return { presets, concrete, defaultSelection, initialCustomTechniques }
 }
 
 function adaptiveEnvelopeCount(state: ScenarioRunEstimateState): number | undefined {
@@ -151,15 +159,16 @@ function adaptiveEnvelopeCount(state: ScenarioRunEstimateState): number | undefi
   return envelopeComponents.length === 1 ? envelopeComponents[0].count : undefined
 }
 
-function selectedTechniqueNames(selection: TechniqueSelection): string[] {
-  return selection.mode === 'preset' ? [selection.preset] : selection.techniques
+function sameStringSet(left: string[], right: string[]): boolean {
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value))
 }
 
-function parseDatasetNames(datasetOverride: string): string[] {
-  return datasetOverride
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
+function parameterDisplayLabel(parameter: Parameter, usesAdaptiveTechniqueSelection: boolean): string {
+  return usesAdaptiveTechniqueSelection && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+    ? MAX_ATTEMPTS_DISPLAY_LABEL
+    : parameter.name
 }
 
 function formatParameterPreview(value: ParameterFormValue | undefined): string {
@@ -184,7 +193,7 @@ interface BuildRunRequestInput {
   techniques: string[]
   dynamicParameters: Parameter[]
   scenarioParamValues: Record<string, ParameterFormValue>
-  datasetOverride: string
+  selectedDatasets: string[]
   maxDatasetSize: string
   maxConcurrency: number
   maxRetries: number
@@ -225,7 +234,7 @@ function buildRunRequest({
   techniques,
   dynamicParameters,
   scenarioParamValues,
-  datasetOverride,
+  selectedDatasets,
   maxDatasetSize,
   maxConcurrency,
   maxRetries,
@@ -237,6 +246,9 @@ function buildRunRequest({
   }
   if (techniques.length === 0) {
     return { ok: false, error: 'Select at least one technique.' }
+  }
+  if (scenario.default_datasets.length > 0 && selectedDatasets.length === 0) {
+    return { ok: false, error: 'Select at least one dataset.' }
   }
 
   let scenarioParams: Record<string, unknown> | null = null
@@ -278,7 +290,6 @@ function buildRunRequest({
     }
   }
 
-  const datasetNames = parseDatasetNames(datasetOverride)
   const request: RunScenarioRequest = {
     scenario_name: scenario.scenario_name,
     target_name: targetName,
@@ -288,8 +299,8 @@ function buildRunRequest({
     include_baseline: includeBaseline,
     labels,
   }
-  if (datasetNames.length > 0) {
-    request.dataset_names = datasetNames
+  if (!sameStringSet(selectedDatasets, scenario.default_datasets)) {
+    request.dataset_names = selectedDatasets
   }
   if (maxDatasetSizeValue !== undefined) {
     request.max_dataset_size = maxDatasetSizeValue
@@ -319,6 +330,121 @@ function buildEstimateRequest(request: RunScenarioRequest): ScenarioRunSizeEstim
     estimateRequest.scenario_params = request.scenario_params
   }
   return estimateRequest
+}
+
+type DatasetCatalogStatus = 'loading' | 'success' | 'error'
+
+interface DatasetPickerProps {
+  availableDatasets: string[]
+  defaultDatasets: string[]
+  selectedDatasets: string[]
+  status: DatasetCatalogStatus
+  error: string | null
+  disabled: boolean
+  invalid: boolean
+  onChange: (name: string, checked: boolean) => void
+  onRestoreDefaults: () => void
+}
+
+function DatasetPicker({
+  availableDatasets,
+  defaultDatasets,
+  selectedDatasets,
+  status,
+  error,
+  disabled,
+  invalid,
+  onChange,
+  onRestoreDefaults,
+}: DatasetPickerProps) {
+  const styles = useScenarioDetailStyles()
+  const [query, setQuery] = useState('')
+  const selectedSet = useMemo(() => new Set(selectedDatasets), [selectedDatasets])
+  const defaultSet = useMemo(() => new Set(defaultDatasets), [defaultDatasets])
+  const orderedDatasets = useMemo(() => {
+    const names = [...new Set([...availableDatasets, ...defaultDatasets])]
+    return names.sort((left, right) => {
+      const leftPriority = selectedSet.has(left) ? 0 : defaultSet.has(left) ? 1 : 2
+      const rightPriority = selectedSet.has(right) ? 0 : defaultSet.has(right) ? 1 : 2
+      return leftPriority - rightPriority || left.localeCompare(right)
+    })
+  }, [availableDatasets, defaultDatasets, defaultSet, selectedSet])
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const visibleDatasets = normalizedQuery.length === 0
+    ? orderedDatasets
+    : orderedDatasets.filter((name) => name.toLocaleLowerCase().includes(normalizedQuery))
+  const selectedCount = selectedDatasets.length
+
+  return (
+    <>
+      <div className={styles.datasetPickerHeader}>
+        <Text aria-live="polite">
+          {selectedCount.toLocaleString()} dataset{selectedCount === 1 ? '' : 's'} selected
+        </Text>
+        <Button
+          className={styles.touchTarget}
+          appearance="subtle"
+          icon={<ArrowSyncRegular />}
+          disabled={disabled || sameStringSet(selectedDatasets, defaultDatasets)}
+          onClick={onRestoreDefaults}
+          data-testid="restore-default-datasets"
+        >
+          Restore defaults
+        </Button>
+      </div>
+      <Field
+        label="Search datasets"
+        hint="Search registered datasets, then select the datasets this run should use."
+        validationState={invalid ? 'error' : 'none'}
+        validationMessage={invalid ? 'Select at least one dataset.' : undefined}
+      >
+        <Input
+          className={styles.control}
+          value={query}
+          disabled={disabled}
+          onChange={(_, data) => setQuery(data.value)}
+          placeholder="Search datasets"
+          aria-label="Search datasets"
+          data-testid="dataset-search-input"
+        />
+      </Field>
+      {status === 'loading' && (
+        <Text size={200} className={styles.hint} role="status" data-testid="dataset-catalog-loading">
+          Loading registered datasets…
+        </Text>
+      )}
+      {status === 'error' && (
+        <MessageBar intent="error" data-testid="dataset-catalog-error">
+          <MessageBarBody role="alert">
+            Registered datasets couldn’t be loaded. Scenario defaults remain available.
+            {error ? ` ${error}` : ''}
+          </MessageBarBody>
+        </MessageBar>
+      )}
+      <div
+        className={styles.datasetList}
+        role="group"
+        aria-label="Datasets"
+        data-testid="dataset-picker-list"
+      >
+        {visibleDatasets.length > 0 ? (
+          visibleDatasets.map((name) => (
+            <Checkbox
+              className={styles.selectionControl}
+              key={name}
+              label={name}
+              checked={selectedSet.has(name)}
+              disabled={disabled}
+              onChange={(_, data) => onChange(name, data.checked === true)}
+              data-testid={`dataset-${name}`}
+            />
+          ))
+        ) : (
+          <Text className={styles.datasetEmptyState}>No datasets match this search.</Text>
+        )}
+      </div>
+    </>
+  )
 }
 
 interface ScenarioDetailProps {
@@ -511,7 +637,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const navigate = useNavigate()
   const formId = `scenario-launch-${encodeURIComponent(scenario.scenario_name).replace(/%/g, '-')}`
 
-  const { presets, concrete, defaultSelection } = useMemo(
+  const { presets, concrete, defaultSelection, initialCustomTechniques } = useMemo(
     () => uniqueTechniqueOptions(scenario),
     [scenario],
   )
@@ -532,10 +658,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     return targets[0].target_registry_name
   })
   const [techniqueSelection, setTechniqueSelection] = useState<TechniqueSelection>(() => defaultSelection)
+  const [customTechniques, setCustomTechniques] = useState<string[]>(() => initialCustomTechniques)
   const [baselineChecked, setBaselineChecked] = useState(
     () => !isBaselineForbidden && scenario.include_baseline_by_default,
   )
-  const [datasetOverride, setDatasetOverride] = useState('')
+  const [availableDatasets, setAvailableDatasets] = useState<string[]>(() => [...scenario.default_datasets])
+  const [selectedDatasets, setSelectedDatasets] = useState<string[]>(() => [...scenario.default_datasets])
+  const [datasetCatalogStatus, setDatasetCatalogStatus] = useState<DatasetCatalogStatus>('loading')
+  const [datasetCatalogError, setDatasetCatalogError] = useState<string | null>(null)
   const [maxDatasetSize, setMaxDatasetSize] = useState('')
   const [maxConcurrency, setMaxConcurrency] = useState(DEFAULT_MAX_CONCURRENCY)
   const [maxRetries, setMaxRetries] = useState(DEFAULT_MAX_RETRIES)
@@ -550,10 +680,13 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
   const estimateSequenceRef = useRef(0)
+  const customTechniquesInitializedRef = useRef(defaultSelection.mode === 'custom')
 
   const techniques = useMemo(
-    () => selectedTechniqueNames(techniqueSelection),
-    [techniqueSelection],
+    () => techniqueSelection.mode === 'preset'
+      ? [techniqueSelection.preset]
+      : customTechniques,
+    [customTechniques, techniqueSelection],
   )
   const requestResult = useMemo(
     () => buildRunRequest({
@@ -562,7 +695,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       techniques,
       dynamicParameters,
       scenarioParamValues,
-      datasetOverride,
+      selectedDatasets,
       maxDatasetSize,
       maxConcurrency,
       maxRetries,
@@ -571,7 +704,6 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     }),
     [
       baselineChecked,
-      datasetOverride,
       dynamicParameters,
       isBaselineForbidden,
       labels,
@@ -580,6 +712,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       maxRetries,
       scenario,
       scenarioParamValues,
+      selectedDatasets,
       targetName,
       techniques,
     ],
@@ -594,6 +727,30 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       : JSON.stringify({ scenarioName: scenario.scenario_name, request: estimateRequest }),
     [estimateRequest, scenario.scenario_name],
   )
+
+  useEffect(() => {
+    let cancelled = false
+    datasetsApi
+      .listDatasets()
+      .then((response) => {
+        if (cancelled) return
+        setAvailableDatasets([...new Set([
+          ...scenario.default_datasets,
+          ...response.items.map((item) => item.name),
+        ])])
+        setDatasetCatalogStatus('success')
+        setDatasetCatalogError(null)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setAvailableDatasets([...scenario.default_datasets])
+        setDatasetCatalogStatus('error')
+        setDatasetCatalogError(toApiError(err).detail)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [scenario.default_datasets])
 
   useEffect(() => {
     if (estimateRequest === null || estimateRequestKey === null) {
@@ -685,28 +842,41 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     estimateState = { status: 'loading', scope: 'request' }
   }
 
-  const handlePresetChange = (preset: string): void => {
-    setTechniqueSelection({ mode: 'preset', preset })
+  const handleTechniqueModeChange = (value: string): void => {
+    if (value === CUSTOM_TECHNIQUE_SET_VALUE) {
+      if (!customTechniquesInitializedRef.current) {
+        const members = techniqueSelection.mode === 'preset'
+          ? techniqueSetMembers(scenario, techniqueSelection.preset)
+          : []
+        const concreteSet = new Set(concrete)
+        setCustomTechniques(members.filter((member) => concreteSet.has(member)))
+        customTechniquesInitializedRef.current = true
+      }
+      setTechniqueSelection({ mode: 'custom' })
+    } else {
+      setTechniqueSelection({ mode: 'preset', preset: value })
+    }
     setValidationError(null)
   }
 
   const handleConcreteChange = (name: string, checked: boolean): void => {
-    setTechniqueSelection((current) => {
+    setCustomTechniques((current) => {
       if (checked) {
-        if (current.mode === 'preset') {
-          return { mode: 'custom', techniques: [name] }
-        }
-        return current.techniques.includes(name)
+        return current.includes(name)
           ? current
-          : { mode: 'custom', techniques: [...current.techniques, name] }
+          : [...current, name]
       }
-      if (current.mode === 'preset') {
-        return current
+      return current.filter((technique) => technique !== name)
+    })
+    setValidationError(null)
+  }
+
+  const handleDatasetChange = (name: string, checked: boolean): void => {
+    setSelectedDatasets((current) => {
+      if (checked) {
+        return current.includes(name) ? current : [...current, name]
       }
-      return {
-        mode: 'custom',
-        techniques: current.techniques.filter((technique) => technique !== name),
-      }
+      return current.filter((dataset) => dataset !== name)
     })
     setValidationError(null)
   }
@@ -749,9 +919,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   }
 
   const techniqueSelectionInvalid =
-    techniqueSelection.mode === 'custom' && techniqueSelection.techniques.length === 0
-  const previewDatasets = parseDatasetNames(datasetOverride)
-  const effectiveDatasets = previewDatasets.length > 0 ? previewDatasets : scenario.default_datasets
+    techniqueSelection.mode === 'custom' && customTechniques.length === 0
+  const datasetSelectionInvalid = scenario.default_datasets.length > 0 && selectedDatasets.length === 0
+  const datasetsAreDefaults = sameStringSet(selectedDatasets, scenario.default_datasets)
   const presetMembers = techniqueSelection.mode === 'preset'
     ? techniqueSetMembers(scenario, techniqueSelection.preset)
     : []
@@ -830,8 +1000,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 Techniques
               </Text>
               <Text size={200} className={styles.hint}>
-                A technique set is a shortcut that selects a predefined group. It is not an additional
-                technique. Choose a set or select techniques individually.
+                Choose a predefined set, or choose Custom to select techniques individually.
               </Text>
               {usesAdaptiveTechniqueSelection && (
                 <>
@@ -853,30 +1022,33 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 </>
               )}
               <div className={styles.techniqueGroups}>
-                {presets.length > 0 ? (
-                  <Field label="Technique set">
-                    <RadioGroup
-                      value={techniqueSelection.mode === 'preset' ? techniqueSelection.preset : ''}
-                      onChange={(_, data) => handlePresetChange(data.value)}
-                      aria-label="Technique set"
-                    >
-                      {presets.map((name) => (
-                        <Radio
-                          className={styles.selectionControl}
-                          key={name}
-                          label={techniqueSetOptionLabel(scenario, name)}
-                          value={name}
-                          disabled={submitting}
-                          data-testid={`technique-${name}`}
-                        />
-                      ))}
-                    </RadioGroup>
-                  </Field>
-                ) : (
-                  <Text size={200} className={styles.hint}>
-                    No technique sets are registered for this scenario.
-                  </Text>
-                )}
+                <Field label="Technique set">
+                  <RadioGroup
+                    value={techniqueSelection.mode === 'preset'
+                      ? techniqueSelection.preset
+                      : CUSTOM_TECHNIQUE_SET_VALUE}
+                    onChange={(_, data) => handleTechniqueModeChange(data.value)}
+                    aria-label="Technique set"
+                  >
+                    {presets.map((name) => (
+                      <Radio
+                        className={styles.selectionControl}
+                        key={name}
+                        label={techniqueSetOptionLabel(scenario, name)}
+                        value={name}
+                        disabled={submitting}
+                        data-testid={`technique-${name}`}
+                      />
+                    ))}
+                    <Radio
+                      className={styles.selectionControl}
+                      label="Custom"
+                      value={CUSTOM_TECHNIQUE_SET_VALUE}
+                      disabled={submitting}
+                      data-testid="technique-mode-custom"
+                    />
+                  </RadioGroup>
+                </Field>
                 {techniqueSelection.mode === 'preset' && (
                   <div
                     className={styles.resolvedMembers}
@@ -897,36 +1069,35 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                     )}
                   </div>
                 )}
-                <Field
-                  label="Individual techniques"
-                  validationState={techniqueSelectionInvalid ? 'error' : 'none'}
-                  validationMessage={techniqueSelectionInvalid
-                    ? 'Select at least one technique.'
-                    : undefined}
-                >
-                  {concrete.length > 0 ? (
-                    <div className={styles.checkboxGroup} role="group" aria-label="Individual techniques">
-                      {concrete.map((name) => (
-                        <Checkbox
-                          className={styles.selectionControl}
-                          key={name}
-                          label={name}
-                          checked={
-                            techniqueSelection.mode === 'custom'
-                            && techniqueSelection.techniques.includes(name)
-                          }
-                          disabled={submitting}
-                          onChange={(_, data) => handleConcreteChange(name, data.checked === true)}
-                          data-testid={`technique-${name}`}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <Text size={200} className={styles.hint}>
-                      No concrete techniques are registered for custom selection.
-                    </Text>
-                  )}
-                </Field>
+                {techniqueSelection.mode === 'custom' && (
+                  <Field
+                    label="Individual techniques"
+                    validationState={techniqueSelectionInvalid ? 'error' : 'none'}
+                    validationMessage={techniqueSelectionInvalid
+                      ? 'Select at least one technique.'
+                      : undefined}
+                  >
+                    {concrete.length > 0 ? (
+                      <div className={styles.checkboxGroup} role="group" aria-label="Individual techniques">
+                        {concrete.map((name) => (
+                          <Checkbox
+                            className={styles.selectionControl}
+                            key={name}
+                            label={name}
+                            checked={customTechniques.includes(name)}
+                            disabled={submitting}
+                            onChange={(_, data) => handleConcreteChange(name, data.checked === true)}
+                            data-testid={`technique-${name}`}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <Text size={200} className={styles.hint}>
+                        No concrete techniques are registered for custom selection.
+                      </Text>
+                    )}
+                  </Field>
+                )}
               </div>
             </section>
 
@@ -934,21 +1105,20 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               <Text id="baseline-section-title" as="h2" size={400} weight="semibold">
                 Baseline
               </Text>
-              <Field>
+              <Field
+                hint={isBaselineForbidden
+                  ? 'This scenario does not support sending objectives directly without an attack technique, so a direct comparison cannot be included.'
+                  : 'Also send each selected objective directly, without an attack technique. This provides a comparison point for measuring whether the selected techniques improve results and adds one planned attack per objective.'}
+              >
                 <Checkbox
                   className={styles.selectionControl}
                   checked={baselineChecked}
                   disabled={submitting || isBaselineForbidden}
-                  label={isBaselineForbidden ? 'Not available for this scenario' : 'Include baseline attack'}
+                  label="Include direct baseline comparison"
                   onChange={(_, data) => setBaselineChecked(data.checked === true)}
                   data-testid="baseline-checkbox"
                 />
               </Field>
-              {isBaselineForbidden && (
-                <Text size={200} className={styles.hint}>
-                  This scenario forbids a baseline comparison run.
-                </Text>
-              )}
             </section>
 
             {dynamicParameters.length > 0 && (
@@ -964,6 +1134,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       value={scenarioParamValues[parameter.name]}
                       disabled={submitting}
                       onChange={updateScenarioParam}
+                      displayLabel={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? MAX_ATTEMPTS_DISPLAY_LABEL
+                        : undefined}
+                      displayHint={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? MAX_ATTEMPTS_DISPLAY_HINT
+                        : undefined}
                       testIdPrefix="scenario-param"
                     />
                   ))}
@@ -971,25 +1149,38 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               </section>
             )}
 
+            <section className={styles.section} aria-labelledby="datasets-section-title">
+              <Text id="datasets-section-title" as="h2" size={400} weight="semibold">
+                Datasets
+              </Text>
+              <Text size={200} className={styles.hint}>
+                Choose the registered datasets that provide objectives for this run.
+              </Text>
+              <DatasetPicker
+                availableDatasets={availableDatasets}
+                defaultDatasets={scenario.default_datasets}
+                selectedDatasets={selectedDatasets}
+                status={datasetCatalogStatus}
+                error={datasetCatalogError}
+                disabled={submitting}
+                invalid={datasetSelectionInvalid}
+                onChange={handleDatasetChange}
+                onRestoreDefaults={() => {
+                  setSelectedDatasets([...scenario.default_datasets])
+                  setValidationError(null)
+                }}
+              />
+            </section>
+
             <Accordion collapsible className={styles.advancedSection}>
               <AccordionItem value="advanced">
                 <AccordionHeader>Advanced options</AccordionHeader>
                 <AccordionPanel>
                   <div className={styles.advancedFields}>
                     <Field
-                      label="Dataset override"
-                      hint="Comma-separated dataset names. Leave blank to use the scenario's default datasets."
+                      label="Max dataset size"
+                      hint="Optional cap applied to each selected dataset. Leave blank for no additional cap."
                     >
-                      <Input
-                        className={styles.control}
-                        value={datasetOverride}
-                        disabled={submitting}
-                        onChange={(_, data) => setDatasetOverride(data.value)}
-                        placeholder={scenario.default_datasets.join(', ') || undefined}
-                        data-testid="dataset-override-input"
-                      />
-                    </Field>
-                    <Field label="Max dataset size" hint="Optional. Leave blank for no cap.">
                       <Input
                         className={styles.numberInput}
                         type="number"
@@ -1011,7 +1202,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         data-testid="max-concurrency-input"
                       />
                     </Field>
-                    <Field label="Max retries">
+                    <Field
+                      label="Max retries"
+                      hint={usesAdaptiveTechniqueSelection
+                        ? 'Maximum times to resume the scenario after an exception. This is separate from Adaptive trying another technique.'
+                        : 'Maximum times to resume the scenario after an exception.'}
+                    >
                       <SpinButton
                         className={styles.numberInput}
                         value={maxRetries}
@@ -1054,9 +1250,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         </Text>
                       )}
                     </div>
-                  ) : techniqueSelection.techniques.length > 0 ? (
+                  ) : customTechniques.length > 0 ? (
                     <div className={styles.previewBadges}>
-                      {techniqueSelection.techniques.map((name) => (
+                      {customTechniques.map((name) => (
                         <Badge key={name} appearance="outline">{name}</Badge>
                       ))}
                     </div>
@@ -1070,10 +1266,10 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 <dd>
                   <div className={styles.previewStack}>
                     <Text>
-                      {effectiveDatasets.length > 0 ? effectiveDatasets.join(', ') : 'No datasets declared'}
+                      {selectedDatasets.length > 0 ? selectedDatasets.join(', ') : 'No datasets selected'}
                     </Text>
                     <Text size={200} className={styles.hint}>
-                      {previewDatasets.length > 0 ? 'Custom override' : 'Scenario defaults'}
+                      {datasetsAreDefaults ? 'Scenario defaults' : 'Selected datasets'}
                       {maxDatasetSize.trim() ? ` · capped at ${maxDatasetSize.trim()} each` : ''}
                     </Text>
                   </div>
@@ -1086,7 +1282,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                     <dl className={styles.parameterPreview}>
                       {dynamicParameters.map((parameter) => (
                         <div className={styles.parameterPreviewRow} key={parameter.name}>
-                          <dt>{parameter.name}</dt>
+                          <dt>{parameterDisplayLabel(parameter, usesAdaptiveTechniqueSelection)}</dt>
                           <dd>{formatParameterPreview(scenarioParamValues[parameter.name])}</dd>
                         </div>
                       ))}
@@ -1100,9 +1296,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 <dt>Baseline</dt>
                 <dd>
                   {isBaselineForbidden
-                    ? 'Excluded by scenario policy'
+                    ? 'Not included — this scenario does not support direct comparison'
                     : baselineChecked
-                      ? 'Included'
+                      ? 'Included — direct objective without an attack technique'
                       : 'Not included'}
                 </dd>
               </div>
@@ -1130,7 +1326,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 appearance="primary"
                 type="submit"
                 form={formId}
-                disabled={submitting || techniqueSelectionInvalid}
+                disabled={submitting || techniqueSelectionInvalid || datasetSelectionInvalid}
                 data-testid="launch-scenario-btn"
               >
                 {submitting ? 'Launching...' : 'Launch scenario'}

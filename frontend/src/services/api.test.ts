@@ -18,6 +18,7 @@ import {
   versionApi,
   targetsApi,
   attacksApi,
+  datasetsApi,
   scenariosApi,
 } from "./api";
 
@@ -466,6 +467,22 @@ describe("api service", () => {
           target_registry_name: "test-target",
         })
       ).rejects.toThrow("Target not found");
+    });
+  });
+
+  describe("datasetsApi", () => {
+    it("lists registered datasets", async () => {
+      const mockResponse = {
+        data: {
+          items: [{ name: "harmbench" }, { name: "xstest" }],
+        },
+      };
+      (apiClient.get as jest.Mock).mockResolvedValueOnce(mockResponse);
+
+      const result = await datasetsApi.listDatasets();
+
+      expect(apiClient.get).toHaveBeenCalledWith("/datasets");
+      expect(result).toEqual(mockResponse.data);
     });
   });
 

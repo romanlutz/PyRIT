@@ -15,6 +15,8 @@ export interface ParameterFieldProps {
   value: ParameterFormValue
   disabled: boolean
   onChange: (name: string, value: ParameterFormValue) => void
+  displayLabel?: string
+  displayHint?: string
   /** Prefix for `data-testid` attributes. Defaults to `'param'` (e.g. `param-<name>`). */
   testIdPrefix?: string
 }
@@ -34,17 +36,21 @@ export default function ParameterField({
   value,
   disabled,
   onChange,
+  displayLabel,
+  displayHint,
   testIdPrefix = 'param',
 }: ParameterFieldProps) {
   const styles = useParameterFieldStyles()
   const kind = getParameterControlKind(parameter)
-  const label = parameter.required ? `${parameter.name} *` : parameter.name
+  const baseLabel = displayLabel ?? parameter.name
+  const label = parameter.required ? `${baseLabel} *` : baseLabel
+  const fieldHint = displayHint ?? parameter.description ?? undefined
   const testId = `${testIdPrefix}-${parameter.name}`
 
   if (kind === 'boolean') {
     const current = value === 'true' || value === 'false' ? value : ''
     return (
-      <Field label={label} hint={parameter.description ?? undefined}>
+      <Field label={label} hint={fieldHint}>
         <Select
           className={styles.control}
           value={current}
@@ -63,8 +69,8 @@ export default function ParameterField({
   if (kind === 'multiselect') {
     const selected = Array.isArray(value) ? value : []
     return (
-      <Field label={label} hint={parameter.description ?? undefined}>
-        <div className={styles.checkboxGroup} role="group" aria-label={parameter.name}>
+      <Field label={label} hint={fieldHint}>
+        <div className={styles.checkboxGroup} role="group" aria-label={baseLabel}>
           {(parameter.choices ?? []).map((choice) => (
             <Checkbox
               className={styles.selectionControl}
@@ -90,7 +96,7 @@ export default function ParameterField({
 
   if (kind === 'select') {
     return (
-      <Field label={label} hint={parameter.description ?? undefined}>
+      <Field label={label} hint={fieldHint}>
         <Select
           className={styles.control}
           value={stringValue}
@@ -110,8 +116,7 @@ export default function ParameterField({
   }
 
   const placeholder = typeof parameter.default === 'string' ? parameter.default : undefined
-  const hint =
-    parameter.description ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
+  const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
 
   return (
     <Field label={label} hint={hint}>

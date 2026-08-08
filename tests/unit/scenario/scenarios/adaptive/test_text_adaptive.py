@@ -129,6 +129,17 @@ class TestTextAdaptiveBasics:
     def test_required_datasets_non_empty(self):
         assert len(TextAdaptive.required_datasets()) > 0
 
+    def test_max_attempts_parameter_distinguishes_techniques_from_retries(self):
+        parameter = next(
+            parameter
+            for parameter in TextAdaptive.additional_parameters()
+            if parameter.name == "max_attempts_per_objective"
+        )
+        assert parameter.default == 3
+        assert "different compatible techniques" in parameter.description
+        assert "stopping after the first success" in parameter.description
+        assert "separate from retries" in parameter.description
+
     def test_get_technique_class_is_cached(self):
         cls_a = TextAdaptive.get_technique_class()
         cls_b = TextAdaptive.get_technique_class()

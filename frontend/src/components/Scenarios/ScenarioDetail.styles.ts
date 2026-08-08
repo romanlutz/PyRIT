@@ -103,6 +103,28 @@ export const useScenarioDetailStyles = makeStyles({
     gap: tokens.spacingVerticalXS,
     paddingLeft: tokens.spacingHorizontalM,
   },
+  datasetPickerHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalM,
+  },
+  datasetList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    maxHeight: '18rem',
+    overflowY: 'auto',
+    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalS}`,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground1,
+  },
+  datasetEmptyState: {
+    padding: tokens.spacingVerticalM,
+    color: tokens.colorNeutralForeground3,
+  },
   hint: {
     color: tokens.colorNeutralForeground3,
   },

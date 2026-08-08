@@ -4,7 +4,7 @@ import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
-import { scenariosApi, targetsApi } from '@/services/api'
+import { datasetsApi, scenariosApi, targetsApi } from '@/services/api'
 import type {
   RegisteredScenario,
   ScenarioDefaultRunSizeEstimate,
@@ -31,6 +31,9 @@ jest.mock('@/services/api', () => ({
   targetsApi: {
     listTargets: jest.fn(),
   },
+  datasetsApi: {
+    listDatasets: jest.fn(),
+  },
 }))
 
 const mockUseScenarioRunProgress = useScenarioRunProgress as jest.Mock
@@ -39,6 +42,7 @@ const mockGetScenario = scenariosApi.getScenario as jest.Mock
 const mockListCatalog = scenariosApi.listCatalog as jest.Mock
 const mockStartRun = scenariosApi.startRun as jest.Mock
 const mockListTargets = targetsApi.listTargets as jest.Mock
+const mockListDatasets = datasetsApi.listDatasets as jest.Mock
 
 const SCENARIO_NAME = 'foundry.red_team_agent'
 const RUN_ID = '123e4567-e89b-12d3-a456-426614174000'
@@ -168,6 +172,7 @@ describe('Scenario catalog-to-run integration', () => {
       items: [TARGET],
       pagination: { limit: 200, has_more: false },
     })
+    mockListDatasets.mockResolvedValue({ items: [{ name: 'harmbench' }] })
     mockEstimateRun.mockResolvedValue(ESTIMATE)
     mockStartRun.mockResolvedValue({ scenario_result_id: RUN_ID })
     mockUseScenarioRunProgress.mockReturnValue({

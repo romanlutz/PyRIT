@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
-import { scenariosApi, targetsApi } from '@/services/api'
+import { datasetsApi, scenariosApi, targetsApi } from '@/services/api'
 import type {
   RegisteredScenario,
   ScenarioDefaultRunSizeEstimate,
@@ -21,12 +21,16 @@ jest.mock('@/services/api', () => ({
   targetsApi: {
     listTargets: jest.fn(),
   },
+  datasetsApi: {
+    listDatasets: jest.fn(),
+  },
 }))
 
 const mockGetScenario = scenariosApi.getScenario as jest.Mock
 const mockEstimateRun = scenariosApi.estimateRun as jest.Mock
 const mockStartRun = scenariosApi.startRun as jest.Mock
 const mockListTargets = targetsApi.listTargets as jest.Mock
+const mockListDatasets = datasetsApi.listDatasets as jest.Mock
 const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
   [
     ['Run', 'size', 'calculated'].join(' '),
@@ -200,10 +204,19 @@ describe('ScenarioDetail', () => {
     mockGetScenario.mockReset()
     mockEstimateRun.mockReset()
     mockListTargets.mockReset()
+    mockListDatasets.mockReset()
     mockStartRun.mockReset()
     mockListTargets.mockResolvedValue({
       items: [makeTarget('target-a'), makeTarget('target-b')],
       pagination: { limit: 200, has_more: false },
+    })
+    mockListDatasets.mockResolvedValue({
+      items: [
+        { name: 'harmbench' },
+        { name: 'ds_a' },
+        { name: 'ds_b' },
+        { name: 'xstest' },
+      ],
     })
     mockGetScenario.mockResolvedValue(makeScenario())
     mockEstimateRun.mockReturnValue(new Promise(() => {}))
@@ -404,7 +417,7 @@ describe('ScenarioDetail', () => {
     renderDetail('/scenarios/foundry.red_team_agent')
     await flushRenderedPromises()
 
-    await user.click(screen.getByTestId('technique-crescendo'))
+    await user.click(screen.getByTestId('technique-mode-custom'))
     await user.click(screen.getByTestId('technique-crescendo'))
     await advanceTimers(300)
 
@@ -450,7 +463,8 @@ describe('ScenarioDetail', () => {
 
     await screen.findByTestId('scenario-target-select')
     expect(screen.getByTestId('technique-default_technique')).toBeChecked()
-    expect(screen.getByTestId('technique-crescendo')).not.toBeChecked()
+    expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('selected-technique-set-members')).toHaveTextContent('crescendo')
   })
 
   it('marks a named technique set as the scenario default', async () => {
@@ -523,7 +537,9 @@ describe('ScenarioDetail', () => {
     expect(screen.getByLabelText('Light (9 techniques)')).toBeInTheDocument()
     expect(screen.getByLabelText('Multi-turn (5 techniques)')).toBeInTheDocument()
     expect(screen.getByLabelText('Single-turn (12 techniques)')).toBeInTheDocument()
-    expect(screen.getByText(/A technique set is a shortcut that selects a predefined group/)).toBeInTheDocument()
+    expect(screen.getByText(
+      'Choose a predefined set, or choose Custom to select techniques individually.',
+    )).toBeInTheDocument()
     expect(screen.getByText(
       /All is generated from the catalog; Recommended is curated for this scenario/,
     )).toBeInTheDocument()
@@ -534,6 +550,8 @@ describe('ScenarioDetail', () => {
       /compatibility can still change the envelope count/,
     )).toBeInTheDocument()
     expect(screen.queryByText(/aggregate preset/i)).not.toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: 'Custom' })).not.toBeChecked()
+    expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
 
     expect(await screen.findByText('21 objective envelopes')).toBeInTheDocument()
     expect(screen.getByText(
@@ -552,7 +570,15 @@ describe('ScenarioDetail', () => {
     expect(within(selectedMembers).getByText('role_play_movie_script')).toBeInTheDocument()
     expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
 
-    const maxAttempts = screen.getByTestId('scenario-param-max_attempts_per_objective')
+    const maxAttempts = screen.getByRole('spinbutton', { name: 'Techniques tried per objective' })
+    expect(screen.getByText(
+      /Maximum different compatible techniques Adaptive may try inside one objective envelope/,
+    )).toBeInTheDocument()
+    expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByText(
+      'Maximum times to resume the scenario after an exception. This is separate from Adaptive trying another technique.',
+    )).toBeInTheDocument()
     await user.clear(maxAttempts)
     await user.type(maxAttempts, '5')
     expect(screen.getByText(
@@ -574,7 +600,33 @@ describe('ScenarioDetail', () => {
     expect(screen.queryByText(/up to 0 technique/i)).not.toBeInTheDocument()
   })
 
-  it('switches from the default preset to a multi-technique custom selection', async () => {
+  it('presents Adaptive attempts clearly while preserving the scenario parameter wire key', async () => {
+    mockGetScenario.mockResolvedValue(makeAdaptiveScenario())
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    const maxAttempts = await screen.findByRole('spinbutton', { name: 'Techniques tried per objective' })
+    expect(screen.queryByText('max_attempts_per_objective')).not.toBeInTheDocument()
+    expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
+
+    await user.clear(maxAttempts)
+    await user.type(maxAttempts, '5')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        scenario_params: { max_attempts_per_objective: 5 },
+      }),
+      expect.any(AbortSignal),
+    ))
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scenario_params: { max_attempts_per_objective: 5 },
+      }),
+    ))
+  })
+
+  it('switches exclusively from a named set to Custom and initializes resolved members', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({
         aggregate_techniques: ['default_technique', 'all_garak'],
@@ -590,11 +642,17 @@ describe('ScenarioDetail', () => {
     // it must render exactly once (deduped), under the aggregate group.
     expect(screen.getAllByTestId('technique-all_garak')).toHaveLength(1)
 
-    await user.click(screen.getByTestId('technique-crescendo'))
+    expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
+    await user.click(screen.getByTestId('technique-mode-custom'))
     expect(screen.getByTestId('technique-default_technique')).not.toBeChecked()
     expect(screen.getByTestId('technique-crescendo')).toBeChecked()
 
     await user.click(screen.getByTestId('technique-prompt_sending'))
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.objectContaining({ techniques: ['crescendo', 'prompt_sending'] }),
+      expect.any(AbortSignal),
+    ))
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
@@ -603,25 +661,39 @@ describe('ScenarioDetail', () => {
     expect(new Set(request.techniques).size).toBe(request.techniques.length)
   })
 
-  it('selecting a preset replaces the custom concrete list', async () => {
+  it('preserves custom choices while named sets send exactly one token', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({
         aggregate_techniques: ['default_technique', 'all_garak'],
-        all_techniques: ['default_technique', 'crescendo'],
+        aggregate_technique_expansions: {
+          default_technique: ['crescendo'],
+          all_garak: ['crescendo'],
+        },
+        all_techniques: ['default_technique', 'crescendo', 'prompt_sending'],
       }),
     )
     const user = userEvent.setup()
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
-    await user.click(screen.getByTestId('technique-crescendo'))
+    await user.click(screen.getByTestId('technique-mode-custom'))
+    await user.click(screen.getByTestId('technique-prompt_sending'))
     await user.click(screen.getByTestId('technique-all_garak'))
     expect(screen.getByTestId('technique-all_garak')).toBeChecked()
-    expect(screen.getByTestId('technique-crescendo')).not.toBeChecked()
+    expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.objectContaining({ techniques: ['all_garak'] }),
+      expect.any(AbortSignal),
+    ))
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
     expect(mockStartRun.mock.calls[0][0].techniques).toEqual(['all_garak'])
+
+    await user.click(screen.getByTestId('technique-mode-custom'))
+    expect(screen.getByTestId('technique-crescendo')).toBeChecked()
+    expect(screen.getByTestId('technique-prompt_sending')).toBeChecked()
   })
 
   it('initializes a concrete default as custom and allows adding another concrete technique', async () => {
@@ -636,6 +708,7 @@ describe('ScenarioDetail', () => {
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
+    expect(screen.getByTestId('technique-mode-custom')).toBeChecked()
     expect(screen.getByTestId('technique-prompt_sending')).toBeChecked()
     await user.click(screen.getByTestId('technique-crescendo'))
     expect(screen.getByTestId('technique-prompt_sending')).toBeChecked()
@@ -651,7 +724,7 @@ describe('ScenarioDetail', () => {
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
-    await user.click(screen.getByTestId('technique-crescendo'))
+    await user.click(screen.getByTestId('technique-mode-custom'))
     await user.click(screen.getByTestId('technique-crescendo'))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Select at least one technique.')
@@ -667,8 +740,19 @@ describe('ScenarioDetail', () => {
 
     const checkbox = screen.getByTestId('baseline-checkbox')
     expect(checkbox).toBeChecked()
+    expect(screen.getByText(
+      /Also send each selected objective directly, without an attack technique/,
+    )).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' })).toHaveTextContent(
+      'Included — direct objective without an attack technique',
+    )
 
     await user.click(checkbox)
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.objectContaining({ include_baseline: false }),
+      expect.any(AbortSignal),
+    ))
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
@@ -695,6 +779,10 @@ describe('ScenarioDetail', () => {
     const checkbox = screen.getByTestId('baseline-checkbox')
     expect(checkbox).toBeDisabled()
     expect(checkbox).not.toBeChecked()
+    expect(checkbox).toHaveAccessibleName('Include direct baseline comparison')
+    expect(screen.getByText(
+      /This scenario does not support sending objectives directly without an attack technique/,
+    )).toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
@@ -747,12 +835,14 @@ describe('ScenarioDetail', () => {
     expect(mockStartRun).not.toHaveBeenCalled()
   })
 
-  it('omits the dataset override and max dataset size when left blank, sending default concurrency/retries', async () => {
+  it('selects scenario default datasets initially and omits the unchanged override', async () => {
     const user = userEvent.setup()
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
-    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByTestId('dataset-harmbench')).toBeChecked()
+    expect(screen.getByText('1 dataset selected')).toBeInTheDocument()
+    expect(screen.getByTestId('restore-default-datasets')).toBeDisabled()
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
@@ -763,26 +853,34 @@ describe('ScenarioDetail', () => {
     expect(request.max_retries).toBe(0)
   })
 
-  it('includes dataset override and max dataset size when provided', async () => {
+  it('filters datasets and sends the exact changed selection to estimate and launch', async () => {
     const user = userEvent.setup()
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
+    await user.type(screen.getByRole('textbox', { name: 'Search datasets' }), 'ds_')
+    expect(screen.queryByTestId('dataset-harmbench')).not.toBeInTheDocument()
+    expect(screen.getByTestId('dataset-ds_a')).toBeInTheDocument()
+    await user.click(screen.getByTestId('dataset-ds_a'))
+    await user.clear(screen.getByRole('textbox', { name: 'Search datasets' }))
+    await user.click(screen.getByTestId('dataset-harmbench'))
+    expect(screen.getByText('1 dataset selected')).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' })).toHaveTextContent('ds_a')
+    expect(screen.getByRole('complementary', { name: 'Run preview' })).not.toHaveTextContent('harmbench')
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
-    await user.type(screen.getByTestId('dataset-override-input'), 'ds_a, ds_b')
     await user.type(screen.getByTestId('max-dataset-size-input'), '25')
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
     const request = mockStartRun.mock.calls[0][0]
-    expect(request.dataset_names).toEqual(['ds_a', 'ds_b'])
+    expect(request.dataset_names).toEqual(['ds_a'])
     expect(request.max_dataset_size).toBe(25)
     await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
       'foundry.red_team_agent',
       expect.objectContaining({
         target_name: 'target-a',
         techniques: ['default_technique'],
-        dataset_names: ['ds_a', 'ds_b'],
+        dataset_names: ['ds_a'],
         max_dataset_size: 25,
         include_baseline: true,
       }),
@@ -791,12 +889,83 @@ describe('ScenarioDetail', () => {
     expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('labels')
   })
 
+  it('restores dataset defaults and removes the estimate and launch override', async () => {
+    const user = userEvent.setup()
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('dataset-ds_a')
+
+    await user.click(screen.getByTestId('dataset-ds_a'))
+    await user.click(screen.getByTestId('dataset-harmbench'))
+    expect(screen.getByTestId('restore-default-datasets')).toBeEnabled()
+    await user.click(screen.getByTestId('restore-default-datasets'))
+    expect(screen.getByTestId('dataset-harmbench')).toBeChecked()
+    expect(screen.getByTestId('dataset-ds_a')).not.toBeChecked()
+
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
+    expect(mockStartRun.mock.calls[0][0]).not.toHaveProperty('dataset_names')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'foundry.red_team_agent',
+      expect.not.objectContaining({ dataset_names: expect.anything() }),
+      expect.any(AbortSignal),
+    ))
+  })
+
+  it('requires one dataset when the scenario declares defaults', async () => {
+    const user = userEvent.setup()
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('dataset-harmbench')
+
+    await user.click(screen.getByTestId('dataset-harmbench'))
+
+    expect(screen.getAllByText('Select at least one dataset.')).not.toHaveLength(0)
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(mockStartRun).not.toHaveBeenCalled()
+  })
+
+  it('keeps scenario defaults usable when the dataset catalog fails', async () => {
+    mockListDatasets.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 503, data: { detail: 'Catalog unavailable' } },
+    })
+    renderDetail('/scenarios/foundry.red_team_agent')
+
+    expect(await screen.findByTestId('dataset-catalog-error')).toHaveTextContent(
+      'Registered datasets couldn’t be loaded. Scenario defaults remain available. Catalog unavailable',
+    )
+    expect(screen.getByTestId('dataset-harmbench')).toBeChecked()
+    expect(screen.getByTestId('launch-scenario-btn')).not.toBeDisabled()
+  })
+
+  it('shows a loading state without hiding known scenario defaults', async () => {
+    mockListDatasets.mockReturnValueOnce(new Promise(() => {}))
+    renderDetail('/scenarios/foundry.red_team_agent')
+
+    expect(await screen.findByTestId('dataset-catalog-loading')).toBeInTheDocument()
+    expect(screen.getByTestId('dataset-harmbench')).toBeChecked()
+  })
+
+  it('exposes the bounded dataset picker to keyboard and assistive technology', async () => {
+    const user = userEvent.setup()
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('dataset-ds_a')
+
+    expect(screen.getByRole('group', { name: 'Datasets' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Search datasets' })).toBeInTheDocument()
+    const dataset = screen.getByRole('checkbox', { name: 'ds_a' })
+    dataset.focus()
+    await user.keyboard('[Space]')
+    expect(dataset).toBeChecked()
+  })
+
   it('rejects a non-positive-integer max dataset size', async () => {
     const user = userEvent.setup()
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
 
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByText(/Maximum times to resume the scenario after an exception/)).toBeInTheDocument()
+    expect(screen.queryByText(/separate from Adaptive trying another technique/)).not.toBeInTheDocument()
     await user.type(screen.getByTestId('max-dataset-size-input'), '0')
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
@@ -924,7 +1093,8 @@ describe('ScenarioDetail', () => {
     renderDetail('/scenarios/airt.jailbreak')
     await screen.findByTestId('scenario-target-select')
 
-    await user.click(screen.getByTestId('technique-prompt_sending'))
+    await user.click(screen.getByTestId('technique-mode-custom'))
+    await user.click(screen.getByTestId('technique-jailbreak_system_prompt'))
     await user.clear(screen.getByTestId('scenario-param-num_jailbreaks'))
     await user.type(screen.getByTestId('scenario-param-num_jailbreaks'), '2')
     await user.clear(screen.getByTestId('scenario-param-num_jailbreak_attempts'))
@@ -1061,7 +1231,7 @@ describe('ScenarioDetail', () => {
     await screen.findByTestId('scenario-target-select')
 
     await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
-    await user.click(screen.getByTestId('technique-crescendo'))
+    await user.click(screen.getByTestId('technique-mode-custom'))
     await user.clear(screen.getByTestId('scenario-param-attempts'))
     await user.type(screen.getByTestId('scenario-param-attempts'), '3')
     await user.click(screen.getByTestId('launch-scenario-btn'))

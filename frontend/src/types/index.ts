@@ -379,6 +379,16 @@ export interface ChangeMainConversationResponse {
   conversation_id: string
 }
 
+// --- Datasets ---
+
+export interface DatasetInfo {
+  name: string
+}
+
+export interface DatasetListResponse {
+  items: DatasetInfo[]
+}
+
 // --- Scenarios ---
 
 export interface RegisteredScenario {
