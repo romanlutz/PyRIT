@@ -17,9 +17,10 @@ executable Python: tasks, solvers, and scorers are arbitrary code imported and r
 harness. That is a large trust boundary to accept into an automated pipeline.
 `capability_suite` takes a different approach:
 
-> **No Inspect dependency exists.** PyRIT does not install, import, or execute
-> `inspect_ai` or `inspect_evals`. Arbitrary Python `@task` evaluations are executable
-> programs and require a reviewed native adapter before PyRIT can compile them.
+> **No Inspect dependency exists.** PyRIT does not install or import the real
+> `inspect_ai` package. Static compilers never execute `inspect_evals`. The separate,
+> opt-in `pyrit.compat.inspect_ai` loader described below can execute trusted source
+> from one pinned checkout before converting its construction graph to this native format.
 
 - **The manifest is data, not code.** `CapabilitySuiteManifest` and everything it contains
   (`manifest.py`) is an immutable, `extra="forbid"` Pydantic model tree. It can be loaded
@@ -90,6 +91,70 @@ conversation/tool loop, retry policy, evidence model, sandbox providers, and sco
 aggregation. A matching dataset and prompt does not by itself imply matching agent,
 browser, tool timeout, container image, scorer, or epoch semantics.
 
+### Opt-in unchanged-source ARC compatibility
+
+`pyrit.compat.inspect_ai` is an isolated construction facade for
+[`inspect_evals@b935c0e5cfa04710f016f925db75d8e81413e2cf`](https://github.com/UKGovernmentBEIS/inspect_evals/tree/b935c0e5cfa04710f016f925db75d8e81413e2cf).
+Its profile ID is `inspect-evals-b935c0e-inspect-api-0.3.233`; this implements the
+construction API semantics of `inspect_ai==0.3.233` consumed by that exact source
+revision, not arbitrary Inspect versions or current `inspect_evals` main.
+
+The loader executes an unchanged `@task` module with temporary `inspect_ai` aliases,
+materializes its dataset, and converts supported graph nodes to a
+`CapabilitySuiteManifest`. No top-level `inspect_ai` package is distributed. Source
+construction runs in a dedicated worker process, so its temporary `inspect_ai` and
+`inspect_evals` import aliases are never visible in the caller, cannot shadow a real
+Inspect installation, and disappear with the worker on success or failure. A contained
+source finder validates every imported `inspect_evals.*` Python module before executing
+it. Static API inventory runs before execution and unknown symbols raise
+`UnsupportedInspectFeatureError` with the symbol, profile, and remediation.
+The pinned `inspect_evals.utils.huggingface.hf_dataset` wrapper path is bound directly
+to the facade's offline-first dataset loader, avoiding the wrapper's unrelated telemetry
+and retry dependencies while preserving its pinned arguments and record mapper.
+
+This is **source containment, not a security sandbox**. The selected module path and
+`inspect_evals.*` imports must resolve beneath the supplied checkout, but the worker is
+arbitrary Python running with the PyRIT user's operating-system identity. Only run
+reviewed, trusted source. Verified loads require both the exact pinned Git commit and a
+clean tracked, untracked, and ignored worktree. Worker bytecode generation is disabled
+so verified loads do not mutate the supplied checkout. If revision verification is
+explicitly disabled, reports and manifests retain the detected revision but mark it
+unverified. Offline dataset loading is the default; callers can inject local ARC records
+or explicitly opt in to the pinned Hugging Face request. Worker execution is bounded by
+`worker_timeout_seconds` (300 seconds by default), and Git verification is bounded by
+`source_verification_timeout_seconds` (120 seconds by default).
+
+```python
+from pyrit.compat.inspect_ai import load_inspect_eval, run_inspect_eval_async
+
+loaded = load_inspect_eval(
+    source_root=checkout,
+    task_spec="arc/arc.py@arc_challenge",
+    dataset_loader=local_pinned_dataset_loader,
+)
+
+execution = await run_inspect_eval_async(
+    source_root=checkout,
+    task_spec="arc/arc.py@arc_challenge",
+    target=target,
+    dataset_loader=local_pinned_dataset_loader,
+)
+```
+
+The implemented execution surface is ARC's dataset record mapper,
+`multiple_choice()`, `choice()`, task variants/parameters, messages, and native target
+dispatch/scoring. Prompts and scoring preserve Inspect 0.3.233's `ANSWER: <letter>`
+contract, including its case/whitespace/trailing-period parsing rules; a bare answer
+letter is incorrect. Non-default task generation configuration, task-level limits,
+multiple-answer/shuffled choices, and dataset transforms fail explicitly rather than
+being silently approximated. Model calls only use the injected PyRIT `PromptTarget`. Agent/React
+loops, bash/Python tools, custom scorer execution, stores/hooks/EvalLog parity, GDM CTF
+execution, and provider implementations are intentionally excluded. AWS/Bedrock/
+SageMaker/EC2, GCP, Modal, Daytona, and other non-Azure cloud providers are not
+implemented by this compatibility layer. Native ARC cases use the explicit
+`case_timeout_seconds` execution bound (300 seconds by default), which is recorded in the
+compatibility report and manifest because Inspect's default task time limit is unbounded.
+
 ## Security and portability boundary
 
 - **Local sandbox provider (`pyrit.sandbox.LocalSandboxProvider`) is not an isolation
@@ -100,10 +165,12 @@ browser, tool timeout, container image, scorer, or epoch semantics.
   `DockerSandboxProviderManifestConfig` or `HyperVSandboxProviderManifestConfig` (both
   typed, validated manifest configs) when a suite's setup/tool commands must run
   untrusted content.
-- **The compiler/runner boundary never imports or executes third-party evaluation code.**
+- **The default compiler/runner boundary never imports or executes third-party evaluation code.**
   Compilation only ever reads data files or scans file suffixes/text patterns; execution
   only ever runs a manifest's own declared messages/tools/setup commands through
   `pyrit.executor.capability.CapabilityTaskExecutor` inside the sandbox the caller chose.
+  The opt-in compatibility loader is a separate, explicit trusted-code boundary that
+  returns to this native manifest/runner boundary after source construction.
 
 ## Runner lifecycle
 
