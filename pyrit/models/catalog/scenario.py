@@ -88,6 +88,7 @@ class ScenarioRunSizeComponent(BaseModel):
     count: int = Field(..., ge=0)
     factors: list[ScenarioRunSizeFactor] = Field(default_factory=list)
     is_baseline: bool = False
+    condition: ScenarioRunSizeEstimateCondition | None = None
     note: str | None = None
 
     @model_validator(mode="after")
@@ -107,6 +108,42 @@ class ScenarioRunSizeComponent(BaseModel):
                 raise ValueError(
                     f"Component '{self.label}' count ({self.count}) must equal its factor product ({factor_product})"
                 )
+        return self
+
+
+class ScenarioAdaptiveRunSizeDetails(BaseModel):
+    """Structured work bounds for an adaptive scenario estimate."""
+
+    objective_count: int = Field(..., ge=0)
+    candidate_technique_count: int = Field(..., ge=1)
+    max_attempts_per_objective: int = Field(..., ge=1)
+    techniques_per_objective_upper_bound: int = Field(..., ge=1)
+    technique_attempt_count_upper_bound: int = Field(..., ge=0)
+    stop_on_first_success: Literal[True] = True
+    compatibility_may_reduce_attempts: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_attempt_bounds(self) -> "ScenarioAdaptiveRunSizeDetails":
+        """
+        Ensure the serialized adaptive attempt bounds match the configured pool.
+
+        Returns:
+            ScenarioAdaptiveRunSizeDetails: The validated details.
+
+        Raises:
+            ValueError: If either derived upper bound is inconsistent.
+        """
+        expected_per_objective = min(self.candidate_technique_count, self.max_attempts_per_objective)
+        if self.techniques_per_objective_upper_bound != expected_per_objective:
+            raise ValueError(
+                "techniques_per_objective_upper_bound must equal "
+                "min(candidate_technique_count, max_attempts_per_objective)"
+            )
+        expected_total = self.objective_count * expected_per_objective
+        if self.technique_attempt_count_upper_bound != expected_total:
+            raise ValueError(
+                "technique_attempt_count_upper_bound must equal objective_count * techniques_per_objective_upper_bound"
+            )
         return self
 
 
@@ -154,6 +191,7 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
     condition: ScenarioRunSizeEstimateCondition | None = None
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
+    adaptive_details: ScenarioAdaptiveRunSizeDetails | None = None
     note: str | None = Field(default=None, validation_alias=AliasChoices("note", "caveat"))
     retries_included: Literal[False] = False
 

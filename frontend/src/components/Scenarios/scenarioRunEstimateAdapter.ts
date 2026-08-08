@@ -88,10 +88,22 @@ export function mapScenarioRunEstimate(
         count: component.count,
         factors: mapFactors(id, component.factors),
         isBaseline: component.is_baseline,
+        condition: component.condition ?? null,
         note: component.note,
       }
     }),
     datasets: mapDatasets(response.datasets),
+    adaptiveDetails: response.adaptive_details
+      ? {
+          objectiveCount: response.adaptive_details.objective_count,
+          candidateTechniqueCount: response.adaptive_details.candidate_technique_count,
+          maxAttemptsPerObjective: response.adaptive_details.max_attempts_per_objective,
+          techniquesPerObjectiveUpperBound: response.adaptive_details.techniques_per_objective_upper_bound,
+          techniqueAttemptCountUpperBound: response.adaptive_details.technique_attempt_count_upper_bound,
+          stopOnFirstSuccess: response.adaptive_details.stop_on_first_success,
+          compatibilityMayReduceAttempts: response.adaptive_details.compatibility_may_reduce_attempts,
+        }
+      : null,
     note: response.note,
     retriesIncluded: response.retries_included,
   }

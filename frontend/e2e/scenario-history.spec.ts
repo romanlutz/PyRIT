@@ -49,6 +49,7 @@ const configuredEstimate = {
     note: null,
   }],
   datasets: [datasetSummary],
+  adaptive_details: null,
   note: "The backend total is authoritative.",
   retries_included: false,
 };
@@ -116,6 +117,7 @@ const catalogScenario = {
       note: null,
     }],
     datasets: [datasetSummary],
+    adaptive_details: null,
     note: "Retries and internal turns are excluded.",
     retries_included: false,
   },
@@ -411,7 +413,9 @@ async function configurePromptSendingRun(page: Page): Promise<void> {
   await page.getByTestId("scenario-param-num_jailbreaks").fill("2");
   await page.getByTestId("scenario-param-num_jailbreak_attempts").fill("1");
   await expect(page.getByTestId("baseline-checkbox")).not.toBeChecked();
-  await expect(page.getByText("8 planned attacks")).toBeVisible();
+  await expect(page.getByRole("group", {
+    name: "1 technique multiplied by 4 objectives multiplied by 2 jailbreak templates multiplied by 1 attempt equals 8 planned attacks.",
+  })).toBeVisible();
 }
 
 test.describe("Scenario catalog, history, and live run routing", () => {
@@ -474,8 +478,10 @@ test.describe("Scenario catalog, history, and live run routing", () => {
     await expect(members.getByText("prompt_sending")).toBeVisible();
     await expect(members.getByText("jailbreak_system_prompt")).toBeVisible();
     const preview = page.getByRole("complementary", { name: "Run preview" });
-    await expect(preview.getByText("Jailbreak templates: 2 (configuration)")).toBeVisible();
-    await expect(preview.getByText("16 planned attacks")).toBeVisible();
+    await expect(preview.getByText("Jailbreak templates: 2")).toBeVisible();
+    await expect(preview.getByRole("group", {
+      name: "2 techniques multiplied by 4 objectives multiplied by 2 jailbreak templates equals 16 planned attacks.",
+    })).toBeVisible();
     await expect(page.getByText("Include direct baseline comparison")).toBeVisible();
     await expect(page.getByText(/Also send each selected objective directly/)).toBeVisible();
 
@@ -515,7 +521,9 @@ test.describe("Scenario catalog, history, and live run routing", () => {
       const requests = mocks.getEstimateRequests();
       return requests[requests.length - 1];
     }).toEqual(expectedEstimateRequest);
-    await expect(preview.getByText("Prompt sending: 2 jailbreak templates × 4 selected seed groups × 1 concrete techniques × 1 attempts = 8")).toBeVisible();
+    await expect(preview.getByRole("group", {
+      name: "1 technique multiplied by 4 objectives multiplied by 2 jailbreak templates multiplied by 1 attempt equals 8 planned attacks.",
+    })).toBeVisible();
     await expect(preview).not.toContainText("context_compliance");
 
     await page.getByTestId("launch-scenario-btn").click();

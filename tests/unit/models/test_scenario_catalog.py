@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pyrit.models import (
+    ScenarioAdaptiveRunSizeDetails,
     ScenarioDatasetSizeCap,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
@@ -171,12 +172,47 @@ def test_default_run_size_serializes_versioned_api_shape() -> None:
                 ],
                 "note": None,
                 "is_baseline": False,
+                "condition": None,
             }
         ],
         "datasets": [],
+        "adaptive_details": None,
         "note": None,
         "retries_included": False,
     }
+
+
+def test_adaptive_run_size_details_serialize_derived_attempt_bounds() -> None:
+    """Adaptive estimates expose progress objectives and underlying attempt bounds separately."""
+    details = ScenarioAdaptiveRunSizeDetails(
+        objective_count=21,
+        candidate_technique_count=2,
+        max_attempts_per_objective=3,
+        techniques_per_objective_upper_bound=2,
+        technique_attempt_count_upper_bound=42,
+    )
+
+    assert details.model_dump(mode="json") == {
+        "objective_count": 21,
+        "candidate_technique_count": 2,
+        "max_attempts_per_objective": 3,
+        "techniques_per_objective_upper_bound": 2,
+        "technique_attempt_count_upper_bound": 42,
+        "stop_on_first_success": True,
+        "compatibility_may_reduce_attempts": True,
+    }
+
+
+def test_adaptive_run_size_details_reject_inconsistent_attempt_bounds() -> None:
+    """Adaptive work bounds cannot drift from the selected pool and configured cap."""
+    with pytest.raises(ValidationError, match="min\\(candidate_technique_count, max_attempts_per_objective\\)"):
+        ScenarioAdaptiveRunSizeDetails(
+            objective_count=21,
+            candidate_technique_count=2,
+            max_attempts_per_objective=3,
+            techniques_per_objective_upper_bound=3,
+            technique_attempt_count_upper_bound=63,
+        )
 
 
 def test_conditional_estimate_exposes_dataset_counts_structurally() -> None:

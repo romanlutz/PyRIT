@@ -74,6 +74,7 @@ const SCENARIO: RegisteredScenario = {
     condition: null,
     components: [],
     datasets: [],
+    adaptive_details: null,
     note: null,
     retries_included: false,
   },
@@ -102,6 +103,7 @@ const ESTIMATE: ScenarioDefaultRunSizeEstimate = {
     note: null,
   }],
   datasets: [],
+  adaptive_details: null,
   note: null,
   retries_included: false,
 }
@@ -201,7 +203,7 @@ describe('Scenario catalog-to-run integration', () => {
       expect.any(AbortSignal),
     ))
     expect(within(screen.getByRole('complementary', { name: 'Run preview' }))
-      .getByText('2 planned attacks')).toBeInTheDocument()
+      .getByRole('group', { name: '2 planned attacks.' })).toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
 

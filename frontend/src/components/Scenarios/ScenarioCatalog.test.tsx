@@ -63,6 +63,7 @@ function makeScenario(overrides: Partial<RegisteredScenario> & { scenario_name: 
       condition: null,
       components: [],
       datasets: [],
+      adaptive_details: null,
       note: 'Default sizing is not available.',
       retries_included: false,
     },
@@ -303,8 +304,48 @@ describe('ScenarioCatalog', () => {
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
     const row = await screen.findByTestId('scenario-card-scenario.compound')
-    expect(within(row).getByText('population-a: 4 · population-b: 2')).toBeInTheDocument()
-    expect(within(row).queryByText('6 selected seed groups')).not.toBeInTheDocument()
+    expect(within(row).getByText(
+      '4 objectives · population-a · 2 objectives · population-b',
+    )).toBeInTheDocument()
+    expect(within(row).queryByText('6 objectives')).not.toBeInTheDocument()
+  })
+
+  it('shows adaptive progress objectives together with the underlying attempt bound', async () => {
+    mockListCatalog.mockResolvedValueOnce({
+      items: [
+        makeScenario({
+          scenario_name: 'adaptive.text_adaptive',
+          default_run_size: {
+            version: 1,
+            status: 'conditional',
+            total_attack_count: null,
+            minimum_attack_count: null,
+            maximum_attack_count: null,
+            condition: 'target_capabilities',
+            components: [],
+            datasets: [],
+            adaptive_details: {
+              objective_count: 21,
+              candidate_technique_count: 2,
+              max_attempts_per_objective: 3,
+              techniques_per_objective_upper_bound: 2,
+              technique_attempt_count_upper_bound: 42,
+              stop_on_first_success: true,
+              compatibility_may_reduce_attempts: true,
+            },
+            note: null,
+            retries_included: false,
+          },
+        }),
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    const row = await screen.findByTestId('scenario-card-adaptive.text_adaptive')
+    expect(within(row).getByText('21 objectives · up to 42 technique attempts')).toBeInTheDocument()
+    expect(within(row).queryByText(/objective envelope/i)).not.toBeInTheDocument()
   })
 
   it('keeps declared datasets visible when backend population summaries are unavailable', async () => {
@@ -393,6 +434,7 @@ describe('ScenarioCatalog', () => {
                 selection_note: 'One incompatible group is excluded.',
               },
             ],
+            adaptive_details: null,
             note: 'Retries and internal turns are excluded.',
             retries_included: false,
           },
@@ -406,7 +448,7 @@ describe('ScenarioCatalog', () => {
     const row = await screen.findByTestId('scenario-card-airt.jailbreak')
     const cells = within(row).getAllByRole('cell')
     expect(within(cells[1]).getByRole('button', { name: 'Configure run' })).toBeInTheDocument()
-    expect(within(row).getByText('4 selected seed groups')).toBeInTheDocument()
+    expect(within(row).getByText('4 objectives')).toBeInTheDocument()
     expect(within(row).getByText('harmbench · 400 available')).toBeInTheDocument()
     expect(within(row).getByText('2 techniques')).toBeInTheDocument()
     expect(within(row).getByText('12–20 planned attacks')).toBeInTheDocument()

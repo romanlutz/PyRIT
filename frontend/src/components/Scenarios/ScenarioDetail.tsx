@@ -87,7 +87,7 @@ const CUSTOM_TECHNIQUE_SET_VALUE = '__custom__'
 const MAX_ATTEMPTS_PARAMETER_NAME = 'max_attempts_per_objective'
 const MAX_ATTEMPTS_DISPLAY_LABEL = 'Techniques tried per objective'
 const MAX_ATTEMPTS_DISPLAY_HINT = [
-  'Maximum different compatible techniques Adaptive may try inside one objective envelope.',
+  'Maximum different compatible techniques Adaptive may try for one objective.',
   'Adaptive stops after the first success. This is separate from retries.',
 ].join(' ')
 
@@ -146,17 +146,6 @@ function uniqueTechniqueOptions(scenario: RegisteredScenario): TechniqueOptions 
     : { mode: 'custom' }
   const initialCustomTechniques = defaultIsPreset ? [] : [scenario.default_technique]
   return { presets, concrete, defaultSelection, initialCustomTechniques }
-}
-
-function adaptiveEnvelopeCount(state: ScenarioRunEstimateState): number | undefined {
-  if (
-    state.status === 'loading'
-    || state.status === 'unavailable'
-  ) {
-    return undefined
-  }
-  const envelopeComponents = state.estimate.components.filter((component) => !component.isBaseline)
-  return envelopeComponents.length === 1 ? envelopeComponents[0].count : undefined
 }
 
 function sameStringSet(left: string[], right: string[]): boolean {
@@ -1013,13 +1002,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   </Text>
                   <MessageBar intent="info">
                     <MessageBarBody>
-                      Adaptive uses these as a candidate pool. It creates at most one objective envelope per
-                      compatible selected seed group
+                      Adaptive uses these as a candidate pool. It tracks one progress step per compatible objective
                       {effectiveMaxAdaptiveAttempts
-                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible techniques inside it, stopping after the first success`
+                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible techniques for that objective, stopping after the first success`
                         : ''}
-                      . Adding techniques changes the candidate pool, not the planned unit for each compatible
-                      group; compatibility can still change the envelope count.
+                      . Adding techniques changes the candidate pool, not the number of progress steps; compatibility
+                      can still change how many objectives can run.
                     </MessageBarBody>
                   </MessageBar>
                 </>
@@ -1311,16 +1299,6 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               <ScenarioRunEstimateDetails
                 state={estimateState}
                 idPrefix={`${formId}-estimate`}
-                primaryCount={usesAdaptiveTechniqueSelection
-                  ? adaptiveEnvelopeCount(estimateState)
-                  : undefined}
-                unitLabels={usesAdaptiveTechniqueSelection
-                  ? { singular: 'objective envelope', plural: 'objective envelopes' }
-                  : undefined}
-                supportingText={usesAdaptiveTechniqueSelection
-                  && effectiveMaxAdaptiveAttempts
-                  ? `Up to ${effectiveMaxAdaptiveAttempts} technique attempts per objective (inner attempts are not included in this count).`
-                  : undefined}
               />
             </div>
             <div className={styles.previewActions}>

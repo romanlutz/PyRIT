@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pyrit.common.utils import to_sha256
 from pyrit.executor.attack import AttackScoringConfig
 from pyrit.models import (
+    ScenarioAdaptiveRunSizeDetails,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateStatus,
@@ -209,10 +210,16 @@ class AdaptiveScenario(Scenario):
 
         Returns:
             ScenarioDefaultRunSizeEstimate: The adaptive outer-envelope estimate.
+
+        Raises:
+            ValueError: If ``max_attempts_per_objective`` is less than one.
         """
         selected_groups, datasets = await self._resolve_dataset_groups_for_estimate_async()
         selected_count = sum(len(groups) for groups in selected_groups.values())
         max_attempts = int(self.params.get("max_attempts_per_objective", 3))
+        if max_attempts < 1:
+            raise ValueError(f"max_attempts_per_objective must be >= 1, got {max_attempts}")
+        selected_candidate_count = len(self._scenario_techniques)
         baseline_components = (
             [
                 ScenarioRunSizeComponent(
@@ -238,6 +245,13 @@ class AdaptiveScenario(Scenario):
                 status=ScenarioRunSizeEstimateStatus.Conditional,
                 components=components,
                 datasets=datasets,
+                adaptive_details=ScenarioAdaptiveRunSizeDetails(
+                    objective_count=selected_count,
+                    candidate_technique_count=selected_candidate_count,
+                    max_attempts_per_objective=max_attempts,
+                    techniques_per_objective_upper_bound=min(selected_candidate_count, max_attempts),
+                    technique_attempt_count_upper_bound=(selected_count * min(selected_candidate_count, max_attempts)),
+                ),
                 note=(
                     "The authoritative total depends on which selected techniques are compatible with the "
                     f"configured objective target and each seed group. Up to {max_attempts} inner attempts per "
@@ -247,6 +261,7 @@ class AdaptiveScenario(Scenario):
 
         assert self._objective_target is not None
         techniques = self._build_techniques_dict(objective_target=self._objective_target)
+        candidate_count = len(techniques)
         dispatcher = AdaptiveTechniqueDispatcher(
             objective_target=self._objective_target,
             techniques=techniques,
@@ -290,6 +305,13 @@ class AdaptiveScenario(Scenario):
             total_attack_count=total_attack_count,
             components=components,
             datasets=datasets,
+            adaptive_details=ScenarioAdaptiveRunSizeDetails(
+                objective_count=compatible_group_count,
+                candidate_technique_count=candidate_count,
+                max_attempts_per_objective=max_attempts,
+                techniques_per_objective_upper_bound=min(candidate_count, max_attempts),
+                technique_attempt_count_upper_bound=compatible_group_count * min(candidate_count, max_attempts),
+            ),
             note=note,
         )
 

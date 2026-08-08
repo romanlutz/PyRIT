@@ -7,6 +7,7 @@ import { datasetsApi, scenariosApi, targetsApi } from '@/services/api'
 import type {
   RegisteredScenario,
   ScenarioDefaultRunSizeEstimate,
+  ScenarioRunSizeEstimateRequest,
   TargetInstance,
 } from '@/types'
 
@@ -76,6 +77,7 @@ function makeScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredSc
       condition: null,
       components: [],
       datasets: [],
+      adaptive_details: null,
       note: 'Default sizing is unavailable.',
       retries_included: false,
     },
@@ -118,6 +120,7 @@ function makeEstimate(
           },
         ],
     datasets: [],
+    adaptive_details: null,
     note: null,
     retries_included: false,
   }
@@ -374,12 +377,12 @@ describe('ScenarioDetail', () => {
     resolveSecond(makeEstimate(12))
     await flushRenderedPromises()
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
-    expect(within(preview).getByText('12 planned attacks')).toBeInTheDocument()
+    expect(within(preview).getByRole('group', { name: '12 planned attacks.' })).toBeInTheDocument()
 
     resolveFirst(makeEstimate(8))
     await flushRenderedPromises()
-    expect(within(preview).getByText('12 planned attacks')).toBeInTheDocument()
-    expect(within(preview).queryByText('8 planned attacks')).not.toBeInTheDocument()
+    expect(within(preview).getByRole('group', { name: '12 planned attacks.' })).toBeInTheDocument()
+    expect(within(preview).queryByRole('group', { name: '8 planned attacks.' })).not.toBeInTheDocument()
   })
 
   it('keeps the last good estimate and entered state after a transient preview failure', async () => {
@@ -396,7 +399,7 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
     await advanceTimers(300)
     await flushRenderedPromises()
-    expect(screen.getByText('8 planned attacks')).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '8 planned attacks.' })).toBeInTheDocument()
 
     await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
     await advanceTimers(300)
@@ -405,7 +408,7 @@ describe('ScenarioDetail', () => {
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('target-b')).toBeInTheDocument()
     expect(within(preview).getByText('Previous estimate')).toBeInTheDocument()
-    expect(within(preview).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(preview).getByRole('group', { name: '8 planned attacks.' })).toBeInTheDocument()
     expect(within(preview).getByText('Preview service unavailable')).toBeInTheDocument()
     expect(screen.getByTestId('scenario-target-select')).toHaveValue('target-b')
     expect(screen.getByTestId('launch-scenario-btn')).not.toBeDisabled()
@@ -508,27 +511,32 @@ describe('ScenarioDetail', () => {
     expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
   })
 
-  it('explains Adaptive technique sets, member counts, and objective-envelope sizing', async () => {
-    mockGetScenario.mockResolvedValue(makeAdaptiveScenario())
-    mockEstimateRun.mockResolvedValue({
-      ...makeEstimate(null),
-      components: [
-        {
-          label: 'Baseline',
-          count: 21,
-          factors: [],
-          is_baseline: true,
-          note: null,
-        },
-        {
-          label: 'Adaptive attack envelopes',
-          count: 21,
-          factors: [],
-          is_baseline: false,
-          note: null,
-        },
-      ],
-    })
+  it('explains Adaptive technique sets, progress objectives, and bounded attempt work', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> => {
+        const selectedSet = request.techniques?.[0] ?? 'default'
+        const candidateCount = scenario.aggregate_technique_expansions[selectedSet]?.length ?? 0
+        const configuredMax = Number(request.scenario_params?.max_attempts_per_objective ?? 3)
+        const perObjective = Math.min(candidateCount, configuredMax)
+        return {
+          ...makeEstimate(null),
+          adaptive_details: {
+            objective_count: 21,
+            candidate_technique_count: candidateCount,
+            max_attempts_per_objective: configuredMax,
+            techniques_per_objective_upper_bound: perObjective,
+            technique_attempt_count_upper_bound: 21 * perObjective,
+            stop_on_first_success: true,
+            compatibility_may_reduce_attempts: true,
+          },
+        }
+      },
+    )
     const user = userEvent.setup()
 
     renderDetail('/scenarios/adaptive.text_adaptive')
@@ -547,35 +555,38 @@ describe('ScenarioDetail', () => {
       /All is generated from the catalog; Recommended is curated for this scenario/,
     )).toBeInTheDocument()
     expect(screen.getByText(
-      /may try up to 3 compatible techniques inside it, stopping after the first success/,
+      /may try up to 3 compatible techniques for that objective, stopping after the first success/,
     )).toBeInTheDocument()
     expect(screen.getByText(
-      /compatibility can still change the envelope count/,
+      /compatibility can still change how many objectives can run/,
     )).toBeInTheDocument()
     expect(screen.queryByText(/aggregate preset/i)).not.toBeInTheDocument()
     expect(screen.getByRole('radio', { name: 'Custom' })).not.toBeChecked()
     expect(screen.queryByRole('group', { name: 'Individual techniques' })).not.toBeInTheDocument()
 
-    expect(await screen.findByText('21 objective envelopes')).toBeInTheDocument()
-    expect(screen.getByText(
-      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
-    )).toBeInTheDocument()
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
 
     await user.click(screen.getByLabelText('All (17 techniques)'))
     expect(screen.getByLabelText('All (17 techniques)')).toBeChecked()
     const selectedMembers = screen.getByTestId('selected-technique-set-members')
     expect(within(selectedMembers).getByText('all_member_15')).toBeInTheDocument()
-    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 3 techniques per objective equals up to 63 technique attempts.',
+    })).toBeInTheDocument()
 
     await user.click(screen.getByLabelText('Recommended (default) — 2 techniques'))
     expect(screen.getByLabelText('Recommended (default) — 2 techniques')).toBeChecked()
     expect(within(selectedMembers).queryByText('all_member_15')).not.toBeInTheDocument()
     expect(within(selectedMembers).getByText('role_play_movie_script')).toBeInTheDocument()
-    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
 
     const maxAttempts = screen.getByRole('spinbutton', { name: 'Techniques tried per objective' })
     expect(screen.getByText(
-      /Maximum different compatible techniques Adaptive may try inside one objective envelope/,
+      /Maximum different compatible techniques Adaptive may try for one objective/,
     )).toBeInTheDocument()
     expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
@@ -585,22 +596,23 @@ describe('ScenarioDetail', () => {
     await user.clear(maxAttempts)
     await user.type(maxAttempts, '5')
     expect(screen.getByText(
-      /may try up to 5 compatible techniques inside it, stopping after the first success/,
+      /may try up to 5 compatible techniques for that objective, stopping after the first success/,
     )).toBeInTheDocument()
-    expect(screen.getByText(
-      'Up to 5 technique attempts per objective (inner attempts are not included in this count).',
-    )).toBeInTheDocument()
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
 
     await user.clear(maxAttempts)
     expect(screen.getByText(
-      /may try up to 3 compatible techniques inside it, stopping after the first success/,
+      /may try up to 3 compatible techniques for that objective, stopping after the first success/,
     )).toBeInTheDocument()
-    expect(screen.getByText(
-      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
-    )).toBeInTheDocument()
+    expect(await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
 
     await user.type(maxAttempts, '0')
     expect(screen.queryByText(/up to 0 technique/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/objective envelope/i)).not.toBeInTheDocument()
   })
 
   it('presents Adaptive attempts clearly while preserving the scenario parameter wire key', async () => {
@@ -1089,6 +1101,7 @@ describe('ScenarioDetail', () => {
           selection_note: 'One incompatible group is excluded.',
         },
       ],
+      adaptive_details: null,
       note: 'The planned total is authoritative.',
       retries_included: false,
     })
@@ -1134,14 +1147,14 @@ describe('ScenarioDetail', () => {
     ))
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('prompt_sending')).toBeInTheDocument()
-    expect(within(preview).getAllByText('harmbench')).toHaveLength(2)
+    expect(within(preview).getByText('harmbench')).toBeInTheDocument()
     expect(within(preview).getByText('Not included')).toBeInTheDocument()
-    expect(within(preview).getByText('8 planned attacks')).toBeInTheDocument()
-    expect(within(preview).getByText('Logical seed groups')).toBeInTheDocument()
-    expect(within(preview).getByText('Selected seed groups')).toBeInTheDocument()
-    expect(within(preview).getByText('Jailbreak templates: 2 (configuration)')).toBeInTheDocument()
-    expect(within(preview).getByText('One incompatible group is excluded.')).toBeInTheDocument()
-    expect(within(preview).getByText('2')).toBeInTheDocument()
+    expect(within(preview).getByRole('group', {
+      name: '1 technique multiplied by 4 objectives multiplied by 2 jailbreak templates multiplied by 1 attempt equals 8 planned attacks.',
+    })).toBeInTheDocument()
+    expect(within(preview).getByText('4 objectives from harmbench · 5 available')).toBeInTheDocument()
+    expect(within(preview).getByText('Jailbreak templates: 2')).toBeInTheDocument()
+    expect(within(preview).queryByText(/logical seed groups|selected seed groups/i)).not.toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
 

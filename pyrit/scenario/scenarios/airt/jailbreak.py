@@ -410,6 +410,7 @@ class Jailbreak(Scenario):
                         ScenarioRunSizeFactor(label="jailbreak templates", count=template_count),
                         ScenarioRunSizeFactor(label="attempts", count=attempt_count),
                     ],
+                    condition=ScenarioRunSizeEstimateCondition.TargetCapabilities,
                     note=(
                         "The selected objective target supports native system-prompt delivery."
                         if system_delivery_supported is True

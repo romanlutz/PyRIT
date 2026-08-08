@@ -72,8 +72,8 @@ function formatCount(value: number): string {
   return value.toLocaleString()
 }
 
-function formatSeedGroupCount(value: number): string {
-  return `${formatCount(value)} selected seed group${value === 1 ? '' : 's'}`
+function formatObjectiveCount(value: number): string {
+  return `${formatCount(value)} objective${value === 1 ? '' : 's'}`
 }
 
 function DefaultDatasetSizeSummary({
@@ -97,7 +97,7 @@ function DefaultDatasetSizeSummary({
     const dataset = datasets[0]
     return (
       <div className={styles.compactStack}>
-        <Text weight="semibold">{formatSeedGroupCount(dataset.selected_seed_group_count)}</Text>
+        <Text weight="semibold">{formatObjectiveCount(dataset.selected_seed_group_count)}</Text>
         <Text size={200} className={styles.secondaryText}>
           {dataset.name} · {formatCount(dataset.logical_seed_group_count)} available
         </Text>
@@ -108,7 +108,7 @@ function DefaultDatasetSizeSummary({
   return (
     <Text size={200} weight="semibold">
       {datasets
-        .map((dataset) => `${dataset.name}: ${formatCount(dataset.selected_seed_group_count)}`)
+        .map((dataset) => `${formatObjectiveCount(dataset.selected_seed_group_count)} · ${dataset.name}`)
         .join(' · ')}
     </Text>
   )

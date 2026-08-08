@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 
 import type { ScenarioDefaultRunSizeEstimate, ScenarioRunEstimateState } from '@/types'
@@ -11,255 +11,268 @@ import {
 } from './ScenarioRunEstimate'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
 
-const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
-  [
-    ['Run', 'size', 'calculated'].join(' '),
-    ['Final', 'count', 'set', 'at', 'launch'].join(' '),
-  ].join('|'),
-  'i',
-)
-
 function TestWrapper({ children }: { children: ReactNode }) {
   return <FluentProvider theme={webLightTheme}>{children}</FluentProvider>
 }
 
-const EXACT_ESTIMATE: ScenarioDefaultRunSizeEstimate = {
-  version: 1,
-  status: 'exact',
-  total_attack_count: 8,
-  minimum_attack_count: null,
-  maximum_attack_count: null,
-  condition: null,
-  components: [
-    {
-      label: 'Prompt sending',
-      count: 8,
-      factors: [
-        { label: 'selected seed groups', count: 4 },
-        { label: 'jailbreak templates', count: 2 },
-        { label: 'techniques', count: 1 },
-        { label: 'attempts', count: 1 },
-      ],
-      is_baseline: false,
-      note: 'One planned attack per selected objective and template.',
-    },
-    {
-      label: 'Baseline attack',
-      // Deliberately differs from the authoritative total when added to the
-      // first component so this test detects accidental client-side summing.
-      count: 2,
-      factors: [],
-      is_baseline: true,
-      note: 'Fixture component used to guard the authoritative total.',
-    },
-  ],
-  datasets: [
-    {
-      name: 'harmbench',
-      kind: 'dataset',
-      logical_seed_group_count: 4,
-      selected_seed_group_count: 4,
-      configured_caps: [
-        {
-          label: 'Jailbreak templates',
-          count: 2,
-          configured_on: 'configuration',
-          dataset_name: null,
-        },
-      ],
-      selection_note: 'Four compatible objective groups selected.',
-    },
-  ],
-  note: 'The planned total is authoritative.',
-  retries_included: false,
+function makeEstimate(
+  overrides: Partial<ScenarioDefaultRunSizeEstimate> = {},
+): ScenarioDefaultRunSizeEstimate {
+  return {
+    version: 1,
+    status: 'exact',
+    total_attack_count: 16,
+    minimum_attack_count: null,
+    maximum_attack_count: null,
+    condition: null,
+    components: [
+      {
+        label: 'Default technique sweep',
+        count: 16,
+        factors: [
+          { label: 'selected logical seed groups', count: 4 },
+          { label: 'default concrete techniques', count: 4 },
+        ],
+        is_baseline: false,
+        note: null,
+      },
+    ],
+    datasets: [
+      {
+        name: 'harmbench',
+        kind: 'dataset',
+        logical_seed_group_count: 400,
+        selected_seed_group_count: 4,
+        configured_caps: [],
+        selection_note: 'The default selection uses 4 of 400 logical seed groups.',
+      },
+    ],
+    adaptive_details: null,
+    note: null,
+    retries_included: false,
+    ...overrides,
+  }
+}
+
+function renderDetails(estimate: ScenarioDefaultRunSizeEstimate): void {
+  render(
+    <TestWrapper>
+      <ScenarioRunEstimateDetails state={mapScenarioRunEstimate(estimate, 'request')} />
+    </TestWrapper>,
+  )
 }
 
 describe('ScenarioRunEstimate', () => {
-  it('renders the authoritative total, ordered factors, dataset counts, caps, and notes', () => {
-    const state = mapScenarioRunEstimate(EXACT_ESTIMATE, 'request')
+  it('renders an exact technique-by-objective equation with a complete accessible sentence', () => {
+    renderDetails(makeEstimate())
 
-    render(
-      <TestWrapper>
-        <ScenarioRunEstimateDetails state={state} />
-      </TestWrapper>,
-    )
-
-    expect(screen.getByText('8 planned attacks')).toBeInTheDocument()
-    expect(screen.queryByText('10 planned attacks')).not.toBeInTheDocument()
-    expect(screen.getByText('Prompt sending')).toBeInTheDocument()
-    expect(screen.getByText('Baseline attack')).toBeInTheDocument()
-    expect(screen.getByText('Baseline')).toBeInTheDocument()
-    expect(screen.getByText('× 4 selected seed groups')).toBeInTheDocument()
-    expect(screen.getByText('× 2 jailbreak templates')).toBeInTheDocument()
-    expect(screen.getByText('harmbench')).toBeInTheDocument()
-    expect(screen.getByText('Jailbreak templates: 2 (configuration)')).toBeInTheDocument()
-    expect(screen.getByText('Four compatible objective groups selected.')).toBeInTheDocument()
-    expect(screen.getByText(
-      'Prompt sending: 4 selected seed groups × 2 jailbreak templates × 1 techniques × 1 attempts = 8 + Baseline attack: 2; planned total = 8',
-    )).toBeInTheDocument()
-    expect(screen.getByText('The planned total is authoritative.')).toBeInTheDocument()
-    expect(screen.getByText('How this count is calculated')).toBeInTheDocument()
-    expect(screen.getByText('Retries are not included. Estimate schema v1.')).toBeInTheDocument()
-    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Backend estimate|Conditional estimate|Backend formula/i)).not.toBeInTheDocument()
+    const equation = screen.getByRole('group', {
+      name: '4 techniques multiplied by 4 objectives equals 16 planned attacks.',
+    })
+    expect(within(equation).getAllByText('4')).toHaveLength(2)
+    expect(within(equation).getByText('techniques')).toBeInTheDocument()
+    expect(within(equation).getByText('objectives')).toBeInTheDocument()
+    expect(within(equation).getByText('16')).toBeInTheDocument()
+    expect(within(equation).getByText('planned attacks')).toBeInTheDocument()
+    expect(screen.getByText('4 objectives from harmbench · 400 available')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Run calculation' })).toBeInTheDocument()
   })
 
-  it('renders an authoritative total with scenario-specific units and context', () => {
-    const state = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
-      status: 'conditional',
-      total_attack_count: null,
-    }, 'request')
+  it('renders heterogeneous compatibility as truthful per-technique additive terms', () => {
+    renderDetails(makeEstimate({
+      total_attack_count: 6,
+      components: [
+        {
+          label: 'technique_alpha',
+          count: 4,
+          factors: [
+            { label: 'selected concrete techniques', count: 1 },
+            { label: 'compatible logical seed groups', count: 4 },
+          ],
+          is_baseline: false,
+          note: null,
+        },
+        {
+          label: 'technique_beta',
+          count: 2,
+          factors: [
+            { label: 'selected concrete techniques', count: 1 },
+            { label: 'compatible logical seed groups', count: 2 },
+          ],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+    }))
 
-    render(
-      <TestWrapper>
-        <ScenarioRunEstimateDetails
-          state={state}
-          primaryCount={21}
-          unitLabels={{ singular: 'objective envelope', plural: 'objective envelopes' }}
-          supportingText="Up to 3 technique attempts per objective (inner attempts are not included in this count)."
-        />
-      </TestWrapper>,
-    )
-
-    expect(screen.getByText('21 objective envelopes')).toBeInTheDocument()
-    expect(screen.queryByText('21 planned attacks')).not.toBeInTheDocument()
-    expect(screen.getByText(
-      'Up to 3 technique attempts per objective (inner attempts are not included in this count).',
-    )).toBeInTheDocument()
+    const equation = screen.getByTestId('run-calculation')
+    expect(within(equation).getByText('objectives · Technique alpha')).toBeInTheDocument()
+    expect(within(equation).getByText('objectives · Technique beta')).toBeInTheDocument()
+    expect(equation).toHaveTextContent('4objectives · Technique alpha+2objectives · Technique beta=6planned attacks')
   })
 
-  it('renders bounded and upper-only conditional estimates from structured bounds', () => {
-    const bounded = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
+  it('uses parentheses to make baseline precedence explicit', () => {
+    renderDetails(makeEstimate({
+      total_attack_count: 20,
+      components: [
+        ...makeEstimate().components,
+        {
+          label: 'Baseline',
+          count: 4,
+          factors: [{ label: 'selected logical seed groups', count: 4 }],
+          is_baseline: true,
+          note: null,
+        },
+      ],
+    }))
+
+    const equation = screen.getByTestId('run-calculation')
+    expect(equation).toHaveTextContent('(4techniques×4objectives)+4direct baseline sends=20planned attacks')
+    expect(screen.getByRole('group', {
+      name: '( 4 techniques multiplied by 4 objectives ) plus 4 direct baseline sends equals 20 planned attacks.',
+    })).toBeInTheDocument()
+  })
+
+  it('keeps guaranteed and target-conditional terms in one bounded equation', () => {
+    renderDetails(makeEstimate({
       status: 'conditional',
       total_attack_count: null,
       minimum_attack_count: 12,
       maximum_attack_count: 20,
       condition: 'target_capabilities',
-    }, 'default')
-    const { rerender } = render(
-      <TestWrapper>
-        <ScenarioRunEstimateDetails state={bounded} />
-      </TestWrapper>,
-    )
+      components: [
+        {
+          label: 'Baseline',
+          count: 4,
+          factors: [{ label: 'objectives', count: 4 }],
+          is_baseline: true,
+          note: null,
+        },
+        {
+          label: 'Inline jailbreak delivery',
+          count: 8,
+          factors: [
+            { label: 'objectives', count: 4 },
+            { label: 'jailbreak templates', count: 2 },
+          ],
+          is_baseline: false,
+          note: null,
+        },
+        {
+          label: 'Native system-prompt jailbreak delivery',
+          count: 8,
+          factors: [
+            { label: 'objectives', count: 4 },
+            { label: 'jailbreak templates', count: 2 },
+          ],
+          is_baseline: false,
+          condition: 'target_capabilities',
+          note: null,
+        },
+      ],
+    }))
 
-    expect(screen.getByText('12–20 planned attacks')).toBeInTheDocument()
-    expect(screen.getByText(/planned range = 12–20/)).toBeInTheDocument()
-    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
-
-    const upperOnly = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
-      status: 'conditional',
-      total_attack_count: null,
-      minimum_attack_count: null,
-      maximum_attack_count: 20,
-      condition: 'launch_configuration',
-    }, 'request')
-    rerender(
-      <TestWrapper>
-        <ScenarioRunEstimateSummary state={upperOnly} />
-      </TestWrapper>,
-    )
-    expect(screen.getByText('Up to 20 planned attacks')).toBeInTheDocument()
-    expect(screen.getByText('Up to 20 planned attacks')).toBeInTheDocument()
+    const equation = screen.getByTestId('run-calculation')
+    expect(equation).toHaveTextContent('4objectives · Inline jailbreak delivery')
+    expect(equation).toHaveTextContent('4objectives · Native system-prompt jailbreak delivery · if supported')
+    expect(equation).toHaveTextContent('4direct baseline sends')
+    expect(equation).toHaveTextContent('12–20planned attacks')
   })
 
-  it('renders an equal bounded estimate as one number', () => {
-    const conditional = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
+  it('shows adaptive progress objectives and the bounded underlying attempt work', () => {
+    const estimate = makeEstimate({
       status: 'conditional',
       total_attack_count: null,
-      minimum_attack_count: 12,
-      maximum_attack_count: 12,
-      condition: 'launch_configuration',
-    }, 'default')
-
+      components: [],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 3,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    })
+    const state = mapScenarioRunEstimate(estimate, 'request')
     render(
       <TestWrapper>
-        <ScenarioRunEstimateSummary state={conditional} />
+        <ScenarioRunEstimateSummary state={state} />
+        <ScenarioRunEstimateDetails state={state} />
       </TestWrapper>,
     )
 
-    expect(screen.getByText('12 planned attacks')).toBeInTheDocument()
-    expect(screen.queryByText('12–12 planned attacks')).not.toBeInTheDocument()
+    expect(screen.getByText('21 objectives · up to 42 technique attempts')).toBeInTheDocument()
+    expect(screen.getByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
+    })).toBeInTheDocument()
+    expect(screen.getByText(
+      'Progress tracks 21 objectives. Each objective stops after the first successful technique, and compatibility may reduce how many candidates it can try.',
+    )).toBeInTheDocument()
   })
 
-  it('supports loading, unknown conditional, unavailable, and stale states', () => {
+  it('uses the configured max when it is lower than the adaptive candidate pool', () => {
+    renderDetails(makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      components: [],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 5,
+        max_attempts_per_objective: 2,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    }))
+
+    expect(screen.getByText('techniques per objective of 5 candidates')).toBeInTheDocument()
+    expect(screen.getByText('up to 42')).toBeInTheDocument()
+  })
+
+  it('uses the candidate pool when it is lower than the adaptive max', () => {
+    renderDetails(makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      components: [],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 5,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    }))
+
+    expect(screen.getByText('techniques per objective')).toBeInTheDocument()
+    expect(screen.queryByText(/of 2 candidates/)).not.toBeInTheDocument()
+    expect(screen.getByText('up to 42')).toBeInTheDocument()
+  })
+
+  it('preserves loading, unavailable, stale, and unknown conditional states', () => {
     const loading: ScenarioRunEstimateState = { status: 'loading', scope: 'request' }
     const { rerender } = render(
-      <TestWrapper>
-        <ScenarioRunEstimateDetails state={loading} />
-      </TestWrapper>,
+      <TestWrapper><ScenarioRunEstimateDetails state={loading} /></TestWrapper>,
     )
     expect(screen.getByText('Calculating planned attacks...')).toBeInTheDocument()
 
-    const conditional = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
-      status: 'conditional',
-      total_attack_count: null,
-      minimum_attack_count: null,
-      maximum_attack_count: null,
-      condition: null,
-      components: [],
-      datasets: [],
-      note: null,
-    }, 'default')
-    rerender(
-      <TestWrapper>
-        <ScenarioRunEstimateDetails state={conditional} />
-      </TestWrapper>,
-    )
-    expect(screen.getByText('Select targets to calculate')).toBeInTheDocument()
-    expect(screen.queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
-    expect(screen.getByText(
-      'Component breakdown unavailable; exact total unavailable',
-    )).toBeInTheDocument()
-    expect(screen.getByText('A component breakdown isn’t available.')).toBeInTheDocument()
-    expect(screen.getByText('Dataset population details aren’t available.')).toBeInTheDocument()
-
-    const configuredConditional = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
-      status: 'conditional',
-      total_attack_count: null,
-      minimum_attack_count: null,
-      maximum_attack_count: null,
-      condition: 'launch_configuration',
-      components: [],
-      datasets: [],
-    }, 'request')
-    rerender(
-      <TestWrapper>
-        <ScenarioRunEstimateSummary state={configuredConditional} />
-      </TestWrapper>,
-    )
-    expect(screen.getByText('Run size is confirmed at launch.')).toBeInTheDocument()
-    expect(screen.queryByText('Select targets to calculate')).not.toBeInTheDocument()
-
-    const unavailable = mapScenarioRunEstimate({
-      ...EXACT_ESTIMATE,
+    const unavailable = mapScenarioRunEstimate(makeEstimate({
       status: 'unavailable',
       total_attack_count: null,
-      minimum_attack_count: null,
-      maximum_attack_count: null,
-      condition: null,
       components: [],
       datasets: [],
       note: 'Target capability is not available.',
-    }, 'request')
-    rerender(
-      <TestWrapper>
-        <ScenarioRunEstimateSummary state={unavailable} />
-        <ScenarioRunEstimateDetails state={unavailable} />
-      </TestWrapper>,
-    )
-    expect(screen.getAllByText('Estimate unavailable')).toHaveLength(2)
+    }), 'request')
+    rerender(<TestWrapper><ScenarioRunEstimateDetails state={unavailable} /></TestWrapper>)
+    expect(screen.getByText('Estimate unavailable')).toBeInTheDocument()
     expect(screen.getByText('Configured run size unavailable')).toBeInTheDocument()
-    expect(screen.getByText('Target capability is not available.')).toBeInTheDocument()
 
-    const exact = mapScenarioRunEstimate(EXACT_ESTIMATE, 'request')
+    const exact = mapScenarioRunEstimate(makeEstimate(), 'request')
     if (exact.status !== 'available') {
-      throw new Error('Expected exact estimate to map to an available state.')
+      throw new Error('Expected exact estimate.')
     }
     const stale: ScenarioRunEstimateState = {
       status: 'stale',
@@ -267,14 +280,40 @@ describe('ScenarioRunEstimate', () => {
       label: 'Showing the last successful estimate.',
       error: 'Preview service timed out.',
     }
+    rerender(<TestWrapper><ScenarioRunEstimateDetails state={stale} /></TestWrapper>)
+    expect(screen.getByText('Previous estimate')).toBeInTheDocument()
+    expect(screen.getByText('Preview service timed out.')).toBeInTheDocument()
+
     rerender(
       <TestWrapper>
-        <ScenarioRunEstimateDetails state={stale} />
+        <ScenarioRunEstimateDetails state={mapScenarioRunEstimate(makeEstimate({
+          status: 'conditional',
+          total_attack_count: null,
+          minimum_attack_count: null,
+          maximum_attack_count: null,
+          components: [],
+          datasets: [],
+        }), 'default')}
+        />
       </TestWrapper>,
     )
-    expect(screen.getByText('Previous estimate')).toBeInTheDocument()
-    expect(screen.getByText('8 planned attacks')).toBeInTheDocument()
-    expect(screen.getByText('Showing the last successful estimate.')).toBeInTheDocument()
-    expect(screen.getByText('Preview service timed out.')).toBeInTheDocument()
+    expect(screen.getByText('Exact total')).toBeInTheDocument()
+    expect(screen.getByText('unavailable')).toBeInTheDocument()
+  })
+
+  it('does not render implementation terminology in the shared estimate surfaces', () => {
+    const state = mapScenarioRunEstimate(makeEstimate(), 'request')
+    render(
+      <TestWrapper>
+        <ScenarioRunEstimateSummary state={state} />
+        <ScenarioRunEstimateDetails state={state} />
+      </TestWrapper>,
+    )
+
+    expect(screen.queryByText(/logical seed groups/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/selected seed groups/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/planned components/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/objective envelopes/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/how this count is calculated/i)).not.toBeInTheDocument()
   })
 })

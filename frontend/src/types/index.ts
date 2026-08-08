@@ -444,7 +444,18 @@ export interface ScenarioRunSizeComponent {
   count: number
   factors: ScenarioRunSizeFactor[]
   is_baseline: boolean
+  condition?: 'target_capabilities' | 'launch_configuration' | null
   note: string | null
+}
+
+export interface ScenarioAdaptiveRunSizeDetails {
+  objective_count: number
+  candidate_technique_count: number
+  max_attempts_per_objective: number
+  techniques_per_objective_upper_bound: number
+  technique_attempt_count_upper_bound: number
+  stop_on_first_success: true
+  compatibility_may_reduce_attempts: true
 }
 
 export interface ScenarioDatasetSizeCap {
@@ -472,6 +483,7 @@ export interface ScenarioDefaultRunSizeEstimate {
   condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunSizeComponent[]
   datasets: ScenarioDatasetSummary[]
+  adaptive_details: ScenarioAdaptiveRunSizeDetails | null
   note: string | null
   retries_included: false
 }
@@ -498,7 +510,18 @@ export interface ScenarioRunEstimateComponent {
   count: number
   factors: ScenarioRunEstimateFactor[]
   isBaseline: boolean
+  condition: 'target_capabilities' | 'launch_configuration' | null
   note: string | null
+}
+
+export interface ScenarioRunEstimateAdaptiveDetails {
+  objectiveCount: number
+  candidateTechniqueCount: number
+  maxAttemptsPerObjective: number
+  techniquesPerObjectiveUpperBound: number
+  techniqueAttemptCountUpperBound: number
+  stopOnFirstSuccess: true
+  compatibilityMayReduceAttempts: true
 }
 
 export interface ScenarioRunEstimateDatasetCap {
@@ -528,6 +551,7 @@ export interface ScenarioRunEstimate {
   condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunEstimateComponent[]
   datasets: ScenarioRunEstimateDataset[]
+  adaptiveDetails: ScenarioRunEstimateAdaptiveDetails | null
   note: string | null
   retriesIncluded: boolean
 }

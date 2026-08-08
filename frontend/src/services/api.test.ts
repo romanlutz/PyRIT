@@ -563,6 +563,7 @@ describe("api service", () => {
           condition: null,
           components: [],
           datasets: [],
+          adaptive_details: null,
           note: null,
           retries_included: false,
         },
