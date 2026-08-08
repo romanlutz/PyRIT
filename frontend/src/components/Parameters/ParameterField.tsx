@@ -1,3 +1,5 @@
+import { type ClipboardEvent, type KeyboardEvent, useRef } from 'react'
+
 import {
   Checkbox,
   Field,
@@ -22,9 +24,13 @@ export interface ParameterFieldProps {
   validationMessage?: string
   numberMin?: number
   numberStep?: number
+  numberWholeOnly?: boolean
+  onRejectedNumberInput?: (name: string) => void
   /** Prefix for `data-testid` attributes. Defaults to `'param'` (e.g. `param-<name>`). */
   testIdPrefix?: string
 }
+
+const BLOCKED_WHOLE_NUMBER_KEYS = new Set(['-', '+', '.', 'e', 'E'])
 
 /**
  * Renders the appropriate Fluent UI control for a declared {@link Parameter},
@@ -47,9 +53,12 @@ export default function ParameterField({
   validationMessage,
   numberMin,
   numberStep,
+  numberWholeOnly = false,
+  onRejectedNumberInput,
   testIdPrefix = 'param',
 }: ParameterFieldProps) {
   const styles = useParameterFieldStyles()
+  const rejectedNumberSequenceRef = useRef(false)
   const kind = getParameterControlKind(parameter)
   const baseLabel = displayLabel ?? parameter.name
   const label = parameter.required ? `${baseLabel} *` : baseLabel
@@ -126,6 +135,56 @@ export default function ParameterField({
 
   const placeholder = typeof parameter.default === 'string' ? parameter.default : undefined
   const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
+  const rejectNumberInput = (): void => {
+    rejectedNumberSequenceRef.current = true
+    onRejectedNumberInput?.(parameter.name)
+  }
+  const handleNumberKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
+    if (!numberWholeOnly) {
+      return
+    }
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      rejectedNumberSequenceRef.current = false
+      return
+    }
+    if (
+      event.key === 'ArrowDown'
+      && numberMin !== undefined
+      && Number(stringValue) <= numberMin
+    ) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    if (BLOCKED_WHOLE_NUMBER_KEYS.has(event.key)) {
+      event.preventDefault()
+      event.stopPropagation()
+      rejectNumberInput()
+      return
+    }
+    if (rejectedNumberSequenceRef.current && event.key.length === 1) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+  }
+  const handleNumberPaste = (event: ClipboardEvent<HTMLInputElement>): void => {
+    if (!numberWholeOnly) {
+      return
+    }
+    const pastedValue = event.clipboardData.getData('text')
+    if (!/^\d+$/.test(pastedValue)) {
+      event.preventDefault()
+      rejectNumberInput()
+    }
+  }
+  const handleInputChange = (nextValue: string): void => {
+    if (numberWholeOnly && nextValue !== '' && !/^\d+$/.test(nextValue)) {
+      rejectNumberInput()
+      return
+    }
+    rejectedNumberSequenceRef.current = false
+    onChange(parameter.name, nextValue)
+  }
 
   return (
     <Field
@@ -140,10 +199,17 @@ export default function ParameterField({
         type={kind === 'number' ? 'number' : 'text'}
         min={kind === 'number' ? numberMin : undefined}
         step={kind === 'number' ? numberStep : undefined}
+        inputMode={kind === 'number' && numberWholeOnly ? 'numeric' : undefined}
+        pattern={kind === 'number' && numberWholeOnly ? '[0-9]*' : undefined}
         aria-invalid={validationState === 'error'}
         placeholder={placeholder}
         disabled={disabled}
-        onChange={(_, data) => onChange(parameter.name, data.value)}
+        onKeyDown={kind === 'number' ? handleNumberKeyDown : undefined}
+        onPaste={kind === 'number' ? handleNumberPaste : undefined}
+        onBlur={() => {
+          rejectedNumberSequenceRef.current = false
+        }}
+        onChange={(_, data) => handleInputChange(data.value)}
         data-testid={testId}
       />
     </Field>

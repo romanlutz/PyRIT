@@ -880,13 +880,36 @@ describe('ScenarioDetail', () => {
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(maxAttempts).toHaveAttribute('min', '1')
     expect(maxAttempts).toHaveAttribute('step', '1')
+    expect(maxAttempts).toHaveAttribute('inputmode', 'numeric')
+    expect(maxAttempts).toHaveAttribute('pattern', '[0-9]*')
     expect(screen.getByText(/Leave blank to use the default of 3/)).toBeInTheDocument()
     expect(within(preview).getByText('up to 42')).toBeInTheDocument()
     const initialRequestCount = mockEstimateRun.mock.calls.length
 
-    for (const invalidValue of ['-8', '0', '1.5']) {
-      await user.clear(maxAttempts)
+    await user.type(maxAttempts, '-8')
+    expect(maxAttempts).toHaveValue(null)
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
+    expect(within(preview).getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE))
+      .toBeInTheDocument()
+    expect(within(preview).queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
+
+    await user.tab()
+    await user.click(maxAttempts)
+    await user.paste('-8')
+    expect(maxAttempts).toHaveValue(null)
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
+
+    for (const invalidValue of ['1.5', '1e3', '+8']) {
+      await user.tab()
+      await user.click(maxAttempts)
       await user.type(maxAttempts, invalidValue)
+      expect(maxAttempts).toHaveValue(null)
       expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
       expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
       expect(within(preview).getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE))
@@ -897,6 +920,15 @@ describe('ScenarioDetail', () => {
       await advanceTimers(300)
       expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
     }
+
+    await user.tab()
+    await user.click(maxAttempts)
+    await user.type(maxAttempts, '0')
+    expect(maxAttempts).toHaveValue(0)
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
 
     await user.clear(maxAttempts)
     expect(maxAttempts).toHaveAttribute('aria-invalid', 'false')
@@ -914,6 +946,13 @@ describe('ScenarioDetail', () => {
     })
     expect(within(preview).getByText('up to 21')).toBeInTheDocument()
     expect(screen.getByTestId('launch-scenario-btn')).toBeEnabled()
+
+    const correctedRequestCount = mockEstimateRun.mock.calls.length
+    Object.defineProperty(window.getSelection(), 'modify', { value: jest.fn(), configurable: true })
+    await user.keyboard('{ArrowDown}')
+    expect(maxAttempts).toHaveValue(1)
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(correctedRequestCount)
   })
 
   it('does not let a superseded estimate repopulate arithmetic after the limit becomes invalid', async () => {

@@ -698,6 +698,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [submitting, setSubmitting] = useState(false)
   const [estimateRequestState, setEstimateRequestState] = useState<EstimateRequestState | null>(null)
   const [launchMaxAttemptsError, setLaunchMaxAttemptsError] = useState<string | null>(null)
+  const [maxAttemptsInputRejected, setMaxAttemptsInputRejected] = useState(false)
   // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
   const estimateSequenceRef = useRef(0)
@@ -739,8 +740,10 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     ],
   )
   const estimateRequest = useMemo(
-    () => requestResult.ok ? buildEstimateRequest(requestResult.request) : null,
-    [requestResult],
+    () => requestResult.ok && !maxAttemptsInputRejected
+      ? buildEstimateRequest(requestResult.request)
+      : null,
+    [maxAttemptsInputRejected, requestResult],
   )
   const estimateRequestKey = useMemo(
     () => estimateRequest === null
@@ -822,7 +825,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   }, [estimateRequest, estimateRequestKey, scenario.scenario_name])
 
   const maxAttemptsClientError = usesAdaptiveTechniqueSelection
-    ? maxAttemptsValidationError(scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME])
+    ? maxAttemptsInputRejected
+      ? MAX_ATTEMPTS_VALIDATION_MESSAGE
+      : maxAttemptsValidationError(scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME])
     : undefined
   const currentEstimateError = estimateRequestState?.requestKey === estimateRequestKey
     && estimateRequestState.status === 'error'
@@ -907,9 +912,21 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const updateScenarioParam = (name: string, value: ParameterFormValue): void => {
     setScenarioParamValues((current) => ({ ...current, [name]: value }))
     if (name === MAX_ATTEMPTS_PARAMETER_NAME) {
+      setMaxAttemptsInputRejected(false)
       setLaunchMaxAttemptsError(null)
       setApiError(null)
     }
+    setValidationError(null)
+  }
+
+  const rejectScenarioParamInput = (name: string): void => {
+    if (name !== MAX_ATTEMPTS_PARAMETER_NAME) {
+      return
+    }
+    setScenarioParamValues((current) => ({ ...current, [name]: '' }))
+    setMaxAttemptsInputRejected(true)
+    setLaunchMaxAttemptsError(null)
+    setApiError(null)
     setValidationError(null)
   }
 
@@ -1201,6 +1218,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       numberStep={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
                         ? 1
+                        : undefined}
+                      numberWholeOnly={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME}
+                      onRejectedNumberInput={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? rejectScenarioParamInput
                         : undefined}
                       testIdPrefix="scenario-param"
                     />
