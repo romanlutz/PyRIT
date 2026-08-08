@@ -39,6 +39,7 @@ const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
   ].join('|'),
   'i',
 )
+const CORRECT_HIGHLIGHTED_SETTING_MESSAGE = 'Correct the highlighted setting to calculate this run.'
 
 const mockNavigate = jest.fn()
 const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
@@ -166,6 +167,50 @@ function makeAdaptiveScenario(): RegisteredScenario {
       },
     ],
   })
+}
+
+function makeAdaptiveEstimateForRequest(
+  scenario: RegisteredScenario,
+  request: ScenarioRunSizeEstimateRequest,
+): ScenarioDefaultRunSizeEstimate {
+  const selectedSet = request.techniques?.[0] ?? 'default'
+  const selectedCandidateCount = scenario.aggregate_technique_expansions[selectedSet]?.length ?? 0
+  const candidateCount = selectedSet === 'core' ? 5 : selectedCandidateCount
+  const configuredMax = Number(request.scenario_params?.max_attempts_per_objective ?? 3)
+  const perObjective = Math.min(candidateCount, configuredMax)
+  return {
+    ...makeEstimate(null),
+    minimum_attack_count: 21,
+    maximum_attack_count: 42,
+    components: [
+      {
+        label: 'Baseline',
+        count: 21,
+        factors: [{ label: 'objectives', count: 21 }],
+        is_baseline: true,
+        condition: null,
+        note: null,
+      },
+      {
+        label: 'Adaptive objectives',
+        count: 21,
+        factors: [{ label: 'compatible objectives', count: 21 }],
+        is_baseline: false,
+        condition: null,
+        note: null,
+      },
+    ],
+    adaptive_details: {
+      objective_count: 21,
+      selected_candidate_technique_count: selectedCandidateCount,
+      candidate_technique_count: candidateCount,
+      max_attempts_per_objective: configuredMax,
+      techniques_per_objective_upper_bound: perObjective,
+      technique_attempt_count_upper_bound: 21 * perObjective,
+      stop_on_first_success: true,
+      compatibility_may_reduce_attempts: true,
+    },
+  }
 }
 
 async function flushRenderedPromises(): Promise<void> {
@@ -395,7 +440,7 @@ describe('ScenarioDetail', () => {
     expect(within(preview).queryByRole('group', { name: '8 planned attacks.' })).not.toBeInTheDocument()
   })
 
-  it('keeps the last good estimate and entered state after a transient preview failure', async () => {
+  it('clears prior arithmetic and keeps entered state after a transient preview failure', async () => {
     jest.useFakeTimers()
     const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
     mockEstimateRun
@@ -417,11 +462,8 @@ describe('ScenarioDetail', () => {
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('target-b')).toBeInTheDocument()
-    expect(within(preview).getByText('Previous estimate not shown')).toBeInTheDocument()
+    expect(within(preview).getByText('Run size couldn’t be updated.')).toBeInTheDocument()
     expect(within(preview).queryByRole('group', { name: '8 planned attacks.' })).not.toBeInTheDocument()
-    expect(within(preview).getByText(
-      'The previous calculation does not match the current configuration.',
-    )).toBeInTheDocument()
     expect(within(preview).getByText('Preview service unavailable')).toBeInTheDocument()
     expect(screen.getByTestId('scenario-target-select')).toHaveValue('target-b')
     expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
@@ -452,7 +494,7 @@ describe('ScenarioDetail', () => {
     await flushRenderedPromises()
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
-    expect(within(preview).getByText('Previous estimate not shown')).toBeInTheDocument()
+    expect(within(preview).getByText('Run size couldn’t be updated.')).toBeInTheDocument()
     expect(within(preview).queryByTestId('run-calculation')).not.toBeInTheDocument()
     expect(within(preview).getByText(
       "Scenario 'adaptive.text_adaptive' does not support overriding dataset names.",
@@ -742,46 +784,7 @@ describe('ScenarioDetail', () => {
       async (
         _scenarioName: string,
         request: ScenarioRunSizeEstimateRequest,
-      ): Promise<ScenarioDefaultRunSizeEstimate> => {
-        const selectedSet = request.techniques?.[0] ?? 'default'
-        const selectedCandidateCount = scenario.aggregate_technique_expansions[selectedSet]?.length ?? 0
-        const candidateCount = selectedSet === 'core' ? 5 : selectedCandidateCount
-        const configuredMax = Number(request.scenario_params?.max_attempts_per_objective ?? 3)
-        const perObjective = Math.min(candidateCount, configuredMax)
-        return {
-          ...makeEstimate(null),
-          minimum_attack_count: 21,
-          maximum_attack_count: 42,
-          components: [
-            {
-              label: 'Baseline',
-              count: 21,
-              factors: [{ label: 'objectives', count: 21 }],
-              is_baseline: true,
-              condition: null,
-              note: null,
-            },
-            {
-              label: 'Adaptive objectives',
-              count: 21,
-              factors: [{ label: 'compatible objectives', count: 21 }],
-              is_baseline: false,
-              condition: null,
-              note: null,
-            },
-          ],
-          adaptive_details: {
-            objective_count: 21,
-            selected_candidate_technique_count: selectedCandidateCount,
-            candidate_technique_count: candidateCount,
-            max_attempts_per_objective: configuredMax,
-            techniques_per_objective_upper_bound: perObjective,
-            technique_attempt_count_upper_bound: 21 * perObjective,
-            stop_on_first_success: true,
-            compatibility_may_reduce_attempts: true,
-          },
-        }
-      },
+      ): Promise<ScenarioDefaultRunSizeEstimate> => makeAdaptiveEstimateForRequest(scenario, request),
     )
     const user = userEvent.setup()
 
@@ -852,8 +855,126 @@ describe('ScenarioDetail', () => {
     })).toBeInTheDocument()
 
     await user.type(maxAttempts, '0')
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
     expect(screen.queryByText(/up to 0 technique/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/objective envelope/i)).not.toBeInTheDocument()
+  })
+
+  it('validates the Adaptive attempt limit locally and recomputes after correction', async () => {
+    jest.useFakeTimers()
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> => makeAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+
+    const maxAttempts = screen.getByRole('spinbutton', { name: 'Maximum techniques per objective' })
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(maxAttempts).toHaveAttribute('min', '1')
+    expect(maxAttempts).toHaveAttribute('step', '1')
+    expect(screen.getByText(/Leave blank to use the default of 3/)).toBeInTheDocument()
+    expect(within(preview).getByText('up to 42')).toBeInTheDocument()
+    const initialRequestCount = mockEstimateRun.mock.calls.length
+
+    for (const invalidValue of ['-8', '0', '1.5']) {
+      await user.clear(maxAttempts)
+      await user.type(maxAttempts, invalidValue)
+      expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+      expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
+      expect(within(preview).getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE))
+        .toBeInTheDocument()
+      expect(within(preview).queryByTestId('run-calculation')).not.toBeInTheDocument()
+      expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+      expect(screen.queryByText(/max_attempts_per_objective must/i)).not.toBeInTheDocument()
+      await advanceTimers(300)
+      expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
+    }
+
+    await user.clear(maxAttempts)
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'false')
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1].scenario_params).toBeUndefined()
+    expect(within(preview).getByText('up to 42')).toBeInTheDocument()
+
+    await user.type(maxAttempts, '1')
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'false')
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1].scenario_params).toEqual({
+      max_attempts_per_objective: 1,
+    })
+    expect(within(preview).getByText('up to 21')).toBeInTheDocument()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeEnabled()
+  })
+
+  it('does not let a superseded estimate repopulate arithmetic after the limit becomes invalid', async () => {
+    jest.useFakeTimers()
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    let resolveEstimate: (estimate: ScenarioDefaultRunSizeEstimate) => void = () => {}
+    mockEstimateRun.mockReturnValueOnce(new Promise((resolve) => {
+      resolveEstimate = resolve
+    }))
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    const requestSignal = mockEstimateRun.mock.calls[0][2] as AbortSignal
+    const maxAttempts = screen.getByRole('spinbutton', { name: 'Maximum techniques per objective' })
+
+    await user.clear(maxAttempts)
+    await user.type(maxAttempts, '-8')
+    expect(requestSignal.aborted).toBe(true)
+    expect(screen.getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE)).toBeInTheDocument()
+
+    resolveEstimate(makeAdaptiveEstimateForRequest(scenario, {
+      target_name: 'target-a',
+      techniques: ['default'],
+      include_baseline: true,
+      scenario_params: { max_attempts_per_objective: 3 },
+    }))
+    await flushRenderedPromises()
+
+    expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(screen.getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE)).toBeInTheDocument()
+    expect(mockEstimateRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps backend attempt-limit validation to the field without exposing internal copy', async () => {
+    jest.useFakeTimers()
+    mockGetScenario.mockResolvedValue(makeAdaptiveScenario())
+    mockEstimateRun.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 400,
+        data: { detail: 'max_attempts_per_objective must be >= 1, got -8' },
+      },
+    })
+
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+
+    const maxAttempts = screen.getByRole('spinbutton', { name: 'Maximum techniques per objective' })
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
+    expect(screen.getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE)).toBeInTheDocument()
+    expect(screen.queryByText(/max_attempts_per_objective must/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
   })
 
   it('presents Adaptive attempts clearly while preserving the scenario parameter wire key', async () => {
@@ -1076,7 +1197,6 @@ describe('ScenarioDetail', () => {
         ],
       }),
     )
-    const user = userEvent.setup()
 
     renderDetail('/scenarios/foundry.red_team_agent')
     await screen.findByTestId('scenario-target-select')
@@ -1085,9 +1205,9 @@ describe('ScenarioDetail', () => {
     // decimal (a valid *number* but not a valid *integer*) exercises the same
     // coercion/validation path a real user could actually trigger.
     fireEvent.change(screen.getByTestId('scenario-param-iterations'), { target: { value: '1.5' } })
-    await user.click(screen.getByTestId('launch-scenario-btn'))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('iterations must be an integer.')
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(screen.getByText('iterations must be an integer.')).toBeInTheDocument()
     expect(mockStartRun).not.toHaveBeenCalled()
   })
 
@@ -1223,11 +1343,11 @@ describe('ScenarioDetail', () => {
     expect(screen.getByText(/Maximum times to resume the scenario after an exception/)).toBeInTheDocument()
     expect(screen.queryByText(/separate from Adaptive trying another technique/)).not.toBeInTheDocument()
     await user.type(screen.getByTestId('max-dataset-size-input'), '0')
-    await user.click(screen.getByTestId('launch-scenario-btn'))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(screen.getByText(
       'Max dataset size must be a positive integer.',
-    )
+    )).toBeInTheDocument()
     expect(mockStartRun).not.toHaveBeenCalled()
   })
 
@@ -1239,11 +1359,11 @@ describe('ScenarioDetail', () => {
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
     fireEvent.change(screen.getByTestId('max-concurrency-input'), { target: { value: '500' } })
     fireEvent.blur(screen.getByTestId('max-concurrency-input'))
-    await user.click(screen.getByTestId('launch-scenario-btn'))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(screen.getByText(
       'Max concurrency must be an integer from 1 to 100.',
-    )
+    )).toBeInTheDocument()
     expect(mockStartRun).not.toHaveBeenCalled()
   })
 

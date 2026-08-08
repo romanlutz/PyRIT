@@ -579,17 +579,6 @@ export type ScenarioRunEstimateState =
       status: 'loading'
       scope: 'default' | 'request'
     }
-  | {
-      status: 'refreshing'
-      estimate: ScenarioRunEstimate
-      label: string
-    }
-  | {
-      status: 'stale'
-      estimate: ScenarioRunEstimate
-      label: string
-      error: string
-    }
   | ScenarioRunEstimateResult
 
 export type ScenarioRunEstimator = (

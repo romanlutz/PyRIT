@@ -97,13 +97,4 @@ export const useScenarioRunEstimateStyles = makeStyles({
     minWidth: 0,
     overflowWrap: 'anywhere',
   },
-  staleNotice: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXXS,
-    padding: `${tokens.spacingVerticalXS} ${tokens.spacingHorizontalS}`,
-    color: tokens.colorPaletteDarkOrangeForeground1,
-    backgroundColor: tokens.colorPaletteDarkOrangeBackground1,
-    borderRadius: tokens.borderRadiusSmall,
-  },
 })

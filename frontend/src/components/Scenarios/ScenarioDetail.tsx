@@ -87,10 +87,13 @@ const CUSTOM_TECHNIQUE_SET_VALUE = '__custom__'
 const MAX_ATTEMPTS_PARAMETER_NAME = 'max_attempts_per_objective'
 const MAX_ATTEMPTS_DISPLAY_LABEL = 'Maximum techniques per objective'
 const MAX_ATTEMPTS_DISPLAY_HINT = [
+  'Leave blank to use the default of 3.',
   'This is a per-objective limit, not a total-run budget.',
   'Adaptive stops after the first success, and incompatible techniques are skipped.',
   'This is separate from retries.',
 ].join(' ')
+const MAX_ATTEMPTS_VALIDATION_MESSAGE = 'Enter a whole number of 1 or more.'
+const CORRECT_HIGHLIGHTED_SETTING_MESSAGE = 'Correct the highlighted setting to calculate this run.'
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
@@ -177,6 +180,17 @@ function effectivePositiveInteger(
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
+function maxAttemptsValidationError(value: ParameterFormValue | undefined): string | undefined {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (raw.length === 0) {
+    return undefined
+  }
+  const parsed = Number(raw)
+  return Number.isSafeInteger(parsed) && parsed >= 1
+    ? undefined
+    : MAX_ATTEMPTS_VALIDATION_MESSAGE
+}
+
 interface BuildRunRequestInput {
   scenario: RegisteredScenario
   targetName: string
@@ -201,11 +215,6 @@ type BuildRunRequestResult =
       error: string
     }
 
-type SuccessfulEstimateResult = Extract<
-  ScenarioRunEstimateResult,
-  { status: 'available' | 'conditional' }
->
-
 type EstimateRequestState =
   | {
       status: 'resolved'
@@ -215,8 +224,30 @@ type EstimateRequestState =
   | {
       status: 'error'
       requestKey: string
-      error: string
+      summary: string
+      note?: string
+      maxAttemptsError?: string
     }
+
+interface MappedEstimateError {
+  summary: string
+  note?: string
+  maxAttemptsError?: string
+}
+
+function mapEstimateError(error: unknown): MappedEstimateError {
+  const detail = toApiError(error).detail
+  if (detail.includes(MAX_ATTEMPTS_PARAMETER_NAME)) {
+    return {
+      summary: CORRECT_HIGHLIGHTED_SETTING_MESSAGE,
+      maxAttemptsError: MAX_ATTEMPTS_VALIDATION_MESSAGE,
+    }
+  }
+  return {
+    summary: 'Run size couldn’t be updated.',
+    note: detail,
+  }
+}
 
 function buildRunRequest({
   scenario,
@@ -239,6 +270,14 @@ function buildRunRequest({
   }
   if (scenario.default_datasets.length > 0 && selectedDatasets.length === 0) {
     return { ok: false, error: 'Select at least one dataset.' }
+  }
+  if (dynamicParameters.some((parameter) => parameter.name === MAX_ATTEMPTS_PARAMETER_NAME)) {
+    const maxAttemptsError = maxAttemptsValidationError(
+      scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME],
+    )
+    if (maxAttemptsError) {
+      return { ok: false, error: maxAttemptsError }
+    }
   }
 
   let scenarioParams: Record<string, unknown> | null = null
@@ -666,7 +705,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [estimateRequestState, setEstimateRequestState] = useState<EstimateRequestState | null>(null)
-  const [lastGoodEstimate, setLastGoodEstimate] = useState<SuccessfulEstimateResult | null>(null)
+  const [launchMaxAttemptsError, setLaunchMaxAttemptsError] = useState<string | null>(null)
   // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
   const estimateSequenceRef = useRef(0)
@@ -743,12 +782,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   }, [scenario.default_datasets])
 
   useEffect(() => {
+    const requestSequence = estimateSequenceRef.current + 1
+    estimateSequenceRef.current = requestSequence
     if (estimateRequest === null || estimateRequestKey === null) {
       return
     }
 
-    const requestSequence = estimateSequenceRef.current + 1
-    estimateSequenceRef.current = requestSequence
     const controller = new AbortController()
 
     const debounceTimer = window.setTimeout(() => {
@@ -767,9 +806,6 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
             requestKey: estimateRequestKey,
             result,
           })
-          if (result.status === 'available' || result.status === 'conditional') {
-            setLastGoodEstimate(result)
-          }
         })
         .catch((err: unknown) => {
           if (
@@ -778,10 +814,11 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
           ) {
             return
           }
+          const mappedError = mapEstimateError(err)
           setEstimateRequestState({
             status: 'error',
             requestKey: estimateRequestKey,
-            error: toApiError(err).detail,
+            ...mappedError,
           })
         })
     }, ESTIMATE_DEBOUNCE_MS)
@@ -792,8 +829,26 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     }
   }, [estimateRequest, estimateRequestKey, scenario.scenario_name])
 
+  const maxAttemptsClientError = usesAdaptiveTechniqueSelection
+    ? maxAttemptsValidationError(scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME])
+    : undefined
+  const currentEstimateError = estimateRequestState?.requestKey === estimateRequestKey
+    && estimateRequestState.status === 'error'
+    ? estimateRequestState
+    : null
+  const maxAttemptsFieldError = maxAttemptsClientError
+    ?? currentEstimateError?.maxAttemptsError
+    ?? launchMaxAttemptsError
+    ?? undefined
+
   let estimateState: ScenarioRunEstimateState
-  if (!requestResult.ok) {
+  if (maxAttemptsFieldError) {
+    estimateState = {
+      status: 'unavailable',
+      scope: 'request',
+      label: CORRECT_HIGHLIGHTED_SETTING_MESSAGE,
+    }
+  } else if (!requestResult.ok) {
     estimateState = {
       status: 'unavailable',
       scope: 'request',
@@ -805,28 +860,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     && estimateRequestState.status === 'resolved'
   ) {
     estimateState = estimateRequestState.result
-  } else if (
-    estimateRequestState?.requestKey === estimateRequestKey
-    && estimateRequestState.status === 'error'
-  ) {
-    estimateState = lastGoodEstimate
-      ? {
-          status: 'stale',
-          estimate: lastGoodEstimate.estimate,
-          label: 'Showing the last successful estimate.',
-          error: estimateRequestState.error,
-        }
-      : {
-          status: 'unavailable',
-          scope: 'request',
-          label: 'Run size couldn’t be updated.',
-          note: estimateRequestState.error,
-        }
-  } else if (lastGoodEstimate) {
+  } else if (currentEstimateError) {
     estimateState = {
-      status: 'refreshing',
-      estimate: lastGoodEstimate.estimate,
-      label: 'Updating for the current configuration…',
+      status: 'unavailable',
+      scope: 'request',
+      label: currentEstimateError.summary,
+      note: currentEstimateError.note,
     }
   } else {
     estimateState = { status: 'loading', scope: 'request' }
@@ -875,6 +914,11 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
 
   const updateScenarioParam = (name: string, value: ParameterFormValue): void => {
     setScenarioParamValues((current) => ({ ...current, [name]: value }))
+    if (name === MAX_ATTEMPTS_PARAMETER_NAME) {
+      setLaunchMaxAttemptsError(null)
+      setApiError(null)
+    }
+    setValidationError(null)
   }
 
   const handleSubmit = async (): Promise<void> => {
@@ -897,8 +941,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       navigate(`/scenario-history/${encodeURIComponent(summary.scenario_result_id)}`, {
         state: { scenarioName: scenario.scenario_name },
       })
-    } catch (err) {
-      setApiError(toApiError(err).detail)
+    } catch (err: unknown) {
+      const mappedError = mapEstimateError(err)
+      if (mappedError.maxAttemptsError) {
+        setLaunchMaxAttemptsError(mappedError.maxAttemptsError)
+        setApiError(null)
+      } else {
+        setApiError(mappedError.note ?? mappedError.summary)
+      }
     } finally {
       isSubmittingRef.current = false
       setSubmitting(false)
@@ -1138,6 +1188,23 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
                         ? MAX_ATTEMPTS_DISPLAY_HINT
                         : undefined}
+                      validationState={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        && maxAttemptsFieldError
+                        ? 'error'
+                        : 'none'}
+                      validationMessage={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? maxAttemptsFieldError
+                        : undefined}
+                      numberMin={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? 1
+                        : undefined}
+                      numberStep={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        ? 1
+                        : undefined}
                       testIdPrefix="scenario-param"
                     />
                   ))}
@@ -1316,6 +1383,8 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   submitting
                   || techniqueSelectionInvalid
                   || datasetSelectionInvalid
+                  || !requestResult.ok
+                  || Boolean(maxAttemptsFieldError)
                   || estimateRequestBlocked
                 }
                 data-testid="launch-scenario-btn"

@@ -333,7 +333,7 @@ describe('ScenarioRunEstimate', () => {
     })
   })
 
-  it('preserves loading, unavailable, stale, and unknown conditional states', () => {
+  it('preserves loading, unavailable, and unknown conditional states', () => {
     const loading: ScenarioRunEstimateState = { status: 'loading', scope: 'request' }
     const { rerender } = render(
       <TestWrapper><ScenarioRunEstimateDetails state={loading} /></TestWrapper>,
@@ -350,24 +350,6 @@ describe('ScenarioRunEstimate', () => {
     rerender(<TestWrapper><ScenarioRunEstimateDetails state={unavailable} /></TestWrapper>)
     expect(screen.getByText('Estimate unavailable')).toBeInTheDocument()
     expect(screen.getByText('Configured run size unavailable')).toBeInTheDocument()
-
-    const exact = mapScenarioRunEstimate(makeEstimate(), 'request')
-    if (exact.status !== 'available') {
-      throw new Error('Expected exact estimate.')
-    }
-    const stale: ScenarioRunEstimateState = {
-      status: 'stale',
-      estimate: exact.estimate,
-      label: 'Showing the last successful estimate.',
-      error: 'Preview service timed out.',
-    }
-    rerender(<TestWrapper><ScenarioRunEstimateDetails state={stale} /></TestWrapper>)
-    expect(screen.getByText('Previous estimate not shown')).toBeInTheDocument()
-    expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
-    expect(screen.getByText(
-      'The previous calculation does not match the current configuration.',
-    )).toBeInTheDocument()
-    expect(screen.getByText('Preview service timed out.')).toBeInTheDocument()
 
     rerender(
       <TestWrapper>

@@ -46,8 +46,6 @@ function stateEstimate(state: ScenarioRunEstimateState): ScenarioRunEstimate | u
   switch (state.status) {
     case 'available':
     case 'conditional':
-    case 'refreshing':
-    case 'stale':
       return state.estimate
     default:
       return undefined
@@ -68,10 +66,6 @@ function statusLabel(state: ScenarioRunEstimateState): string | null {
     case 'available':
     case 'conditional':
       return null
-    case 'refreshing':
-      return 'Updating estimate'
-    case 'stale':
-      return 'Previous estimate'
     case 'unavailable':
       return 'Estimate unavailable'
   }
@@ -80,10 +74,8 @@ function statusLabel(state: ScenarioRunEstimateState): string | null {
 function statusColor(state: ScenarioRunEstimateState): 'brand' | 'warning' | 'subtle' {
   switch (state.status) {
     case 'available':
-    case 'refreshing':
       return 'brand'
     case 'conditional':
-    case 'stale':
       return 'warning'
     default:
       return 'subtle'
@@ -556,25 +548,10 @@ export function ScenarioRunEstimateDetails({
     )
   }
 
-  if (state.status === 'stale') {
-    return (
-      <div className={styles.details} aria-live="polite">
-        <div className={styles.staleNotice} role="status">
-          <Text weight="semibold">Previous estimate not shown</Text>
-          <Text size={200}>The previous calculation does not match the current configuration.</Text>
-          <Text size={200}>{state.error}</Text>
-        </div>
-      </div>
-    )
-  }
-
   const { estimate } = state
   return (
     <div className={styles.details} aria-live="polite">
       <RunCalculationView estimate={estimate} idPrefix={idPrefix} />
-      {state.status === 'refreshing' && (
-        <Text size={200} className={styles.muted}>{state.label}</Text>
-      )}
       <EstimateSources estimate={estimate} />
       <Text size={200} className={styles.muted}>
         Retries are {estimate.retriesIncluded ? 'included' : 'not included'}.

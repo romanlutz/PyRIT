@@ -3,6 +3,7 @@ import {
   Field,
   Input,
   Select,
+  type FieldProps,
 } from '@fluentui/react-components'
 
 import type { Parameter } from '@/types'
@@ -17,6 +18,10 @@ export interface ParameterFieldProps {
   onChange: (name: string, value: ParameterFormValue) => void
   displayLabel?: string
   displayHint?: string
+  validationState?: FieldProps['validationState']
+  validationMessage?: string
+  numberMin?: number
+  numberStep?: number
   /** Prefix for `data-testid` attributes. Defaults to `'param'` (e.g. `param-<name>`). */
   testIdPrefix?: string
 }
@@ -38,6 +43,10 @@ export default function ParameterField({
   onChange,
   displayLabel,
   displayHint,
+  validationState,
+  validationMessage,
+  numberMin,
+  numberStep,
   testIdPrefix = 'param',
 }: ParameterFieldProps) {
   const styles = useParameterFieldStyles()
@@ -119,11 +128,19 @@ export default function ParameterField({
   const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
 
   return (
-    <Field label={label} hint={hint}>
+    <Field
+      label={label}
+      hint={hint}
+      validationState={validationState}
+      validationMessage={validationMessage}
+    >
       <Input
         className={styles.control}
         value={stringValue}
         type={kind === 'number' ? 'number' : 'text'}
+        min={kind === 'number' ? numberMin : undefined}
+        step={kind === 'number' ? numberStep : undefined}
+        aria-invalid={validationState === 'error'}
         placeholder={placeholder}
         disabled={disabled}
         onChange={(_, data) => onChange(parameter.name, data.value)}
