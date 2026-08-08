@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 
 import { scenariosApi } from '@/services/api'
 import type { RegisteredScenario } from '@/types'
@@ -16,7 +16,6 @@ jest.mock('@/services/api', () => ({
 
 const mockListCatalog = scenariosApi.listCatalog as jest.Mock
 
-const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
 const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
   [
     ['Run', 'size', 'calculated'].join(' '),
@@ -25,10 +24,18 @@ const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
   'i',
 )
 
+function LocationProbe() {
+  const location = useLocation()
+  return <output aria-label="Current route">{location.pathname}</output>
+}
+
 function TestWrapper({ children }: { children: React.ReactNode }) {
   return (
     <FluentProvider theme={webLightTheme}>
-      <MemoryRouter>{children}</MemoryRouter>
+      <MemoryRouter>
+        {children}
+        <LocationProbe />
+      </MemoryRouter>
     </FluentProvider>
   )
 }
@@ -94,7 +101,7 @@ describe('ScenarioCatalog', () => {
     expect(mockListCatalog).toHaveBeenCalledTimes(1)
   })
 
-  it('explains scenario run plans and applies spacing classes to every table cell', async () => {
+  it('renders the exact launch-index column order and applies spacing to every cell', async () => {
     mockListCatalog.mockResolvedValueOnce({
       items: [makeScenario({ scenario_name: 'foundry.red_team_agent' })],
       pagination: { limit: 200, has_more: false },
@@ -103,20 +110,24 @@ describe('ScenarioCatalog', () => {
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
     const table = await screen.findByRole('table', { name: 'Registered scenarios' })
-    expect(screen.getByText(/packages objective datasets, selected or aggregate techniques/i)).toBeInTheDocument()
+    expect(screen.getByText(/packages objective datasets, technique sets or selected techniques/i))
+      .toBeInTheDocument()
     const headers = within(table).getAllByRole('columnheader')
     expect(headers).toHaveLength(5)
     expect(headers.map((header) => header.textContent)).toEqual([
       'Scenario / purpose',
+      'Configure',
       'Default dataset size',
       'Default techniques',
       'Default run size',
-      'Action',
     ])
     expect(headers.every((cell) => cell.classList.contains('scenario-catalog-cell-padding'))).toBe(true)
     const cells = within(screen.getByTestId('scenario-card-foundry.red_team_agent')).getAllByRole('cell')
     expect(cells).toHaveLength(5)
     expect(cells.every((cell) => cell.classList.contains('scenario-catalog-cell-padding'))).toBe(true)
+    expect(within(cells[1]).getByRole('button', { name: 'Configure run' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /show details|hide details/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: /details/i })).not.toBeInTheDocument()
   })
 
   it('follows the cursor to load every page automatically', async () => {
@@ -244,6 +255,22 @@ describe('ScenarioCatalog', () => {
     expect(card).toHaveAttribute('href', '/scenarios/foundry%2Fred_team_agent')
   })
 
+  it('navigates from the second-cell Configure button', async () => {
+    const user = userEvent.setup()
+    mockListCatalog.mockResolvedValueOnce({
+      items: [makeScenario({ scenario_name: 'foundry/red_team_agent' })],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    const row = await screen.findByTestId('scenario-card-foundry/red_team_agent')
+    const cells = within(row).getAllByRole('cell')
+    await user.click(within(cells[1]).getByRole('button', { name: 'Configure run' }))
+
+    expect(screen.getByLabelText('Current route')).toHaveTextContent('/scenarios/foundry%2Fred_team_agent')
+  })
+
   it('shows multiple default populations separately instead of summing them', async () => {
     mockListCatalog.mockResolvedValueOnce({
       items: [
@@ -280,31 +307,7 @@ describe('ScenarioCatalog', () => {
     expect(within(row).queryByText('6 selected seed groups')).not.toBeInTheDocument()
   })
 
-  it('keeps Markdown links out of the clipped summary until the disclosure is opened', async () => {
-    const user = userEvent.setup()
-    mockListCatalog.mockResolvedValueOnce({
-      items: [
-        makeScenario({
-          scenario_name: 'garak.doctor',
-          description: 'Read the [scenario guide](https://example.com/guide) before launch.',
-        }),
-      ],
-      pagination: { limit: 200, has_more: false },
-    })
-
-    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
-    const row = await screen.findByTestId('scenario-card-garak.doctor')
-    expect(screen.queryByRole('link', { name: 'scenario guide' })).not.toBeInTheDocument()
-
-    await user.click(within(row).getByRole('button', { name: 'Show details' }))
-
-    const guide = screen.getByRole('link', { name: 'scenario guide' })
-    expect(guide).toHaveAttribute('target', '_blank')
-    expect(guide).toHaveAttribute('rel', 'noopener noreferrer')
-  })
-
   it('keeps declared datasets visible when backend population summaries are unavailable', async () => {
-    const user = userEvent.setup()
     mockListCatalog.mockResolvedValueOnce({
       items: [
         makeScenario({
@@ -319,21 +322,10 @@ describe('ScenarioCatalog', () => {
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
     const row = await screen.findByTestId('scenario-card-scenario.unsized')
     expect(within(row).getByText('Population counts unavailable')).toBeInTheDocument()
-    await user.click(within(row).getByRole('button', { name: 'Show details' }))
-
-    const details = screen.getByRole('region', { name: 'scenario.unsized details' })
-    expect(within(details).getByText('harmbench')).toBeInTheDocument()
-    expect(within(details).getByText('Population unavailable')).toBeInTheDocument()
-    expect(within(details).getByText(
-      'Population counts and configured caps aren’t available.',
-    )).toBeInTheDocument()
-    expect(within(details).queryByText(
-      'This scenario does not declare a default dataset.',
-    )).not.toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Configure run' })).toBeInTheDocument()
   })
 
-  it('discloses every technique and dataset without an unactionable +N summary', async () => {
-    const user = userEvent.setup()
+  it('keeps the authoritative default comparison values in the launch row', async () => {
     mockListCatalog.mockResolvedValueOnce({
       items: [
         makeScenario({
@@ -412,8 +404,8 @@ describe('ScenarioCatalog', () => {
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
     const row = await screen.findByTestId('scenario-card-airt.jailbreak')
-    const disclosure = within(row).getByRole('button', { name: 'Show details' })
-    expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    const cells = within(row).getAllByRole('cell')
+    expect(within(cells[1]).getByRole('button', { name: 'Configure run' })).toBeInTheDocument()
     expect(within(row).getByText('4 selected seed groups')).toBeInTheDocument()
     expect(within(row).getByText('harmbench · 400 available')).toBeInTheDocument()
     expect(within(row).getByText('2 techniques')).toBeInTheDocument()
@@ -421,56 +413,7 @@ describe('ScenarioCatalog', () => {
     expect(within(row).queryByText('default')).not.toBeInTheDocument()
     expect(within(row).queryByText(/aggregate presets|compatible concrete/i)).not.toBeInTheDocument()
     expect(within(row).queryByText(REMOVED_NORMAL_ESTIMATE_LABELS)).not.toBeInTheDocument()
-
-    await user.click(disclosure)
-
-    expect(disclosure).toHaveAttribute('aria-expanded', 'true')
-    const details = screen.getByRole('region', { name: 'airt.jailbreak details' })
-    expect(within(details).getAllByText(/Recommended \(default\)/).length).toBeGreaterThan(0)
-    expect(within(details).getByText('Easy (1 technique)')).toBeInTheDocument()
-    expect(within(details).getAllByText('prompt_sending').length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('jailbreak_system_prompt').length).toBeGreaterThan(0)
-    expect(within(details).getByText('flip')).toBeInTheDocument()
-    expect(within(details).getAllByText('harmbench').length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('Jailbreak templates: 2 (configuration)').length)
-      .toBeGreaterThan(0)
-    expect(within(details).getAllByText('One incompatible group is excluded.').length)
-      .toBeGreaterThan(0)
-    expect(within(details).getByText('12–20 planned attacks')).toBeInTheDocument()
-    expect(within(details).getAllByText('Included techniques')).not.toHaveLength(0)
-    expect(within(details).getByText('Technique sets')).toBeInTheDocument()
-    expect(within(details).queryByText(/aggregate preset/i)).not.toBeInTheDocument()
-    expect(within(details).queryByText(/Backend estimate|Conditional estimate|Backend formula/i))
-      .not.toBeInTheDocument()
-    expect(within(details).queryByText('context_compliance')).not.toBeInTheDocument()
-    expect(within(details).queryByText(/multi.?turn/i)).not.toBeInTheDocument()
-    expect(within(details).queryByText(/simulated/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/\+\d+ more/i)).not.toBeInTheDocument()
-  })
-
-  it('normalizes MyST literals while keeping scenario Markdown and raw HTML safe', async () => {
-    const user = userEvent.setup()
-    mockListCatalog.mockResolvedValueOnce({
-      items: [
-        makeScenario({
-          scenario_name: 'airt.jailbreak',
-          description: 'Configure the Jailbreak scenario.',
-          description_markdown: `Set \`\`num_jailbreaks\`\`.\n\n${RAW_IMAGE_HTML}unsafe`,
-        }),
-      ],
-      pagination: { limit: 200, has_more: false },
-    })
-
-    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
-    const row = await screen.findByTestId('scenario-card-airt.jailbreak')
-    await user.click(within(row).getByRole('button', { name: 'Show details' }))
-
-    const details = screen.getByRole('region', { name: 'airt.jailbreak details' })
-    const literal = within(details).getByText('num_jailbreaks')
-    expect(literal.tagName).toBe('CODE')
-    expect(screen.queryByRole('img')).not.toBeInTheDocument()
-    expect(
-      within(details).getByText((content: string) => content.includes(`${RAW_IMAGE_HTML}unsafe`)),
-    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /show details|hide details/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: /details/i })).not.toBeInTheDocument()
   })
 })

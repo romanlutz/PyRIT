@@ -38,6 +38,9 @@ export const useScenarioDetailStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalXS,
   },
+  scenarioMetadata: {
+    color: tokens.colorNeutralForeground3,
+  },
   description: {
     maxWidth: '75ch',
     color: tokens.colorNeutralForeground2,

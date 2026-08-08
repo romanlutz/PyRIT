@@ -444,6 +444,8 @@ describe('ScenarioDetail', () => {
   it('renders MyST literals through the shared safe Markdown renderer', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({
+        scenario_type: 'Jailbreak',
+        scenario_version: 4,
         description: 'Configure this scenario.',
         description_markdown: `Set \`\`num_jailbreaks\`\`.\n\n${RAW_IMAGE_HTML}unsafe`,
       }),
@@ -451,6 +453,7 @@ describe('ScenarioDetail', () => {
     renderDetail('/scenarios/foundry.red_team_agent')
 
     const description = await screen.findByTestId('scenario-detail-description')
+    expect(screen.getByText('Jailbreak · v4')).toBeInTheDocument()
     expect(within(description).getByText('num_jailbreaks').tagName).toBe('CODE')
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
     expect(
@@ -1134,7 +1137,10 @@ describe('ScenarioDetail', () => {
     expect(within(preview).getAllByText('harmbench')).toHaveLength(2)
     expect(within(preview).getByText('Not included')).toBeInTheDocument()
     expect(within(preview).getByText('8 planned attacks')).toBeInTheDocument()
+    expect(within(preview).getByText('Logical seed groups')).toBeInTheDocument()
+    expect(within(preview).getByText('Selected seed groups')).toBeInTheDocument()
     expect(within(preview).getByText('Jailbreak templates: 2 (configuration)')).toBeInTheDocument()
+    expect(within(preview).getByText('One incompatible group is excluded.')).toBeInTheDocument()
     expect(within(preview).getByText('2')).toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))

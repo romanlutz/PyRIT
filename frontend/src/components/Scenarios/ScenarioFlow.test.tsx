@@ -182,12 +182,13 @@ describe('Scenario catalog-to-run integration', () => {
     })
   })
 
-  it('carries one configured request from catalog detail through estimate, launch, and run hydration', async () => {
+  it('carries one configured request from catalog through estimate, launch, and run hydration', async () => {
     const user = userEvent.setup()
     renderFlow()
 
-    await user.click(await screen.findByRole('link', { name: SCENARIO_NAME }))
+    await user.click(await screen.findByRole('button', { name: 'Configure run' }))
     expect(await screen.findByRole('heading', { level: 1, name: SCENARIO_NAME })).toBeInTheDocument()
+    expect(screen.getByText('RedTeamAgentScenario · v1')).toBeInTheDocument()
 
     const expectedEstimateRequest = {
       target_name: TARGET.target_registry_name,

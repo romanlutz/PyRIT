@@ -130,19 +130,19 @@ export const useScenarioCatalogStyles = makeStyles({
     },
   },
   scenarioColumn: {
-    width: '30%',
+    width: '34%',
+  },
+  configureColumn: {
+    width: '15%',
   },
   sizeColumn: {
-    width: '18%',
+    width: '17%',
   },
   techniqueColumn: {
-    width: '15%',
+    width: '14%',
   },
   datasetColumn: {
     width: '20%',
-  },
-  actionColumn: {
-    width: '17%',
   },
   summaryRow: {
     color: tokens.colorNeutralForeground1,
@@ -159,14 +159,6 @@ export const useScenarioCatalogStyles = makeStyles({
       border: `1px solid ${tokens.colorNeutralStroke2}`,
       borderRadius: tokens.borderRadiusLarge,
       backgroundColor: tokens.colorNeutralBackground1,
-    },
-  },
-  expandedSummaryRow: {
-    backgroundColor: tokens.colorNeutralBackground1Hover,
-    [NARROW_VIEWPORT_QUERY]: {
-      marginBottom: 0,
-      borderBottomLeftRadius: 0,
-      borderBottomRightRadius: 0,
     },
   },
   tableCell: {
@@ -223,9 +215,6 @@ export const useScenarioCatalogStyles = makeStyles({
       minHeight: MINIMUM_TOUCH_TARGET_SIZE,
     },
   },
-  scenarioType: {
-    color: tokens.colorNeutralForeground3,
-  },
   purposePreview: {
     display: '-webkit-box',
     maxWidth: '56ch',
@@ -245,146 +234,11 @@ export const useScenarioCatalogStyles = makeStyles({
   secondaryText: {
     color: tokens.colorNeutralForeground3,
   },
-  actionCell: {
+  configureButton: {
+    ...mobileTouchTarget,
+    alignSelf: 'flex-start',
     [NARROW_VIEWPORT_QUERY]: {
-      borderBottom: 0,
-    },
-  },
-  actionGroup: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'stretch',
-    gap: tokens.spacingVerticalXS,
-    minWidth: 0,
-  },
-  actionLink: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: tokens.spacingVerticalXXL,
-    padding: `0 ${tokens.spacingHorizontalM}`,
-    color: tokens.colorBrandForegroundLink,
-    fontWeight: tokens.fontWeightSemibold,
-    textDecorationLine: 'none',
-    borderRadius: tokens.borderRadiusMedium,
-    ':hover': {
-      backgroundColor: tokens.colorSubtleBackgroundHover,
-    },
-    ':focus-visible': {
-      outline: `2px solid ${tokens.colorStrokeFocus2}`,
-      outlineOffset: '2px',
-    },
-    [TOUCH_INPUT_QUERY]: {
-      minHeight: MINIMUM_TOUCH_TARGET_SIZE,
-    },
-  },
-  detailsRow: {
-    backgroundColor: tokens.colorNeutralBackground2,
-    [NARROW_VIEWPORT_QUERY]: {
-      display: 'block',
       width: '100%',
-      marginBottom: tokens.spacingVerticalM,
     },
-  },
-  detailsCell: {
-    padding: tokens.spacingVerticalL,
-    [NARROW_VIEWPORT_QUERY]: {
-      display: 'block',
-      width: 'auto',
-      padding: tokens.spacingVerticalL,
-      border: `1px solid ${tokens.colorNeutralStroke2}`,
-      borderTop: 0,
-      borderBottomLeftRadius: tokens.borderRadiusLarge,
-      borderBottomRightRadius: tokens.borderRadiusLarge,
-      backgroundColor: tokens.colorNeutralBackground2,
-    },
-  },
-  detailsPanel: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-    gap: `${tokens.spacingVerticalXL} ${tokens.spacingHorizontalXXL}`,
-    [NARROW_VIEWPORT_QUERY]: {
-      gridTemplateColumns: 'minmax(0, 1fr)',
-      gap: tokens.spacingVerticalXL,
-    },
-  },
-  detailGroup: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalM,
-    minWidth: 0,
-  },
-  descriptionGroup: {
-    gridColumn: '1 / -1',
-    maxWidth: '75ch',
-  },
-  metadataGroup: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXS,
-  },
-  badgeGroup: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: tokens.spacingHorizontalXXS,
-  },
-  presetList: {
-    display: 'grid',
-    gap: tokens.spacingVerticalS,
-    margin: 0,
-    padding: 0,
-    listStyleType: 'none',
-  },
-  presetItem: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-start',
-    gap: tokens.spacingVerticalXXS,
-    minWidth: 0,
-    overflowWrap: 'anywhere',
-  },
-  datasetList: {
-    display: 'grid',
-    gap: tokens.spacingVerticalS,
-    margin: 0,
-    padding: 0,
-    listStyleType: 'none',
-  },
-  datasetCard: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    backgroundColor: tokens.colorNeutralBackground3,
-    borderRadius: tokens.borderRadiusSmall,
-    minWidth: 0,
-    overflowWrap: 'anywhere',
-  },
-  datasetHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: tokens.spacingHorizontalXS,
-  },
-  datasetCounts: {
-    display: 'grid',
-    gap: tokens.spacingVerticalXXS,
-    margin: 0,
-  },
-  datasetCountRow: {
-    display: 'grid',
-    gridTemplateColumns: 'minmax(0, 1fr) auto',
-    gap: tokens.spacingHorizontalS,
-    fontVariantNumeric: 'tabular-nums',
-    '& dd': {
-      margin: 0,
-      fontWeight: tokens.fontWeightSemibold,
-    },
-  },
-  capList: {
-    display: 'grid',
-    gap: tokens.spacingVerticalXXS,
-    margin: 0,
-    paddingLeft: tokens.spacingHorizontalL,
   },
 })

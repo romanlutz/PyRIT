@@ -947,6 +947,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
           <Text id="scenario-detail-title" as="h1" size={600} weight="semibold">
             {scenario.scenario_name}
           </Text>
+          <Text size={200} className={styles.scenarioMetadata}>
+            {scenario.scenario_type} · v{scenario.scenario_version}
+          </Text>
           <MarkdownContent
             content={normalizeScenarioMarkdown(
               scenario.description_markdown || scenario.description,

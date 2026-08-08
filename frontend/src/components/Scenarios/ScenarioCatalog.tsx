@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
-  Badge,
   Button,
   Input,
   mergeClasses,
@@ -18,13 +17,11 @@ import {
 } from '@fluentui/react-components'
 import {
   ArrowSyncRegular,
-  ChevronDownRegular,
-  ChevronRightRegular,
   SearchRegular,
+  SettingsRegular,
 } from '@fluentui/react-icons'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
-import MarkdownContent from '@/components/Markdown/MarkdownContent'
 import { scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
 import type { RegisteredScenario, ScenarioDatasetSummary } from '@/types'
@@ -32,16 +29,10 @@ import { fetchAllPages } from '@/utils/fetchAllPages'
 
 import { useScenarioCatalogStyles } from './ScenarioCatalog.styles'
 import {
-  ScenarioRunEstimateDetails,
   ScenarioRunEstimateSummary,
 } from './ScenarioRunEstimate'
-import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
-import {
-  techniqueSetMembers,
-  techniqueSetName,
-  techniqueSetOptionLabel,
-} from './scenarioTechniqueSets'
+import { techniqueSetName } from './scenarioTechniqueSets'
 
 /** Items requested per catalog page while paging through the full list. */
 const CATALOG_PAGE_SIZE = 200
@@ -123,298 +114,83 @@ function DefaultDatasetSizeSummary({
   )
 }
 
-function baselineDescription(scenario: RegisteredScenario): string {
-  if (scenario.baseline_policy === 'forbidden') {
-    return 'Baseline execution is not supported for this scenario.'
-  }
-  if (scenario.include_baseline_by_default) {
-    return 'Baseline execution is allowed and included by default.'
-  }
-  return 'Baseline execution is allowed and excluded by default.'
-}
-
-function DatasetPopulation({ dataset }: { dataset: ScenarioDatasetSummary }) {
-  const styles = useScenarioCatalogStyles()
-
-  return (
-    <article className={styles.datasetCard}>
-      <div className={styles.datasetHeader}>
-        <Text weight="semibold">{dataset.name}</Text>
-        <Badge appearance="tint" color="informative">{dataset.kind}</Badge>
-      </div>
-      <dl className={styles.datasetCounts}>
-        <div className={styles.datasetCountRow}>
-          <dt>Logical seed groups</dt>
-          <dd>{formatCount(dataset.logical_seed_group_count)}</dd>
-        </div>
-        <div className={styles.datasetCountRow}>
-          <dt>Selected seed groups</dt>
-          <dd>{formatCount(dataset.selected_seed_group_count)}</dd>
-        </div>
-      </dl>
-      {dataset.configured_caps.length > 0 && (
-        <div className={styles.metadataGroup}>
-          <Text size={200} weight="semibold">Configured caps</Text>
-          <ul className={styles.capList}>
-            {dataset.configured_caps.map((cap) => (
-              <li key={`${cap.label}:${cap.configured_on}:${cap.dataset_name ?? ''}:${cap.count}`}>
-                <Text size={200}>
-                  {cap.label}: {formatCount(cap.count)}
-                  {' '}({cap.configured_on}{cap.dataset_name ? `: ${cap.dataset_name}` : ''})
-                </Text>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {dataset.selection_note && (
-        <Text size={200} className={styles.secondaryText}>{dataset.selection_note}</Text>
-      )}
-    </article>
-  )
-}
-
 interface ScenarioCatalogRowProps {
   scenario: RegisteredScenario
-  expanded: boolean
-  onToggle: (scenarioName: string) => void
 }
 
-function ScenarioCatalogRow({ scenario, expanded, onToggle }: ScenarioCatalogRowProps) {
+function ScenarioCatalogRow({ scenario }: ScenarioCatalogRowProps) {
   const styles = useScenarioCatalogStyles()
-  const detailsId = `scenario-details-${encodeURIComponent(scenario.scenario_name).replace(/%/g, '-')}`
-  const aggregateTechniques = uniqueNames(scenario.aggregate_techniques)
-  const defaultIsAggregate = aggregateTechniques.includes(scenario.default_technique)
-  const concreteTechniques = uniqueNames(scenario.all_techniques)
+  const navigate = useNavigate()
   const defaultConcreteTechniques = uniqueNames(scenario.default_techniques)
-  const description = normalizeScenarioMarkdown(
-    scenario.description_markdown || scenario.description,
-  )
   const estimateState = mapScenarioRunEstimate(scenario.default_run_size, 'default')
   const scenarioPath = `/scenarios/${encodeURIComponent(scenario.scenario_name)}`
 
   return (
-    <>
-      <TableRow
-        className={mergeClasses(styles.summaryRow, expanded && styles.expandedSummaryRow)}
-        data-testid={`scenario-card-${scenario.scenario_name}`}
+    <TableRow
+      className={styles.summaryRow}
+      data-testid={`scenario-card-${scenario.scenario_name}`}
+    >
+      <TableCell
+        className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
       >
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+        <Text className={styles.mobileLabel} size={200} weight="semibold">
+          Scenario / purpose
+        </Text>
+        <div className={styles.scenarioSummary}>
+          <Link to={scenarioPath} className={styles.scenarioLink}>
+            {scenario.scenario_name}
+          </Link>
+          <Text size={200} className={styles.purposePreview}>{scenario.description}</Text>
+        </div>
+      </TableCell>
+      <TableCell
+        className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+      >
+        <Text className={styles.mobileLabel} size={200} weight="semibold">
+          Configure
+        </Text>
+        <Button
+          className={styles.configureButton}
+          appearance="primary"
+          icon={<SettingsRegular />}
+          type="button"
+          onClick={() => navigate(scenarioPath)}
         >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Scenario / purpose
-          </Text>
-          <div className={styles.scenarioSummary}>
-            <Link to={scenarioPath} className={styles.scenarioLink}>
-              {scenario.scenario_name}
-            </Link>
-            <Text size={200} className={styles.scenarioType}>
-              {scenario.scenario_type} · v{scenario.scenario_version}
-            </Text>
-            <Text size={200} className={styles.purposePreview}>{scenario.description}</Text>
-          </div>
-        </TableCell>
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Default dataset size
-          </Text>
-          <DefaultDatasetSizeSummary
-            datasets={scenario.default_dataset_summaries}
-            hasDeclaredDatasets={scenario.default_datasets.length > 0}
-          />
-        </TableCell>
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Default techniques
-          </Text>
-          <Text weight="semibold">
-            {defaultConcreteTechniques.length === 0
-              ? 'No default techniques'
-              : `${defaultConcreteTechniques.length} technique${defaultConcreteTechniques.length === 1 ? '' : 's'}`}
-          </Text>
-        </TableCell>
-        <TableCell
-          className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Default run size
-          </Text>
-          <ScenarioRunEstimateSummary state={estimateState} />
-        </TableCell>
-        <TableCell
-          className={mergeClasses(
-            styles.tableCell,
-            styles.tableCellPadding,
-            styles.actionCell,
-            'scenario-catalog-cell-padding',
-          )}
-        >
-          <Text className={styles.mobileLabel} size={200} weight="semibold">
-            Action
-          </Text>
-          <div className={styles.actionGroup}>
-            <Button
-              className={styles.touchTarget}
-              appearance="subtle"
-              icon={expanded ? <ChevronDownRegular /> : <ChevronRightRegular />}
-              aria-expanded={expanded}
-              aria-controls={detailsId}
-              onClick={() => onToggle(scenario.scenario_name)}
-            >
-              {expanded ? 'Hide details' : 'Show details'}
-            </Button>
-            <Link className={styles.actionLink} to={scenarioPath}>
-              Configure run
-            </Link>
-          </div>
-        </TableCell>
-      </TableRow>
-      {expanded && (
-        <TableRow className={styles.detailsRow}>
-          <TableCell className={styles.detailsCell} colSpan={5}>
-            <div
-              className={styles.detailsPanel}
-              id={detailsId}
-              role="region"
-              aria-label={`${scenario.scenario_name} details`}
-            >
-              <section className={mergeClasses(styles.detailGroup, styles.descriptionGroup)}>
-                <Text as="h3" size={400} weight="semibold">Purpose and behavior</Text>
-                <MarkdownContent
-                  content={description}
-                  testId={`scenario-description-${scenario.scenario_name}`}
-                />
-              </section>
-              <section className={styles.detailGroup}>
-                <Text as="h3" size={400} weight="semibold">Default run size</Text>
-                <ScenarioRunEstimateDetails
-                  state={estimateState}
-                  idPrefix={`${detailsId}-estimate`}
-                />
-              </section>
-              <section className={styles.detailGroup}>
-                <Text as="h3" size={400} weight="semibold">Techniques</Text>
-                <div className={styles.metadataGroup}>
-                  <Text weight="semibold">
-                    {defaultIsAggregate ? 'Default technique set' : 'Default concrete technique'}
-                  </Text>
-                  <div className={styles.badgeGroup}>
-                    <Badge appearance="tint" color="brand">
-                      {defaultIsAggregate
-                        ? techniqueSetOptionLabel(scenario, scenario.default_technique)
-                        : scenario.default_technique}
-                    </Badge>
-                  </div>
-                </div>
-                <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Included techniques</Text>
-                  {defaultConcreteTechniques.length > 0 ? (
-                    <div className={styles.badgeGroup}>
-                      {defaultConcreteTechniques.map((technique) => (
-                        <Badge key={technique} appearance="outline">{technique}</Badge>
-                      ))}
-                    </div>
-                  ) : (
-                    <Text size={200} className={styles.secondaryText}>
-                      No concrete default members were supplied.
-                    </Text>
-                  )}
-                </div>
-                <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Technique sets</Text>
-                  {aggregateTechniques.length > 0 ? (
-                    <ul className={styles.presetList}>
-                      {aggregateTechniques.map((technique) => (
-                        <li className={styles.presetItem} key={technique}>
-                          <Badge appearance="tint">{techniqueSetOptionLabel(scenario, technique)}</Badge>
-                          <Text size={200} className={styles.secondaryText}>
-                            {techniqueSetMembers(scenario, technique).length > 0
-                              ? techniqueSetMembers(scenario, technique).join(', ')
-                              : 'No concrete members supplied.'}
-                          </Text>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <Text size={200} className={styles.secondaryText}>None registered.</Text>
-                  )}
-                </div>
-                <div className={styles.metadataGroup}>
-                  <Text weight="semibold">Compatible concrete techniques</Text>
-                  {concreteTechniques.length > 0 ? (
-                    <div className={styles.badgeGroup}>
-                      {concreteTechniques.map((technique) => (
-                        <Badge key={technique} appearance="outline">{technique}</Badge>
-                      ))}
-                    </div>
-                  ) : (
-                    <Text size={200} className={styles.secondaryText}>None registered.</Text>
-                  )}
-                </div>
-              </section>
-              <section className={styles.detailGroup}>
-                <Text as="h3" size={400} weight="semibold">
-                  Default datasets and populations
-                </Text>
-                {scenario.default_dataset_summaries.length > 0 ? (
-                  <ul className={styles.datasetList}>
-                    {scenario.default_dataset_summaries.map((dataset) => (
-                      <li key={`${dataset.kind}:${dataset.name}`}>
-                        <DatasetPopulation dataset={dataset} />
-                      </li>
-                    ))}
-                  </ul>
-                ) : scenario.default_datasets.length > 0 ? (
-                  <ul className={styles.datasetList}>
-                    {uniqueNames(scenario.default_datasets).map((dataset) => (
-                      <li key={dataset}>
-                        <article className={styles.datasetCard}>
-                          <div className={styles.datasetHeader}>
-                            <Text weight="semibold">{dataset}</Text>
-                            <Badge appearance="tint" color="warning">
-                              Population unavailable
-                            </Badge>
-                          </div>
-                          <Text size={200} className={styles.secondaryText}>
-                            Population counts and configured caps aren’t available.
-                          </Text>
-                        </article>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <Text size={200} className={styles.secondaryText}>
-                    This scenario does not declare a default dataset.
-                  </Text>
-                )}
-              </section>
-              <section className={styles.detailGroup}>
-                <Text as="h3" size={400} weight="semibold">Baseline policy</Text>
-                <div className={styles.badgeGroup}>
-                  <Badge
-                    appearance="tint"
-                    color={scenario.baseline_policy === 'forbidden' ? 'warning' : 'subtle'}
-                  >
-                    {scenario.baseline_policy}
-                  </Badge>
-                  <Badge appearance="outline">
-                    {scenario.include_baseline_by_default ? 'Included by default' : 'Excluded by default'}
-                  </Badge>
-                </div>
-                <Text size={200} className={styles.secondaryText}>
-                  {baselineDescription(scenario)}
-                </Text>
-              </section>
-            </div>
-          </TableCell>
-        </TableRow>
-      )}
-    </>
+          Configure run
+        </Button>
+      </TableCell>
+      <TableCell
+        className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+      >
+        <Text className={styles.mobileLabel} size={200} weight="semibold">
+          Default dataset size
+        </Text>
+        <DefaultDatasetSizeSummary
+          datasets={scenario.default_dataset_summaries}
+          hasDeclaredDatasets={scenario.default_datasets.length > 0}
+        />
+      </TableCell>
+      <TableCell
+        className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+      >
+        <Text className={styles.mobileLabel} size={200} weight="semibold">
+          Default techniques
+        </Text>
+        <Text weight="semibold">
+          {defaultConcreteTechniques.length === 0
+            ? 'No default techniques'
+            : `${defaultConcreteTechniques.length} technique${defaultConcreteTechniques.length === 1 ? '' : 's'}`}
+        </Text>
+      </TableCell>
+      <TableCell
+        className={mergeClasses(styles.tableCell, styles.tableCellPadding, 'scenario-catalog-cell-padding')}
+      >
+        <Text className={styles.mobileLabel} size={200} weight="semibold">
+          Default run size
+        </Text>
+        <ScenarioRunEstimateSummary state={estimateState} />
+      </TableCell>
+    </TableRow>
   )
 }
 
@@ -425,7 +201,6 @@ export default function ScenarioCatalog() {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [refetchCount, setRefetchCount] = useState(0)
-  const [expandedScenarios, setExpandedScenarios] = useState<Set<string>>(() => new Set())
 
   useEffect(() => {
     let cancelled = false
@@ -460,18 +235,6 @@ export default function ScenarioCatalog() {
     setRefetchCount((count) => count + 1)
   }, [])
 
-  const handleToggle = useCallback((scenarioName: string) => {
-    setExpandedScenarios((current) => {
-      const next = new Set(current)
-      if (next.has(scenarioName)) {
-        next.delete(scenarioName)
-      } else {
-        next.add(scenarioName)
-      }
-      return next
-    })
-  }, [])
-
   const filteredScenarios = useMemo(
     () => scenarios.filter((scenario) => matchesSearch(scenario, query)),
     [scenarios, query],
@@ -492,7 +255,7 @@ export default function ScenarioCatalog() {
             Browse registered scenarios and launch a run against a configured target.
           </Text>
           <Text as="p" size={300} className={styles.explanation}>
-            A scenario packages objective datasets, selected or aggregate techniques, baseline policy,
+            A scenario packages objective datasets, technique sets or selected techniques, baseline policy,
             and scenario-specific axes into a run plan.
           </Text>
         </div>
@@ -562,6 +325,15 @@ export default function ScenarioCatalog() {
                 </TableHeaderCell>
                 <TableHeaderCell
                   className={mergeClasses(
+                    styles.configureColumn,
+                    styles.tableHeaderCell,
+                    'scenario-catalog-cell-padding',
+                  )}
+                >
+                  Configure
+                </TableHeaderCell>
+                <TableHeaderCell
+                  className={mergeClasses(
                     styles.datasetColumn,
                     styles.tableHeaderCell,
                     'scenario-catalog-cell-padding',
@@ -587,15 +359,6 @@ export default function ScenarioCatalog() {
                 >
                   Default run size
                 </TableHeaderCell>
-                <TableHeaderCell
-                  className={mergeClasses(
-                    styles.actionColumn,
-                    styles.tableHeaderCell,
-                    'scenario-catalog-cell-padding',
-                  )}
-                >
-                  Action
-                </TableHeaderCell>
               </TableRow>
             </TableHeader>
             <TableBody className={styles.tableBody}>
@@ -603,8 +366,6 @@ export default function ScenarioCatalog() {
                 <ScenarioCatalogRow
                   key={scenario.scenario_name}
                   scenario={scenario}
-                  expanded={expandedScenarios.has(scenario.scenario_name)}
-                  onToggle={handleToggle}
                 />
               ))}
             </TableBody>
