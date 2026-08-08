@@ -23,12 +23,15 @@ export interface ParameterFieldProps {
   validationState?: FieldProps['validationState']
   validationMessage?: string
   numberMin?: number
+  numberMax?: number
   numberStep?: number
   numberWholeOnly?: boolean
-  onRejectedNumberInput?: (name: string) => void
+  onRejectedNumberInput?: (name: string, reason: RejectedNumberInputReason) => void
   /** Prefix for `data-testid` attributes. Defaults to `'param'` (e.g. `param-<name>`). */
   testIdPrefix?: string
 }
+
+export type RejectedNumberInputReason = 'format' | 'above-max'
 
 const BLOCKED_WHOLE_NUMBER_KEYS = new Set(['-', '+', '.', 'e', 'E'])
 
@@ -52,6 +55,7 @@ export default function ParameterField({
   validationState,
   validationMessage,
   numberMin,
+  numberMax,
   numberStep,
   numberWholeOnly = false,
   onRejectedNumberInput,
@@ -135,9 +139,9 @@ export default function ParameterField({
 
   const placeholder = typeof parameter.default === 'string' ? parameter.default : undefined
   const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
-  const rejectNumberInput = (): void => {
-    rejectedNumberSequenceRef.current = true
-    onRejectedNumberInput?.(parameter.name)
+  const rejectNumberInput = (reason: RejectedNumberInputReason): void => {
+    rejectedNumberSequenceRef.current = reason === 'format'
+    onRejectedNumberInput?.(parameter.name, reason)
   }
   const handleNumberKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
     if (!numberWholeOnly) {
@@ -156,10 +160,19 @@ export default function ParameterField({
       event.stopPropagation()
       return
     }
+    if (
+      event.key === 'ArrowUp'
+      && numberMax !== undefined
+      && Number(stringValue) >= numberMax
+    ) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     if (BLOCKED_WHOLE_NUMBER_KEYS.has(event.key)) {
       event.preventDefault()
       event.stopPropagation()
-      rejectNumberInput()
+      rejectNumberInput('format')
       return
     }
     if (rejectedNumberSequenceRef.current && event.key.length === 1) {
@@ -174,12 +187,21 @@ export default function ParameterField({
     const pastedValue = event.clipboardData.getData('text')
     if (!/^\d+$/.test(pastedValue)) {
       event.preventDefault()
-      rejectNumberInput()
+      rejectNumberInput('format')
+      return
+    }
+    if (numberMax !== undefined && Number(pastedValue) > numberMax) {
+      event.preventDefault()
+      rejectNumberInput('above-max')
     }
   }
   const handleInputChange = (nextValue: string): void => {
     if (numberWholeOnly && nextValue !== '' && !/^\d+$/.test(nextValue)) {
-      rejectNumberInput()
+      rejectNumberInput('format')
+      return
+    }
+    if (numberMax !== undefined && nextValue !== '' && Number(nextValue) > numberMax) {
+      rejectNumberInput('above-max')
       return
     }
     rejectedNumberSequenceRef.current = false
@@ -198,6 +220,7 @@ export default function ParameterField({
         value={stringValue}
         type={kind === 'number' ? 'number' : 'text'}
         min={kind === 'number' ? numberMin : undefined}
+        max={kind === 'number' ? numberMax : undefined}
         step={kind === 'number' ? numberStep : undefined}
         inputMode={kind === 'number' && numberWholeOnly ? 'numeric' : undefined}
         pattern={kind === 'number' && numberWholeOnly ? '[0-9]*' : undefined}

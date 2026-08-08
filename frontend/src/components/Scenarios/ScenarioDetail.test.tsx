@@ -653,7 +653,6 @@ describe('ScenarioDetail', () => {
         target_name: 'target-a',
         techniques: ['default'],
         include_baseline: true,
-        scenario_params: { max_attempts_per_objective: 3 },
       },
       expect.any(AbortSignal),
     ))
@@ -960,16 +959,25 @@ describe('ScenarioDetail', () => {
     const scenario = makeAdaptiveScenario()
     mockGetScenario.mockResolvedValue(scenario)
     let resolveEstimate: (estimate: ScenarioDefaultRunSizeEstimate) => void = () => {}
-    mockEstimateRun.mockReturnValueOnce(new Promise((resolve) => {
-      resolveEstimate = resolve
-    }))
+    mockEstimateRun
+      .mockResolvedValueOnce(makeAdaptiveEstimateForRequest(scenario, {
+        target_name: 'target-a',
+        techniques: ['default'],
+        include_baseline: true,
+      }))
+      .mockReturnValueOnce(new Promise((resolve) => {
+        resolveEstimate = resolve
+      }))
     const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
 
     renderDetail('/scenarios/adaptive.text_adaptive')
     await flushRenderedPromises()
     await advanceTimers(300)
-    const requestSignal = mockEstimateRun.mock.calls[0][2] as AbortSignal
+    await flushRenderedPromises()
     const maxAttempts = screen.getByRole('spinbutton', { name: 'Maximum techniques per objective' })
+    await user.type(maxAttempts, '1')
+    await advanceTimers(300)
+    const requestSignal = mockEstimateRun.mock.calls[1][2] as AbortSignal
 
     await user.clear(maxAttempts)
     await user.type(maxAttempts, '-8')
@@ -986,7 +994,7 @@ describe('ScenarioDetail', () => {
 
     expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
     expect(screen.getByText(CORRECT_HIGHLIGHTED_SETTING_MESSAGE)).toBeInTheDocument()
-    expect(mockEstimateRun).toHaveBeenCalledTimes(1)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(2)
   })
 
   it('maps backend attempt-limit validation to the field without exposing internal copy', async () => {
@@ -1030,34 +1038,176 @@ describe('ScenarioDetail', () => {
     await screen.findByRole('group', {
       name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 3, equals up to 42 technique attempts.',
     })
+    expect(maxAttempts).toHaveAttribute('max', '2')
+    expect(screen.queryByText(/Maximum reached:/)).not.toBeInTheDocument()
     expect(screen.queryByText('max_attempts_per_objective')).not.toBeInTheDocument()
     expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
 
     await user.clear(maxAttempts)
     await user.type(maxAttempts, '5')
-    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+    expect(maxAttempts).toHaveValue(null)
+    expect(screen.getByText(
+      'Maximum is 2: Recommended (default) provides 2 compatible techniques for this target.',
+    )).toBeInTheDocument()
+    expect(mockEstimateRun).not.toHaveBeenCalledWith(
       'adaptive.text_adaptive',
       expect.objectContaining({
         scenario_params: { max_attempts_per_objective: 5 },
       }),
       expect.any(AbortSignal),
+    )
+
+    await user.paste('3')
+    expect(maxAttempts).toHaveValue(null)
+    expect(screen.getByText(
+      'Maximum is 2: Recommended (default) provides 2 compatible techniques for this target.',
+    )).toBeInTheDocument()
+
+    await user.type(maxAttempts, '1')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        scenario_params: { max_attempts_per_objective: 1 },
+      }),
+      expect.any(AbortSignal),
+    ))
+    expect(screen.queryByText(/Maximum reached:/)).not.toBeInTheDocument()
+
+    await user.clear(maxAttempts)
+    await user.type(maxAttempts, '2')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        scenario_params: { max_attempts_per_objective: 2 },
+      }),
+      expect.any(AbortSignal),
     ))
     expect(await screen.findByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 5, equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 2, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
-    expect(screen.getByText('2 selected candidates · limit 5')).toBeInTheDocument()
     expect(screen.getByText(
-      /2 selected candidates · limit 5 · effective maximum 2\./,
+      'Maximum reached: Recommended (default) provides 2 compatible techniques for this target.',
     )).toBeInTheDocument()
+    Object.defineProperty(window.getSelection(), 'modify', { value: jest.fn(), configurable: true })
+    await user.keyboard('{ArrowUp}')
+    expect(maxAttempts).toHaveValue(2)
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('Maximum techniques per objective')).toBeInTheDocument()
     expect(within(preview).queryByText('Techniques tried per objective')).not.toBeInTheDocument()
     await user.click(screen.getByTestId('launch-scenario-btn'))
     await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        scenario_params: { max_attempts_per_objective: 5 },
+        scenario_params: { max_attempts_per_objective: 2 },
       }),
     ))
+  })
+
+  it('clamps an explicit limit when the selected technique set lowers the compatible maximum', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> => makeAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    const maxAttempts = await screen.findByRole('spinbutton', {
+      name: 'Maximum techniques per objective',
+    })
+    await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 3, equals up to 42 technique attempts.',
+    })
+
+    await user.click(screen.getByLabelText('Core (14 techniques)'))
+    await waitFor(() => expect(maxAttempts).toHaveAttribute('max', '5'))
+    await user.type(maxAttempts, '5')
+    await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 5 techniques per objective, the smaller of 5 compatible candidates from 14 selected and limit 5, equals up to 105 technique attempts.',
+    })
+
+    await user.click(screen.getByLabelText('Recommended (default) — 2 techniques'))
+    expect(maxAttempts).toBeDisabled()
+    await waitFor(() => expect(maxAttempts).toHaveValue(2))
+    expect(maxAttempts).toHaveAttribute('max', '2')
+    expect(screen.getByText(
+      'Reduced to 2 because Recommended (default) provides 2 compatible techniques for this target.',
+    )).toBeInTheDocument()
+    await screen.findByRole('group', {
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 2, equals up to 42 technique attempts.',
+    })
+    expect(mockEstimateRun).not.toHaveBeenCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        techniques: ['default'],
+        scenario_params: { max_attempts_per_objective: 5 },
+      }),
+      expect.any(AbortSignal),
+    )
+
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        techniques: ['default'],
+        scenario_params: { max_attempts_per_objective: 2 },
+      }),
+    ))
+  })
+
+  it('updates the bound for target compatibility and blocks a target with no eligible techniques', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> => {
+        const estimate = makeAdaptiveEstimateForRequest(scenario, request)
+        if (request.target_name === 'target-b' && estimate.adaptive_details) {
+          const candidateCount = request.techniques?.[0] === 'core' ? 0 : 1
+          estimate.adaptive_details.candidate_technique_count = candidateCount
+          estimate.adaptive_details.techniques_per_objective_upper_bound = candidateCount
+          estimate.adaptive_details.technique_attempt_count_upper_bound = 21 * candidateCount
+        }
+        return estimate
+      },
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    const maxAttempts = await screen.findByRole('spinbutton', {
+      name: 'Maximum techniques per objective',
+    })
+    await waitFor(() => expect(maxAttempts).toHaveAttribute('max', '2'))
+    await user.type(maxAttempts, '2')
+    await waitFor(() => expect(maxAttempts).toHaveValue(2))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Target' }), 'target-b')
+
+    expect(maxAttempts).toBeDisabled()
+    await waitFor(() => expect(maxAttempts).toHaveValue(1))
+    expect(maxAttempts).toHaveAttribute('max', '1')
+    expect(screen.getByText(
+      'Reduced to 1 because Recommended (default) provides 1 compatible technique for this target.',
+    )).toBeInTheDocument()
+    expect(mockEstimateRun).not.toHaveBeenCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        target_name: 'target-b',
+        scenario_params: { max_attempts_per_objective: 2 },
+      }),
+      expect.any(AbortSignal),
+    )
+
+    await user.click(screen.getByLabelText('Core (14 techniques)'))
+    expect(await screen.findByText(
+      'No compatible techniques are available for this target. Choose a different technique set or target.',
+    )).toBeInTheDocument()
+    expect(maxAttempts).toBeDisabled()
+    expect(maxAttempts).not.toHaveAttribute('max')
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
+    expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
   })
 
   it('switches exclusively from a named set to Custom and initializes resolved members', async () => {

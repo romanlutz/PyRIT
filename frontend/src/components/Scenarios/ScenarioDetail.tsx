@@ -23,7 +23,9 @@ import { ArrowLeftRegular, ArrowSyncRegular, SettingsRegular } from '@fluentui/r
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import MarkdownContent from '@/components/Markdown/MarkdownContent'
-import ParameterField from '@/components/Parameters/ParameterField'
+import ParameterField, {
+  type RejectedNumberInputReason,
+} from '@/components/Parameters/ParameterField'
 import {
   buildParametersFromForm,
   getInitialFormValues,
@@ -225,6 +227,16 @@ interface MappedEstimateError {
   summary: string
   note?: string
   maxAttemptsError?: string
+}
+
+interface AdaptiveCandidateMetadata {
+  scopeKey: string
+  maximum: number
+}
+
+interface AdaptiveLimitNotice {
+  scopeKey: string
+  message: string
 }
 
 function mapEstimateError(error: unknown): MappedEstimateError {
@@ -690,15 +702,22 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [maxDatasetSize, setMaxDatasetSize] = useState('')
   const [maxConcurrency, setMaxConcurrency] = useState(DEFAULT_MAX_CONCURRENCY)
   const [maxRetries, setMaxRetries] = useState(DEFAULT_MAX_RETRIES)
-  const [scenarioParamValues, setScenarioParamValues] = useState<Record<string, ParameterFormValue>>(() =>
-    getInitialFormValues(dynamicParameters),
-  )
+  const [scenarioParamValues, setScenarioParamValues] = useState<Record<string, ParameterFormValue>>(() => {
+    const initialValues = getInitialFormValues(dynamicParameters)
+    if (usesAdaptiveTechniqueSelection && MAX_ATTEMPTS_PARAMETER_NAME in initialValues) {
+      initialValues[MAX_ATTEMPTS_PARAMETER_NAME] = ''
+    }
+    return initialValues
+  })
   const [validationError, setValidationError] = useState<string | null>(null)
   const [apiError, setApiError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [estimateRequestState, setEstimateRequestState] = useState<EstimateRequestState | null>(null)
   const [launchMaxAttemptsError, setLaunchMaxAttemptsError] = useState<string | null>(null)
   const [maxAttemptsInputRejected, setMaxAttemptsInputRejected] = useState(false)
+  const [adaptiveCandidateMetadata, setAdaptiveCandidateMetadata] =
+    useState<AdaptiveCandidateMetadata | null>(null)
+  const [adaptiveLimitNotice, setAdaptiveLimitNotice] = useState<AdaptiveLimitNotice | null>(null)
   // Synchronous guard against a double-submit racing ahead of the state update.
   const isSubmittingRef = useRef(false)
   const estimateSequenceRef = useRef(0)
@@ -710,6 +729,17 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       : customTechniques,
     [customTechniques, techniqueSelection],
   )
+  const adaptiveCandidateScopeKey = useMemo(
+    () => JSON.stringify({ targetName, techniques }),
+    [targetName, techniques],
+  )
+  const knownAdaptiveCandidateMaximum =
+    adaptiveCandidateMetadata?.scopeKey === adaptiveCandidateScopeKey
+      ? adaptiveCandidateMetadata.maximum
+      : null
+  const adaptiveSelectionDisplayName = techniqueSelection.mode === 'preset'
+    ? techniqueSetDisplayName(scenario, techniqueSelection.preset)
+    : 'Custom selection'
   const requestResult = useMemo(
     () => buildRunRequest({
       scenario,
@@ -740,10 +770,35 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     ],
   )
   const estimateRequest = useMemo(
-    () => requestResult.ok && !maxAttemptsInputRejected
-      ? buildEstimateRequest(requestResult.request)
-      : null,
-    [maxAttemptsInputRejected, requestResult],
+    () => {
+      if (!requestResult.ok || maxAttemptsInputRejected) {
+        return null
+      }
+      const request = buildEstimateRequest(requestResult.request)
+      if (!usesAdaptiveTechniqueSelection || !request.scenario_params) {
+        return request
+      }
+      const scenarioParams = { ...request.scenario_params }
+      const configuredMaximum = scenarioParams[MAX_ATTEMPTS_PARAMETER_NAME]
+      if (knownAdaptiveCandidateMaximum === null || knownAdaptiveCandidateMaximum === 0) {
+        delete scenarioParams[MAX_ATTEMPTS_PARAMETER_NAME]
+      } else if (
+        typeof configuredMaximum === 'number'
+        && configuredMaximum > knownAdaptiveCandidateMaximum
+      ) {
+        scenarioParams[MAX_ATTEMPTS_PARAMETER_NAME] = knownAdaptiveCandidateMaximum
+      }
+      return {
+        ...request,
+        scenario_params: Object.keys(scenarioParams).length > 0 ? scenarioParams : undefined,
+      }
+    },
+    [
+      knownAdaptiveCandidateMaximum,
+      maxAttemptsInputRejected,
+      requestResult,
+      usesAdaptiveTechniqueSelection,
+    ],
   )
   const estimateRequestKey = useMemo(
     () => estimateRequest === null
@@ -796,6 +851,37 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
             return
           }
           const result = mapScenarioRunEstimate(response, 'request')
+          const adaptiveDetails =
+            result.status === 'available' || result.status === 'conditional'
+              ? result.estimate.adaptiveDetails
+              : null
+          if (usesAdaptiveTechniqueSelection && adaptiveDetails) {
+            const maximum = adaptiveDetails.candidateTechniqueCount
+            setAdaptiveCandidateMetadata({ scopeKey: adaptiveCandidateScopeKey, maximum })
+            const rawValue = scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME]
+            const parsedValue = typeof rawValue === 'string' && rawValue.trim() !== ''
+              ? Number(rawValue)
+              : null
+            if (
+              maximum > 0
+              && parsedValue !== null
+              && Number.isSafeInteger(parsedValue)
+              && parsedValue > maximum
+            ) {
+              setScenarioParamValues((current) => ({
+                ...current,
+                [MAX_ATTEMPTS_PARAMETER_NAME]: String(maximum),
+              }))
+              setAdaptiveLimitNotice({
+                scopeKey: adaptiveCandidateScopeKey,
+                message: `Reduced to ${maximum.toLocaleString()} because ${
+                  adaptiveSelectionDisplayName
+                } provides ${maximum.toLocaleString()} compatible ${
+                  maximum === 1 ? 'technique' : 'techniques'
+                } for this target.`,
+              })
+            }
+          }
           setEstimateRequestState({
             status: 'resolved',
             requestKey: estimateRequestKey,
@@ -822,8 +908,44 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       window.clearTimeout(debounceTimer)
       controller.abort()
     }
-  }, [estimateRequest, estimateRequestKey, scenario.scenario_name])
+  }, [
+    adaptiveCandidateScopeKey,
+    adaptiveSelectionDisplayName,
+    estimateRequest,
+    estimateRequestKey,
+    scenario.scenario_name,
+    scenarioParamValues,
+    usesAdaptiveTechniqueSelection,
+  ])
 
+  const currentResolvedEstimate = estimateRequestState?.requestKey === estimateRequestKey
+    && estimateRequestState.status === 'resolved'
+    ? estimateRequestState.result
+    : null
+  const currentResolvedAdaptiveDetails = currentResolvedEstimate
+    && (currentResolvedEstimate.status === 'available' || currentResolvedEstimate.status === 'conditional')
+    ? currentResolvedEstimate.estimate.adaptiveDetails
+    : null
+  const adaptiveCandidateMaximum = currentResolvedAdaptiveDetails?.candidateTechniqueCount
+    ?? knownAdaptiveCandidateMaximum
+  const adaptiveCandidateAvailability = adaptiveCandidateMaximum === null
+    ? undefined
+    : `${adaptiveSelectionDisplayName} provides ${adaptiveCandidateMaximum.toLocaleString()} compatible ${
+      adaptiveCandidateMaximum === 1 ? 'technique' : 'techniques'
+    } for this target.`
+  const maxAttemptsRawValue = scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME]
+  const maxAttemptsNumericValue = typeof maxAttemptsRawValue === 'string'
+    && maxAttemptsRawValue.trim() !== ''
+    ? Number(maxAttemptsRawValue)
+    : null
+  const maxAttemptsExceedsCandidateMaximum = adaptiveCandidateMaximum !== null
+    && maxAttemptsNumericValue !== null
+    && maxAttemptsNumericValue > adaptiveCandidateMaximum
+  const adaptiveMetadataUnavailable = usesAdaptiveTechniqueSelection
+    && adaptiveCandidateMaximum === null
+  const noAdaptiveCandidatesError = usesAdaptiveTechniqueSelection && adaptiveCandidateMaximum === 0
+    ? 'No compatible techniques are available for this target. Choose a different technique set or target.'
+    : undefined
   const maxAttemptsClientError = usesAdaptiveTechniqueSelection
     ? maxAttemptsInputRejected
       ? MAX_ATTEMPTS_VALIDATION_MESSAGE
@@ -834,6 +956,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     ? estimateRequestState
     : null
   const maxAttemptsFieldError = maxAttemptsClientError
+    ?? noAdaptiveCandidatesError
     ?? currentEstimateError?.maxAttemptsError
     ?? launchMaxAttemptsError
     ?? undefined
@@ -852,11 +975,8 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       label: 'Complete the required configuration to request an estimate.',
       note: requestResult.error,
     }
-  } else if (
-    estimateRequestState?.requestKey === estimateRequestKey
-    && estimateRequestState.status === 'resolved'
-  ) {
-    estimateState = estimateRequestState.result
+  } else if (currentResolvedEstimate) {
+    estimateState = currentResolvedEstimate
   } else if (currentEstimateError) {
     estimateState = {
       status: 'unavailable',
@@ -913,18 +1033,33 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     setScenarioParamValues((current) => ({ ...current, [name]: value }))
     if (name === MAX_ATTEMPTS_PARAMETER_NAME) {
       setMaxAttemptsInputRejected(false)
+      setAdaptiveLimitNotice(null)
       setLaunchMaxAttemptsError(null)
       setApiError(null)
     }
     setValidationError(null)
   }
 
-  const rejectScenarioParamInput = (name: string): void => {
+  const rejectScenarioParamInput = (name: string, reason: RejectedNumberInputReason): void => {
     if (name !== MAX_ATTEMPTS_PARAMETER_NAME) {
+      return
+    }
+    if (reason === 'above-max' && adaptiveCandidateMaximum !== null) {
+      setMaxAttemptsInputRejected(false)
+      setAdaptiveLimitNotice({
+        scopeKey: adaptiveCandidateScopeKey,
+        message: `Maximum is ${adaptiveCandidateMaximum.toLocaleString()}: ${
+          adaptiveCandidateAvailability
+        }`,
+      })
+      setLaunchMaxAttemptsError(null)
+      setApiError(null)
+      setValidationError(null)
       return
     }
     setScenarioParamValues((current) => ({ ...current, [name]: '' }))
     setMaxAttemptsInputRejected(true)
+    setAdaptiveLimitNotice(null)
     setLaunchMaxAttemptsError(null)
     setApiError(null)
     setValidationError(null)
@@ -936,6 +1071,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     }
 
     setApiError(null)
+    if (
+      adaptiveMetadataUnavailable
+      || adaptiveCandidateMaximum === 0
+      || maxAttemptsExceedsCandidateMaximum
+    ) {
+      setValidationError('Wait for the compatible technique limit to update.')
+      return
+    }
     if (!requestResult.ok) {
       setValidationError(requestResult.error)
       return
@@ -976,17 +1119,21 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const presetMembers = techniqueSelection.mode === 'preset'
     ? techniqueSetMembers(scenario, techniqueSelection.preset)
     : []
-  const resolvedAdaptiveDetails = (
-    estimateState.status === 'available' || estimateState.status === 'conditional'
-  )
-    ? estimateState.estimate.adaptiveDetails
-    : null
-  const adaptiveCapFeedback = resolvedAdaptiveDetails
+  const atAdaptiveCandidateMaximum = adaptiveCandidateMaximum !== null
+    && adaptiveCandidateMaximum > 0
+    && maxAttemptsNumericValue === adaptiveCandidateMaximum
+  const currentAdaptiveLimitNotice =
+    adaptiveLimitNotice?.scopeKey === adaptiveCandidateScopeKey
+      ? adaptiveLimitNotice.message
+      : atAdaptiveCandidateMaximum && adaptiveCandidateAvailability
+        ? `Maximum reached: ${adaptiveCandidateAvailability}`
+        : undefined
+  const adaptiveCapFeedback = currentResolvedAdaptiveDetails
     ? formatAdaptiveCapFeedback({
-        selectedCandidateCount: resolvedAdaptiveDetails.selectedCandidateTechniqueCount,
-        compatibleCandidateCount: resolvedAdaptiveDetails.candidateTechniqueCount,
-        limit: resolvedAdaptiveDetails.maxAttemptsPerObjective,
-        effectiveMaximum: resolvedAdaptiveDetails.techniquesPerObjectiveUpperBound,
+        selectedCandidateCount: currentResolvedAdaptiveDetails.selectedCandidateTechniqueCount,
+        compatibleCandidateCount: currentResolvedAdaptiveDetails.candidateTechniqueCount,
+        limit: currentResolvedAdaptiveDetails.maxAttemptsPerObjective,
+        effectiveMaximum: currentResolvedAdaptiveDetails.techniquesPerObjectiveUpperBound,
       })
     : undefined
 
@@ -1190,7 +1337,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       key={parameter.name}
                       parameter={parameter}
                       value={scenarioParamValues[parameter.name]}
-                      disabled={submitting}
+                      disabled={
+                        submitting
+                        || (
+                          usesAdaptiveTechniqueSelection
+                          && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                          && (adaptiveMetadataUnavailable || adaptiveCandidateMaximum === 0)
+                        )
+                      }
                       onChange={updateScenarioParam}
                       displayLabel={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
@@ -1204,16 +1358,25 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         : undefined}
                       validationState={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
-                        && maxAttemptsFieldError
-                        ? 'error'
+                        ? maxAttemptsFieldError
+                          ? 'error'
+                          : currentAdaptiveLimitNotice
+                            ? 'warning'
+                            : 'none'
                         : 'none'}
                       validationMessage={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
-                        ? maxAttemptsFieldError
+                        ? maxAttemptsFieldError ?? currentAdaptiveLimitNotice
                         : undefined}
                       numberMin={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
                         ? 1
+                        : undefined}
+                      numberMax={usesAdaptiveTechniqueSelection
+                        && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
+                        && adaptiveCandidateMaximum !== null
+                        && adaptiveCandidateMaximum > 0
+                        ? adaptiveCandidateMaximum
                         : undefined}
                       numberStep={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
@@ -1406,6 +1569,8 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   || !requestResult.ok
                   || Boolean(maxAttemptsFieldError)
                   || estimateRequestBlocked
+                  || adaptiveMetadataUnavailable
+                  || maxAttemptsExceedsCandidateMaximum
                 }
                 data-testid="launch-scenario-btn"
               >
