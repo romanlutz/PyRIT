@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, cast
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
 from pyrit.models.messages.message_piece import MessagePiece
 
@@ -30,6 +30,7 @@ class Message(BaseModel):
     )
 
     message_pieces: list[MessagePiece]
+    _request_converters_applied: bool = PrivateAttr(default=False)
 
     # ------------------------------------------------------------------ #
     # Validators
@@ -139,6 +140,15 @@ class Message(BaseModel):
             raise IndexError(f"No message piece at index {n}.")
 
         return self.message_pieces[n]
+
+    @property
+    def request_converters_applied(self) -> bool:
+        """Whether request converters have already been applied."""
+        return self._request_converters_applied
+
+    def mark_request_converters_applied(self) -> None:
+        """Mark this message as already processed by its request converters."""
+        self._request_converters_applied = True
 
     def get_pieces_by_type(
         self,
@@ -371,4 +381,7 @@ class Message(BaseModel):
             piece.id = uuid.uuid4()
             piece.timestamp = new_timestamp
             # original_prompt_id intentionally kept the same to track the origin
-        return Message(message_pieces=new_pieces)
+        duplicate = Message(message_pieces=new_pieces)
+        if self.request_converters_applied:
+            duplicate.mark_request_converters_applied()
+        return duplicate

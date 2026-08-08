@@ -25,8 +25,9 @@ class PrependedConversationConfig:
     - Which message roles should have request converters applied
     - How to normalize conversation history for non-chat objective targets
 
-    Non-chat objective targets always normalize the prepended conversation into the
-    first turn (via ``message_normalizer``; default: ConversationContextNormalizer).
+    Non-chat objective targets apply request converters to the configured roles before
+    normalizing the prepended conversation into the first turn (via ``message_normalizer``;
+    default: ConversationContextNormalizer).
     """
 
     # Request converters default to prepended user messages only. Assistant history is

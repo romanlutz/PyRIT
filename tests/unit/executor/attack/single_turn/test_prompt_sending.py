@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import base64
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,8 @@ from pyrit.models import (
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.score import Scorer, TrueFalseScorer
 
 
@@ -335,6 +338,32 @@ class TestSetupPhase:
         assert assistant_piece.role == "simulated_assistant"
         assert assistant_piece.converted_value != assistant_piece.original_value
         assert [identifier.class_name for identifier in assistant_piece.converter_identifiers] == ["Base64Converter"]
+
+    async def test_non_chat_target_converts_history_by_role_before_flattening(self):
+        target = MockPromptTarget()
+        target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+        converter_config = AttackConverterConfig(
+            request_converters=ConverterConfiguration.from_converters(converters=[Base64Converter()])
+        )
+        attack = PromptSendingAttack(objective_target=target, attack_converter_config=converter_config)
+        prepended_user = "prepended user request"
+        simulated_response = "simulated assistant response"
+        final_request = "live final request"
+
+        await attack.execute_async(
+            objective="Test objective",
+            prepended_conversation=[
+                Message.from_prompt(prompt=prepended_user, role="user"),
+                Message.from_prompt(prompt=simulated_response, role="assistant"),
+            ],
+            next_message=Message.from_prompt(prompt=final_request, role="user"),
+        )
+
+        encoded_user = base64.b64encode(prepended_user.encode()).decode()
+        encoded_final_request = base64.b64encode(final_request.encode()).decode()
+        assert target.prompt_sent == [
+            f"Turn 1:\nuser: {encoded_user}\nassistant: {simulated_response}\n\n{encoded_final_request}"
+        ]
 
 
 @pytest.mark.usefixtures("patch_central_database")

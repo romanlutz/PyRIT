@@ -108,8 +108,13 @@ class PromptNormalizer:
         for piece in request.message_pieces:
             piece.conversation_id = conversation_id
 
-        # Apply request converters
-        await self.convert_values_async(converter_configurations=request_converter_configurations, message=request)
+        # A caller may need to apply converters before a lossy normalization step
+        # such as flattening role-separated history for a non-chat target.
+        if not request.request_converters_applied:
+            await self.convert_values_async(
+                converter_configurations=request_converter_configurations,
+                message=request,
+            )
 
         await self._calc_hash_async(request=request)
 

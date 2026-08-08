@@ -17,6 +17,7 @@ Helper functions include:
 - get_prepended_turn_count: Counts assistant messages in a conversation
 """
 
+import base64
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1094,7 +1095,7 @@ class TestPrependedConversationConfigSettings:
         text_value = context.next_message.get_piece().original_value
         assert len(text_value) > 0
 
-    async def test_non_chat_target_rejects_converter_scoping_that_excludes_history_roles(
+    async def test_non_chat_target_converts_selected_roles_before_flattening(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
@@ -1103,15 +1104,55 @@ class TestPrependedConversationConfigSettings:
         manager = ConversationManager()
         context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
         context.prepended_conversation = sample_conversation
+        context.next_message = Message.from_prompt(prompt="live request", role="user")
         converter_config = ConverterConfiguration.from_converters(converters=[Base64Converter()])
 
-        with pytest.raises(ValueError, match="non-chat target.*excluded roles.*assistant"):
-            await manager.initialize_context_async(
-                context=context,
-                target=mock_prompt_target,
-                conversation_id=str(uuid.uuid4()),
-                request_converters=converter_config,
-            )
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=str(uuid.uuid4()),
+            request_converters=converter_config,
+        )
+
+        assert context.next_message is not None
+        piece = context.next_message.get_piece()
+        encoded_user = base64.b64encode(b"Hello, how are you?").decode()
+        encoded_live_request = base64.b64encode(b"live request").decode()
+        assert piece.original_value == (
+            "Turn 1:\nuser: Hello, how are you?\nassistant: I'm doing well, thank you!\n\nlive request"
+        )
+        assert piece.converted_value == (
+            f"Turn 1:\nuser: {encoded_user}\nassistant: I'm doing well, thank you!\n\n{encoded_live_request}"
+        )
+        assert context.next_message.request_converters_applied
+
+    async def test_non_chat_target_converts_assistant_history_only_when_opted_in(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        context.next_message = Message.from_prompt(prompt="live request", role="user")
+        converter_config = ConverterConfiguration.from_converters(converters=[Base64Converter()])
+        config = PrependedConversationConfig(apply_converters_to_roles=["assistant"])
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=str(uuid.uuid4()),
+            request_converters=converter_config,
+            prepended_conversation_config=config,
+        )
+
+        assert context.next_message is not None
+        encoded_assistant = base64.b64encode(b"I'm doing well, thank you!").decode()
+        encoded_live_request = base64.b64encode(b"live request").decode()
+        assert context.next_message.get_piece().converted_value == (
+            f"Turn 1:\nuser: Hello, how are you?\nassistant: {encoded_assistant}\n\n{encoded_live_request}"
+        )
 
     async def test_non_chat_target_behavior_normalize_first_turn_creates_next_message(
         self,

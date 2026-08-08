@@ -13,7 +13,11 @@ from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, GenericSystemSquashNormalizer
+from pyrit.message_normalizer import (
+    ConversationContextNormalizer,
+    GenericSystemSquashNormalizer,
+    MessageStringNormalizer,
+)
 from pyrit.models import (
     ChatMessageRole,
     ComponentIdentifier,
@@ -284,8 +288,9 @@ class ConversationManager:
             - All messages get new UUIDs
 
         For non-chat PromptTarget:
+            - Applies request converters to configured prepended roles before normalization
             - Normalizes the prepended conversation to a string and prepends it to
-              ``context.next_message`` (using ``config.message_normalizer`` when provided).
+              ``context.next_message`` (using ``config.message_normalizer`` when provided)
 
         Args:
             context: The attack context to initialize.
@@ -300,8 +305,7 @@ class ConversationManager:
             ConversationState with turn_count and last_assistant_message_scores.
 
         Raises:
-            ValueError: If conversation_id is empty, or if prepended_conversation
-                requires a chat-capable PromptTarget but target is not one.
+            ValueError: If conversation_id is empty.
         """
         if not conversation_id:
             raise ValueError("conversation_id cannot be empty")
@@ -322,21 +326,11 @@ class ConversationManager:
         is_chat_target = target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
         if not is_chat_target:
             config = prepended_conversation_config or PrependedConversationConfig()
-            if request_converters:
-                present_roles = {
-                    piece.api_role for message in prepended_conversation for piece in message.message_pieces
-                }
-                excluded_roles = present_roles - set(config.apply_converters_to_roles)
-                if excluded_roles:
-                    raise ValueError(
-                        "Cannot preserve prepended-conversation converter role scoping for a non-chat target: "
-                        f"the flattened context contains excluded roles {sorted(excluded_roles)}. "
-                        "Use a chat target, remove request converters, or explicitly opt into every prepended role."
-                    )
             return await self._handle_non_chat_target_async(
                 context=context,
                 prepended_conversation=prepended_conversation,
                 config=config,
+                request_converters=request_converters,
             )
 
         # Process prepended conversation for objective target
@@ -355,7 +349,8 @@ class ConversationManager:
         *,
         context: AttackContext[Any],
         prepended_conversation: list[Message],
-        config: PrependedConversationConfig | None,
+        config: PrependedConversationConfig,
+        request_converters: list[ConverterConfiguration] | None,
     ) -> ConversationState:
         """
         Handle prepended conversation for non-chat targets.
@@ -364,59 +359,163 @@ class ConversationManager:
             context: The attack context.
             prepended_conversation: Messages to prepend.
             config: Configuration for non-chat target behavior.
+            request_converters: Converters to apply before flattening.
 
         Returns:
             Empty ConversationState (non-chat targets don't track turns).
         """
-        if config is None:
-            config = PrependedConversationConfig()
-
         normalizer = config.get_message_normalizer()
-        messages_to_normalize = prepended_conversation
-        if isinstance(normalizer, ConversationContextNormalizer):
-            messages_to_normalize = await GenericSystemSquashNormalizer().normalize_async(prepended_conversation)
+        original_context = await self._normalize_non_chat_context_async(
+            messages=self._build_original_normalizer_view(prepended_conversation),
+            normalizer=normalizer,
+        )
+        converted_context = original_context
+        if request_converters:
+            converted_messages = await self._build_converted_normalizer_view_async(
+                messages=prepended_conversation,
+                request_converters=request_converters,
+                apply_to_roles=config.apply_converters_to_roles,
+            )
+            converted_context = await self._normalize_non_chat_context_async(
+                messages=converted_messages,
+                normalizer=normalizer,
+            )
 
-        normalized_context = await normalizer.normalize_string_async(messages_to_normalize)
+        next_message = (
+            context.next_message.duplicate()
+            if context.next_message
+            else Message.from_prompt(
+                prompt=context.objective,
+                role="user",
+            )
+        )
+        if request_converters and not next_message.request_converters_applied:
+            await self._prompt_normalizer.convert_values_async(
+                converter_configurations=request_converters,
+                message=next_message,
+            )
+            next_message.mark_request_converters_applied()
 
-        next_message = context.next_message
-        if next_message is None:
-            next_message = Message.from_prompt(prompt=context.objective, role="user")
-            context.next_message = next_message
+        self._prepend_non_chat_context(
+            message=next_message,
+            original_context=original_context,
+            converted_context=converted_context,
+        )
+        context.next_message = next_message
 
-        if normalized_context:
-            # Find an existing text piece to prepend to
-            text_piece = None
-            for piece in next_message.message_pieces:
-                if piece.original_value_data_type == "text":
-                    text_piece = piece
-                    break
-
-            if text_piece:
-                # Prepend context to the existing text piece
-                context_prefix = f"{normalized_context}\n\n"
-                if text_piece.original_value != normalized_context and not text_piece.original_value.startswith(
-                    context_prefix
-                ):
-                    text_piece.original_value = f"{context_prefix}{text_piece.original_value}"
-                if text_piece.converted_value != normalized_context and not text_piece.converted_value.startswith(
-                    context_prefix
-                ):
-                    text_piece.converted_value = f"{context_prefix}{text_piece.converted_value}"
-            else:
-                # No text piece found (multimodal message), add a new text piece at the beginning
-                context_piece = MessagePiece(
-                    id=uuid.uuid4(),
-                    role="user",
-                    original_value=normalized_context,
-                    converted_value=normalized_context,
-                    original_value_data_type="text",
-                    converted_value_data_type="text",
-                )
-                # Create a new message with the context piece prepended
-                context.next_message = Message(message_pieces=[context_piece] + list(next_message.message_pieces))
-
-        logger.debug(f"Normalized prepended conversation for non-chat target: {len(normalized_context)} characters")
+        logger.debug(f"Normalized prepended conversation for non-chat target: {len(converted_context)} characters")
         return ConversationState()
+
+    async def _build_converted_normalizer_view_async(
+        self,
+        *,
+        messages: list[Message],
+        request_converters: list[ConverterConfiguration] | None,
+        apply_to_roles: list[ChatMessageRole],
+    ) -> list[Message]:
+        """
+        Build copies containing only the values that should be sent.
+
+        Returns:
+            list[Message]: Converted message copies ready for string normalization.
+        """
+        converted_messages = [message.duplicate() for message in messages]
+        if request_converters:
+            for message in converted_messages:
+                await self._apply_converters_async(
+                    message=message,
+                    request_converters=request_converters,
+                    apply_to_roles=apply_to_roles,
+                )
+        for message in converted_messages:
+            for piece in message.message_pieces:
+                piece.original_value = piece.converted_value
+                piece.original_value_data_type = piece.converted_value_data_type
+        return converted_messages
+
+    @staticmethod
+    def _build_original_normalizer_view(messages: list[Message]) -> list[Message]:
+        """
+        Build copies containing only the original values.
+
+        Returns:
+            list[Message]: Message copies with converted fields reset to their originals.
+        """
+        original_messages = [message.duplicate() for message in messages]
+        for message in original_messages:
+            for piece in message.message_pieces:
+                piece.converted_value = piece.original_value
+                piece.converted_value_data_type = piece.original_value_data_type
+        return original_messages
+
+    @staticmethod
+    async def _normalize_non_chat_context_async(
+        *,
+        messages: list[Message],
+        normalizer: MessageStringNormalizer,
+    ) -> str:
+        """
+        Flatten role-separated messages into a context string.
+
+        Returns:
+            str: The flattened conversation context.
+        """
+        messages_to_normalize = messages
+        if isinstance(normalizer, ConversationContextNormalizer):
+            messages_to_normalize = await GenericSystemSquashNormalizer().normalize_async(messages)
+        return await normalizer.normalize_string_async(messages_to_normalize)
+
+    @staticmethod
+    def _prepend_non_chat_context(
+        *,
+        message: Message,
+        original_context: str,
+        converted_context: str,
+    ) -> None:
+        """Prepend original and converted context without mixing their values."""
+        text_piece = next(
+            (
+                piece
+                for piece in message.message_pieces
+                if piece.original_value_data_type == "text" and piece.converted_value_data_type == "text"
+            ),
+            None,
+        )
+        if text_piece:
+            text_piece.original_value = ConversationManager._prepend_context_value(
+                context=original_context,
+                value=text_piece.original_value,
+            )
+            text_piece.converted_value = ConversationManager._prepend_context_value(
+                context=converted_context,
+                value=text_piece.converted_value,
+            )
+            return
+
+        template_piece = message.get_piece()
+        context_piece = MessagePiece(
+            id=uuid.uuid4(),
+            role=template_piece.role,
+            original_value=original_context,
+            converted_value=converted_context,
+            original_value_data_type="text",
+            converted_value_data_type="text",
+            conversation_id=template_piece.conversation_id,
+            sequence=template_piece.sequence,
+        )
+        message.message_pieces.insert(0, context_piece)
+
+    @staticmethod
+    def _prepend_context_value(*, context: str, value: str) -> str:
+        """
+        Prepend context once to a message value.
+
+        Returns:
+            str: The value prefixed with context when it was not already present.
+        """
+        if not context or value == context or value.startswith(f"{context}\n\n"):
+            return value
+        return f"{context}\n\n{value}"
 
     async def add_prepended_conversation_to_memory_async(
         self,
