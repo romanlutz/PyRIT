@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from pyrit.compat.inspect_ai import load_inspect_eval, run_inspect_eval_async
+from pyrit.cli import pyrit_capability_suite
+from pyrit.compat.inspect_ai import cli as inspect_cli
+from pyrit.compat.inspect_ai import load_inspect_eval, run_inspect_eval_async, run_loaded_inspect_eval_async
 from pyrit.models import Message, MessagePiece, TargetResponseMetadata, ToolCallRequest
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, TargetRequestOptions
 from pyrit.sandbox import (
@@ -22,7 +24,7 @@ from pyrit.sandbox import (
     SandboxSessionSpec,
     SandboxWriteResult,
 )
-from pyrit.scenario.capability_suite import SandboxProviderFactoryRegistry
+from pyrit.scenario.capability_suite import DockerSandboxProviderManifestConfig, SandboxProviderFactoryRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -221,6 +223,18 @@ class _ScriptedToolTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         del normalized_conversation
+
+
+class _SingleTurnTarget(_ScriptedToolTarget):
+    _DEFAULT_CONFIGURATION = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=False,
+            supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+            supports_editable_history=False,
+            input_modalities=frozenset({frozenset({"text"})}),
+        )
+    )
 
 
 def _write_package_file(root: Path, relative: str, content: str) -> None:
@@ -437,6 +451,46 @@ def test_load_ctf_sources_constructs_exact_native_surfaces(ctf_source_root: Path
     assert case.sandbox_environment_workdirs == {"attacker": "/root", "target_env": "/root"}
 
 
+def test_cli_rejects_unsupported_hyperv_and_target_capabilities(
+    ctf_source_root: Path,
+    intercode_cache: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    arguments = [
+        "inspect-evals",
+        "compile",
+        "--source",
+        str(ctf_source_root),
+        "--task",
+        "gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
+        "--inspect-evals-cache-dir",
+        str(intercode_cache),
+        "--no-verify-source",
+        "--sandbox-provider",
+        "hyperv",
+    ]
+
+    assert pyrit_capability_suite.main(arguments) == 1
+    assert "no Hyper-V Compose compatibility is implemented" in capsys.readouterr().err
+
+    loaded = load_inspect_eval(
+        source_root=ctf_source_root,
+        task_spec="gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
+        inspect_evals_cache_dir=intercode_cache,
+        verify_source_revision=False,
+    )
+    with pytest.raises(ValueError, match="does not support the multi-turn conversation"):
+        inspect_cli._validate_target_and_request_options(
+            target=_SingleTurnTarget(calls=[]),
+            manifest=loaded.suite,
+        )
+    with pytest.raises(ValueError, match="cannot receive capability tool declarations"):
+        inspect_cli._validate_target_and_request_options(
+            target=_ScriptedToolTarget(calls=[]),
+            manifest=loaded.suite,
+        )
+
+
 def test_intercode_source_snapshot_materialization_is_concurrency_safe(
     ctf_source_root: Path,
     intercode_cache: Path,
@@ -531,3 +585,91 @@ async def test_in_house_empty_flag_output_does_not_score_as_solved(ctf_source_ro
     attempt = run.result.attempts[0]
     assert attempt.task_result is not None, attempt.error
     assert attempt.task_result.scores[0].score_value == "False"
+
+
+@pytest.mark.parametrize(
+    ("task_spec", "task_args", "calls", "expected_task"),
+    (
+        (
+            "gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
+            ("--case-id", "2"),
+            [
+                ("submit", '{"answer":"picoCTF{wrong}"}'),
+                ("bash", '{"command":"cat clue.txt"}'),
+                ("submit", '{"answer":"picoCTF{ok}"}'),
+            ],
+            "gdm_intercode_ctf",
+        ),
+        (
+            "gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf",
+            ("--case-id", "ssh", "--epochs", "1"),
+            [
+                ("bash", '{"command":"printf probe"}'),
+                ("submit", '{"answer":"FLAG{native}"}'),
+            ],
+            "gdm_in_house_ctf",
+        ),
+    ),
+)
+def test_cli_runs_unchanged_ctf_with_injected_target_and_provider(
+    ctf_source_root: Path,
+    intercode_cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task_spec: str,
+    task_args: tuple[str, ...],
+    calls: list[tuple[str, str]],
+    expected_task: str,
+) -> None:
+    target = _ScriptedToolTarget(calls=calls)
+    native_run_loaded = run_loaded_inspect_eval_async
+
+    async def resolve_target(**kwargs):
+        del kwargs
+        return target
+
+    async def run_loaded(*, loaded, target, inspect_evals_cache_dir, cancellation_event, **kwargs):
+        del kwargs
+        provider = loaded.suite.cases[0].sandbox_provider or loaded.suite.sandbox_provider
+        assert isinstance(provider, DockerSandboxProviderManifestConfig)
+        assert provider.config.retain_resources_on_close is True
+        assert provider.config.cli_timeout_seconds == 30
+        return await native_run_loaded(
+            loaded=loaded,
+            inspect_evals_cache_dir=inspect_evals_cache_dir,
+            target=target,
+            request_options_factory=_RequestOptionsFactory(),
+            sandbox_provider_registry=_local_docker_registry(),
+            cancellation_event=cancellation_event,
+        )
+
+    monkeypatch.setattr(inspect_cli, "_resolve_target_async", resolve_target)
+    monkeypatch.setattr(inspect_cli, "_validate_target_and_request_options", lambda **kwargs: _RequestOptionsFactory())
+    monkeypatch.setattr(inspect_cli, "run_loaded_inspect_eval_async", run_loaded)
+    result_path = tmp_path / f"{expected_task}-result.json"
+    sandbox_config_path = tmp_path / f"{expected_task}-sandbox.json"
+    sandbox_config_path.write_text('{"cli_timeout_seconds": 30}', encoding="utf-8")
+    arguments = [
+        "inspect-evals",
+        "run",
+        "--source",
+        str(ctf_source_root),
+        "--task",
+        task_spec,
+        "--inspect-evals-cache-dir",
+        str(intercode_cache),
+        "--no-verify-source",
+        "--target",
+        "injected",
+        "--retain-sandboxes",
+        "--sandbox-config",
+        str(sandbox_config_path),
+        "--result",
+        str(result_path),
+        *task_args,
+    ]
+
+    assert pyrit_capability_suite.main(arguments) == 0
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["task"] == expected_task
+    assert payload["result"]["aggregate"]["outcome_counts"]["success"] == 1

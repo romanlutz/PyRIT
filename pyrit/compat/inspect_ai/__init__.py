@@ -20,6 +20,7 @@ from pyrit.compat.inspect_ai.loader import (
     LoadedInspectEval,
     load_inspect_eval,
     run_inspect_eval_async,
+    run_loaded_inspect_eval_async,
 )
 from pyrit.compat.inspect_ai.profile import (
     PINNED_INSPECT_EVALS_PROFILE,
@@ -91,4 +92,5 @@ __all__ = [
     "load_inspect_eval",
     "resolve_profile",
     "run_inspect_eval_async",
+    "run_loaded_inspect_eval_async",
 ]

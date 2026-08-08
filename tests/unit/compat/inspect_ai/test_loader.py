@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -225,6 +227,84 @@ def test_load_inspect_eval_executes_unchanged_arc_factory_and_mapper(
     assert loaded.suite.cases[0].source is not None
     assert loaded.suite.cases[0].source.metadata["dataset"]["revision"] == ("210d026faf9955653af8916fad021475a3f00453")
     json.dumps(loaded.suite.model_dump(mode="json"))
+
+
+def test_cli_and_worker_run_from_outside_source_cwd(
+    arc_source_root: Path,
+    arc_records: list[dict[str, Any]],
+    tmp_path: Path,
+) -> None:
+    data_path = tmp_path / "arc-records.json"
+    data_path.write_text(json.dumps(arc_records), encoding="utf-8")
+    manifest_path = tmp_path / "arc-manifest.json"
+    outside_cwd = tmp_path / "outside"
+    outside_cwd.mkdir()
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pyrit.cli.pyrit_capability_suite",
+            "inspect-evals",
+            "compile",
+            "--source",
+            str(arc_source_root),
+            "--task",
+            "arc/arc.py@arc_challenge",
+            "--data",
+            str(data_path),
+            "--no-verify-source",
+            "--manifest",
+            str(manifest_path),
+        ],
+        cwd=outside_cwd,
+        env=environment,
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["cases"][0]["case_id"] == "Mercury_7175875"
+
+
+async def test_async_cancellation_terminates_source_worker(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "slow.py").write_text(
+        "import time\n"
+        "time.sleep(30)\n"
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import choice\n"
+        "from inspect_ai.solver import multiple_choice\n"
+        "@task\n"
+        "def slow():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='x', choices=['x'], target='A')]), "
+        "solver=multiple_choice(), scorer=choice())\n",
+        encoding="utf-8",
+    )
+    cancellation_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, cancellation_event.set)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            run_inspect_eval_async(
+                source_root=root,
+                task_spec="slow.py@slow",
+                verify_source_revision=False,
+                target=_ScriptedTarget(response="ANSWER: A"),
+                cancellation_event=cancellation_event,
+            ),
+            timeout=5,
+        )
 
 
 def test_loader_cleans_aliases_after_success(

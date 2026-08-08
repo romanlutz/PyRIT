@@ -4,14 +4,41 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from pyrit.compat.inspect_ai import PINNED_INSPECT_EVALS_PROFILE, load_inspect_eval, run_inspect_eval_async
-from pyrit.models import Message, TargetResponseMetadata
-from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
+from pyrit.models import Message, MessagePiece, TargetResponseMetadata, ToolCallRequest
+from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, TargetRequestOptions
+
+if TYPE_CHECKING:
+    from pyrit.executor.capability import ToolDeclaration, ToolExecutionPolicy
+
+
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        subprocess.run(["docker", "compose", "version"], check=True, capture_output=True, timeout=10)
+        subprocess.run(["docker", "info"], check=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+class _RequestOptionsFactory:
+    def build_request_options(
+        self,
+        *,
+        declarations: tuple[ToolDeclaration, ...],
+        execution_policy: ToolExecutionPolicy,
+    ) -> TargetRequestOptions:
+        del declarations, execution_policy
+        return TargetRequestOptions()
 
 
 class _ArcTarget(PromptTarget):
@@ -41,6 +68,47 @@ class _ArcTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         return
+
+
+class _SubmitTarget(PromptTarget):
+    _DEFAULT_CONFIGURATION = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+            supports_editable_history=True,
+            input_modalities=frozenset({frozenset({"text"}), frozenset({"function_call_output"})}),
+        )
+    )
+
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        response = Message(
+            message_pieces=[
+                MessagePiece(
+                    role="assistant",
+                    original_value=ToolCallRequest(
+                        call_id="submit-1",
+                        name="submit",
+                        arguments='{"answer":"not-the-flag"}',
+                    ).to_json(),
+                    original_value_data_type="function_call",
+                    converted_value_data_type="function_call",
+                )
+            ]
+        )
+        for piece in response.message_pieces:
+            piece.conversation_id = normalized_conversation[-1].conversation_id
+        self._record_response_metadata(
+            metadata=TargetResponseMetadata(
+                provider_response_id="pinned-in-house-integration",
+                stop_reason="tool_calls",
+                provider_stop_reason="tool_calls",
+            )
+        )
+        return [response]
+
+    def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
+        del normalized_conversation
 
 
 @pytest.mark.run_only_if_all_tests
@@ -108,3 +176,26 @@ def test_user_supplied_pinned_checkout_constructs_unchanged_intercode_ctf_source
     assert loaded.suite.cases[0].source is not None
     assert loaded.suite.cases[0].source.source_id == "2"
     assert [tool.declaration.name for tool in loaded.suite.cases[0].tools] == ["bash", "python", "submit"]
+
+
+@pytest.mark.docker
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.skipif(not _docker_available(), reason="Docker CLI, Compose v2, and a running daemon are required.")
+async def test_user_supplied_pinned_in_house_ctf_runs_real_docker(sqlite_instance) -> None:
+    del sqlite_instance
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    execution = await run_inspect_eval_async(
+        source_root=Path(source_value),
+        task_spec="gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf",
+        task_parameters={"challenges": "ssh", "epochs": 1},
+        target=_SubmitTarget(),
+        request_options_factory=_RequestOptionsFactory(),
+    )
+
+    attempt = execution.result.attempts[0]
+    assert attempt.task_result is not None, attempt.error
+    assert attempt.task_result.tool_calls == 1
+    assert attempt.task_result.scores[0].score_value == "False"

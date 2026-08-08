@@ -14,12 +14,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
@@ -223,6 +225,7 @@ def load_inspect_eval(
     worker_timeout_seconds: float = 300.0,
     source_verification_timeout_seconds: float = 120.0,
     case_timeout_seconds: float = 300.0,
+    worker_cancel_event: threading.Event | None = None,
 ) -> LoadedInspectEval:
     """
     Execute one trusted pinned task factory and convert its graph to a native suite.
@@ -293,6 +296,7 @@ def load_inspect_eval(
         worker_timeout_seconds=worker_timeout_seconds,
         source_verification_timeout_seconds=source_verification_timeout_seconds,
         case_timeout_seconds=case_timeout_seconds,
+        worker_cancel_event=worker_cancel_event,
     )
 
 
@@ -436,8 +440,109 @@ async def run_inspect_eval_async(
     Returns:
         InspectEvalRun: The loaded suite and native execution result.
     """
+    loaded = await _load_inspect_eval_async(
+        source_root=source_root,
+        task_spec=task_spec,
+        task_parameters=task_parameters,
+        profile_id=profile_id,
+        dataset_loader=dataset_loader,
+        inspect_evals_cache_dir=inspect_evals_cache_dir,
+        allow_network=allow_network,
+        verify_source_revision=verify_source_revision,
+        cancellation_event=cancellation_event,
+        worker_timeout_seconds=worker_timeout_seconds,
+        source_verification_timeout_seconds=source_verification_timeout_seconds,
+        case_timeout_seconds=case_timeout_seconds,
+    )
+    result = await run_loaded_inspect_eval_async(
+        loaded=loaded,
+        target=target,
+        inspect_evals_cache_dir=inspect_evals_cache_dir,
+        request_options_factory=request_options_factory,
+        sandbox_provider_registry=sandbox_provider_registry,
+        cancellation_event=cancellation_event,
+    )
+    return InspectEvalRun(loaded=loaded, result=result)
+
+
+async def _load_inspect_eval_async(
+    *,
+    source_root: Path,
+    task_spec: str,
+    task_parameters: Mapping[str, object] | None,
+    profile_id: str,
+    dataset_loader: DatasetLoader | None,
+    inspect_evals_cache_dir: Path | None,
+    allow_network: bool,
+    verify_source_revision: bool,
+    cancellation_event: asyncio.Event | None,
+    worker_timeout_seconds: float,
+    source_verification_timeout_seconds: float,
+    case_timeout_seconds: float,
+) -> LoadedInspectEval:
     import asyncio
 
+    worker_cancel_event = threading.Event()
+    load_task = asyncio.create_task(
+        asyncio.to_thread(
+            load_inspect_eval,
+            source_root=source_root,
+            task_spec=task_spec,
+            task_parameters=task_parameters,
+            profile_id=profile_id,
+            dataset_loader=dataset_loader,
+            inspect_evals_cache_dir=inspect_evals_cache_dir,
+            allow_network=allow_network,
+            verify_source_revision=verify_source_revision,
+            worker_timeout_seconds=worker_timeout_seconds,
+            source_verification_timeout_seconds=source_verification_timeout_seconds,
+            case_timeout_seconds=case_timeout_seconds,
+            worker_cancel_event=worker_cancel_event,
+        )
+    )
+    cancellation_task = asyncio.create_task(cancellation_event.wait()) if cancellation_event is not None else None
+    cancelled_by_event = False
+    try:
+        if cancellation_task is None:
+            return await load_task
+        done, _ = await asyncio.wait((load_task, cancellation_task), return_when=asyncio.FIRST_COMPLETED)
+        if load_task in done:
+            return await load_task
+        cancelled_by_event = True
+    except asyncio.CancelledError:
+        worker_cancel_event.set()
+        with suppress(InterruptedError, asyncio.CancelledError):
+            await asyncio.shield(load_task)
+        raise
+    finally:
+        if cancellation_task is not None:
+            cancellation_task.cancel()
+    if cancelled_by_event:
+        worker_cancel_event.set()
+        with suppress(InterruptedError):
+            await load_task
+        raise asyncio.CancelledError
+    raise RuntimeError("Inspect compatibility source loading ended without a result.")
+
+
+async def run_loaded_inspect_eval_async(
+    *,
+    loaded: LoadedInspectEval,
+    target: PromptTarget,
+    inspect_evals_cache_dir: Path | None = None,
+    request_options_factory: CapabilityRequestOptionsFactory | None = None,
+    sandbox_provider_registry: SandboxProviderFactoryRegistry | None = None,
+    cancellation_event: asyncio.Event | None = None,
+) -> CapabilitySuiteRunResult:
+    """
+    Run an already-loaded suite through an injected PyRIT target.
+
+    This seam lets callers inspect or restrict the native manifest before model
+    execution without loading the trusted upstream source a second time.
+
+    Returns:
+        CapabilitySuiteRunResult: The complete native suite execution result.
+    """
     from pyrit.compat.inspect_ai.runtime import build_inspect_tool_registry
     from pyrit.compat.inspect_ai.scorer import InspectCheckFlagScorer, InspectChoiceScorer
     from pyrit.scenario.capability_suite import (
@@ -448,20 +553,6 @@ async def run_inspect_eval_async(
         build_default_scorer_registry,
     )
 
-    loaded = await asyncio.to_thread(
-        load_inspect_eval,
-        source_root=source_root,
-        task_spec=task_spec,
-        task_parameters=task_parameters,
-        profile_id=profile_id,
-        dataset_loader=dataset_loader,
-        inspect_evals_cache_dir=inspect_evals_cache_dir,
-        allow_network=allow_network,
-        verify_source_revision=verify_source_revision,
-        worker_timeout_seconds=worker_timeout_seconds,
-        source_verification_timeout_seconds=source_verification_timeout_seconds,
-        case_timeout_seconds=case_timeout_seconds,
-    )
     scorer_registry = build_default_scorer_registry()
     scorer_registry.register(
         kind="inspect_choice",
@@ -476,7 +567,7 @@ async def run_inspect_eval_async(
         if inspect_evals_cache_dir is not None and any(case.assets for case in loaded.suite.cases)
         else None
     )
-    result = await CapabilitySuiteRunner(
+    return await CapabilitySuiteRunner(
         manifest=loaded.suite,
         target=target,
         request_options_factory=request_options_factory or _NoToolRequestOptionsFactory(),
@@ -485,7 +576,6 @@ async def run_inspect_eval_async(
         scorer_registry=scorer_registry,
         asset_resolver=asset_resolver,
     ).run_async(cancellation_event=cancellation_event)
-    return InspectEvalRun(loaded=loaded, result=result)
 
 
 def _resolve_source_layout(source_root: Path) -> tuple[Path, Path, Path]:
@@ -611,6 +701,7 @@ def _run_worker(
     worker_timeout_seconds: float,
     source_verification_timeout_seconds: float,
     case_timeout_seconds: float,
+    worker_cancel_event: threading.Event | None,
 ) -> LoadedInspectEval:
     if worker_timeout_seconds <= 0:
         raise ValueError("worker_timeout_seconds must be greater than zero.")
@@ -632,23 +723,18 @@ def _run_worker(
         request_path.write_text(json.dumps(request), encoding="utf-8")
         process_environment = os.environ.copy()
         process_environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        try:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pyrit.compat.inspect_ai.worker",
-                    str(request_path),
-                    str(response_path),
-                ],
-                capture_output=True,
-                check=False,
-                encoding="utf-8",
-                env=process_environment,
-                timeout=worker_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise TimeoutError(f"Inspect compatibility worker exceeded {worker_timeout_seconds:g} seconds.") from error
+        completed = _run_worker_process(
+            argv=(
+                sys.executable,
+                "-m",
+                "pyrit.compat.inspect_ai.worker",
+                str(request_path),
+                str(response_path),
+            ),
+            environment=process_environment,
+            timeout_seconds=worker_timeout_seconds,
+            cancel_event=worker_cancel_event,
+        )
         if not response_path.is_file():
             raise RuntimeError(
                 "Inspect compatibility worker failed without a response: "
@@ -671,6 +757,65 @@ def _run_worker(
         limitations=loaded.report.limitations,
     )
     return LoadedInspectEval(task=loaded.task, suite=loaded.suite, report=report)
+
+
+def _run_worker_process(
+    *,
+    argv: tuple[str, ...],
+    environment: dict[str, str],
+    timeout_seconds: float,
+    cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        env=environment,
+        start_new_session=os.name != "nt",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _terminate_worker_process(process)
+            raise InterruptedError("Inspect compatibility worker was cancelled.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_worker_process(process)
+            raise TimeoutError(f"Inspect compatibility worker exceeded {timeout_seconds:g} seconds.")
+        try:
+            stdout, stderr = process.communicate(timeout=min(remaining, 0.1))
+            break
+        except subprocess.TimeoutExpired:
+            continue
+        except BaseException:
+            _terminate_worker_process(process)
+            raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def _terminate_worker_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+        else:
+            process.kill()
+        process.wait()
 
 
 def _raise_worker_error(error: dict[str, Any]) -> None:

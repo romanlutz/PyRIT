@@ -164,6 +164,156 @@ non-pinned callbacks remain unsupported. AWS/Bedrock/SageMaker/EC2, GCP, Modal, 
 Kubernetes, and other cloud providers are not implemented. Every native case uses the
 explicit `case_timeout_seconds` execution bound (300 seconds by default).
 
+### CLI setup and unchanged-task workflow
+
+Install PyRIT's development environment with `uv`; do not install `inspect_ai` or
+`inspect_evals`:
+
+```console
+uv sync --group dev
+uv run pyrit_capability_suite inspect-evals source prepare --output ./inspect-source.json
+```
+
+`source prepare` fetches only
+`UKGovernmentBEIS/inspect_evals@b935c0e5cfa04710f016f925db75d8e81413e2cf`
+into a revision-keyed PyRIT user cache, then verifies the commit, Git tree, clean
+worktree, package layout, and LICENSE hash. It never installs or executes Inspect.
+Use `--offline` to require an existing cache. An already-available checkout can be
+validated without modification:
+
+```console
+uv run pyrit_capability_suite inspect-evals source validate \
+  --source ./inspect_evals-b935c0e \
+  --output ./inspect-source.json
+```
+
+The JSON output's `source_root` is the value to pass as `<source>` below. Discovery,
+compatibility diagnostics, the CI regression check, and compilation need no model
+credentials:
+
+```console
+uv run pyrit_capability_suite inspect-evals tasks \
+  --source <source> --family arc
+uv run pyrit_capability_suite inspect-evals report \
+  --source <source> --format json --output ./inspect-report.json
+uv run pyrit_capability_suite inspect-evals catalog \
+  --source <source> --check --format json --output ./inspect-catalog.json
+uv run pyrit_capability_suite inspect-evals dry-run \
+  --source <source> \
+  --task arc/arc.py@arc_challenge \
+  --data ./arc-records.json \
+  --limit 10 \
+  --manifest ./arc-manifest.json \
+  --report ./arc-compatibility.json
+```
+
+`catalog --check` is intended for CI. At the pinned revision it expects 129
+families, 249 task factories, and 262 referenced `inspect_ai` APIs with inventory
+SHA-256
+`4515d2aba8bedf78de2c0ee866f44de6167ab92aa4eccf9d8fc321b2e789cd34`.
+It fails rather than silently expanding support if an API inventory or supported
+task claim changes.
+
+Configure targets through the normal [PyRIT configuration](../../getting_started/pyrit_conf.md)
+and environment/secret providers. Credentials are never accepted as task arguments.
+`--target` selects an exact `TargetRegistry` name; otherwise `--target-role`
+selects exactly one registry tag and defaults to `default_objective_target`.
+For example, ARC can use the configured default text target:
+
+```console
+uv run pyrit_capability_suite inspect-evals run \
+  --config ./.pyrit_conf \
+  --source <source> \
+  --task arc/arc.py@arc_challenge \
+  --data ./arc-records.json \
+  --case-id Mercury_7175875 \
+  --target openai_chat \
+  --result ./results/arc.json
+```
+
+#### GDM InterCode CTF
+
+InterCode data has separate picoCTF/non-commercial terms and is not fetched or
+redistributed by PyRIT. After accepting the applicable license, prepare
+`<intercode-cache>/gdm_intercode_ctf/data/ic_ctf.json` and its referenced
+`task_assets/` from
+`princeton-nlp/intercode@c3e46d827cfc9d4c704ec078f7abf9f41e3191d8`.
+The reviewed archive SHA-256 is
+`32e552a468fd69efb7a2cfe13bc591a79246c5db46f3fb629f9cec6dbb1720d7`.
+Compile before starting Docker or making a model call:
+
+```console
+uv run pyrit_capability_suite inspect-evals dry-run \
+  --source <source> \
+  --task gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf \
+  --inspect-evals-cache-dir <intercode-cache> \
+  --case-id 2 \
+  --submission-attempts 3 \
+  --max-messages 50 \
+  --manifest ./intercode-manifest.json
+```
+
+Then use a registered `OpenAIResponseTarget`, which is currently required for
+the Responses-shaped tool declaration transport:
+
+```console
+docker compose version
+docker info
+uv run pyrit_capability_suite inspect-evals run \
+  --config ./.pyrit_conf \
+  --source <source> \
+  --task gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf \
+  --inspect-evals-cache-dir <intercode-cache> \
+  --case-id 2 \
+  --attempts 1 \
+  --concurrency 1 \
+  --sandbox-provider docker \
+  --target azure_openai_responses \
+  --result ./results/intercode-2.json
+```
+
+#### GDM in-house CTF
+
+In-house challenge metadata and Compose assets are in the pinned checkout. A
+single-challenge dry-run and run are:
+
+```console
+uv run pyrit_capability_suite inspect-evals dry-run \
+  --source <source> \
+  --task gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf \
+  --case-id ssh --epochs 1 \
+  --manifest ./in-house-ssh.json
+uv run pyrit_capability_suite inspect-evals run \
+  --config ./.pyrit_conf \
+  --source <source> \
+  --task gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf \
+  --case-id ssh --epochs 1 --attempts 1 --concurrency 1 \
+  --sandbox-provider docker \
+  --target azure_openai_responses \
+  --result ./results/in-house-ssh.json
+```
+
+Docker resolves Compose, runs its preflight, and applies the deny-by-default
+`DockerSecurityPolicy` before any model request. Policy failures name the rejected
+field and required explicit `allow_*` opt-in. Temporary source snapshots and
+sandboxes are cleaned after success, failure, timeout, signal, or cancellation.
+`--retain-sandboxes` keeps Docker resources for investigation; `--sandbox-config`
+accepts JSON overrides for the compiled `DockerSandboxProviderConfig`. Hyper-V is
+rejected for these Compose-backed tasks because Compose-compatible Hyper-V
+semantics are not implemented.
+
+The `--result` JSON contains every native attempt, model/tool transcript evidence,
+scores, aggregate counts, manifest hash, compatibility report, and cleanup error.
+`--manifest`, `--report`, and `--output` place compile and catalog evidence at the
+specified paths. Common failures are actionable: use the exact clean pinned
+checkout for revision errors, populate the licensed InterCode cache for missing
+assets, start Docker/Compose for preflight failures, select a multiturn/editable
+history target, and select `OpenAIResponseTarget` for tool tasks. The worker is
+trusted arbitrary Python under the user's OS identity, not a security sandbox.
+AWS/Bedrock/SageMaker/EC2, GCP, Modal, Daytona, Kubernetes, all other non-Azure
+cloud runtimes, EvalLog/control-plane/TUI/checkpoint parity, and unreviewed task
+families remain unsupported.
+
 ## Security and portability boundary
 
 - **Local sandbox provider (`pyrit.sandbox.LocalSandboxProvider`) is not an isolation
