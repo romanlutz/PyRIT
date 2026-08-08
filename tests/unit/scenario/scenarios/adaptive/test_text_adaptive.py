@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.models import AttackSeedGroup, SeedObjective
+from pyrit.models import AttackSeedGroup, ScenarioDatasetSummary, SeedObjective
 from pyrit.models.identifiers import ComponentIdentifier
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
@@ -22,6 +22,17 @@ from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
 from pyrit.score import TrueFalseScorer
 
 _MOCK_MANY_SHOT_EXAMPLES = [{"question": f"q{i}", "answer": f"a{i}"} for i in range(100)]
+_LIGHT_TECHNIQUES = {
+    "role_play_movie_script",
+    "role_play_video_game",
+    "role_play_trivia_game",
+    "role_play_persuasion",
+    "role_play_persuasion_written",
+    "many_shot",
+    "red_teaming",
+    "context_compliance",
+    "flip",
+}
 
 
 def _mock_id(name: str) -> ComponentIdentifier:
@@ -82,30 +93,39 @@ def _make_seed_group(*, value: str, harm_categories: list[str] | None = None) ->
     return AttackSeedGroup(seeds=[SeedObjective(value=value, harm_categories=harm_categories)])
 
 
-def _make_fake_factory(*, seed_technique=None, adversarial_chat=None, scoring_config_type=None) -> MagicMock:
+def _make_fake_factory(
+    *,
+    seed_technique=None,
+    adversarial_chat=None,
+    scoring_config_type=None,
+    attack_identifier: ComponentIdentifier | None = None,
+    factory_identifier: ComponentIdentifier | None = None,
+) -> MagicMock:
     """Return a stub attack-technique factory that produces a fake ``AttackTechnique``.
 
     Mocks the surface ``AdaptiveScenario._build_techniques_dict`` consumes
-    (``factory.create(...)``, ``factory.adversarial_chat``, and
-    ``factory.scoring_config_type``). Each call assigns a unique fake
-    attack identifier (via a fresh UUID) so the bundle dict keys (eval
-    hashes) don't collide across calls — no shared mutable test state, so
-    test execution order doesn't shift hash values.
+    (``factory.create(...)``, ``factory.get_identifier()``,
+    ``factory.adversarial_chat``, and ``factory.scoring_config_type``).
+    Each call assigns unique attack and factory identities unless a test
+    deliberately supplies shared identities.
     """
     fake_id = uuid.uuid4().hex[:8]
 
     fake_technique = MagicMock()
     fake_attack = MagicMock(name=f"fake-attack-technique-{fake_id}")
-    fake_attack.get_identifier.return_value = ComponentIdentifier(
-        class_name=f"FakeAttack{fake_id}",
-        class_module="test_text_adaptive",
+    fake_attack.get_identifier.return_value = attack_identifier or ComponentIdentifier(
+        class_name=f"FakeAttack{fake_id}", class_module="test_text_adaptive"
     )
     fake_technique.attack = fake_attack
     fake_technique.seed_technique = seed_technique
     factory = MagicMock()
     factory.create.return_value = fake_technique
     factory.adversarial_chat = adversarial_chat
+    factory.uses_adversarial = adversarial_chat is not None
     factory.scoring_config_type = scoring_config_type
+    factory.get_identifier.return_value = factory_identifier or ComponentIdentifier(
+        class_name=f"FakeFactory{fake_id}", class_module="test_text_adaptive"
+    )
     return factory
 
 
@@ -343,6 +363,77 @@ class TestTextAdaptiveAtomicAttacks:
         technique_names = {b.name for b in techniques.values()}
         assert "role_play_movie_script" in technique_names
         assert "many_shot" in technique_names
+
+    @pytest.mark.parametrize(("max_attempts", "expected_attempts"), [(4, 84), (5, 105)])
+    async def test_light_keeps_nine_distinct_factory_arms_and_attempt_bound(
+        self,
+        mock_objective_target,
+        mock_objective_scorer,
+        max_attempts,
+        expected_attempts,
+    ):
+        shared_attack_identifier = _mock_id("SharedPromptSendingAttack")
+        factories = {
+            name: _make_fake_factory(
+                attack_identifier=shared_attack_identifier,
+                factory_identifier=_mock_id(f"Factory_{name}"),
+            )
+            for name in _LIGHT_TECHNIQUES
+        }
+        groups = {"adaptive": [_make_seed_group(value=f"obj-{index}") for index in range(21)]}
+        summaries = [
+            ScenarioDatasetSummary(
+                name="adaptive",
+                logical_seed_group_count=21,
+                selected_seed_group_count=21,
+            )
+        ]
+        scenario = TextAdaptive(objective_scorer=mock_objective_scorer)
+        technique_class = scenario.get_technique_class()
+        scenario.set_params_from_args(
+            args={
+                "objective_target": mock_objective_target,
+                "scenario_techniques": [technique_class("light")],
+                "include_baseline": False,
+                "max_attempts_per_objective": max_attempts,
+            }
+        )
+        scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=(groups, summaries))
+
+        with patch.object(scenario, "_get_attack_technique_factories", return_value=factories):
+            estimate = await scenario.get_run_size_estimate_async()
+            techniques = scenario._build_techniques_dict(objective_target=mock_objective_target)
+
+        assert len(techniques) == 9
+        assert {bundle.name for bundle in techniques.values()} == _LIGHT_TECHNIQUES
+        assert estimate.adaptive_details is not None
+        assert estimate.adaptive_details.selected_candidate_technique_count == 9
+        assert estimate.adaptive_details.candidate_technique_count == 9
+        assert estimate.adaptive_details.techniques_per_objective_upper_bound == max_attempts
+        assert estimate.adaptive_details.technique_attempt_count_upper_bound == expected_attempts
+
+    def test_exact_duplicate_registered_technique_dedupes_only_itself(
+        self,
+        mock_objective_target,
+        mock_objective_scorer,
+    ):
+        scenario = TextAdaptive(objective_scorer=mock_objective_scorer)
+        technique_class = scenario.get_technique_class()
+        scenario._scenario_techniques = [
+            technique_class("role_play_movie_script"),
+            technique_class("role_play_movie_script"),
+        ]
+        factory = _make_fake_factory()
+
+        with patch.object(
+            scenario,
+            "_get_attack_technique_factories",
+            return_value={"role_play_movie_script": factory},
+        ):
+            techniques = scenario._build_techniques_dict(objective_target=mock_objective_target)
+
+        assert len(techniques) == 1
+        factory.create.assert_called_once()
 
     async def test_incompatible_seed_technique_is_filtered_per_objective(
         self, mock_objective_target, mock_objective_scorer

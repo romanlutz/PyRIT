@@ -29,7 +29,6 @@ from pyrit.models import (
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
-from pyrit.models.identifiers import compute_inner_attack_eval_hash
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.matrix_atomic_attack_builder import build_baseline_atomic_attack
@@ -339,19 +338,17 @@ class AdaptiveScenario(Scenario):
         objective_target: PromptTarget,
     ) -> dict[str, TechniqueBundle]:
         """
-        Resolve selected techniques into a ``{eval_hash: TechniqueBundle}`` map.
+        Resolve selected techniques into a ``{factory_hash: TechniqueBundle}`` map.
 
         Each bundle carries the inner attack technique along with the factory's
         ``seed_technique`` and ``adversarial_chat`` so the dispatcher can
         reproduce the static ``AtomicAttack`` execution path per attempt.
 
-        Technique keys are eval hashes derived from the inner attack technique's
-        identifier (run through ``AtomicAttackEvaluationIdentifier`` so seeds,
-        scorers, and operational target params are excluded). The same hash is
-        auto-stamped on every persisted ``AttackResultEntry.atomic_attack_identifier``
-        by the executor, which lets the selector aggregate historical success
-        rates by behavioral configuration via
-        ``MemoryInterface.get_attack_results(atomic_attack_eval_hashes=...)``.
+        Technique keys are canonical factory identifier hashes. Factory identity
+        includes the registered technique name and meaningful configuration, so
+        distinct registered techniques remain distinct selector arms even when
+        they share the same inner attack implementation. The dispatcher persists
+        this identity on each child result for selector history and attribution.
 
         For factories whose attack class narrows ``attack_scoring_config`` to a
         specific subtype (e.g. ``TAPAttackScoringConfig`` for TAP), this method
@@ -361,7 +358,7 @@ class AdaptiveScenario(Scenario):
         are dropped with a warning so the rest of the pool continues to run.
 
         Returns:
-            dict[str, TechniqueBundle]: Mapping from technique eval hash to its
+            dict[str, TechniqueBundle]: Mapping from factory identifier hash to its
                 bundle, in the order selected techniques were resolved.
 
         Raises:
@@ -397,11 +394,11 @@ class AdaptiveScenario(Scenario):
                 skipped_incompatible[technique_name] = str(exc)
                 logger.warning(f"Skipping technique '{technique_name}': {type(exc).__name__}: {exc}")
                 continue
-            eval_hash = compute_inner_attack_eval_hash(attack=technique.attack)
+            technique_identifier = factory.get_identifier().hash
             adversarial_chat = factory.adversarial_chat
             if adversarial_chat is None and factory.uses_adversarial:
                 adversarial_chat = get_default_adversarial_target()
-            techniques[eval_hash] = TechniqueBundle(
+            techniques[technique_identifier] = TechniqueBundle(
                 attack=technique.attack,
                 name=technique_name,
                 seed_technique=technique.seed_technique,
