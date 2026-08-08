@@ -658,3 +658,9 @@ class TestTextAdaptiveBaselinePolicy:
             assert scenario._atomic_attacks[0].atomic_attack_name == "baseline", (
                 f"baseline must be prepended at index 0; got {[a.atomic_attack_name for a in scenario._atomic_attacks]}"
             )
+            estimate = await scenario.get_run_size_estimate_async()
+            plan = scenario._build_run_plan()
+            planned_units = sum(len(group.seed_group_ids) for group in plan.atomic_groups)
+            assert planned_units == 2
+            assert estimate.total_attack_count == planned_units
+            assert [component.count for component in estimate.components] == [1, 1]

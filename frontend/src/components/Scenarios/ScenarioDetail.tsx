@@ -215,6 +215,7 @@ type EstimateRequestState =
       status: 'error'
       requestKey: string
       error: string
+      launchInvalid: boolean
     }
 
 function buildRunRequest({
@@ -777,10 +778,13 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
           ) {
             return
           }
+          const apiError = toApiError(err)
           setEstimateRequestState({
             status: 'error',
             requestKey: estimateRequestKey,
-            error: toApiError(err).detail,
+            error: apiError.detail,
+            launchInvalid: apiError.status === 400
+              && apiError.detail.includes('does not support overriding dataset'),
           })
         })
     }, ESTIMATE_DEBOUNCE_MS)
@@ -830,6 +834,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   } else {
     estimateState = { status: 'loading', scope: 'request' }
   }
+  const estimateRequestBlocked = estimateRequestState?.requestKey === estimateRequestKey
+    && estimateRequestState.status === 'error'
+    && estimateRequestState.launchInvalid
 
   const handleTechniqueModeChange = (value: string): void => {
     if (value === CUSTOM_TECHNIQUE_SET_VALUE) {
@@ -1307,7 +1314,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 appearance="primary"
                 type="submit"
                 form={formId}
-                disabled={submitting || techniqueSelectionInvalid || datasetSelectionInvalid}
+                disabled={
+                  submitting
+                  || techniqueSelectionInvalid
+                  || datasetSelectionInvalid
+                  || estimateRequestBlocked
+                }
                 data-testid="launch-scenario-btn"
               >
                 {submitting ? 'Launching...' : 'Launch scenario'}

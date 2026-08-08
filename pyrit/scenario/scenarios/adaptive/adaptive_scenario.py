@@ -220,12 +220,14 @@ class AdaptiveScenario(Scenario):
         if max_attempts < 1:
             raise ValueError(f"max_attempts_per_objective must be >= 1, got {max_attempts}")
         selected_candidate_count = len(self._scenario_techniques)
+        selected_attempt_bound = min(selected_candidate_count, max_attempts)
+        baseline_count = selected_count if self._include_baseline else 0
         baseline_components = (
             [
                 ScenarioRunSizeComponent(
                     label="Baseline",
                     count=selected_count,
-                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=selected_count)],
+                    factors=[ScenarioRunSizeFactor(label="objectives", count=selected_count)],
                     is_baseline=True,
                 )
             ]
@@ -236,26 +238,28 @@ class AdaptiveScenario(Scenario):
             components = [
                 *baseline_components,
                 ScenarioRunSizeComponent(
-                    label="Adaptive attack-envelope candidates",
+                    label="Adaptive objectives",
                     count=selected_count,
-                    factors=[ScenarioRunSizeFactor(label="selected logical seed groups", count=selected_count)],
+                    factors=[ScenarioRunSizeFactor(label="objectives", count=selected_count)],
                 ),
             ]
             return ScenarioDefaultRunSizeEstimate(
                 status=ScenarioRunSizeEstimateStatus.Conditional,
+                minimum_attack_count=baseline_count,
+                maximum_attack_count=baseline_count + selected_count,
                 components=components,
                 datasets=datasets,
                 adaptive_details=ScenarioAdaptiveRunSizeDetails(
                     objective_count=selected_count,
                     candidate_technique_count=selected_candidate_count,
                     max_attempts_per_objective=max_attempts,
-                    techniques_per_objective_upper_bound=min(selected_candidate_count, max_attempts),
-                    technique_attempt_count_upper_bound=(selected_count * min(selected_candidate_count, max_attempts)),
+                    techniques_per_objective_upper_bound=selected_attempt_bound,
+                    technique_attempt_count_upper_bound=selected_count * selected_attempt_bound,
                 ),
                 note=(
-                    "The authoritative total depends on which selected techniques are compatible with the "
-                    f"configured objective target and each seed group. Up to {max_attempts} inner attempts per "
-                    "envelope and retries are excluded."
+                    "The planned-attack total depends on which selected techniques are compatible with the "
+                    f"configured objective target. Up to {selected_attempt_bound} selected technique attempts "
+                    "may run per adaptive objective; retries are excluded."
                 ),
             )
 
@@ -279,9 +283,9 @@ class AdaptiveScenario(Scenario):
         components = [
             *baseline_components,
             ScenarioRunSizeComponent(
-                label="Adaptive attack envelopes",
+                label="Adaptive objectives",
                 count=compatible_group_count,
-                factors=[ScenarioRunSizeFactor(label="compatible logical seed groups", count=compatible_group_count)],
+                factors=[ScenarioRunSizeFactor(label="compatible objectives", count=compatible_group_count)],
             ),
         ]
         status = (
@@ -289,28 +293,40 @@ class AdaptiveScenario(Scenario):
             if self._estimate_has_binding_size_cap
             else ScenarioRunSizeEstimateStatus.Exact
         )
+        adaptive_objective_bound = (
+            selected_count if status is ScenarioRunSizeEstimateStatus.Conditional else compatible_group_count
+        )
         total_attack_count = (
             None
             if status is ScenarioRunSizeEstimateStatus.Conditional
             else sum(component.count for component in components)
         )
+        minimum_attack_count = (
+            baseline_count if status is ScenarioRunSizeEstimateStatus.Conditional and baseline_count > 0 else None
+        )
+        maximum_attack_count = (
+            baseline_count + selected_count if status is ScenarioRunSizeEstimateStatus.Conditional else None
+        )
+        technique_attempt_bound = min(candidate_count, max_attempts)
         note = (
-            f"Each planned unit is one persisted adaptive envelope. Up to {max_attempts} selected technique "
-            "attempts may run inside that unit; inner attempts and retries are excluded."
+            f"Each compatible adaptive objective is one planned attack. Up to {technique_attempt_bound} selected "
+            "technique attempts may run for that objective; retries are excluded."
         )
         if status is ScenarioRunSizeEstimateStatus.Conditional:
             note += " A binding randomized dataset cap may select a different compatibility mix at launch."
         return ScenarioDefaultRunSizeEstimate(
             status=status,
             total_attack_count=total_attack_count,
+            minimum_attack_count=minimum_attack_count,
+            maximum_attack_count=maximum_attack_count,
             components=components,
             datasets=datasets,
             adaptive_details=ScenarioAdaptiveRunSizeDetails(
-                objective_count=compatible_group_count,
+                objective_count=adaptive_objective_bound,
                 candidate_technique_count=candidate_count,
                 max_attempts_per_objective=max_attempts,
-                techniques_per_objective_upper_bound=min(candidate_count, max_attempts),
-                technique_attempt_count_upper_bound=compatible_group_count * min(candidate_count, max_attempts),
+                techniques_per_objective_upper_bound=technique_attempt_bound,
+                technique_attempt_count_upper_bound=adaptive_objective_bound * technique_attempt_bound,
             ),
             note=note,
         )

@@ -319,10 +319,27 @@ describe('ScenarioCatalog', () => {
             version: 1,
             status: 'conditional',
             total_attack_count: null,
-            minimum_attack_count: null,
-            maximum_attack_count: null,
+            minimum_attack_count: 21,
+            maximum_attack_count: 42,
             condition: 'target_capabilities',
-            components: [],
+            components: [
+              {
+                label: 'Baseline',
+                count: 21,
+                factors: [{ label: 'objectives', count: 21 }],
+                is_baseline: true,
+                condition: null,
+                note: null,
+              },
+              {
+                label: 'Adaptive objectives',
+                count: 21,
+                factors: [{ label: 'compatible objectives', count: 21 }],
+                is_baseline: false,
+                condition: null,
+                note: null,
+              },
+            ],
             datasets: [],
             adaptive_details: {
               objective_count: 21,
@@ -344,7 +361,7 @@ describe('ScenarioCatalog', () => {
     render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
 
     const row = await screen.findByTestId('scenario-card-adaptive.text_adaptive')
-    expect(within(row).getByText('21 objectives · up to 42 technique attempts')).toBeInTheDocument()
+    expect(within(row).getByText('21–42 planned attacks · up to 42 technique attempts')).toBeInTheDocument()
     expect(within(row).queryByText(/objective envelope/i)).not.toBeInTheDocument()
   })
 

@@ -96,15 +96,7 @@ function countLabel(value: number, singular: string, plural: string): string {
   return `${formatCount(value)} ${value === 1 ? singular : plural}`
 }
 
-function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
-  if (estimate.adaptiveDetails) {
-    const { objectiveCount, techniqueAttemptCountUpperBound } = estimate.adaptiveDetails
-    return `${countLabel(objectiveCount, 'objective', 'objectives')} · up to ${countLabel(
-      techniqueAttemptCountUpperBound,
-      'technique attempt',
-      'technique attempts',
-    )}`
-  }
+function formatPlannedAttackSummary(estimate: ScenarioRunEstimate): string {
   if (estimate.total !== null) {
     return countLabel(estimate.total, 'planned attack', 'planned attacks')
   }
@@ -122,6 +114,30 @@ function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
   return estimate.scope === 'default'
     ? 'Select targets to calculate'
     : 'Run size is confirmed at launch.'
+}
+
+function baselineCount(estimate: ScenarioRunEstimate): number {
+  return estimate.components
+    .filter((component) => component.isBaseline)
+    .reduce((sum, component) => sum + component.count, 0)
+}
+
+function formatEstimateSummary(estimate: ScenarioRunEstimate): string {
+  if (estimate.adaptiveDetails) {
+    const { objectiveCount, techniqueAttemptCountUpperBound } = estimate.adaptiveDetails
+    const attemptSummary = `up to ${countLabel(
+      techniqueAttemptCountUpperBound,
+      'technique attempt',
+      'technique attempts',
+    )}`
+    const hasPlannedAttackBound = estimate.total !== null
+      || estimate.minimum !== null
+      || estimate.maximum !== null
+    return hasPlannedAttackBound
+      ? `${formatPlannedAttackSummary(estimate)} · ${attemptSummary}`
+      : `${countLabel(objectiveCount, 'objective', 'objectives')} · ${attemptSummary}`
+  }
+  return formatPlannedAttackSummary(estimate)
 }
 
 function operand(id: string, value: string, label: string, result = false): CalculationPart {
@@ -218,6 +234,26 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   const poolLimit = details.maxAttemptsPerObjective < details.candidateTechniqueCount
     ? ` of ${formatCount(details.candidateTechniqueCount)} candidates`
     : ''
+  const directBaselineCount = baselineCount(estimate)
+  const hasPlannedAttackBound = estimate.total !== null
+    || estimate.minimum !== null
+    || estimate.maximum !== null
+  const progressSummary = hasPlannedAttackBound
+    ? formatPlannedAttackSummary(estimate)
+    : countLabel(details.objectiveCount, 'objective', 'objectives')
+  const adaptiveProgressMaximum = estimate.maximum === null
+    ? details.objectiveCount
+    : Math.max(estimate.maximum - directBaselineCount, 0)
+  const progressContext = directBaselineCount > 0
+    ? `Progress tracks ${progressSummary}: ${countLabel(
+      directBaselineCount,
+      'direct baseline send',
+      'direct baseline sends',
+    )} plus up to ${countLabel(adaptiveProgressMaximum, 'adaptive objective', 'adaptive objectives')}.`
+    : `Progress tracks ${progressSummary}.`
+  const compatibilityContext = details.compatibilityMayReduceAttempts
+    ? ' Compatibility may reduce how many candidates each objective can try.'
+    : ''
   return {
     parts: [
       operand('adaptive-objectives', formatCount(details.objectiveCount), objectiveLabel),
@@ -240,7 +276,7 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
     } equals up to ${
       countLabel(details.techniqueAttemptCountUpperBound, 'technique attempt', 'technique attempts')
     }.`,
-    context: `Progress tracks ${countLabel(details.objectiveCount, 'objective', 'objectives')}. Each objective stops after the first successful technique, and compatibility may reduce how many candidates it can try.`,
+    context: `${progressContext} Each adaptive objective stops after the first successful technique.${compatibilityContext}`,
   }
 }
 
@@ -480,19 +516,24 @@ export function ScenarioRunEstimateDetails({
     )
   }
 
+  if (state.status === 'stale') {
+    return (
+      <div className={styles.details} aria-live="polite">
+        <div className={styles.staleNotice} role="status">
+          <Text weight="semibold">Previous estimate not shown</Text>
+          <Text size={200}>The previous calculation does not match the current configuration.</Text>
+          <Text size={200}>{state.error}</Text>
+        </div>
+      </div>
+    )
+  }
+
   const { estimate } = state
   return (
     <div className={styles.details} aria-live="polite">
       <RunCalculationView estimate={estimate} idPrefix={idPrefix} />
       {state.status === 'refreshing' && (
         <Text size={200} className={styles.muted}>{state.label}</Text>
-      )}
-      {state.status === 'stale' && (
-        <div className={styles.staleNotice} role="status">
-          <Text weight="semibold">Previous estimate</Text>
-          <Text size={200}>{state.label}</Text>
-          <Text size={200}>{state.error}</Text>
-        </div>
       )}
       <EstimateSources estimate={estimate} />
       <Text size={200} className={styles.muted}>

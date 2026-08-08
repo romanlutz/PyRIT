@@ -207,8 +207,55 @@ describe('ScenarioRunEstimate', () => {
       name: '21 objectives multiplied by up to 2 techniques per objective equals up to 42 technique attempts.',
     })).toBeInTheDocument()
     expect(screen.getByText(
-      'Progress tracks 21 objectives. Each objective stops after the first successful technique, and compatibility may reduce how many candidates it can try.',
+      'Progress tracks 21 objectives. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
     )).toBeInTheDocument()
+  })
+
+  it('adds direct baseline sends to Adaptive progress without inflating technique attempts', () => {
+    const estimate = makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: 21,
+      maximum_attack_count: 42,
+      components: [
+        {
+          label: 'Baseline',
+          count: 21,
+          factors: [{ label: 'objectives', count: 21 }],
+          is_baseline: true,
+          note: null,
+        },
+        {
+          label: 'Adaptive objectives',
+          count: 21,
+          factors: [{ label: 'compatible objectives', count: 21 }],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 3,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    })
+    const state = mapScenarioRunEstimate(estimate, 'request')
+    render(
+      <TestWrapper>
+        <ScenarioRunEstimateSummary state={state} />
+        <ScenarioRunEstimateDetails state={state} />
+      </TestWrapper>,
+    )
+
+    expect(screen.getByText('21–42 planned attacks · up to 42 technique attempts')).toBeInTheDocument()
+    expect(screen.getByText(
+      'Progress tracks 21–42 planned attacks: 21 direct baseline sends plus up to 21 adaptive objectives. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/objective envelope|logical seed groups|selected seed groups/i)).not.toBeInTheDocument()
   })
 
   it('uses the configured max when it is lower than the adaptive candidate pool', () => {
@@ -281,7 +328,11 @@ describe('ScenarioRunEstimate', () => {
       error: 'Preview service timed out.',
     }
     rerender(<TestWrapper><ScenarioRunEstimateDetails state={stale} /></TestWrapper>)
-    expect(screen.getByText('Previous estimate')).toBeInTheDocument()
+    expect(screen.getByText('Previous estimate not shown')).toBeInTheDocument()
+    expect(screen.queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(screen.getByText(
+      'The previous calculation does not match the current configuration.',
+    )).toBeInTheDocument()
     expect(screen.getByText('Preview service timed out.')).toBeInTheDocument()
 
     rerender(

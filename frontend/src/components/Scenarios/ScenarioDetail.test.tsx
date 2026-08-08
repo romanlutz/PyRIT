@@ -128,6 +128,15 @@ function makeEstimate(
 
 function makeAdaptiveScenario(): RegisteredScenario {
   const defaultMembers = ['role_play_movie_script', 'many_shot']
+  const defaultDatasets = [
+    'airt_hate',
+    'airt_fairness',
+    'airt_violence',
+    'airt_sexual',
+    'airt_harassment',
+    'airt_misinformation',
+    'airt_leakage',
+  ]
   const aggregateTechniqueExpansions = {
     default: defaultMembers,
     all: [...defaultMembers, ...Array.from({ length: 15 }, (_, index) => `all_member_${index + 1}`)],
@@ -142,6 +151,7 @@ function makeAdaptiveScenario(): RegisteredScenario {
     scenario_type: 'TextAdaptive',
     default_technique: 'default',
     default_techniques: defaultMembers,
+    default_datasets: defaultDatasets,
     aggregate_techniques: ['all', 'default', 'core', 'extra', 'light', 'multi_turn', 'single_turn'],
     aggregate_technique_expansions: aggregateTechniqueExpansions,
     all_techniques: [...new Set(Object.values(aggregateTechniqueExpansions).flat())],
@@ -407,11 +417,47 @@ describe('ScenarioDetail', () => {
 
     const preview = screen.getByRole('complementary', { name: 'Run preview' })
     expect(within(preview).getByText('target-b')).toBeInTheDocument()
-    expect(within(preview).getByText('Previous estimate')).toBeInTheDocument()
-    expect(within(preview).getByRole('group', { name: '8 planned attacks.' })).toBeInTheDocument()
+    expect(within(preview).getByText('Previous estimate not shown')).toBeInTheDocument()
+    expect(within(preview).queryByRole('group', { name: '8 planned attacks.' })).not.toBeInTheDocument()
+    expect(within(preview).getByText(
+      'The previous calculation does not match the current configuration.',
+    )).toBeInTheDocument()
     expect(within(preview).getByText('Preview service unavailable')).toBeInTheDocument()
     expect(screen.getByTestId('scenario-target-select')).toHaveValue('target-b')
     expect(screen.getByTestId('launch-scenario-btn')).not.toBeDisabled()
+  })
+
+  it('hides stale arithmetic and blocks launch after a configuration request error', async () => {
+    jest.useFakeTimers()
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime })
+    mockEstimateRun
+      .mockResolvedValueOnce(makeEstimate(8))
+      .mockRejectedValueOnce({
+        isAxiosError: true,
+        response: {
+          status: 400,
+          data: {
+            detail: "Scenario 'adaptive.text_adaptive' does not support overriding dataset names.",
+          },
+        },
+      })
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await flushRenderedPromises()
+    await advanceTimers(300)
+    await flushRenderedPromises()
+    expect(screen.getByRole('group', { name: '8 planned attacks.' })).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByTestId('scenario-target-select'), 'target-b')
+    await advanceTimers(300)
+    await flushRenderedPromises()
+
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(within(preview).getByText('Previous estimate not shown')).toBeInTheDocument()
+    expect(within(preview).queryByTestId('run-calculation')).not.toBeInTheDocument()
+    expect(within(preview).getByText(
+      "Scenario 'adaptive.text_adaptive' does not support overriding dataset names.",
+    )).toBeInTheDocument()
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
   })
 
   it('does not request a preview while the custom technique selection is empty', async () => {
@@ -517,8 +563,8 @@ describe('ScenarioDetail', () => {
       version: 1,
       status: 'conditional',
       total_attack_count: null,
-      minimum_attack_count: null,
-      maximum_attack_count: null,
+      minimum_attack_count: 21,
+      maximum_attack_count: 42,
       condition: null,
       components: [
         {
@@ -554,6 +600,10 @@ describe('ScenarioDetail', () => {
 
     renderDetail('/scenarios/adaptive.text_adaptive')
 
+    for (const datasetName of makeAdaptiveScenario().default_datasets) {
+      expect(await screen.findByTestId(`dataset-${datasetName}`)).toBeChecked()
+    }
+    expect(screen.getByText('7 datasets selected')).toBeInTheDocument()
     await waitFor(() => expect(mockEstimateRun).toHaveBeenCalledWith(
       'adaptive.text_adaptive',
       {
@@ -584,6 +634,26 @@ describe('ScenarioDetail', () => {
         const perObjective = Math.min(candidateCount, configuredMax)
         return {
           ...makeEstimate(null),
+          minimum_attack_count: 21,
+          maximum_attack_count: 42,
+          components: [
+            {
+              label: 'Baseline',
+              count: 21,
+              factors: [{ label: 'objectives', count: 21 }],
+              is_baseline: true,
+              condition: null,
+              note: null,
+            },
+            {
+              label: 'Adaptive objectives',
+              count: 21,
+              factors: [{ label: 'compatible objectives', count: 21 }],
+              is_baseline: false,
+              condition: null,
+              note: null,
+            },
+          ],
           adaptive_details: {
             objective_count: 21,
             candidate_technique_count: candidateCount,

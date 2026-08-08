@@ -311,6 +311,8 @@ async def test_adaptive_estimate_is_target_conditional_and_does_not_multiply_tec
 
     assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
     assert estimate.total_attack_count is None
+    assert estimate.minimum_attack_count == 3
+    assert estimate.maximum_attack_count == 6
     assert [component.count for component in estimate.components] == [3, 3]
     assert estimate.adaptive_details is not None
     assert estimate.adaptive_details.objective_count == 3
@@ -349,7 +351,7 @@ async def test_adaptive_estimate_counts_exact_compatible_outer_envelopes_with_ta
     assert estimate.status is ScenarioRunSizeEstimateStatus.Exact
     assert estimate.total_attack_count == 2
     assert [component.count for component in estimate.components] == [2]
-    assert "7 selected technique attempts" in estimate.note
+    assert "Up to 1 selected technique attempts" in estimate.note
     assert estimate.adaptive_details is not None
     assert estimate.adaptive_details.objective_count == 2
     assert estimate.adaptive_details.candidate_technique_count == 1
@@ -399,6 +401,51 @@ async def test_adaptive_estimate_caps_attempts_below_candidate_pool() -> None:
     assert estimate.adaptive_details.max_attempts_per_objective == 1
     assert estimate.adaptive_details.techniques_per_objective_upper_bound == 1
     assert estimate.adaptive_details.technique_attempt_count_upper_bound == 3
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_adaptive_conditional_attempt_bound_uses_launch_wide_objective_maximum() -> None:
+    """A sampled compatibility preview cannot understate a capped launch's attempt bound."""
+    with patch.object(TextAdaptive, "get_technique_class", return_value=_TwoTechniqueDefault):
+        scenario = TextAdaptive(objective_scorer=_scorer())
+    target = MagicMock(spec=PromptTarget)
+    scenario.set_params_from_args(
+        args={
+            "objective_target": target,
+            "include_baseline": False,
+            "max_attempts_per_objective": 3,
+        }
+    )
+
+    async def resolve_groups() -> tuple[dict[str, list[AttackSeedGroup]], list[ScenarioDatasetSummary]]:
+        scenario._estimate_has_binding_size_cap = True
+        return _resolved_groups({"adaptive": 3})
+
+    scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(side_effect=resolve_groups)
+    dispatcher = MagicMock()
+    dispatcher.compatible_techniques.side_effect = [["one"], [], []]
+
+    with (
+        patch.object(
+            scenario,
+            "_build_techniques_dict",
+            return_value={"one": MagicMock(), "two": MagicMock()},
+        ),
+        patch(
+            "pyrit.scenario.scenarios.adaptive.adaptive_scenario.AdaptiveTechniqueDispatcher",
+            return_value=dispatcher,
+        ),
+    ):
+        estimate = await scenario.get_run_size_estimate_async()
+
+    assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
+    assert estimate.minimum_attack_count is None
+    assert estimate.maximum_attack_count == 3
+    assert estimate.components[0].count == 1
+    assert estimate.adaptive_details is not None
+    assert estimate.adaptive_details.objective_count == 3
+    assert estimate.adaptive_details.techniques_per_objective_upper_bound == 2
+    assert estimate.adaptive_details.technique_attempt_count_upper_bound == 6
 
 
 @pytest.mark.usefixtures("patch_central_database")
