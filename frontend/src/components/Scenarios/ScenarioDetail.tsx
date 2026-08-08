@@ -1048,9 +1048,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       setMaxAttemptsInputRejected(false)
       setAdaptiveLimitNotice({
         scopeKey: adaptiveCandidateScopeKey,
-        message: `Maximum is ${adaptiveCandidateMaximum.toLocaleString()}: ${
-          adaptiveCandidateAvailability
-        }`,
+        message: `Maximum reached: ${adaptiveCandidateAvailability}`,
       })
       setLaunchMaxAttemptsError(null)
       setApiError(null)

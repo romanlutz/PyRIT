@@ -1047,7 +1047,7 @@ describe('ScenarioDetail', () => {
     await user.type(maxAttempts, '5')
     expect(maxAttempts).toHaveValue(null)
     expect(screen.getByText(
-      'Maximum is 2: Recommended (default) provides 2 compatible techniques for this target.',
+      'Maximum reached: Recommended (default) provides 2 compatible techniques for this target.',
     )).toBeInTheDocument()
     expect(mockEstimateRun).not.toHaveBeenCalledWith(
       'adaptive.text_adaptive',
@@ -1060,7 +1060,7 @@ describe('ScenarioDetail', () => {
     await user.paste('3')
     expect(maxAttempts).toHaveValue(null)
     expect(screen.getByText(
-      'Maximum is 2: Recommended (default) provides 2 compatible techniques for this target.',
+      'Maximum reached: Recommended (default) provides 2 compatible techniques for this target.',
     )).toBeInTheDocument()
 
     await user.type(maxAttempts, '1')
