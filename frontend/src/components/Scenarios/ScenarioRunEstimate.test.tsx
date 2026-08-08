@@ -307,6 +307,32 @@ describe('ScenarioRunEstimate', () => {
     expect(screen.getByText('up to 42')).toBeInTheDocument()
   })
 
+  it('adapts legacy version-one payloads without the selected candidate count', () => {
+    const estimate = mapScenarioRunEstimate(makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      components: [],
+      adaptive_details: {
+        objective_count: 21,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 3,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    }), 'request')
+
+    expect(estimate).toMatchObject({
+      status: 'conditional',
+      estimate: {
+        adaptiveDetails: {
+          selectedCandidateTechniqueCount: 2,
+        },
+      },
+    })
+  })
+
   it('preserves loading, unavailable, stale, and unknown conditional states', () => {
     const loading: ScenarioRunEstimateState = { status: 'loading', scope: 'request' }
     const { rerender } = render(
