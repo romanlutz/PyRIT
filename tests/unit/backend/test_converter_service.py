@@ -460,6 +460,36 @@ class TestPreviewConversion:
         assert mock_factory.call_args.kwargs["data_type"] == "audio_path"
         mock_serializer.save_b64_image_async.assert_awaited_once_with(data=raw_b64)
 
+    async def test_preview_conversion_treats_path_inspection_failure_as_raw_base64(self) -> None:
+        service = ConverterService()
+        mock_converter = MagicMock(spec=converter.Converter)
+        mock_result = MagicMock()
+        mock_result.output_text = "/tmp/persisted.wav"
+        mock_result.output_type = "audio_path"
+        mock_converter.convert_async = AsyncMock(return_value=mock_result)
+        service._registry.instances.register(mock_converter, name="conv-1")
+        mock_serializer = MagicMock()
+        mock_serializer.value = "/tmp/persisted.wav"
+        mock_serializer.save_b64_image_async = AsyncMock()
+        raw_b64 = "UklGRiQAAABXQVZF" * 1000
+        request = ConverterPreviewRequest(
+            original_value=raw_b64,
+            original_value_data_type="audio_path",
+            converter_ids=["conv-1"],
+        )
+
+        with (
+            patch.object(Path, "is_file", side_effect=OSError("path too long")),
+            patch(
+                "pyrit.backend.services.converter_service.data_serializer_factory",
+                return_value=mock_serializer,
+            ),
+        ):
+            await service.preview_conversion_async(request=request)
+
+        mock_serializer.save_b64_image_async.assert_awaited_once_with(data=raw_b64)
+        mock_converter.convert_async.assert_awaited_once_with(prompt="/tmp/persisted.wav", input_type="audio_path")
+
 
 class TestGetConverterObjectsForIds:
     """Tests for ConverterService.get_converter_objects_for_ids method."""
