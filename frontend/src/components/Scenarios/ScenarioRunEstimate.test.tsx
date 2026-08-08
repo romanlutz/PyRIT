@@ -205,9 +205,9 @@ describe('ScenarioRunEstimate', () => {
 
     expect(screen.getByText('21 objectives · up to 42 technique attempts')).toBeInTheDocument()
     expect(screen.getByRole('group', {
-      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 compatible candidates and limit 3, equals up to 42 technique attempts.',
+      name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
-    expect(screen.getByText('min(2 compatible candidates, limit 3)')).toBeInTheDocument()
+    expect(screen.getByText('2 selected candidates · limit 3')).toBeInTheDocument()
     expect(screen.getByText(
       'Progress tracks 21 objectives. Adaptive technique-attempt counts exclude multi-turn target exchanges and retries. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
     )).toBeInTheDocument()
@@ -281,7 +281,7 @@ describe('ScenarioRunEstimate', () => {
       },
     }))
 
-    expect(screen.getByText('min(5 compatible candidates from 14 selected, limit 3)')).toBeInTheDocument()
+    expect(screen.getByText('5 compatible candidates from 14 selected · limit 3')).toBeInTheDocument()
     expect(screen.getByText('up to 63')).toBeInTheDocument()
   })
 
@@ -303,7 +303,7 @@ describe('ScenarioRunEstimate', () => {
     }))
 
     expect(screen.getByText('techniques per objective')).toBeInTheDocument()
-    expect(screen.getByText('min(2 compatible candidates, limit 5)')).toBeInTheDocument()
+    expect(screen.getByText('2 selected candidates · limit 5')).toBeInTheDocument()
     expect(screen.getByText('up to 42')).toBeInTheDocument()
   })
 

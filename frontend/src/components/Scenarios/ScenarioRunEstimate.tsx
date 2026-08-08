@@ -7,6 +7,10 @@ import type {
   ScenarioRunEstimateState,
 } from '@/types'
 
+import {
+  formatAdaptiveCapAccessibleRule,
+  formatAdaptiveCapMetadata,
+} from './scenarioAdaptiveCap'
 import { useScenarioRunEstimateStyles } from './ScenarioRunEstimate.styles'
 
 interface ScenarioRunEstimateSummaryProps {
@@ -225,20 +229,14 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   const attemptLabel = details.techniqueAttemptCountUpperBound === 1
     ? 'technique attempt'
     : 'technique attempts'
-  const compatibleCandidateLabel = countLabel(
-    details.candidateTechniqueCount,
-    'compatible candidate',
-    'compatible candidates',
-  )
-  const selectedCandidateContext = details.candidateTechniqueCount < details.selectedCandidateTechniqueCount
-    ? ` from ${formatCount(details.selectedCandidateTechniqueCount)} selected`
-    : ''
-  const effectiveCapRule = `min(${compatibleCandidateLabel}${selectedCandidateContext}, limit ${
-    formatCount(details.maxAttemptsPerObjective)
-  })`
-  const accessibleCapRule = `the smaller of ${compatibleCandidateLabel}${selectedCandidateContext} and limit ${
-    formatCount(details.maxAttemptsPerObjective)
-  }`
+  const capProvenance = {
+    selectedCandidateCount: details.selectedCandidateTechniqueCount,
+    compatibleCandidateCount: details.candidateTechniqueCount,
+    limit: details.maxAttemptsPerObjective,
+    effectiveMaximum: details.techniquesPerObjectiveUpperBound,
+  }
+  const effectiveCapRule = formatAdaptiveCapMetadata(capProvenance)
+  const accessibleCapRule = formatAdaptiveCapAccessibleRule(capProvenance)
   const directBaselineCount = baselineCount(estimate)
   const hasPlannedAttackBound = estimate.total !== null
     || estimate.minimum !== null

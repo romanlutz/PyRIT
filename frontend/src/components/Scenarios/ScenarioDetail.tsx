@@ -46,6 +46,7 @@ import { routerPathParamValue } from '@/utils/routeParams'
 
 import { useScenarioDetailStyles } from './ScenarioDetail.styles'
 import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
+import { formatAdaptiveCapFeedback } from './scenarioAdaptiveCap'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
 import {
@@ -169,15 +170,6 @@ function formatParameterPreview(value: ParameterFormValue | undefined): string {
     return value.length > 0 ? value.join(', ') : 'Not set'
   }
   return value?.trim() || 'Not set'
-}
-
-function effectivePositiveInteger(
-  value: ParameterFormValue | undefined,
-  fallback: unknown,
-): number | undefined {
-  const candidate = typeof value === 'string' && value.trim().length > 0 ? value : fallback
-  const parsed = typeof candidate === 'number' ? candidate : Number(candidate)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function maxAttemptsValidationError(value: ParameterFormValue | undefined): string | undefined {
@@ -967,12 +959,19 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const presetMembers = techniqueSelection.mode === 'preset'
     ? techniqueSetMembers(scenario, techniqueSelection.preset)
     : []
-  const effectiveMaxAdaptiveAttempts = effectivePositiveInteger(
-    scenarioParamValues.max_attempts_per_objective,
-    dynamicParameters.find(
-      (parameter) => parameter.name === 'max_attempts_per_objective',
-    )?.default,
+  const resolvedAdaptiveDetails = (
+    estimateState.status === 'available' || estimateState.status === 'conditional'
   )
+    ? estimateState.estimate.adaptiveDetails
+    : null
+  const adaptiveCapFeedback = resolvedAdaptiveDetails
+    ? formatAdaptiveCapFeedback({
+        selectedCandidateCount: resolvedAdaptiveDetails.selectedCandidateTechniqueCount,
+        compatibleCandidateCount: resolvedAdaptiveDetails.candidateTechniqueCount,
+        limit: resolvedAdaptiveDetails.maxAttemptsPerObjective,
+        effectiveMaximum: resolvedAdaptiveDetails.techniquesPerObjectiveUpperBound,
+      })
+    : undefined
 
   return (
     <section
@@ -1055,14 +1054,10 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   </Text>
                   <MessageBar intent="info">
                     <MessageBarBody>
-                      Adaptive uses these as a candidate pool. It tracks one progress step per compatible objective
-                      {effectiveMaxAdaptiveAttempts
-                        ? ` and may try up to ${effectiveMaxAdaptiveAttempts} compatible ${
-                          effectiveMaxAdaptiveAttempts === 1 ? 'technique' : 'techniques'
-                        } for that objective, stopping after the first success`
-                        : ''}
-                      . Adding techniques changes the candidate pool, not the number of progress steps; compatibility
-                      can still change how many objectives can run.
+                      Adaptive uses these as a candidate pool. It tracks one progress step per compatible objective.
+                      Adaptive tries no more than the configured maximum or the compatible candidate count, whichever
+                      is smaller, and stops after the first success. Adding techniques changes the candidate pool, not
+                      the number of progress steps; compatibility can still change how many objectives can run.
                     </MessageBarBody>
                   </MessageBar>
                 </>
@@ -1186,7 +1181,9 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         : undefined}
                       displayHint={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
-                        ? MAX_ATTEMPTS_DISPLAY_HINT
+                        ? `${MAX_ATTEMPTS_DISPLAY_HINT}${adaptiveCapFeedback
+                          ? ` ${adaptiveCapFeedback}`
+                          : ''}`
                         : undefined}
                       validationState={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
