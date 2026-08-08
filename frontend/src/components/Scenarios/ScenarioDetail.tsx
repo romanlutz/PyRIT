@@ -89,8 +89,8 @@ const TEXT_ADAPTIVE_SCENARIO_NAME = 'adaptive.text_adaptive'
 const CUSTOM_TECHNIQUE_SET_VALUE = '__custom__'
 const MAX_ATTEMPTS_PARAMETER_NAME = 'max_attempts_per_objective'
 const MAX_ATTEMPTS_DISPLAY_LABEL = 'Maximum techniques per objective'
-const MAX_ATTEMPTS_DISPLAY_HINT = [
-  'Leave blank to use the default of 3.',
+const MAX_ATTEMPTS_DEFAULT_HINT = 'Leave blank to use the default of 3.'
+const MAX_ATTEMPTS_BEHAVIOR_HINT = [
   'This is a per-objective limit, not a total-run budget.',
   'Adaptive stops after the first success, and incompatible techniques are skipped.',
   'This is separate from retries.',
@@ -237,6 +237,7 @@ interface AdaptiveCandidateMetadata {
 interface AdaptiveLimitNotice {
   scopeKey: string
   message: string
+  validationState: 'none' | 'warning'
 }
 
 function mapEstimateError(error: unknown): MappedEstimateError {
@@ -866,6 +867,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               ? Number(rawValue)
               : null
             const configuredValue = parsedValue ?? adaptiveDetails.maxAttemptsPerObjective
+            const isDefaultReduction = parsedValue === null
             if (
               maximum > 0
               && Number.isSafeInteger(configuredValue)
@@ -876,7 +878,17 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 [MAX_ATTEMPTS_PARAMETER_NAME]: String(maximum),
               }))
               setAdaptiveLimitNotice(
-                hadResolvedAdaptiveMetadata
+                isDefaultReduction
+                  ? {
+                      scopeKey: adaptiveCandidateScopeKey,
+                      message: `The scenario default of ${configuredValue.toLocaleString()} is reduced to ${
+                        maximum.toLocaleString()
+                      } because ${adaptiveSelectionDisplayName} provides ${maximum.toLocaleString()} compatible ${
+                        maximum === 1 ? 'technique' : 'techniques'
+                      } for this target.`,
+                      validationState: 'none',
+                    }
+                  : hadResolvedAdaptiveMetadata
                   ? {
                       scopeKey: adaptiveCandidateScopeKey,
                       message: `Reduced to ${maximum.toLocaleString()} because ${
@@ -884,6 +896,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                       } provides ${maximum.toLocaleString()} compatible ${
                         maximum === 1 ? 'technique' : 'techniques'
                       } for this target.`,
+                      validationState: 'warning',
                     }
                   : null,
               )
@@ -940,6 +953,18 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     : `${adaptiveSelectionDisplayName} provides ${adaptiveCandidateMaximum.toLocaleString()} compatible ${
       adaptiveCandidateMaximum === 1 ? 'technique' : 'techniques'
     } for this target.`
+  const maxAttemptsParameter = dynamicParameters.find(
+    (parameter) => parameter.name === MAX_ATTEMPTS_PARAMETER_NAME,
+  )
+  const maxAttemptsDefault = Number(maxAttemptsParameter?.default ?? 3)
+  const adaptiveDefaultIsReduced = usesAdaptiveTechniqueSelection
+    && adaptiveCandidateMaximum !== null
+    && adaptiveCandidateMaximum > 0
+    && Number.isSafeInteger(maxAttemptsDefault)
+    && maxAttemptsDefault > adaptiveCandidateMaximum
+  const adaptiveDefaultHint = adaptiveDefaultIsReduced
+    ? `Blank restores the bounded default of ${adaptiveCandidateMaximum.toLocaleString()} techniques per objective for this target.`
+    : MAX_ATTEMPTS_DEFAULT_HINT
   const maxAttemptsRawValue = scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME]
   const maxAttemptsNumericValue = typeof maxAttemptsRawValue === 'string'
     && maxAttemptsRawValue.trim() !== ''
@@ -1064,6 +1089,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       setAdaptiveLimitNotice({
         scopeKey: adaptiveCandidateScopeKey,
         message: `Maximum reached: ${adaptiveCandidateAvailability}`,
+        validationState: 'warning',
       })
       setLaunchMaxAttemptsError(null)
       setApiError(null)
@@ -1135,12 +1161,15 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const atAdaptiveCandidateMaximum = adaptiveCandidateMaximum !== null
     && adaptiveCandidateMaximum > 0
     && maxAttemptsNumericValue === adaptiveCandidateMaximum
-  const currentAdaptiveLimitNotice =
-    adaptiveLimitNotice?.scopeKey === adaptiveCandidateScopeKey
-      ? adaptiveLimitNotice.message
-      : atAdaptiveCandidateMaximum && adaptiveCandidateAvailability
-        ? `Maximum reached: ${adaptiveCandidateAvailability}`
-        : undefined
+  const scopedAdaptiveLimitNotice = adaptiveLimitNotice?.scopeKey === adaptiveCandidateScopeKey
+    ? adaptiveLimitNotice
+    : null
+  const currentAdaptiveLimitNotice = scopedAdaptiveLimitNotice?.message
+    ?? (atAdaptiveCandidateMaximum && adaptiveCandidateAvailability
+      ? `Maximum reached: ${adaptiveCandidateAvailability}`
+      : undefined)
+  const currentAdaptiveLimitValidationState = scopedAdaptiveLimitNotice?.validationState
+    ?? (atAdaptiveCandidateMaximum && adaptiveCandidateAvailability ? 'warning' : 'none')
   const adaptiveCapFeedback = currentResolvedAdaptiveDetails
     ? formatAdaptiveCapFeedback({
         selectedCandidateCount: currentResolvedAdaptiveDetails.selectedCandidateTechniqueCount,
@@ -1365,7 +1394,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         : undefined}
                       displayHint={usesAdaptiveTechniqueSelection
                         && parameter.name === MAX_ATTEMPTS_PARAMETER_NAME
-                        ? `${MAX_ATTEMPTS_DISPLAY_HINT}${adaptiveCapFeedback
+                        ? `${adaptiveDefaultHint} ${MAX_ATTEMPTS_BEHAVIOR_HINT}${adaptiveCapFeedback
                           ? ` ${adaptiveCapFeedback}`
                           : ''}`
                         : undefined}
@@ -1374,7 +1403,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                         ? maxAttemptsFieldError
                           ? 'error'
                           : currentAdaptiveLimitNotice
-                            ? 'warning'
+                            ? currentAdaptiveLimitValidationState
                             : 'none'
                         : 'none'}
                       validationMessage={usesAdaptiveTechniqueSelection

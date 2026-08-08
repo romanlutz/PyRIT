@@ -887,7 +887,10 @@ describe('ScenarioDetail', () => {
     expect(maxAttempts).toHaveAttribute('step', '1')
     expect(maxAttempts).toHaveAttribute('inputmode', 'numeric')
     expect(maxAttempts).toHaveAttribute('pattern', '[0-9]*')
-    expect(screen.getByText(/Leave blank to use the default of 3/)).toBeInTheDocument()
+    expect(screen.getByText(
+      /Blank restores the bounded default of 2 techniques per objective for this target\./,
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/Leave blank to use the default of 3/)).not.toBeInTheDocument()
     expect(maxAttempts).toHaveValue(2)
     expect(within(preview).getByText('up to 42')).toBeInTheDocument()
     const initialRequestCount = mockEstimateRun.mock.calls.length
@@ -1066,7 +1069,11 @@ describe('ScenarioDetail', () => {
     expect(maxAttempts).toHaveAttribute('max', '2')
     expect(maxAttempts).toHaveValue(2)
     expect(screen.getByText(
-      'Maximum reached: Recommended (default) provides 2 compatible techniques for this target.',
+      'The scenario default of 3 is reduced to 2 because Recommended (default) provides 2 compatible techniques for this target.',
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/Maximum reached:/)).not.toBeInTheDocument()
+    expect(screen.getByText(
+      /Blank restores the bounded default of 2 techniques per objective for this target\./,
     )).toBeInTheDocument()
     expect(screen.queryByText('max_attempts_per_objective')).not.toBeInTheDocument()
     expect(screen.getByText(/This is separate from retries/)).toBeInTheDocument()
@@ -1084,6 +1091,12 @@ describe('ScenarioDetail', () => {
       }),
       expect.any(AbortSignal),
     )
+
+    await user.clear(maxAttempts)
+    await waitFor(() => expect(maxAttempts).toHaveValue(2))
+    expect(screen.getByText(
+      'The scenario default of 3 is reduced to 2 because Recommended (default) provides 2 compatible techniques for this target.',
+    )).toBeInTheDocument()
 
     await user.paste('3')
     expect(maxAttempts).toHaveValue(2)
@@ -1169,6 +1182,8 @@ describe('ScenarioDetail', () => {
       })
       await user.click(await screen.findByLabelText(optionLabel))
       await waitFor(() => expect(maxAttempts).toHaveAttribute('max', String(maximum)))
+      expect(screen.getByText(/Leave blank to use the default of 3\./)).toBeInTheDocument()
+      expect(screen.queryByText(/Blank restores the bounded default/)).not.toBeInTheDocument()
       await user.clear(maxAttempts)
       await user.type(maxAttempts, String(attemptedValue))
 
