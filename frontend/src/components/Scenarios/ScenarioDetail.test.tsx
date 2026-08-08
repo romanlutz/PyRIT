@@ -904,6 +904,14 @@ describe('ScenarioDetail', () => {
     await advanceTimers(300)
     expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
 
+    await user.tab()
+    await user.click(maxAttempts)
+    await user.paste('0')
+    expect(maxAttempts).toHaveValue(null)
+    expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
+    await advanceTimers(300)
+    expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
+
     for (const invalidValue of ['1.5', '1e3', '+8']) {
       await user.tab()
       await user.click(maxAttempts)
@@ -923,12 +931,15 @@ describe('ScenarioDetail', () => {
     await user.tab()
     await user.click(maxAttempts)
     await user.type(maxAttempts, '0')
-    expect(maxAttempts).toHaveValue(0)
+    expect(maxAttempts).toHaveValue(null)
     expect(maxAttempts).toHaveAttribute('aria-invalid', 'true')
     expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
     await advanceTimers(300)
     expect(mockEstimateRun).toHaveBeenCalledTimes(initialRequestCount)
 
+    await user.tab()
+    await user.click(maxAttempts)
+    await user.type(maxAttempts, '1')
     await user.clear(maxAttempts)
     expect(maxAttempts).toHaveAttribute('aria-invalid', 'false')
     await advanceTimers(300)

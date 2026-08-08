@@ -31,7 +31,7 @@ export interface ParameterFieldProps {
   testIdPrefix?: string
 }
 
-export type RejectedNumberInputReason = 'format' | 'above-max'
+export type RejectedNumberInputReason = 'format' | 'below-min' | 'above-max'
 
 const BLOCKED_WHOLE_NUMBER_KEYS = new Set(['-', '+', '.', 'e', 'E'])
 
@@ -140,7 +140,7 @@ export default function ParameterField({
   const placeholder = typeof parameter.default === 'string' ? parameter.default : undefined
   const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
   const rejectNumberInput = (reason: RejectedNumberInputReason): void => {
-    rejectedNumberSequenceRef.current = reason === 'format'
+    rejectedNumberSequenceRef.current = reason !== 'above-max'
     onRejectedNumberInput?.(parameter.name, reason)
   }
   const handleNumberKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
@@ -193,6 +193,11 @@ export default function ParameterField({
     if (numberMax !== undefined && Number(pastedValue) > numberMax) {
       event.preventDefault()
       rejectNumberInput('above-max')
+      return
+    }
+    if (numberMin !== undefined && Number(pastedValue) < numberMin) {
+      event.preventDefault()
+      rejectNumberInput('below-min')
     }
   }
   const handleInputChange = (nextValue: string): void => {
@@ -202,6 +207,10 @@ export default function ParameterField({
     }
     if (numberMax !== undefined && nextValue !== '' && Number(nextValue) > numberMax) {
       rejectNumberInput('above-max')
+      return
+    }
+    if (numberMin !== undefined && nextValue !== '' && Number(nextValue) < numberMin) {
+      rejectNumberInput('below-min')
       return
     }
     rejectedNumberSequenceRef.current = false
