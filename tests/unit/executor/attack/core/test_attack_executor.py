@@ -360,6 +360,55 @@ class TestExecuteAttackAsync:
         expected_order = ["start_A", "end_A", "start_B", "end_B", "start_C", "end_C"]
         assert execution_order == expected_order
 
+    async def test_outer_cancellation_cleans_execution_tasks_and_executor_is_reusable(self) -> None:
+        attack = create_mock_attack()
+        executor = AttackExecutor(max_concurrency=2)
+        all_slots_started = asyncio.Event()
+        release = asyncio.Event()
+        started: list[str] = []
+        cancelled: list[str] = []
+
+        async def block_execution(*, context: SingleTurnAttackContext) -> AttackResult:
+            objective = context.params.objective
+            started.append(objective)
+            if len(started) == 2:
+                all_slots_started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.append(objective)
+                raise
+
+        attack.execute_with_context_async.side_effect = block_execution
+        execution_task = asyncio.create_task(
+            executor.execute_attack_async(
+                attack=attack,
+                objectives=["A", "B", "C"],
+            )
+        )
+        await asyncio.wait_for(all_slots_started.wait(), timeout=5.0)
+
+        execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution_task
+
+        assert set(started) == {"A", "B"}
+        assert set(cancelled) == set(started)
+        assert attack.execute_with_context_async.await_count == 2
+
+        attack.execute_with_context_async.reset_mock()
+        attack.execute_with_context_async.side_effect = lambda *, context: create_attack_result(
+            context.params.objective
+        )
+        result = await executor.execute_attack_async(
+            attack=attack,
+            objectives=["A", "B", "C"],
+        )
+
+        assert [item.objective for item in result.completed_results] == ["A", "B", "C"]
+        assert result.incomplete_objectives == []
+        assert attack.execute_with_context_async.await_count == 3
+
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestExecuteAttackFromSeedGroupsAsync:
