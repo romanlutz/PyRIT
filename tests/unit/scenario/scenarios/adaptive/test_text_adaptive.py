@@ -412,6 +412,64 @@ class TestTextAdaptiveAtomicAttacks:
         assert estimate.adaptive_details.techniques_per_objective_upper_bound == max_attempts
         assert estimate.adaptive_details.technique_attempt_count_upper_bound == expected_attempts
 
+    @pytest.mark.parametrize(("aggregate_name", "expected_candidate_count"), [("light", 9), ("core", 14)])
+    async def test_aggregate_attempt_bound_increases_until_distinct_candidate_count(
+        self,
+        mock_objective_target,
+        mock_objective_scorer,
+        aggregate_name,
+        expected_candidate_count,
+    ):
+        technique_class = TextAdaptive.get_technique_class()
+        aggregate = technique_class(aggregate_name)
+        selected_names = {technique.value for technique in technique_class.expand({aggregate})}
+        assert len(selected_names) == expected_candidate_count
+
+        shared_attack_identifier = _mock_id("SharedAttackImplementation")
+        factories = {
+            name: _make_fake_factory(
+                attack_identifier=shared_attack_identifier,
+                factory_identifier=_mock_id(f"Factory_{name}"),
+            )
+            for name in selected_names
+        }
+        groups = {"adaptive": [_make_seed_group(value=f"obj-{index}") for index in range(21)]}
+        summaries = [
+            ScenarioDatasetSummary(
+                name="adaptive",
+                logical_seed_group_count=21,
+                selected_seed_group_count=21,
+            )
+        ]
+        scenario = TextAdaptive(objective_scorer=mock_objective_scorer)
+        scenario._resolve_dataset_groups_for_estimate_async = AsyncMock(return_value=(groups, summaries))
+        effective_caps: list[int] = []
+
+        with patch.object(scenario, "_get_attack_technique_factories", return_value=factories):
+            for limit in range(1, expected_candidate_count + 3):
+                scenario.set_params_from_args(
+                    args={
+                        "objective_target": mock_objective_target,
+                        "scenario_techniques": [aggregate],
+                        "include_baseline": False,
+                        "max_attempts_per_objective": limit,
+                    }
+                )
+                estimate = await scenario.get_run_size_estimate_async()
+
+                assert estimate.adaptive_details is not None
+                expected_effective_cap = min(limit, expected_candidate_count)
+                effective_caps.append(estimate.adaptive_details.techniques_per_objective_upper_bound)
+                assert estimate.adaptive_details.candidate_technique_count == expected_candidate_count
+                assert estimate.adaptive_details.techniques_per_objective_upper_bound == expected_effective_cap
+                assert estimate.adaptive_details.technique_attempt_count_upper_bound == 21 * expected_effective_cap
+
+        assert effective_caps == [
+            *range(1, expected_candidate_count + 1),
+            expected_candidate_count,
+            expected_candidate_count,
+        ]
+
     def test_exact_duplicate_registered_technique_dedupes_only_itself(
         self,
         mock_objective_target,
