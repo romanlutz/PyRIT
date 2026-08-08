@@ -17,6 +17,7 @@ from pyrit.executor.capability import (
     ToolExecutionError,
     ToolExecutionOutput,
     ToolExecutionStatus,
+    ToolImplementation,
     ToolRegistry,
 )
 from pyrit.sandbox.models import (
@@ -37,10 +38,30 @@ if TYPE_CHECKING:
 class SandboxToolAdapter:
     """Register exec, read, and write tools bound to one sandbox session."""
 
-    def __init__(self, *, session: SandboxSession, default_environment: str | None = None) -> None:
-        """Initialize a session-bound adapter."""
+    def __init__(
+        self,
+        *,
+        session: SandboxSession,
+        default_environment: str | None = None,
+        allowed_environments: tuple[str, ...] = (),
+        default_user: str | None = None,
+        allow_user_override: bool = True,
+        include_file_tools: bool = True,
+    ) -> None:
+        """
+        Initialize a session-bound adapter.
+
+        Raises:
+            ValueError: If a default environment is configured without an allowlist.
+        """
+        if default_environment is not None and not allowed_environments:
+            raise ValueError("A default sandbox environment requires a non-empty environment allowlist.")
         self._session = session
         self._default_environment = default_environment
+        self._allowed_environments = frozenset(allowed_environments)
+        self._default_user = default_user
+        self._allow_user_override = allow_user_override
+        self._include_file_tools = include_file_tools
 
     def register(self, *, registry: ToolRegistry, prefix: str = "sandbox") -> tuple[str, ...]:
         """
@@ -49,7 +70,7 @@ class SandboxToolAdapter:
         Returns:
             tuple[str, ...]: Registered tool names.
         """
-        bindings = (
+        bindings: list[tuple[ToolDeclaration, ToolImplementation]] = [
             (
                 ToolDeclaration(
                     name=f"{prefix}_exec",
@@ -58,23 +79,28 @@ class SandboxToolAdapter:
                 ),
                 _SandboxExecTool(adapter=self),
             ),
-            (
-                ToolDeclaration(
-                    name=f"{prefix}_read_file",
-                    description="Read a binary file from a sandbox environment as base64.",
-                    input_schema=_read_schema(),
-                ),
-                _SandboxReadTool(adapter=self),
-            ),
-            (
-                ToolDeclaration(
-                    name=f"{prefix}_write_file",
-                    description="Write base64-encoded binary data to a sandbox environment.",
-                    input_schema=_write_schema(),
-                ),
-                _SandboxWriteTool(adapter=self),
-            ),
-        )
+        ]
+        if self._include_file_tools:
+            bindings.extend(
+                (
+                    (
+                        ToolDeclaration(
+                            name=f"{prefix}_read_file",
+                            description="Read a binary file from a sandbox environment as base64.",
+                            input_schema=_read_schema(),
+                        ),
+                        _SandboxReadTool(adapter=self),
+                    ),
+                    (
+                        ToolDeclaration(
+                            name=f"{prefix}_write_file",
+                            description="Write base64-encoded binary data to a sandbox environment.",
+                            input_schema=_write_schema(),
+                        ),
+                        _SandboxWriteTool(adapter=self),
+                    ),
+                )
+            )
         for declaration, implementation in bindings:
             registry.register(declaration=declaration, implementation=implementation)
         return tuple(declaration.name for declaration, _ in bindings)
@@ -89,13 +115,36 @@ class SandboxToolAdapter:
         Raises:
             ToolExecutionError: If the requested environment is unavailable.
         """
+        requested = name or self._default_environment
+        if self._allowed_environments and requested not in self._allowed_environments:
+            raise ToolExecutionError(
+                code="environment_not_allowed",
+                message="Requested sandbox environment is not exposed to model tools.",
+            )
         try:
-            return self._session.get_environment(name or self._default_environment)
+            return self._session.get_environment(requested)
         except KeyError as error:
             raise ToolExecutionError(
                 code="environment_not_found",
                 message="Requested sandbox environment is not available.",
             ) from error
+
+    def user(self, requested: str | None) -> str | None:
+        """
+        Resolve the execution user according to this binding's policy.
+
+        Returns:
+            str | None: The explicit or configured default user.
+
+        Raises:
+            ToolExecutionError: If an explicit user override is prohibited.
+        """
+        if requested is not None and not self._allow_user_override:
+            raise ToolExecutionError(
+                code="user_override_not_allowed",
+                message="Sandbox user override is disabled for this tool binding.",
+            )
+        return requested or self._default_user
 
 
 class _SandboxExecTool:
@@ -128,7 +177,7 @@ class _SandboxExecTool:
                 stdin=_optional_base64(arguments=arguments, name="stdin_base64"),
                 environment=_string_mapping(arguments=arguments, name="env"),
                 cwd=_optional_string(arguments=arguments, name="cwd"),
-                user=_optional_string(arguments=arguments, name="user"),
+                user=self._adapter.user(_optional_string(arguments=arguments, name="user")),
                 timeout_seconds=_optional_float(arguments=arguments, name="timeout_seconds"),
             )
         except (ValidationError, ValueError) as error:

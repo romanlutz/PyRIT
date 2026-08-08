@@ -64,6 +64,35 @@ def test_load_manifest_json_roundtrip() -> None:
     assert loaded == manifest
 
 
+def test_load_manifest_json_migrates_frozen_v1_shape() -> None:
+    data = dump_manifest_json(_manifest())
+    data["schema_version"] = 1
+    case = data["cases"][0]
+    for field in (
+        "sandbox_tools_default_environment",
+        "sandbox_tools_allowed_environments",
+        "sandbox_tools_default_user",
+        "sandbox_tools_allow_user_override",
+        "sandbox_tools_include_file_tools",
+        "runnable",
+        "unsupported_reason",
+    ):
+        case.pop(field)
+    case["scorers"] = [
+        {
+            "kind": "sandbox_command",
+            "config": {"environment": "victim", "argv": ["echo", "ready"]},
+        }
+    ]
+
+    loaded = load_manifest_json(data)
+
+    assert loaded.schema_version == CURRENT_MANIFEST_SCHEMA_VERSION
+    assert loaded.cases[0].sandbox_tools_include_file_tools is True
+    assert loaded.cases[0].runnable is True
+    assert loaded.cases[0].scorers[0].required_environments == ("victim",)
+
+
 def test_load_manifest_json_text_and_file_roundtrip(tmp_path: Path) -> None:
     manifest = _manifest()
     text = json.dumps(dump_manifest_json(manifest))

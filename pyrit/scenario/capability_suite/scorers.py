@@ -145,6 +145,36 @@ class SandboxCommandScorerConfig(BaseModel):
         return self
 
 
+class SandboxStateMatchMode(str, Enum):
+    """How live sandbox command output is compared with the final model response."""
+
+    EXACT = "exact"
+    STATE_IN_RESPONSE = "state_in_response"
+    RESPONSE_IN_STATE = "response_in_state"
+
+
+class SandboxStateMatchScorerConfig(BaseModel):
+    """Strict manifest configuration for ``SandboxStateMatchScorer``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    argv: tuple[str, ...] | None = None
+    shell_script: str | None = None
+    environment: str | None = None
+    expected_exit_code: int = 0
+    mode: SandboxStateMatchMode = SandboxStateMatchMode.STATE_IN_RESPONSE
+    case_sensitive: bool = True
+    category: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_command(self) -> SandboxStateMatchScorerConfig:
+        if (self.argv is None) == (self.shell_script is None):
+            raise ValueError("Exactly one of 'argv' or 'shell_script' must be provided.")
+        if self.argv is not None and not self.argv:
+            raise ValueError("'argv' must contain at least one element.")
+        return self
+
+
 def _final_message_text(*, result: CapabilityTaskResult, memory: MemoryInterface) -> str:
     pieces = memory.get_message_pieces(prompt_ids=list(result.final_message_piece_ids))
     by_id = {piece.id: piece for piece in pieces}
@@ -433,3 +463,105 @@ class SandboxCommandScorer:
                 objective=objective,
             )
         ]
+
+
+class SandboxStateMatchScorer:
+    """Compare final model text with dynamic state read from a live sandbox command."""
+
+    def __init__(
+        self,
+        *,
+        argv: tuple[str, ...] | None = None,
+        shell_script: str | None = None,
+        environment: str | None = None,
+        expected_exit_code: int = 0,
+        mode: SandboxStateMatchMode = SandboxStateMatchMode.STATE_IN_RESPONSE,
+        case_sensitive: bool = True,
+        category: str | None = None,
+        memory: MemoryInterface | None = None,
+    ) -> None:
+        """
+        Initialize the live-state matcher.
+
+        Raises:
+            ValueError: If neither or both of ``argv``/``shell_script`` are provided.
+        """
+        if (argv is None) == (shell_script is None):
+            raise ValueError("Exactly one of 'argv' or 'shell_script' must be provided.")
+        self._argv = argv
+        self._shell_script = shell_script
+        self._environment = environment
+        self._expected_exit_code = expected_exit_code
+        self._mode = mode
+        self._case_sensitive = case_sensitive
+        self._category = category
+        self._memory = memory or CentralMemory.get_memory_instance()
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, JSONValue]) -> SandboxStateMatchScorer:
+        """
+        Build a ``SandboxStateMatchScorer`` from manifest JSON config.
+
+        Returns:
+            SandboxStateMatchScorer: The configured scorer.
+        """
+        parsed = SandboxStateMatchScorerConfig.model_validate(dict(config))
+        return cls(
+            argv=parsed.argv,
+            shell_script=parsed.shell_script,
+            environment=parsed.environment,
+            expected_exit_code=parsed.expected_exit_code,
+            mode=parsed.mode,
+            case_sensitive=parsed.case_sensitive,
+            category=parsed.category,
+        )
+
+    async def score_async(
+        self,
+        *,
+        result: CapabilityTaskResult,
+        objective: str,
+        session: SandboxSession,
+    ) -> list[Score]:
+        """
+        Read sandbox state before cleanup and compare it with the submitted response.
+
+        Returns:
+            list[Score]: A single evidence-aware ``true_false`` score.
+        """
+        environment = session.get_environment(self._environment)
+        exec_result = await environment.exec_async(
+            request=SandboxExecRequest(argv=self._argv, shell_script=self._shell_script)
+        )
+        state = exec_result.stdout.decode("utf-8", errors="replace").strip()
+        response = _final_message_text(result=result, memory=self._memory).strip()
+        command_succeeded = (
+            exec_result.status is SandboxOperationStatus.SUCCEEDED
+            and exec_result.exit_code == self._expected_exit_code
+            and bool(state)
+        )
+        matched = command_succeeded and self._is_match(state=state, response=response)
+        return [
+            Score(
+                score_value=str(matched),
+                score_type="true_false",
+                score_category=[self._category] if self._category else [],
+                score_rationale=(
+                    "SandboxStateMatchScorer compared final response with live sandbox state; "
+                    f"status={exec_result.status.value} exit_code={exec_result.exit_code}."
+                ),
+                message_piece_id=(
+                    result.final_message_piece_ids[-1] if result.final_message_piece_ids else str(result.case_id)
+                ),
+                objective=objective,
+            )
+        ]
+
+    def _is_match(self, *, state: str, response: str) -> bool:
+        if not self._case_sensitive:
+            state, response = state.lower(), response.lower()
+        if self._mode is SandboxStateMatchMode.EXACT:
+            return state == response
+        if self._mode is SandboxStateMatchMode.RESPONSE_IN_STATE:
+            return bool(response) and response in state
+        return state in response

@@ -130,6 +130,20 @@ def test_case_rejects_custom_tool_collision_with_sandbox_tools() -> None:
         _case(sandbox_tools_prefix="sandbox", tools=(tool,))
 
 
+def test_case_requires_sandbox_default_environment_in_allowlist() -> None:
+    with pytest.raises(ValidationError, match="non-empty"):
+        _case(
+            sandbox_tools_prefix="sandbox",
+            sandbox_tools_default_environment="attacker",
+        )
+    with pytest.raises(ValidationError, match="default environment"):
+        _case(
+            sandbox_tools_prefix="sandbox",
+            sandbox_tools_default_environment="attacker",
+            sandbox_tools_allowed_environments=("victim",),
+        )
+
+
 def test_asset_hash_must_be_lowercase_sha256_hex() -> None:
     with pytest.raises(ValidationError):
         CaseAssetManifest(asset_id="a1", source="s.txt", sha256="g" * 64, destination="d.txt")

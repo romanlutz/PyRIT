@@ -18,6 +18,7 @@ register only what they choose to allow.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,10 @@ if TYPE_CHECKING:
     from pyrit.executor.capability import CapabilityEvidenceSink, ToolImplementation
     from pyrit.models import JSONValue
     from pyrit.sandbox import SandboxProvider, SandboxSession
-    from pyrit.scenario.capability_suite.manifest import SandboxProviderManifest
+    from pyrit.scenario.capability_suite.manifest import (
+        DockerSandboxProviderManifestConfig,
+        SandboxProviderManifest,
+    )
     from pyrit.scenario.capability_suite.scorers import CapabilitySuiteScorer
 
 
@@ -114,6 +118,7 @@ def build_default_sandbox_provider_registry(
         from pyrit.sandbox import DockerSandboxProvider
 
         assert isinstance(config, DockerSandboxProviderManifestConfig)
+        _verify_docker_build_context(config)
         return DockerSandboxProvider(config=config.config, evidence_sink=evidence_sink)
 
     def _build_hyperv(config: SandboxProviderManifest) -> SandboxProvider:
@@ -126,6 +131,26 @@ def build_default_sandbox_provider_registry(
     registry.register(provider_type="docker", factory=_build_docker)
     registry.register(provider_type="hyperv", factory=_build_hyperv)
     return registry
+
+
+def _verify_docker_build_context(config: DockerSandboxProviderManifestConfig) -> None:
+    if not config.build_context_assets:
+        return
+    root = config.config.project_context
+    if root is None:
+        raise ValueError("Docker build-context integrity records require config.project_context.")
+    resolved_root = root.resolve()
+    for asset in config.build_context_assets:
+        path = (resolved_root / asset.source).resolve()
+        if resolved_root not in path.parents:
+            raise ValueError(f"Docker build-context asset '{asset.source}' escapes project_context.")
+        if not path.is_file():
+            raise ValueError(f"Docker build-context asset '{asset.source}' does not exist.")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != asset.sha256:
+            raise ValueError(
+                f"Docker build-context asset '{asset.source}' sha256 mismatch: expected {asset.sha256}, got {actual}."
+            )
 
 
 ToolImplementationFactory = Callable[[Mapping[str, "JSONValue"], "SandboxSession"], "ToolImplementation"]
@@ -214,8 +239,9 @@ def build_default_scorer_registry() -> CapabilitySuiteScorerFactoryRegistry:
     """
     Build a registry with PyRIT's built-in native scorer kinds pre-registered.
 
-    Registers ``"text_match"``, ``"tool_evidence"``, ``"sandbox_file"``, and
-    ``"sandbox_command"``. To compose an *existing* ``pyrit.score.Scorer`` (the
+    Registers ``"text_match"``, ``"tool_evidence"``, ``"sandbox_file"``,
+    ``"sandbox_command"``, and ``"sandbox_state_match"``. To compose an *existing*
+    ``pyrit.score.Scorer`` (the
     "existing scorer adapter" seam), register an additional kind whose factory wraps
     an already-constructed scorer, e.g.::
 
@@ -236,6 +262,7 @@ def build_default_scorer_registry() -> CapabilitySuiteScorerFactoryRegistry:
         ResultOnlyScorerAdapter,
         SandboxCommandScorer,
         SandboxFileScorer,
+        SandboxStateMatchScorer,
         TextMatchScorer,
         ToolEvidenceScorer,
     )
@@ -251,4 +278,8 @@ def build_default_scorer_registry() -> CapabilitySuiteScorerFactoryRegistry:
     )
     registry.register(kind="sandbox_file", factory=lambda config: SandboxFileScorer.from_config(config))
     registry.register(kind="sandbox_command", factory=lambda config: SandboxCommandScorer.from_config(config))
+    registry.register(
+        kind="sandbox_state_match",
+        factory=lambda config: SandboxStateMatchScorer.from_config(config),
+    )
     return registry

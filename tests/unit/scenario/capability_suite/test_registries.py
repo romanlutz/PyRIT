@@ -32,6 +32,7 @@ from pyrit.scenario.capability_suite.scorers import (
     ResultOnlyScorerAdapter,
     SandboxCommandScorer,
     SandboxFileScorer,
+    SandboxStateMatchScorer,
 )
 
 
@@ -112,3 +113,6 @@ def test_build_default_scorer_registry_resolves_all_builtin_kinds(patch_central_
 
     sandbox_command = registry.build(kind="sandbox_command", config={"argv": ["echo", "hi"]})
     assert isinstance(sandbox_command, SandboxCommandScorer)
+
+    sandbox_state_match = registry.build(kind="sandbox_state_match", config={"argv": ["cat", "/flag.txt"]})
+    assert isinstance(sandbox_state_match, SandboxStateMatchScorer)

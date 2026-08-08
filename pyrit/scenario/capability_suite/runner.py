@@ -171,7 +171,14 @@ class CapabilitySuiteRunner:
         Returns:
             CapabilitySuiteRunResult: Every preserved attempt record plus the computed
             aggregate, alongside the manifest's content hash for provenance.
+
+        Raises:
+            ValueError: If any case is explicitly marked non-runnable.
         """
+        unsupported = tuple(case for case in self._manifest.cases if not case.runnable)
+        if unsupported:
+            details = "; ".join(f"{case.case_id}: {case.unsupported_reason}" for case in unsupported)
+            raise ValueError(f"Capability suite contains non-runnable cases: {details}")
         content_hash = manifest_hash(self._manifest)
         run_id = run_id or f"capability-suite-{content_hash[:32]}"
         provider = self._sandbox_provider_registry.build(self._manifest.sandbox_provider)
@@ -483,6 +490,10 @@ class CapabilitySuiteRunner:
     ) -> SandboxSessionSpec:
         environment_names = {asset.environment or "default" for asset in case.assets}
         environment_names.update(step.environment or "default" for step in case.setup)
+        environment_names.update(environment for scorer in case.scorers for environment in scorer.required_environments)
+        if case.sandbox_tools_default_environment is not None:
+            environment_names.add(case.sandbox_tools_default_environment)
+        environment_names.update(case.sandbox_tools_allowed_environments)
         environment_names.add("default")
 
         setup_files: dict[str, list[SandboxSetupFile]] = {name: [] for name in environment_names}
@@ -535,7 +546,14 @@ class CapabilitySuiteRunner:
 
     def _bind_tools(self, *, case: CapabilityCaseManifest, session: SandboxSession, registry: ToolRegistry) -> None:
         if case.sandbox_tools_prefix is not None:
-            SandboxToolAdapter(session=session).register(registry=registry, prefix=case.sandbox_tools_prefix)
+            SandboxToolAdapter(
+                session=session,
+                default_environment=case.sandbox_tools_default_environment,
+                allowed_environments=case.sandbox_tools_allowed_environments,
+                default_user=case.sandbox_tools_default_user,
+                allow_user_override=case.sandbox_tools_allow_user_override,
+                include_file_tools=case.sandbox_tools_include_file_tools,
+            ).register(registry=registry, prefix=case.sandbox_tools_prefix)
         for tool in case.tools:
             if self._tool_implementation_registry is None:
                 raise ValueError(
@@ -570,13 +588,14 @@ class CapabilitySuiteRunner:
         )
         required_tools = [tool.declaration.name for tool in case.tools]
         if case.sandbox_tools_prefix is not None:
-            required_tools.extend(
-                (
-                    f"{case.sandbox_tools_prefix}_exec",
-                    f"{case.sandbox_tools_prefix}_read_file",
-                    f"{case.sandbox_tools_prefix}_write_file",
+            required_tools.append(f"{case.sandbox_tools_prefix}_exec")
+            if case.sandbox_tools_include_file_tools:
+                required_tools.extend(
+                    (
+                        f"{case.sandbox_tools_prefix}_read_file",
+                        f"{case.sandbox_tools_prefix}_write_file",
+                    )
                 )
-            )
         environment_references = {asset.environment or "default" for asset in case.assets} | {
             step.environment or "default" for step in case.setup
         }

@@ -43,7 +43,7 @@ from pyrit.sandbox import (
 #: The schema version this build of PyRIT natively understands. Raw JSON at an older
 #: version is migrated forward (see ``serialization.load_manifest_json``); raw JSON at
 #: a newer version is rejected.
-CURRENT_MANIFEST_SCHEMA_VERSION = 1
+CURRENT_MANIFEST_SCHEMA_VERSION = 2
 
 _SYMBOL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -207,6 +207,13 @@ class CaseScorerManifest(BaseModel):
 
     kind: str = Field(min_length=1, pattern=_SYMBOL_PATTERN)
     config: dict[str, JSONValue] = Field(default_factory=dict)
+    required_environments: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_unique_required_environments(self) -> CaseScorerManifest:
+        if len(self.required_environments) != len(set(self.required_environments)):
+            raise ValueError(f"Scorer '{self.kind}' has duplicate required environment names.")
+        return self
 
 
 class LocalSandboxProviderManifestConfig(BaseModel):
@@ -267,6 +274,11 @@ class CapabilityCaseManifest(BaseModel):
     assets: tuple[CaseAssetManifest, ...] = ()
     tools: tuple[CaseToolManifest, ...] = ()
     sandbox_tools_prefix: str | None = None
+    sandbox_tools_default_environment: str | None = None
+    sandbox_tools_allowed_environments: tuple[str, ...] = ()
+    sandbox_tools_default_user: str | None = None
+    sandbox_tools_allow_user_override: bool = True
+    sandbox_tools_include_file_tools: bool = True
     setup: tuple[CaseSetupStepManifest, ...] = ()
     limits: CapabilityLimits = Field(default_factory=CapabilityLimits)
     scorers: tuple[CaseScorerManifest, ...] = ()
@@ -274,6 +286,8 @@ class CapabilityCaseManifest(BaseModel):
     source: CapabilitySource | None = None
     tags: tuple[str, ...] = ()
     metadata: dict[str, JSONValue] = Field(default_factory=dict)
+    runnable: bool = True
+    unsupported_reason: str | None = None
 
     @model_validator(mode="after")
     def _validate_unique_asset_ids(self) -> CapabilityCaseManifest:
@@ -294,6 +308,23 @@ class CapabilityCaseManifest(BaseModel):
                 raise ValueError(
                     f"Case '{self.case_id}' custom tools collide with sandbox tool names: {', '.join(collisions)}."
                 )
+        elif (
+            self.sandbox_tools_default_environment is not None
+            or self.sandbox_tools_allowed_environments
+            or self.sandbox_tools_default_user is not None
+        ):
+            raise ValueError("Sandbox tool environment restrictions require 'sandbox_tools_prefix'.")
+        if len(self.sandbox_tools_allowed_environments) != len(set(self.sandbox_tools_allowed_environments)):
+            raise ValueError(f"Case '{self.case_id}' has duplicate sandbox tool environment names.")
+        if self.sandbox_tools_default_environment is not None:
+            if not self.sandbox_tools_allowed_environments:
+                raise ValueError("Sandbox tool default environment requires a non-empty allowed environment list.")
+            if self.sandbox_tools_default_environment not in self.sandbox_tools_allowed_environments:
+                raise ValueError("Sandbox tool default environment must be present in the allowed environment list.")
+        if self.sandbox_tools_default_user is not None and self.sandbox_tools_include_file_tools:
+            raise ValueError("Sandbox file tools must be disabled when a default execution user is configured.")
+        if self.runnable == (self.unsupported_reason is not None):
+            raise ValueError("Non-runnable cases require exactly one 'unsupported_reason'.")
         return self
 
 

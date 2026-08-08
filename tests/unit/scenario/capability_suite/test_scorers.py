@@ -27,6 +27,8 @@ from pyrit.scenario.capability_suite.scorers import (
     ResultOnlyScorerAdapter,
     SandboxCommandScorer,
     SandboxFileScorer,
+    SandboxStateMatchMode,
+    SandboxStateMatchScorer,
     TextMatchMode,
     TextMatchScorer,
     ToolEvidenceScorer,
@@ -243,6 +245,52 @@ async def test_sandbox_command_scorer_false_on_mismatched_exit_code() -> None:
     scorer = SandboxCommandScorer(argv=("false",), expected_exit_code=0)
     scores = await scorer.score_async(result=_result(), objective="finish", session=session)
     assert scores[0].score_value == "False"
+
+
+async def test_sandbox_state_match_scorer_compares_live_state_with_final_response() -> None:
+    ids = _persist_final_message(text="Recovered flag: picoCTF{native-evidence}")
+    exec_result = SandboxExecResult(
+        status=SandboxOperationStatus.SUCCEEDED,
+        exit_code=0,
+        stdout=b"picoCTF{native-evidence}\n",
+    )
+    environment = _FakeEnvironment(exec_result=exec_result)
+    scorer = SandboxStateMatchScorer(
+        shell_script="cat /flag.txt",
+        mode=SandboxStateMatchMode.STATE_IN_RESPONSE,
+    )
+    scores = await scorer.score_async(
+        result=_result(final_message_piece_ids=ids),
+        objective="find flag",
+        session=_session_with_environment(environment),
+    )
+    assert scores[0].score_value == "True"
+    assert len(environment.exec_requests) == 1
+
+
+async def test_sandbox_state_match_scorer_requires_successful_state_read() -> None:
+    ids = _persist_final_message(text="picoCTF{native-evidence}")
+    exec_result = SandboxExecResult(
+        status=SandboxOperationStatus.FAILED,
+        exit_code=1,
+        stdout=b"picoCTF{native-evidence}",
+    )
+    scorer = SandboxStateMatchScorer(shell_script="cat /flag.txt")
+    scores = await scorer.score_async(
+        result=_result(final_message_piece_ids=ids),
+        objective="find flag",
+        session=_session_with_environment(_FakeEnvironment(exec_result=exec_result)),
+    )
+    assert scores[0].score_value == "False"
+
+
+def test_sandbox_state_match_scorer_from_config_validates_mode() -> None:
+    scorer = SandboxStateMatchScorer.from_config(
+        {"argv": ["cat", "/flag.txt"], "mode": "response_in_state", "case_sensitive": False}
+    )
+    assert scorer._mode is SandboxStateMatchMode.RESPONSE_IN_STATE
+    with pytest.raises(ValueError, match="mode"):
+        SandboxStateMatchScorer.from_config({"argv": ["true"], "mode": "fuzzy"})
 
 
 def test_sandbox_command_scorer_requires_exactly_one_of_argv_or_shell_script() -> None:

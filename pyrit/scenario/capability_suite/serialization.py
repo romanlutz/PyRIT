@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 from pyrit.scenario.capability_suite.manifest import (
@@ -34,6 +35,33 @@ class UnsupportedManifestVersionError(Exception):
 
 
 _MIGRATIONS: dict[int, ManifestMigration] = {}
+
+
+def _migrate_v1_to_v2(raw: JSONDict) -> JSONDict:
+    migrated = deepcopy(raw)
+    cases = migrated.get("cases")
+    if isinstance(cases, list):
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            scorers = case.get("scorers")
+            if not isinstance(scorers, list):
+                continue
+            for scorer in scorers:
+                if not isinstance(scorer, dict):
+                    continue
+                config = scorer.get("config")
+                environment = (
+                    config.get("environment")
+                    if scorer.get("kind") in {"sandbox_file", "sandbox_command"} and isinstance(config, dict)
+                    else None
+                )
+                scorer["required_environments"] = [environment] if isinstance(environment, str) else []
+    migrated["schema_version"] = 2
+    return migrated
+
+
+_BUILTIN_MIGRATIONS: dict[int, ManifestMigration] = {1: _migrate_v1_to_v2}
 
 
 def register_migration(*, from_version: int, migrate: ManifestMigration) -> None:
@@ -119,7 +147,7 @@ def load_manifest_json(data: Mapping[str, Any] | str | bytes) -> CapabilitySuite
             f"Manifest schema_version {version} is newer than the supported version {CURRENT_MANIFEST_SCHEMA_VERSION}."
         )
     while version < CURRENT_MANIFEST_SCHEMA_VERSION:
-        migrate = _MIGRATIONS.get(version)
+        migrate = _MIGRATIONS.get(version) or _BUILTIN_MIGRATIONS.get(version)
         if migrate is None:
             raise UnsupportedManifestVersionError(
                 f"No migration is registered from manifest schema_version {version} to "
