@@ -127,9 +127,9 @@ describe('ScenarioRunEstimate', () => {
     }))
 
     const equation = screen.getByTestId('run-calculation')
-    expect(equation).toHaveTextContent('(4techniques×4objectives)+4direct baseline sends=20planned attacks')
+    expect(equation).toHaveTextContent('(4techniques×4objectives)+4direct baseline attacks=20planned attacks')
     expect(screen.getByRole('group', {
-      name: '( 4 techniques multiplied by 4 objectives ) plus 4 direct baseline sends equals 20 planned attacks.',
+      name: '( 4 techniques multiplied by 4 objectives ) plus 4 direct baseline attacks equals 20 planned attacks.',
     })).toBeInTheDocument()
   })
 
@@ -175,7 +175,7 @@ describe('ScenarioRunEstimate', () => {
     const equation = screen.getByTestId('run-calculation')
     expect(equation).toHaveTextContent('4objectives · Inline jailbreak delivery')
     expect(equation).toHaveTextContent('4objectives · Native system-prompt jailbreak delivery · if supported')
-    expect(equation).toHaveTextContent('4direct baseline sends')
+    expect(equation).toHaveTextContent('4direct baseline attacks')
     expect(equation).toHaveTextContent('12–20planned attacks')
   })
 
@@ -208,12 +208,16 @@ describe('ScenarioRunEstimate', () => {
       name: '21 objectives multiplied by up to 2 techniques per objective, the smaller of 2 selected candidates and limit 3, equals up to 42 technique attempts.',
     })).toBeInTheDocument()
     expect(screen.getByText('2 selected candidates · limit 3')).toBeInTheDocument()
+    expect(screen.getByRole('group', {
+      name: 'Direct baseline comparison is not included: up to 21 Adaptive attacks. Planned total is confirmed at launch.',
+    })).toBeInTheDocument()
+    expect(screen.queryByText('Exact total')).not.toBeInTheDocument()
     expect(screen.getByText(
-      'Progress tracks 21 objectives. Adaptive technique-attempt counts exclude multi-turn target exchanges and retries. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
+      'Technique-attempt totals exclude multi-turn target exchanges and retries. Adaptive stops each objective after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
     )).toBeInTheDocument()
   })
 
-  it('adds direct baseline sends to Adaptive progress without inflating technique attempts', () => {
+  it('shows baseline-aware planned attacks before unchanged Adaptive work', () => {
     const estimate = makeEstimate({
       status: 'conditional',
       total_attack_count: null,
@@ -255,13 +259,121 @@ describe('ScenarioRunEstimate', () => {
     )
 
     expect(screen.getByText('21–42 planned attacks · up to 42 technique attempts')).toBeInTheDocument()
-    expect(screen.getByText(
-      'Attempt ceiling: 21 direct baseline sends + up to 42 adaptive technique attempts = up to 63 attack starts.',
-    )).toBeInTheDocument()
-    expect(screen.getByText(
-      'Progress tracks 21–42 planned attacks: 21 direct baseline sends plus up to 21 adaptive objectives. Adaptive technique-attempt counts exclude multi-turn target exchanges and retries. Each adaptive objective stops after the first successful technique. Compatibility may reduce how many candidates each objective can try.',
-    )).toBeInTheDocument()
+    const plannedEquation = screen.getByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })
+    expect(plannedEquation).toHaveTextContent(
+      '21direct baseline attacks+up to 21Adaptive attacks=21–42planned attacks',
+    )
+    expect(screen.getByRole('heading', { name: 'Planned attacks' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Adaptive work' })).toBeInTheDocument()
+    const adaptiveWork = screen.getByTestId('adaptive-work-calculation')
+    expect(adaptiveWork).toHaveTextContent('21objectives×up to 2techniques per objective')
+    expect(adaptiveWork).toHaveTextContent('=up to 42technique attempts')
+    expect(screen.queryByText(/Attempt ceiling:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Progress tracks/)).not.toBeInTheDocument()
     expect(screen.queryByText(/objective envelope|logical seed groups|selected seed groups/i)).not.toBeInTheDocument()
+  })
+
+  it('removes the baseline term while keeping Adaptive work unchanged', () => {
+    renderDetails(makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: null,
+      maximum_attack_count: 21,
+      components: [
+        {
+          label: 'Adaptive objectives',
+          count: 21,
+          factors: [{ label: 'compatible objectives', count: 21 }],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+      adaptive_details: {
+        objective_count: 21,
+        selected_candidate_technique_count: 14,
+        candidate_technique_count: 14,
+        max_attempts_per_objective: 14,
+        techniques_per_objective_upper_bound: 14,
+        technique_attempt_count_upper_bound: 294,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    }))
+
+    const plannedEquation = screen.getByRole('group', {
+      name: 'Direct baseline comparison is not included: up to 21 Adaptive attacks equals up to 21 planned attacks.',
+    })
+    expect(plannedEquation).toHaveTextContent('up to 21Adaptive attacks=up to 21planned attacks')
+    expect(within(plannedEquation).queryByText(/baseline attack/)).not.toBeInTheDocument()
+    const adaptiveWork = screen.getByTestId('adaptive-work-calculation')
+    expect(adaptiveWork).toHaveTextContent('21objectives×up to 14techniques per objective')
+    expect(adaptiveWork).toHaveTextContent('=up to 294technique attempts')
+  })
+
+  it('renders exact Adaptive planned values without inventing a range', () => {
+    renderDetails(makeEstimate({
+      status: 'exact',
+      total_attack_count: 42,
+      minimum_attack_count: null,
+      maximum_attack_count: null,
+      components: [
+        {
+          label: 'Baseline',
+          count: 21,
+          factors: [{ label: 'objectives', count: 21 }],
+          is_baseline: true,
+          note: null,
+        },
+        {
+          label: 'Adaptive objectives',
+          count: 21,
+          factors: [{ label: 'objectives', count: 21 }],
+          is_baseline: false,
+          note: null,
+        },
+      ],
+      adaptive_details: {
+        objective_count: 21,
+        selected_candidate_technique_count: 14,
+        candidate_technique_count: 14,
+        max_attempts_per_objective: 14,
+        techniques_per_objective_upper_bound: 14,
+        technique_attempt_count_upper_bound: 294,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: false,
+      },
+    }))
+
+    expect(screen.getByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus 21 Adaptive attacks equals 42 planned attacks.',
+    })).toBeInTheDocument()
+    expect(screen.queryByText('21–42')).not.toBeInTheDocument()
+  })
+
+  it('preserves a nonzero Adaptive planned range when no baseline is included', () => {
+    renderDetails(makeEstimate({
+      status: 'conditional',
+      total_attack_count: null,
+      minimum_attack_count: 5,
+      maximum_attack_count: 21,
+      components: [],
+      adaptive_details: {
+        objective_count: 21,
+        selected_candidate_technique_count: 2,
+        candidate_technique_count: 2,
+        max_attempts_per_objective: 2,
+        techniques_per_objective_upper_bound: 2,
+        technique_attempt_count_upper_bound: 42,
+        stop_on_first_success: true,
+        compatibility_may_reduce_attempts: true,
+      },
+    }))
+
+    expect(screen.getByRole('group', {
+      name: 'Direct baseline comparison is not included: 5–21 Adaptive attacks equals 5–21 planned attacks.',
+    })).toBeInTheDocument()
   })
 
   it('uses the configured max when it is lower than the adaptive candidate pool', () => {

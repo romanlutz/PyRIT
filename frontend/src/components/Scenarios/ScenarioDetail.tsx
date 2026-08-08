@@ -942,9 +942,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     && estimateRequestState.status === 'resolved'
     ? estimateRequestState.result
     : null
-  const currentResolvedAdaptiveDetails = currentResolvedEstimate
+  const currentResolvedRunEstimate = currentResolvedEstimate
     && (currentResolvedEstimate.status === 'available' || currentResolvedEstimate.status === 'conditional')
-    ? currentResolvedEstimate.estimate.adaptiveDetails
+    ? currentResolvedEstimate.estimate
+    : null
+  const currentResolvedAdaptiveDetails = currentResolvedRunEstimate
+    ? currentResolvedRunEstimate.adaptiveDetails
     : null
   const adaptiveCandidateMaximum = currentResolvedAdaptiveDetails?.candidateTechniqueCount
     ?? knownAdaptiveCandidateMaximum
@@ -1170,6 +1173,16 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       : undefined)
   const currentAdaptiveLimitValidationState = scopedAdaptiveLimitNotice?.validationState
     ?? (atAdaptiveCandidateMaximum && adaptiveCandidateAvailability ? 'warning' : 'none')
+  const currentBaselineCount = currentResolvedRunEstimate?.components
+    .filter((component) => component.isBaseline)
+    .reduce((sum, component) => sum + component.count, 0)
+  const baselineHint = isBaselineForbidden
+    ? 'This scenario does not support sending objectives directly without an attack technique, so a direct comparison cannot be included.'
+    : baselineChecked && currentBaselineCount
+      ? `Adds ${currentBaselineCount.toLocaleString()} direct ${
+        currentBaselineCount === 1 ? 'baseline attack' : 'baseline attacks'
+      } for the current objectives.`
+      : 'Also send each selected objective directly, without an attack technique. This provides a comparison point for measuring whether the selected techniques improve results and adds one planned attack per objective.'
   const adaptiveCapFeedback = currentResolvedAdaptiveDetails
     ? formatAdaptiveCapFeedback({
         selectedCandidateCount: currentResolvedAdaptiveDetails.selectedCandidateTechniqueCount,
@@ -1352,11 +1365,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               <Text id="baseline-section-title" as="h2" size={400} weight="semibold">
                 Baseline
               </Text>
-              <Field
-                hint={isBaselineForbidden
-                  ? 'This scenario does not support sending objectives directly without an attack technique, so a direct comparison cannot be included.'
-                  : 'Also send each selected objective directly, without an attack technique. This provides a comparison point for measuring whether the selected techniques improve results and adds one planned attack per objective.'}
-              >
+              <Field hint={baselineHint}>
                 <Checkbox
                   className={styles.selectionControl}
                   checked={baselineChecked}

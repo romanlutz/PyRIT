@@ -217,10 +217,76 @@ function resultOperand(estimate: ScenarioRunEstimate): CalculationOperand {
   return { id: 'result', value: 'Exact total', label: 'unavailable', result: true }
 }
 
-function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
+function adaptivePlannedCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   const details = estimate.adaptiveDetails
   if (!details) {
-    throw new Error('Adaptive calculation requires adaptive details.')
+    throw new Error('Adaptive planned calculation requires adaptive details.')
+  }
+  const directBaselineCount = baselineCount(estimate)
+  const hasExactTotal = estimate.total !== null
+    || (
+      estimate.minimum !== null
+      && estimate.maximum !== null
+      && estimate.minimum === estimate.maximum
+    )
+  const hasPlannedTotal = estimate.total !== null
+    || estimate.minimum !== null
+    || estimate.maximum !== null
+  const adaptiveAttackCount = hasExactTotal
+    ? Math.max((estimate.total ?? estimate.maximum ?? 0) - directBaselineCount, 0)
+    : estimate.maximum !== null
+      ? Math.max(estimate.maximum - directBaselineCount, 0)
+      : estimate.minimum !== null
+        ? Math.max(estimate.minimum - directBaselineCount, 0)
+        : details.objectiveCount
+  const hasAdaptiveRange = directBaselineCount === 0
+    && estimate.minimum !== null
+    && estimate.minimum > 0
+    && estimate.maximum !== null
+    && estimate.minimum !== estimate.maximum
+  const adaptiveValue = hasExactTotal
+    ? formatCount(adaptiveAttackCount)
+    : hasAdaptiveRange
+      ? `${formatCount(estimate.minimum ?? 0)}–${formatCount(estimate.maximum ?? 0)}`
+      : estimate.maximum !== null || estimate.minimum === null
+        ? `up to ${formatCount(adaptiveAttackCount)}`
+        : `at least ${formatCount(adaptiveAttackCount)}`
+  const adaptiveLabel = adaptiveAttackCount === 1 ? 'Adaptive attack' : 'Adaptive attacks'
+  const result = resultOperand(estimate)
+  const parts: CalculationPart[] = []
+  if (directBaselineCount > 0) {
+    parts.push(operand(
+      'baseline',
+      formatCount(directBaselineCount),
+      directBaselineCount === 1 ? 'direct baseline attack' : 'direct baseline attacks',
+    ))
+    parts.push(operator('baseline-plus', '+'))
+  }
+  parts.push(operand('adaptive-attacks', adaptiveValue, adaptiveLabel))
+  if (hasPlannedTotal) {
+    parts.push(operator('planned-equals', '='))
+    parts.push({ kind: 'operand', operand: result })
+  }
+
+  const adaptivePhrase = `${adaptiveValue} ${adaptiveLabel}`
+  const resultPhrase = `${result.value} ${result.label}`
+  const plannedResultPhrase = hasPlannedTotal
+    ? ` equals ${resultPhrase}.`
+    : '. Planned total is confirmed at launch.'
+  const accessibleLabel = directBaselineCount > 0
+    ? `Direct baseline comparison is included: ${countLabel(
+      directBaselineCount,
+      'direct baseline attack',
+      'direct baseline attacks',
+    )} plus ${adaptivePhrase}${plannedResultPhrase}`
+    : `Direct baseline comparison is not included: ${adaptivePhrase}${plannedResultPhrase}`
+  return { parts, accessibleLabel }
+}
+
+function adaptiveWorkCalculation(estimate: ScenarioRunEstimate): RunCalculation {
+  const details = estimate.adaptiveDetails
+  if (!details) {
+    throw new Error('Adaptive work calculation requires adaptive details.')
   }
   const objectiveLabel = details.objectiveCount === 1 ? 'objective' : 'objectives'
   const techniqueLabel = details.techniquesPerObjectiveUpperBound === 1
@@ -237,42 +303,6 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   }
   const effectiveCapRule = formatAdaptiveCapMetadata(capProvenance)
   const accessibleCapRule = formatAdaptiveCapAccessibleRule(capProvenance)
-  const directBaselineCount = baselineCount(estimate)
-  const hasPlannedAttackBound = estimate.total !== null
-    || estimate.minimum !== null
-    || estimate.maximum !== null
-  const progressSummary = hasPlannedAttackBound
-    ? formatPlannedAttackSummary(estimate)
-    : countLabel(details.objectiveCount, 'objective', 'objectives')
-  const adaptiveProgressMaximum = estimate.maximum === null
-    ? details.objectiveCount
-    : Math.max(estimate.maximum - directBaselineCount, 0)
-  const progressContext = directBaselineCount > 0
-    ? `Progress tracks ${progressSummary}: ${countLabel(
-      directBaselineCount,
-      'direct baseline send',
-      'direct baseline sends',
-    )} plus up to ${countLabel(adaptiveProgressMaximum, 'adaptive objective', 'adaptive objectives')}.`
-    : `Progress tracks ${progressSummary}.`
-  const compatibilityContext = details.compatibilityMayReduceAttempts
-    ? ' Compatibility may reduce how many candidates each objective can try.'
-    : ''
-  const attemptSummary = directBaselineCount > 0
-    ? `Attempt ceiling: ${countLabel(
-      directBaselineCount,
-      'direct baseline send',
-      'direct baseline sends',
-    )} + up to ${countLabel(
-      details.techniqueAttemptCountUpperBound,
-      'adaptive technique attempt',
-      'adaptive technique attempts',
-    )} = up to ${countLabel(
-      directBaselineCount + details.techniqueAttemptCountUpperBound,
-      'attack start',
-      'attack starts',
-    )}.`
-    : undefined
-  const attemptScopeContext = ' Adaptive technique-attempt counts exclude multi-turn target exchanges and retries.'
   return {
     parts: [
       operand('adaptive-objectives', formatCount(details.objectiveCount), objectiveLabel),
@@ -297,9 +327,18 @@ function adaptiveCalculation(estimate: ScenarioRunEstimate): RunCalculation {
     }, ${accessibleCapRule}, equals up to ${
       countLabel(details.techniqueAttemptCountUpperBound, 'technique attempt', 'technique attempts')
     }.`,
-    summary: attemptSummary,
-    context: `${progressContext}${attemptScopeContext} Each adaptive objective stops after the first successful technique.${compatibilityContext}`,
   }
+}
+
+function adaptiveWorkContext(estimate: ScenarioRunEstimate): string {
+  const details = estimate.adaptiveDetails
+  if (!details) {
+    throw new Error('Adaptive work context requires adaptive details.')
+  }
+  const compatibilityContext = details.compatibilityMayReduceAttempts
+    ? ' Compatibility may reduce how many candidates each objective can try.'
+    : ''
+  return `Technique-attempt totals exclude multi-turn target exchanges and retries. Adaptive stops each objective after the first successful technique.${compatibilityContext}`
 }
 
 function homogeneousTechniqueCalculation(
@@ -390,7 +429,7 @@ function ordinaryCalculation(estimate: ScenarioRunEstimate): RunCalculation {
     parts.push(operand(
       'baseline',
       formatCount(baselineCount),
-      baselineCount === 1 ? 'direct baseline send' : 'direct baseline sends',
+      baselineCount === 1 ? 'direct baseline attack' : 'direct baseline attacks',
     ))
   }
   const result = resultOperand(estimate)
@@ -414,10 +453,6 @@ function ordinaryCalculation(estimate: ScenarioRunEstimate): RunCalculation {
   }
 }
 
-function runCalculation(estimate: ScenarioRunEstimate): RunCalculation {
-  return estimate.adaptiveDetails ? adaptiveCalculation(estimate) : ordinaryCalculation(estimate)
-}
-
 export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummaryProps) {
   const styles = useScenarioRunEstimateStyles()
   const estimate = stateEstimate(state)
@@ -438,24 +473,27 @@ export function ScenarioRunEstimateSummary({ state }: ScenarioRunEstimateSummary
 }
 
 function RunCalculationView({
-  estimate,
+  calculation,
+  heading,
   idPrefix,
+  testId,
 }: {
-  estimate: ScenarioRunEstimate
+  calculation: RunCalculation
+  heading: string
   idPrefix: string
+  testId: string
 }) {
   const styles = useScenarioRunEstimateStyles()
-  const calculation = runCalculation(estimate)
   const headingId = `${idPrefix}-calculation`
 
   return (
     <section className={styles.calculationSection} aria-labelledby={headingId}>
-      <Text as="h4" id={headingId} weight="semibold">Run calculation</Text>
+      <Text as="h4" id={headingId} weight="semibold">{heading}</Text>
       <div
         className={styles.equation}
         role="group"
         aria-label={calculation.accessibleLabel}
-        data-testid="run-calculation"
+        data-testid={testId}
       >
         {calculation.parts.map((part) => part.kind === 'operator' ? (
           <Text
@@ -547,12 +585,37 @@ export function ScenarioRunEstimateDetails({
   }
 
   const { estimate } = state
+  const hasAdaptiveDetails = estimate.adaptiveDetails !== null
   return (
     <div className={styles.details} aria-live="polite">
-      <RunCalculationView estimate={estimate} idPrefix={idPrefix} />
+      {hasAdaptiveDetails ? (
+        <>
+          <RunCalculationView
+            calculation={adaptivePlannedCalculation(estimate)}
+            heading="Planned attacks"
+            idPrefix={`${idPrefix}-planned`}
+            testId="run-calculation"
+          />
+          <RunCalculationView
+            calculation={adaptiveWorkCalculation(estimate)}
+            heading="Adaptive work"
+            idPrefix={`${idPrefix}-adaptive-work`}
+            testId="adaptive-work-calculation"
+          />
+        </>
+      ) : (
+        <RunCalculationView
+          calculation={ordinaryCalculation(estimate)}
+          heading="Run calculation"
+          idPrefix={idPrefix}
+          testId="run-calculation"
+        />
+      )}
       <EstimateSources estimate={estimate} />
       <Text size={200} className={styles.muted}>
-        Retries are {estimate.retriesIncluded ? 'included' : 'not included'}.
+        {hasAdaptiveDetails
+          ? adaptiveWorkContext(estimate)
+          : `Retries are ${estimate.retriesIncluded ? 'included' : 'not included'}.`}
       </Text>
     </div>
   )

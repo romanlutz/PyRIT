@@ -178,19 +178,20 @@ function makeAdaptiveEstimateForRequest(
   const candidateCount = selectedSet === 'core' ? 5 : selectedCandidateCount
   const configuredMax = Number(request.scenario_params?.max_attempts_per_objective ?? 3)
   const perObjective = Math.min(candidateCount, configuredMax)
+  const includeBaseline = request.include_baseline !== false
   return {
     ...makeEstimate(null),
-    minimum_attack_count: 21,
-    maximum_attack_count: 42,
+    minimum_attack_count: includeBaseline ? 21 : null,
+    maximum_attack_count: includeBaseline ? 42 : 21,
     components: [
-      {
+      ...(includeBaseline ? [{
         label: 'Baseline',
         count: 21,
         factors: [{ label: 'objectives', count: 21 }],
         is_baseline: true,
         condition: null,
         note: null,
-      },
+      }] : []),
       {
         label: 'Adaptive objectives',
         count: 21,
@@ -211,6 +212,24 @@ function makeAdaptiveEstimateForRequest(
       compatibility_may_reduce_attempts: true,
     },
   }
+}
+
+function makeFullyCompatibleAdaptiveEstimateForRequest(
+  scenario: RegisteredScenario,
+  request: ScenarioRunSizeEstimateRequest,
+): ScenarioDefaultRunSizeEstimate {
+  const estimate = makeAdaptiveEstimateForRequest(scenario, request)
+  const adaptiveDetails = estimate.adaptive_details
+  if (!adaptiveDetails) {
+    throw new Error('Expected Adaptive estimate details.')
+  }
+  const candidateCount = adaptiveDetails.selected_candidate_technique_count ?? 0
+  const configuredMaximum = adaptiveDetails.max_attempts_per_objective
+  adaptiveDetails.candidate_technique_count = candidateCount
+  adaptiveDetails.techniques_per_objective_upper_bound = Math.min(candidateCount, configuredMaximum)
+  adaptiveDetails.technique_attempt_count_upper_bound =
+    adaptiveDetails.objective_count * adaptiveDetails.techniques_per_objective_upper_bound
+  return estimate
 }
 
 async function flushRenderedPromises(): Promise<void> {
@@ -971,7 +990,8 @@ describe('ScenarioDetail', () => {
     expect(mockEstimateRun.mock.calls.at(-1)?.[1].scenario_params).toEqual({
       max_attempts_per_objective: 1,
     })
-    expect(within(preview).getByText('up to 21')).toBeInTheDocument()
+    expect(within(within(preview).getByTestId('adaptive-work-calculation')).getByText('up to 21'))
+      .toBeInTheDocument()
     expect(screen.getByTestId('launch-scenario-btn')).toBeEnabled()
 
     const correctedRequestCount = mockEstimateRun.mock.calls.length
@@ -1461,6 +1481,140 @@ describe('ScenarioDetail', () => {
     expect(mockStartRun.mock.calls[0][0].include_baseline).toBe(false)
   })
 
+  it('updates Adaptive planned arithmetic ON to OFF to ON while preserving inner work', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> =>
+        makeFullyCompatibleAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    await user.click(await screen.findByLabelText('Core (14 techniques)'))
+    const maxAttempts = await screen.findByRole('spinbutton', {
+      name: 'Maximum techniques per objective',
+    })
+    await waitFor(() => expect(maxAttempts).toHaveAttribute('max', '14'))
+    await user.clear(maxAttempts)
+    await user.type(maxAttempts, '14')
+
+    const preview = screen.getByRole('complementary', { name: 'Run preview' })
+    expect(await within(preview).findByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })).toBeInTheDocument()
+    expect(within(preview).getByTestId('adaptive-work-calculation')).toHaveTextContent(
+      'up to 294technique attempts',
+    )
+    expect(screen.getByText('Adds 21 direct baseline attacks for the current objectives.'))
+      .toBeInTheDocument()
+    expect(within(preview).getByText('Included — direct objective without an attack technique'))
+      .toBeInTheDocument()
+
+    const baselineCheckbox = screen.getByTestId('baseline-checkbox')
+    await user.click(baselineCheckbox)
+    expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
+    expect(within(preview).getByText('Not included')).toBeInTheDocument()
+    expect(await within(preview).findByRole('group', {
+      name: 'Direct baseline comparison is not included: up to 21 Adaptive attacks equals up to 21 planned attacks.',
+    })).toBeInTheDocument()
+    expect(within(preview).getByTestId('adaptive-work-calculation')).toHaveTextContent(
+      'up to 294technique attempts',
+    )
+    expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        include_baseline: false,
+        scenario_params: { max_attempts_per_objective: 14 },
+      }),
+      expect.any(AbortSignal),
+    )
+
+    await user.click(baselineCheckbox)
+    expect(within(preview).getByText('Calculating planned attacks...')).toBeInTheDocument()
+    expect(within(preview).getByText('Included — direct objective without an attack technique'))
+      .toBeInTheDocument()
+    expect(await within(preview).findByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })).toBeInTheDocument()
+    expect(mockEstimateRun).toHaveBeenLastCalledWith(
+      'adaptive.text_adaptive',
+      expect.objectContaining({
+        include_baseline: true,
+        scenario_params: { max_attempts_per_objective: 14 },
+      }),
+      expect.any(AbortSignal),
+    )
+  })
+
+  it('ignores stale Adaptive baseline estimates after a rapid OFF to ON toggle', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> =>
+        makeFullyCompatibleAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+
+    await screen.findByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })
+
+    let resolveOff: ((estimate: ScenarioDefaultRunSizeEstimate) => void) | null = null
+    let resolveOn: ((estimate: ScenarioDefaultRunSizeEstimate) => void) | null = null
+    mockEstimateRun.mockImplementation(
+      async (
+        _scenarioName: string,
+        request: ScenarioRunSizeEstimateRequest,
+      ): Promise<ScenarioDefaultRunSizeEstimate> => await new Promise((resolve) => {
+        if (request.include_baseline === false) {
+          resolveOff = resolve
+        } else {
+          resolveOn = resolve
+        }
+      }),
+    )
+
+    const baselineCheckbox = screen.getByTestId('baseline-checkbox')
+    await user.click(baselineCheckbox)
+    await waitFor(() => expect(resolveOff).not.toBeNull())
+    await user.click(baselineCheckbox)
+    await waitFor(() => expect(resolveOn).not.toBeNull())
+
+    if (!resolveOn || !resolveOff) {
+      throw new Error('Expected both baseline estimate requests to be pending.')
+    }
+    resolveOn(makeFullyCompatibleAdaptiveEstimateForRequest(scenario, {
+      target_name: 'target-a',
+      techniques: ['default'],
+      include_baseline: true,
+    }))
+    await flushRenderedPromises()
+    expect(screen.getByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })).toBeInTheDocument()
+
+    resolveOff(makeFullyCompatibleAdaptiveEstimateForRequest(scenario, {
+      target_name: 'target-a',
+      techniques: ['default'],
+      include_baseline: false,
+    }))
+    await flushRenderedPromises()
+    expect(screen.getByRole('group', {
+      name: 'Direct baseline comparison is included: 21 direct baseline attacks plus up to 21 Adaptive attacks equals 21–42 planned attacks.',
+    })).toBeInTheDocument()
+    expect(screen.queryByRole('group', {
+      name: 'Direct baseline comparison is not included: up to 21 Adaptive attacks equals up to 21 planned attacks.',
+    })).not.toBeInTheDocument()
+  })
+
   it('defaults the baseline checkbox to unchecked when the policy is disabled with include_baseline_by_default false', async () => {
     mockGetScenario.mockResolvedValue(
       makeScenario({ baseline_policy: 'disabled', include_baseline_by_default: false }),
@@ -1473,6 +1627,7 @@ describe('ScenarioDetail', () => {
 
   it('disables and forces the baseline checkbox false when the policy is forbidden', async () => {
     mockGetScenario.mockResolvedValue(makeScenario({ baseline_policy: 'forbidden' }))
+    mockEstimateRun.mockResolvedValue(makeEstimate(8))
     const user = userEvent.setup()
 
     renderDetail('/scenarios/foundry.red_team_agent')
@@ -1485,6 +1640,8 @@ describe('ScenarioDetail', () => {
     expect(screen.getByText(
       /This scenario does not support sending objectives directly without an attack technique/,
     )).toBeInTheDocument()
+    expect(await screen.findByRole('group', { name: '8 planned attacks.' })).toBeInTheDocument()
+    expect(screen.queryByText(/direct baseline attack/)).not.toBeInTheDocument()
 
     await user.click(screen.getByTestId('launch-scenario-btn'))
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
