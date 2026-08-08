@@ -722,6 +722,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const isSubmittingRef = useRef(false)
   const estimateSequenceRef = useRef(0)
   const customTechniquesInitializedRef = useRef(defaultSelection.mode === 'custom')
+  const hasResolvedAdaptiveMetadataRef = useRef(false)
 
   const techniques = useMemo(
     () => techniqueSelection.mode === 'preset'
@@ -857,29 +858,35 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
               : null
           if (usesAdaptiveTechniqueSelection && adaptiveDetails) {
             const maximum = adaptiveDetails.candidateTechniqueCount
+            const hadResolvedAdaptiveMetadata = hasResolvedAdaptiveMetadataRef.current
+            hasResolvedAdaptiveMetadataRef.current = true
             setAdaptiveCandidateMetadata({ scopeKey: adaptiveCandidateScopeKey, maximum })
             const rawValue = scenarioParamValues[MAX_ATTEMPTS_PARAMETER_NAME]
             const parsedValue = typeof rawValue === 'string' && rawValue.trim() !== ''
               ? Number(rawValue)
               : null
+            const configuredValue = parsedValue ?? adaptiveDetails.maxAttemptsPerObjective
             if (
               maximum > 0
-              && parsedValue !== null
-              && Number.isSafeInteger(parsedValue)
-              && parsedValue > maximum
+              && Number.isSafeInteger(configuredValue)
+              && configuredValue > maximum
             ) {
               setScenarioParamValues((current) => ({
                 ...current,
                 [MAX_ATTEMPTS_PARAMETER_NAME]: String(maximum),
               }))
-              setAdaptiveLimitNotice({
-                scopeKey: adaptiveCandidateScopeKey,
-                message: `Reduced to ${maximum.toLocaleString()} because ${
-                  adaptiveSelectionDisplayName
-                } provides ${maximum.toLocaleString()} compatible ${
-                  maximum === 1 ? 'technique' : 'techniques'
-                } for this target.`,
-              })
+              setAdaptiveLimitNotice(
+                hadResolvedAdaptiveMetadata
+                  ? {
+                      scopeKey: adaptiveCandidateScopeKey,
+                      message: `Reduced to ${maximum.toLocaleString()} because ${
+                        adaptiveSelectionDisplayName
+                      } provides ${maximum.toLocaleString()} compatible ${
+                        maximum === 1 ? 'technique' : 'techniques'
+                      } for this target.`,
+                    }
+                  : null,
+              )
             }
           }
           setEstimateRequestState({
@@ -1040,11 +1047,19 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     setValidationError(null)
   }
 
-  const rejectScenarioParamInput = (name: string, reason: RejectedNumberInputReason): void => {
+  const rejectScenarioParamInput = (
+    name: string,
+    reason: RejectedNumberInputReason,
+    retainedValue: string,
+  ): void => {
     if (name !== MAX_ATTEMPTS_PARAMETER_NAME) {
       return
     }
     if (reason === 'above-max' && adaptiveCandidateMaximum !== null) {
+      setScenarioParamValues((current) => ({
+        ...current,
+        [name]: String(adaptiveCandidateMaximum),
+      }))
       setMaxAttemptsInputRejected(false)
       setAdaptiveLimitNotice({
         scopeKey: adaptiveCandidateScopeKey,
@@ -1055,7 +1070,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       setValidationError(null)
       return
     }
-    setScenarioParamValues((current) => ({ ...current, [name]: '' }))
+    setScenarioParamValues((current) => ({ ...current, [name]: retainedValue }))
     setMaxAttemptsInputRejected(true)
     setAdaptiveLimitNotice(null)
     setLaunchMaxAttemptsError(null)

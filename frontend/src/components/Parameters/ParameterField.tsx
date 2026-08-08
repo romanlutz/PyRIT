@@ -26,7 +26,11 @@ export interface ParameterFieldProps {
   numberMax?: number
   numberStep?: number
   numberWholeOnly?: boolean
-  onRejectedNumberInput?: (name: string, reason: RejectedNumberInputReason) => void
+  onRejectedNumberInput?: (
+    name: string,
+    reason: RejectedNumberInputReason,
+    retainedValue: string,
+  ) => void
   /** Prefix for `data-testid` attributes. Defaults to `'param'` (e.g. `param-<name>`). */
   testIdPrefix?: string
 }
@@ -63,6 +67,7 @@ export default function ParameterField({
 }: ParameterFieldProps) {
   const styles = useParameterFieldStyles()
   const rejectedNumberSequenceRef = useRef(false)
+  const editSessionStartValueRef = useRef('')
   const kind = getParameterControlKind(parameter)
   const baseLabel = displayLabel ?? parameter.name
   const label = parameter.required ? `${baseLabel} *` : baseLabel
@@ -139,9 +144,15 @@ export default function ParameterField({
 
   const placeholder = typeof parameter.default === 'string' ? parameter.default : undefined
   const hint = fieldHint ?? (kind === 'list' ? 'Comma-separated list of values.' : parameter.type_name)
-  const rejectNumberInput = (reason: RejectedNumberInputReason): void => {
+  const rejectNumberInput = (
+    reason: RejectedNumberInputReason,
+    retainedValue: string,
+  ): void => {
     rejectedNumberSequenceRef.current = reason !== 'above-max'
-    onRejectedNumberInput?.(parameter.name, reason)
+    if (reason === 'above-max' && numberMax !== undefined) {
+      editSessionStartValueRef.current = String(numberMax)
+    }
+    onRejectedNumberInput?.(parameter.name, reason, retainedValue)
   }
   const handleNumberKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
     if (!numberWholeOnly) {
@@ -172,7 +183,7 @@ export default function ParameterField({
     if (BLOCKED_WHOLE_NUMBER_KEYS.has(event.key)) {
       event.preventDefault()
       event.stopPropagation()
-      rejectNumberInput('format')
+      rejectNumberInput('format', editSessionStartValueRef.current)
       return
     }
     if (rejectedNumberSequenceRef.current && event.key.length === 1) {
@@ -187,33 +198,36 @@ export default function ParameterField({
     const pastedValue = event.clipboardData.getData('text')
     if (!/^\d+$/.test(pastedValue)) {
       event.preventDefault()
-      rejectNumberInput('format')
+      rejectNumberInput('format', stringValue)
       return
     }
     if (numberMax !== undefined && Number(pastedValue) > numberMax) {
       event.preventDefault()
-      rejectNumberInput('above-max')
+      rejectNumberInput('above-max', stringValue)
       return
     }
     if (numberMin !== undefined && Number(pastedValue) < numberMin) {
       event.preventDefault()
-      rejectNumberInput('below-min')
+      rejectNumberInput('below-min', stringValue)
     }
   }
   const handleInputChange = (nextValue: string): void => {
     if (numberWholeOnly && nextValue !== '' && !/^\d+$/.test(nextValue)) {
-      rejectNumberInput('format')
+      rejectNumberInput('format', stringValue)
       return
     }
     if (numberMax !== undefined && nextValue !== '' && Number(nextValue) > numberMax) {
-      rejectNumberInput('above-max')
+      rejectNumberInput('above-max', stringValue)
       return
     }
     if (numberMin !== undefined && nextValue !== '' && Number(nextValue) < numberMin) {
-      rejectNumberInput('below-min')
+      rejectNumberInput('below-min', stringValue)
       return
     }
     rejectedNumberSequenceRef.current = false
+    if (nextValue === '') {
+      editSessionStartValueRef.current = ''
+    }
     onChange(parameter.name, nextValue)
   }
 
@@ -238,6 +252,9 @@ export default function ParameterField({
         disabled={disabled}
         onKeyDown={kind === 'number' ? handleNumberKeyDown : undefined}
         onPaste={kind === 'number' ? handleNumberPaste : undefined}
+        onFocus={() => {
+          editSessionStartValueRef.current = stringValue
+        }}
         onBlur={() => {
           rejectedNumberSequenceRef.current = false
         }}
