@@ -65,6 +65,11 @@ function makeScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredSc
       ),
     all_techniques: ['default_technique', 'crescendo'],
     default_datasets: ['harmbench'],
+    dataset_size_limit: {
+      default_scope: 'none',
+      default_count: null,
+      override_scope: 'per_dataset',
+    },
     default_dataset_summaries: [],
     baseline_policy: 'enabled',
     include_baseline_by_default: true,
@@ -153,6 +158,11 @@ function makeAdaptiveScenario(): RegisteredScenario {
     default_technique: 'default',
     default_techniques: defaultMembers,
     default_datasets: defaultDatasets,
+    dataset_size_limit: {
+      default_scope: 'per_dataset',
+      default_count: 4,
+      override_scope: 'per_dataset',
+    },
     aggregate_techniques: ['all', 'default', 'core', 'extra', 'light', 'multi_turn', 'single_turn'],
     aggregate_technique_expansions: aggregateTechniqueExpansions,
     all_techniques: [...new Set(Object.values(aggregateTechniqueExpansions).flat())],
@@ -1711,6 +1721,168 @@ describe('ScenarioDetail', () => {
     expect(request.max_retries).toBe(0)
   })
 
+  it('materializes the adaptive per-dataset default while omitting unchanged and restored overrides', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (_scenarioName, request: ScenarioRunSizeEstimateRequest) =>
+        makeFullyCompatibleAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+
+    const input = screen.getByTestId('advanced-max_dataset_size')
+    expect(input).toHaveValue(4)
+    expect(input).toHaveAttribute('min', '1')
+    expect(input).toHaveAttribute('step', '1')
+    expect(input).toHaveAttribute('inputmode', 'numeric')
+    expect(screen.getByText(
+      'Scenario default: up to 4 objectives from each selected dataset. Enter another whole number to override it, or leave blank to use the scenario default.',
+    )).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('4 per dataset (scenario default)')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenCalled())
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('max_dataset_size')
+
+    await user.clear(input)
+    expect(input).toHaveValue(null)
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('4 per dataset (scenario default)')
+    await user.type(input, '3')
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('3 per dataset (override)')
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1]).toEqual(
+      expect.objectContaining({ max_dataset_size: 3 }),
+    ))
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
+    expect(mockStartRun.mock.calls[0][0].max_dataset_size).toBe(3)
+    mockStartRun.mockClear()
+
+    await user.click(screen.getByTestId('restore-default-dataset-size'))
+    expect(input).toHaveValue(4)
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('4 per dataset (scenario default)')
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1])
+      .not.toHaveProperty('max_dataset_size'))
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
+    expect(mockStartRun.mock.calls[0][0]).not.toHaveProperty('max_dataset_size')
+  })
+
+  it('keeps the inherited per-dataset default while dataset selections change', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (_scenarioName, request: ScenarioRunSizeEstimateRequest) =>
+        makeFullyCompatibleAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await screen.findByTestId('dataset-ds_a')
+
+    await user.click(screen.getByTestId('dataset-airt_hate'))
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1]).toEqual(
+      expect.objectContaining({
+        dataset_names: expect.arrayContaining(['airt_fairness', 'airt_violence']),
+      }),
+    ))
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names).toHaveLength(6)
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('max_dataset_size')
+
+    for (const name of ['airt_fairness', 'airt_violence', 'airt_sexual', 'airt_harassment', 'airt_misinformation']) {
+      await user.click(screen.getByTestId(`dataset-${name}`))
+    }
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names)
+      .toEqual(['airt_leakage']))
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('max_dataset_size')
+
+    await user.click(screen.getByTestId('restore-default-datasets'))
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1])
+      .not.toHaveProperty('dataset_names'))
+    await user.click(screen.getByTestId('dataset-ds_a'))
+    await waitFor(() => expect(mockEstimateRun.mock.calls.at(-1)?.[1].dataset_names)
+      .toEqual([...scenario.default_datasets, 'ds_a']))
+    expect(mockEstimateRun.mock.calls.at(-1)?.[1]).not.toHaveProperty('max_dataset_size')
+
+    await user.click(screen.getByTestId('launch-scenario-btn'))
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
+    expect(mockStartRun.mock.calls[0][0].dataset_names).toEqual([...scenario.default_datasets, 'ds_a'])
+    expect(mockStartRun.mock.calls[0][0]).not.toHaveProperty('max_dataset_size')
+  })
+
+  it('renders accurate combined, no-cap, and heterogeneous dataset limit semantics', async () => {
+    const combinedScenario = makeScenario({
+      default_datasets: ['harmbench', 'xstest'],
+      dataset_size_limit: {
+        default_scope: 'combined',
+        default_count: 5,
+        override_scope: 'combined',
+      },
+    })
+    mockGetScenario.mockResolvedValue(combinedScenario)
+    const user = userEvent.setup()
+    const view = renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByRole('spinbutton', {
+      name: 'Maximum objectives across selected datasets',
+    })).toHaveValue(5)
+    expect(screen.getByText(/Scenario default: up to 5 objectives across the selected datasets/))
+      .toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('5 total (scenario default)')
+
+    view.unmount()
+    mockGetScenario.mockResolvedValue(makeScenario())
+    const noCapView = renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByText(/No scenario default cap/)).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('No additional objective cap')
+
+    noCapView.unmount()
+    mockGetScenario.mockResolvedValue(makeScenario({
+      default_datasets: ['harmbench', 'xstest'],
+      dataset_size_limit: {
+        default_scope: 'heterogeneous',
+        default_count: null,
+        override_scope: 'per_dataset',
+      },
+    }))
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    expect(screen.getByText(/Scenario defaults vary by dataset/)).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('Varies by dataset (scenario default)')
+  })
+
+  it('disables dataset-size overrides when the scenario manages its population directly', async () => {
+    mockGetScenario.mockResolvedValue(makeScenario({
+      dataset_size_limit: {
+        default_scope: 'none',
+        default_count: null,
+        override_scope: 'unsupported',
+      },
+    }))
+    const user = userEvent.setup()
+    renderDetail('/scenarios/foundry.red_team_agent')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+
+    expect(screen.getByRole('spinbutton', { name: 'Maximum objectives' })).toBeDisabled()
+    expect(screen.getByText(
+      'This scenario manages its objective population directly and does not support a dataset-size override.',
+    )).toBeInTheDocument()
+    expect(screen.queryByTestId('restore-default-dataset-size')).not.toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('No additional objective cap')
+  })
+
   it('filters datasets and sends the exact changed selection to estimate and launch', async () => {
     const user = userEvent.setup()
     renderDetail('/scenarios/foundry.red_team_agent')
@@ -1726,7 +1898,7 @@ describe('ScenarioDetail', () => {
     expect(screen.getByRole('complementary', { name: 'Run preview' })).toHaveTextContent('ds_a')
     expect(screen.getByRole('complementary', { name: 'Run preview' })).not.toHaveTextContent('harmbench')
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
-    await user.type(screen.getByTestId('max-dataset-size-input'), '25')
+    await user.type(screen.getByTestId('advanced-max_dataset_size'), '25')
     await user.click(screen.getByTestId('launch-scenario-btn'))
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalled())
@@ -1824,13 +1996,42 @@ describe('ScenarioDetail', () => {
     await user.click(screen.getByRole('button', { name: 'Advanced options' }))
     expect(screen.getByText(/Maximum times to resume the scenario after an exception/)).toBeInTheDocument()
     expect(screen.queryByText(/separate from Adaptive trying another technique/)).not.toBeInTheDocument()
-    await user.type(screen.getByTestId('max-dataset-size-input'), '0')
+    await user.type(screen.getByTestId('advanced-max_dataset_size'), '0')
 
     expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
-    expect(screen.getByText(
-      'Max dataset size must be a positive integer.',
-    )).toBeInTheDocument()
+    expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
     expect(mockStartRun).not.toHaveBeenCalled()
+  })
+
+  it('blocks signed and decimal dataset-size input before it changes the controlled value', async () => {
+    const scenario = makeAdaptiveScenario()
+    mockGetScenario.mockResolvedValue(scenario)
+    mockEstimateRun.mockImplementation(
+      async (_scenarioName, request: ScenarioRunSizeEstimateRequest) =>
+        makeFullyCompatibleAdaptiveEstimateForRequest(scenario, request),
+    )
+    const user = userEvent.setup()
+    renderDetail('/scenarios/adaptive.text_adaptive')
+    await screen.findByTestId('scenario-target-select')
+    await user.click(screen.getByRole('button', { name: 'Advanced options' }))
+    const input = screen.getByTestId('advanced-max_dataset_size')
+    await waitFor(() => expect(mockEstimateRun).toHaveBeenCalled())
+    const requestCount = mockEstimateRun.mock.calls.length
+
+    await user.clear(input)
+    await user.type(input, '-8')
+    expect(input).toHaveValue(null)
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Enter a whole number of 1 or more.')).toBeInTheDocument()
+    await new Promise((resolve) => window.setTimeout(resolve, 350))
+    expect(mockEstimateRun).toHaveBeenCalledTimes(requestCount)
+
+    await user.click(input)
+    await user.paste('1.5')
+    expect(input).toHaveValue(null)
+    expect(screen.getByRole('complementary', { name: 'Run preview' }))
+      .toHaveTextContent('4 per dataset (scenario default)')
+    expect(screen.getByTestId('launch-scenario-btn')).toBeDisabled()
   })
 
   it('validates advanced concurrency and retry bounds before launching', async () => {

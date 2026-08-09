@@ -38,6 +38,7 @@ import type {
   Parameter,
   RegisteredScenario,
   RunScenarioRequest,
+  ScenarioDatasetSizeLimit,
   ScenarioRunEstimateResult,
   ScenarioRunSizeEstimateRequest,
   ScenarioRunEstimateState,
@@ -96,7 +97,16 @@ const MAX_ATTEMPTS_BEHAVIOR_HINT = [
   'This is separate from retries.',
 ].join(' ')
 const MAX_ATTEMPTS_VALIDATION_MESSAGE = 'Enter a whole number of 1 or more.'
+const MAX_DATASET_SIZE_VALIDATION_MESSAGE = 'Enter a whole number of 1 or more.'
 const CORRECT_HIGHLIGHTED_SETTING_MESSAGE = 'Correct the highlighted setting to calculate this run.'
+const MAX_DATASET_SIZE_PARAMETER: Parameter = {
+  name: 'max_dataset_size',
+  type_name: 'int',
+  required: false,
+  default: null,
+  choices: null,
+  is_list: false,
+}
 
 /** Resolves a Fluent `SpinButton` change event to a numeric value, preferring the parsed `value` over the raw `displayValue`. */
 function resolveSpinButtonValue(data: { value?: number | null; displayValue?: string }, previous: number): number {
@@ -185,6 +195,71 @@ function maxAttemptsValidationError(value: ParameterFormValue | undefined): stri
     : MAX_ATTEMPTS_VALIDATION_MESSAGE
 }
 
+function datasetSizeFieldLabel(limit: ScenarioDatasetSizeLimit): string {
+  if (limit.override_scope === 'unsupported') {
+    return 'Maximum objectives'
+  }
+  return limit.override_scope === 'per_dataset'
+    ? 'Maximum objectives per dataset'
+    : 'Maximum objectives across selected datasets'
+}
+
+function datasetSizeHint(limit: ScenarioDatasetSizeLimit): string {
+  if (limit.override_scope === 'unsupported') {
+    return 'This scenario manages its objective population directly and does not support a dataset-size override.'
+  }
+  if (limit.default_scope === 'per_dataset' && limit.default_count !== null) {
+    return `Scenario default: up to ${limit.default_count.toLocaleString()} objectives from each selected dataset. Enter another whole number to override it, or leave blank to use the scenario default.`
+  }
+  if (limit.default_scope === 'combined' && limit.default_count !== null) {
+    return `Scenario default: up to ${limit.default_count.toLocaleString()} objectives across the selected datasets. Enter another whole number to override it, or leave blank to use the scenario default.`
+  }
+  if (limit.default_scope === 'heterogeneous') {
+    const replacement = limit.override_scope === 'per_dataset'
+      ? 'a uniform per-dataset maximum'
+      : 'a combined maximum'
+    return `Scenario defaults vary by dataset. Enter a whole number to replace them with ${replacement}, or leave blank to keep the scenario defaults.`
+  }
+  const scope = limit.override_scope === 'per_dataset'
+    ? 'objectives from each selected dataset'
+    : 'objectives across the selected datasets'
+  return `No scenario default cap. Enter a whole number to limit ${scope}, or leave blank for no additional cap.`
+}
+
+function formatDatasetSizePreview(
+  limit: ScenarioDatasetSizeLimit,
+  maxDatasetSize: string,
+  hasOverride: boolean,
+): string {
+  const parsed = Number(maxDatasetSize.trim())
+  if (hasOverride && Number.isSafeInteger(parsed) && parsed >= 1) {
+    return limit.override_scope === 'per_dataset'
+      ? `${parsed.toLocaleString()} per dataset (override)`
+      : `${parsed.toLocaleString()} total (override)`
+  }
+  if (limit.default_scope === 'per_dataset' && limit.default_count !== null) {
+    return `${limit.default_count.toLocaleString()} per dataset (scenario default)`
+  }
+  if (limit.default_scope === 'combined' && limit.default_count !== null) {
+    return `${limit.default_count.toLocaleString()} total (scenario default)`
+  }
+  if (limit.default_scope === 'heterogeneous') {
+    return 'Varies by dataset (scenario default)'
+  }
+  return 'No additional objective cap'
+}
+
+function maxDatasetSizeValidationError(value: string): string | undefined {
+  const raw = value.trim()
+  if (raw.length === 0) {
+    return undefined
+  }
+  const parsed = Number(raw)
+  return Number.isSafeInteger(parsed) && parsed >= 1
+    ? undefined
+    : MAX_DATASET_SIZE_VALIDATION_MESSAGE
+}
+
 interface BuildRunRequestInput {
   scenario: RegisteredScenario
   targetName: string
@@ -193,6 +268,7 @@ interface BuildRunRequestInput {
   scenarioParamValues: Record<string, ParameterFormValue>
   selectedDatasets: string[]
   maxDatasetSize: string
+  hasMaxDatasetSizeOverride: boolean
   maxConcurrency: number
   maxRetries: number
   includeBaseline: boolean
@@ -262,6 +338,7 @@ function buildRunRequest({
   scenarioParamValues,
   selectedDatasets,
   maxDatasetSize,
+  hasMaxDatasetSizeOverride,
   maxConcurrency,
   maxRetries,
   includeBaseline,
@@ -301,7 +378,12 @@ function buildRunRequest({
     if (!Number.isInteger(parsed) || parsed < 1) {
       return { ok: false, error: 'Max dataset size must be a positive integer.' }
     }
-    maxDatasetSizeValue = parsed
+    if (hasMaxDatasetSizeOverride) {
+      if (scenario.dataset_size_limit.override_scope === 'unsupported') {
+        return { ok: false, error: 'This scenario does not support a dataset-size override.' }
+      }
+      maxDatasetSizeValue = parsed
+    }
   }
   if (
     !Number.isInteger(maxConcurrency)
@@ -700,7 +782,14 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>(() => [...scenario.default_datasets])
   const [datasetCatalogStatus, setDatasetCatalogStatus] = useState<DatasetCatalogStatus>('loading')
   const [datasetCatalogError, setDatasetCatalogError] = useState<string | null>(null)
-  const [maxDatasetSize, setMaxDatasetSize] = useState('')
+  const [maxDatasetSize, setMaxDatasetSize] = useState(() => {
+    const limit = scenario.dataset_size_limit
+    return limit.default_count !== null && limit.default_scope === limit.override_scope
+      ? String(limit.default_count)
+      : ''
+  })
+  const [hasMaxDatasetSizeOverride, setHasMaxDatasetSizeOverride] = useState(false)
+  const [maxDatasetSizeInputRejected, setMaxDatasetSizeInputRejected] = useState(false)
   const [maxConcurrency, setMaxConcurrency] = useState(DEFAULT_MAX_CONCURRENCY)
   const [maxRetries, setMaxRetries] = useState(DEFAULT_MAX_RETRIES)
   const [scenarioParamValues, setScenarioParamValues] = useState<Record<string, ParameterFormValue>>(() => {
@@ -751,6 +840,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       scenarioParamValues,
       selectedDatasets,
       maxDatasetSize,
+      hasMaxDatasetSizeOverride,
       maxConcurrency,
       maxRetries,
       includeBaseline: isBaselineForbidden ? false : baselineChecked,
@@ -763,6 +853,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
       labels,
       maxConcurrency,
       maxDatasetSize,
+      hasMaxDatasetSizeOverride,
       maxRetries,
       scenario,
       scenarioParamValues,
@@ -773,7 +864,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
   )
   const estimateRequest = useMemo(
     () => {
-      if (!requestResult.ok || maxAttemptsInputRejected) {
+      if (!requestResult.ok || maxAttemptsInputRejected || maxDatasetSizeInputRejected) {
         return null
       }
       const request = buildEstimateRequest(requestResult.request)
@@ -798,6 +889,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     [
       knownAdaptiveCandidateMaximum,
       maxAttemptsInputRejected,
+      maxDatasetSizeInputRejected,
       requestResult,
       usesAdaptiveTechniqueSelection,
     ],
@@ -995,9 +1087,12 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     ?? currentEstimateError?.maxAttemptsError
     ?? launchMaxAttemptsError
     ?? undefined
+  const maxDatasetSizeFieldError = maxDatasetSizeInputRejected
+    ? MAX_DATASET_SIZE_VALIDATION_MESSAGE
+    : maxDatasetSizeValidationError(maxDatasetSize)
 
   let estimateState: ScenarioRunEstimateState
-  if (maxAttemptsFieldError) {
+  if (maxAttemptsFieldError || maxDatasetSizeFieldError) {
     estimateState = {
       status: 'unavailable',
       scope: 'request',
@@ -1083,6 +1178,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     if (name !== MAX_ATTEMPTS_PARAMETER_NAME) {
       return
     }
+
     if (reason === 'above-max' && adaptiveCandidateMaximum !== null) {
       setScenarioParamValues((current) => ({
         ...current,
@@ -1105,6 +1201,45 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     setLaunchMaxAttemptsError(null)
     setApiError(null)
     setValidationError(null)
+  }
+
+  const updateMaxDatasetSize = (_name: string, value: ParameterFormValue): void => {
+    const nextValue = typeof value === 'string' ? value : ''
+    const parsed = Number(nextValue.trim())
+    const limit = scenario.dataset_size_limit
+    const matchesRepresentableDefault = nextValue.trim() !== ''
+      && limit.default_count !== null
+      && limit.default_scope === limit.override_scope
+      && parsed === limit.default_count
+    setMaxDatasetSize(nextValue)
+    setHasMaxDatasetSizeOverride(nextValue.trim() !== '' && !matchesRepresentableDefault)
+    setMaxDatasetSizeInputRejected(false)
+    setValidationError(null)
+    setApiError(null)
+  }
+
+  const rejectMaxDatasetSizeInput = (
+    _name: string,
+    _reason: RejectedNumberInputReason,
+    retainedValue: string,
+  ): void => {
+    setMaxDatasetSize(retainedValue)
+    setMaxDatasetSizeInputRejected(true)
+    setValidationError(null)
+    setApiError(null)
+  }
+
+  const restoreDefaultDatasetSize = (): void => {
+    const limit = scenario.dataset_size_limit
+    setMaxDatasetSize(
+      limit.default_count !== null && limit.default_scope === limit.override_scope
+        ? String(limit.default_count)
+        : '',
+    )
+    setHasMaxDatasetSizeOverride(false)
+    setMaxDatasetSizeInputRejected(false)
+    setValidationError(null)
+    setApiError(null)
   }
 
   const handleSubmit = async (): Promise<void> => {
@@ -1158,6 +1293,11 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
     techniqueSelection.mode === 'custom' && customTechniques.length === 0
   const datasetSelectionInvalid = scenario.default_datasets.length > 0 && selectedDatasets.length === 0
   const datasetsAreDefaults = sameStringSet(selectedDatasets, scenario.default_datasets)
+  const datasetSizePreview = formatDatasetSizePreview(
+    scenario.dataset_size_limit,
+    maxDatasetSize,
+    hasMaxDatasetSizeOverride,
+  )
   const presetMembers = techniqueSelection.mode === 'preset'
     ? techniqueSetMembers(scenario, techniqueSelection.preset)
     : []
@@ -1474,20 +1614,35 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                 <AccordionHeader>Advanced options</AccordionHeader>
                 <AccordionPanel>
                   <div className={styles.advancedFields}>
-                    <Field
-                      label="Max dataset size"
-                      hint="Optional cap applied to each selected dataset. Leave blank for no additional cap."
-                    >
-                      <Input
-                        className={styles.numberInput}
-                        type="number"
-                        min={1}
-                        value={maxDatasetSize}
+                    <ParameterField
+                      parameter={MAX_DATASET_SIZE_PARAMETER}
+                      value={maxDatasetSize}
+                      disabled={submitting || scenario.dataset_size_limit.override_scope === 'unsupported'}
+                      onChange={updateMaxDatasetSize}
+                      displayLabel={datasetSizeFieldLabel(scenario.dataset_size_limit)}
+                      displayHint={datasetSizeHint(scenario.dataset_size_limit)}
+                      validationState={maxDatasetSizeFieldError ? 'error' : 'none'}
+                      validationMessage={maxDatasetSizeFieldError}
+                      numberMin={1}
+                      numberStep={1}
+                      numberWholeOnly
+                      onRejectedNumberInput={rejectMaxDatasetSizeInput}
+                      testIdPrefix="advanced"
+                    />
+                    {scenario.dataset_size_limit.override_scope !== 'unsupported'
+                      && (hasMaxDatasetSizeOverride || maxDatasetSize.trim() === '') && (
+                      <Button
+                        className={styles.touchTarget}
+                        appearance="subtle"
+                        icon={<ArrowSyncRegular />}
+                        type="button"
                         disabled={submitting}
-                        onChange={(_, data) => setMaxDatasetSize(data.value)}
-                        data-testid="max-dataset-size-input"
-                      />
-                    </Field>
+                        onClick={restoreDefaultDatasetSize}
+                        data-testid="restore-default-dataset-size"
+                      >
+                        Restore scenario default
+                      </Button>
+                    )}
                     <Field label="Max concurrency">
                       <SpinButton
                         className={styles.numberInput}
@@ -1567,7 +1722,8 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                     </Text>
                     <Text size={200} className={styles.hint}>
                       {datasetsAreDefaults ? 'Scenario defaults' : 'Selected datasets'}
-                      {maxDatasetSize.trim() ? ` · capped at ${maxDatasetSize.trim()} each` : ''}
+                      {' · '}
+                      {datasetSizePreview}
                     </Text>
                   </div>
                 </dd>
@@ -1619,6 +1775,7 @@ function ScenarioLaunchForm({ scenario, targets, activeTarget, labels }: Scenari
                   || datasetSelectionInvalid
                   || !requestResult.ok
                   || Boolean(maxAttemptsFieldError)
+                  || Boolean(maxDatasetSizeFieldError)
                   || estimateRequestBlocked
                   || adaptiveMetadataUnavailable
                   || maxAttemptsExceedsCandidateMaximum

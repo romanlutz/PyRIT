@@ -25,6 +25,7 @@ from pyrit.backend.services.scenario_service import (
 from pyrit.models import (
     Parameter,
     ScenarioDatasetSizeCap,
+    ScenarioDatasetSizeLimit,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -83,6 +84,7 @@ def _make_scenario_metadata(
     default_datasets: tuple[str, ...] = ("test_dataset",),
     baseline_policy: str = "enabled",
     include_baseline_by_default: bool = True,
+    dataset_size_limit: ScenarioDatasetSizeLimit | None = None,
 ) -> ScenarioMetadata:
     """Create a ScenarioMetadata instance for testing."""
     return ScenarioMetadata(
@@ -98,6 +100,7 @@ def _make_scenario_metadata(
         aggregate_techniques=aggregate_techniques,
         aggregate_technique_expansions=aggregate_technique_expansions,
         default_datasets=default_datasets,
+        dataset_size_limit=dataset_size_limit or ScenarioDatasetSizeLimit(),
         baseline_policy=baseline_policy,
         include_baseline_by_default=include_baseline_by_default,
     )
@@ -145,8 +148,27 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].aggregate_technique_expansions["default"] == ["role_play"]
             assert result.items[0].all_techniques == ["role_play", "many_shot"]
             assert result.items[0].default_datasets == ["test_dataset"]
+            assert result.items[0].dataset_size_limit == ScenarioDatasetSizeLimit()
             assert result.items[0].baseline_policy == "enabled"
             assert result.items[0].include_baseline_by_default is True
+
+    async def test_list_scenarios_projects_dataset_size_limit_metadata(self) -> None:
+        """Catalog responses preserve structured scenario-owned limit semantics."""
+        limit = ScenarioDatasetSizeLimit(
+            default_scope="per_dataset",
+            default_count=4,
+            override_scope="per_dataset",
+        )
+        metadata = _make_scenario_metadata(dataset_size_limit=limit)
+
+        with patch.object(ScenarioService, "__init__", lambda self: None):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_all_registered_class_metadata.return_value = [metadata]
+
+            result = await service.list_scenarios_async()
+
+        assert result.items[0].dataset_size_limit == limit
 
     async def test_estimate_is_offloaded_and_cached(self) -> None:
         """Scenario-owned estimates run in a worker once and are reused by subsequent reads."""

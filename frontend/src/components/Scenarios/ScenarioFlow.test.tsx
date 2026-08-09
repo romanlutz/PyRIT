@@ -61,6 +61,11 @@ const SCENARIO: RegisteredScenario = {
   },
   all_techniques: ['crescendo'],
   default_datasets: ['harmbench'],
+  dataset_size_limit: {
+    default_scope: 'none',
+    default_count: null,
+    override_scope: 'per_dataset',
+  },
   default_dataset_summaries: [],
   baseline_policy: 'enabled',
   include_baseline_by_default: true,

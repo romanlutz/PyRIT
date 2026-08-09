@@ -194,6 +194,30 @@ class ScenarioDatasetSummary(BaseModel):
     selection_note: str | None = None
 
 
+class ScenarioDatasetSizeLimit(BaseModel):
+    """Structured default and override semantics for a scenario's dataset-size limit."""
+
+    default_scope: Literal["none", "per_dataset", "combined", "heterogeneous"] = "none"
+    default_count: int | None = Field(default=None, ge=1)
+    override_scope: Literal["per_dataset", "combined", "unsupported"] = "per_dataset"
+
+    @model_validator(mode="after")
+    def validate_default_count(self) -> "ScenarioDatasetSizeLimit":
+        """
+        Require a count exactly when the default has one representable scope.
+
+        Returns:
+            ScenarioDatasetSizeLimit: The validated limit metadata.
+
+        Raises:
+            ValueError: If the count does not match the declared default scope.
+        """
+        has_representable_default = self.default_scope in {"per_dataset", "combined"}
+        if has_representable_default != (self.default_count is not None):
+            raise ValueError("default_count must be set exactly for per_dataset or combined defaults")
+        return self
+
+
 class ScenarioDefaultRunSizeEstimate(BaseModel):
     """
     Structured estimate of default planned scenario execution units.
@@ -333,6 +357,10 @@ class RegisteredScenario(BaseModel):
     )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    dataset_size_limit: ScenarioDatasetSizeLimit = Field(
+        default_factory=ScenarioDatasetSizeLimit,
+        description="Structured scenario-default and explicit-override dataset-size limit semantics",
+    )
     default_dataset_summaries: list[ScenarioDatasetSummary] = Field(
         default_factory=list,
         description="Logical and effectively selected attack-group counts for the default configuration",

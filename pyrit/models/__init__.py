@@ -20,6 +20,7 @@ from pyrit.models.additional_initializer import AdditionalInitializer
 from pyrit.models.catalog import (
     ScenarioAdaptiveRunSizeDetails,
     ScenarioDatasetSizeCap,
+    ScenarioDatasetSizeLimit,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -228,6 +229,7 @@ __all__ = [
     "ScenarioIdentifier",
     "ScenarioAdaptiveRunSizeDetails",
     "ScenarioDatasetSizeCap",
+    "ScenarioDatasetSizeLimit",
     "ScenarioDatasetSummary",
     "ScenarioDefaultRunSizeEstimate",
     "ScenarioRunSizeEstimate",

@@ -62,6 +62,7 @@ def _metadata_to_registered_scenario(
         },
         all_techniques=list(metadata.all_techniques),
         default_datasets=list(metadata.default_datasets),
+        dataset_size_limit=metadata.dataset_size_limit,
         default_dataset_summaries=estimate.datasets,
         supported_parameters=list(metadata.supported_parameters),
         baseline_policy=metadata.baseline_policy,

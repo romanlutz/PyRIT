@@ -50,6 +50,11 @@ function makeScenario(overrides: Partial<RegisteredScenario> & { scenario_name: 
     aggregate_technique_expansions: {},
     all_techniques: ['default_technique'],
     default_datasets: [],
+    dataset_size_limit: {
+      default_scope: 'none',
+      default_count: null,
+      override_scope: 'per_dataset',
+    },
     default_dataset_summaries: [],
     baseline_policy: 'enabled',
     include_baseline_by_default: true,
@@ -278,6 +283,11 @@ describe('ScenarioCatalog', () => {
         makeScenario({
           scenario_name: 'scenario.compound',
           default_datasets: ['population-a', 'population-b'],
+          dataset_size_limit: {
+            default_scope: 'none',
+            default_count: null,
+            override_scope: 'per_dataset',
+          },
           default_dataset_summaries: [
             {
               name: 'population-a',
@@ -372,6 +382,11 @@ describe('ScenarioCatalog', () => {
         makeScenario({
           scenario_name: 'scenario.unsized',
           default_datasets: ['harmbench'],
+          dataset_size_limit: {
+            default_scope: 'none',
+            default_count: null,
+            override_scope: 'per_dataset',
+          },
           default_dataset_summaries: [],
         }),
       ],
@@ -399,6 +414,11 @@ describe('ScenarioCatalog', () => {
           },
           all_techniques: ['prompt_sending', 'jailbreak_system_prompt', 'flip'],
           default_datasets: ['harmbench'],
+          dataset_size_limit: {
+            default_scope: 'none',
+            default_count: null,
+            override_scope: 'per_dataset',
+          },
           default_dataset_summaries: [
             {
               name: 'harmbench',
