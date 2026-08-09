@@ -441,6 +441,41 @@ async def test_receive_events_soft_finishes_after_audio_done(target):
     assert result.transcripts == ["partial"]
 
 
+async def test_receive_events_audio_done_grace_period_is_not_extended_by_lifecycle_events(target):
+    """Lifecycle events after audio.done consume, rather than reset, the soft-finish grace period."""
+    mock_connection = AsyncMock()
+    conversation_id = "test_soft_finish_deadline"
+    target._existing_conversation[conversation_id] = mock_connection
+    mock_connection.__aiter__.return_value = [
+        _scripted_event("response.output_audio.done"),
+        _scripted_event("response.created"),
+        _scripted_event("response.done", **{"response.status": "success"}),
+    ]
+    observed_timeouts: list[float | None] = []
+    wait_for = asyncio.wait_for
+
+    async def _record_wait_for(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await wait_for(awaitable, timeout=timeout)
+
+    mock_loop = MagicMock()
+    mock_loop.time.side_effect = [100.0, 100.25, 101.5]
+    with (
+        patch(
+            "pyrit.prompt_target.openai.openai_realtime_target.asyncio.get_running_loop",
+            return_value=mock_loop,
+        ),
+        patch(
+            "pyrit.prompt_target.openai.openai_realtime_target.asyncio.wait_for",
+            side_effect=_record_wait_for,
+        ),
+    ):
+        result = await target.receive_events_async(conversation_id)
+
+    assert result.audio_bytes == b""
+    assert observed_timeouts == [None, 0.75, 0.0]
+
+
 async def test_receive_events_connection_close_soft_finishes_with_audio(target):
     """Atomic receiving returns accumulated audio when the provider closes before response.done."""
 

@@ -1,7 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -48,6 +50,25 @@ seeds:
         assert dataset.dataset_name == "test_dataset"
         assert len(dataset.prompts) == 1
         assert dataset.prompts[0].value == "test prompt"
+
+    async def test_async_loaders_dispatch_blocking_file_io(self, tmp_path: Path, valid_yaml_content: str) -> None:
+        file_path = tmp_path / "test.yaml"
+        file_path.write_text(valid_yaml_content, encoding="utf-8")
+        loader = _LocalDatasetLoader(file_path=file_path)
+
+        with patch(
+            "pyrit.datasets.seed_datasets.local.local_dataset_loader.asyncio.to_thread",
+            new_callable=AsyncMock,
+            wraps=asyncio.to_thread,
+        ) as to_thread:
+            dataset = await loader.fetch_dataset_async()
+            metadata = await loader._parse_metadata_async()
+
+        assert dataset.dataset_name == "test_dataset"
+        assert metadata is None
+        assert to_thread.await_count == 2
+        assert to_thread.await_args_list[0].args == (SeedDataset.from_yaml_file, file_path)
+        assert to_thread.await_args_list[1].args == (loader._read_yaml_file,)
 
     async def test_fetch_dataset_file_not_found(self):
         loader = _LocalDatasetLoader(file_path=Path("non_existent.yaml"))
