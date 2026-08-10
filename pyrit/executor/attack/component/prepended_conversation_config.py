@@ -27,7 +27,8 @@ class PrependedConversationConfig:
 
     Non-chat objective targets apply request converters to the configured roles before
     normalizing the prepended conversation into the first turn (via ``message_normalizer``;
-    default: ConversationContextNormalizer).
+    default: ConversationContextNormalizer). Those converters must produce text because
+    string normalization cannot preserve converted image, audio, or other non-text output.
     """
 
     # Request converters default to prepended user messages only. Assistant history is

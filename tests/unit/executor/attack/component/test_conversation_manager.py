@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from unit.mocks import get_mock_scorer_identifier
 
-from pyrit.converter import Base64Converter
+from pyrit.converter import Base64Converter, Converter, ConverterResult
 from pyrit.executor.attack import ConversationManager, ConversationState
 from pyrit.executor.attack.component import PrependedConversationConfig
 from pyrit.executor.attack.component.conversation_manager import (
@@ -36,7 +36,7 @@ from pyrit.executor.attack.component.conversation_manager import (
 from pyrit.executor.attack.core import AttackContext
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.message_normalizer import ConversationContextNormalizer
-from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -59,6 +59,16 @@ class _TestAttackContext(AttackContext):
 
     # Add last_score to match MultiTurnAttackContext behavior for testing
     last_score: Score | None = None
+
+
+class _ImageOutputConverter(Converter):
+    """A deterministic text-to-image converter for non-chat flattening tests."""
+
+    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
+    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        return ConverterResult(output_text="converted.png", output_type="image_path")
 
 
 # =============================================================================
@@ -1153,6 +1163,27 @@ class TestPrependedConversationConfigSettings:
         assert context.next_message.get_piece().converted_value == (
             f"Turn 1:\nuser: Hello, how are you?\nassistant: {encoded_assistant}\n\n{encoded_live_request}"
         )
+
+    async def test_non_chat_target_rejects_non_text_history_converter_output(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        converter_config = ConverterConfiguration.from_converters(converters=[_ImageOutputConverter()])
+
+        with pytest.raises(ValueError, match="non-chat target.*non-text output types.*image_path"):
+            await manager.initialize_context_async(
+                context=context,
+                target=mock_prompt_target,
+                conversation_id=str(uuid.uuid4()),
+                request_converters=converter_config,
+            )
+
+        assert sample_conversation[0].get_piece().converted_value_data_type == "text"
 
     async def test_non_chat_target_behavior_normalize_first_turn_creates_next_message(
         self,

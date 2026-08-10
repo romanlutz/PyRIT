@@ -427,11 +427,47 @@ class ConversationManager:
                     request_converters=request_converters,
                     apply_to_roles=apply_to_roles,
                 )
+            self._validate_flattenable_converter_output(
+                source_messages=messages,
+                converted_messages=converted_messages,
+            )
         for message in converted_messages:
             for piece in message.message_pieces:
                 piece.original_value = piece.converted_value
                 piece.original_value_data_type = piece.converted_value_data_type
         return converted_messages
+
+    @staticmethod
+    def _validate_flattenable_converter_output(
+        *,
+        source_messages: list[Message],
+        converted_messages: list[Message],
+    ) -> None:
+        """
+        Reject converted history that a string normalizer cannot preserve.
+
+        Raises:
+            ValueError: If an applied converter produced non-text prepended history.
+        """
+        output_types: set[str] = set()
+        for source_message, converted_message in zip(source_messages, converted_messages, strict=True):
+            for source_piece, converted_piece in zip(
+                source_message.message_pieces,
+                converted_message.message_pieces,
+                strict=True,
+            ):
+                converter_was_applied = len(converted_piece.converter_identifiers) > len(
+                    source_piece.converter_identifiers
+                )
+                if converter_was_applied and converted_piece.converted_value_data_type != "text":
+                    output_types.add(converted_piece.converted_value_data_type)
+
+        if output_types:
+            raise ValueError(
+                "Cannot flatten prepended conversation for a non-chat target after request converters "
+                f"produced non-text output types {sorted(output_types)}. Role-scoped prepended conversion "
+                "must produce text; use text-output converters or a chat target with editable history."
+            )
 
     @staticmethod
     def _build_original_normalizer_view(messages: list[Message]) -> list[Message]:
