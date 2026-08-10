@@ -249,6 +249,12 @@ export interface TargetInfo {
   identifier_hash: string
 }
 
+export interface AttackResultMetadata {
+  child_attack_result_ids?: string[]
+  completion_policy?: string
+  [key: string]: unknown
+}
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string
@@ -264,6 +270,8 @@ export interface AttackSummary {
   labels: Record<string, string>
   created_at: string
   updated_at: string
+  execution_time_ms?: number
+  metadata?: AttackResultMetadata
 }
 
 export interface CreateAttackRequest {

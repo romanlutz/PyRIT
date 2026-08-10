@@ -5,6 +5,8 @@ import { Joyride } from 'react-joyride'
 import { useTheme } from './hooks/useTheme'
 import MainLayout from './components/Layout/MainLayout'
 import ChatWindow from './components/Chat/ChatWindow'
+import AttackOrchestrationView from './components/Chat/AttackOrchestrationView'
+import { isAttackOrchestrationSummary } from './components/Chat/attackOrchestration'
 import AttackNotFound from './components/Chat/AttackNotFound'
 import Home from './components/Home/Home'
 import TargetConfig from './components/Config/TargetConfig'
@@ -375,12 +377,22 @@ function App() {
     })
   }, [location.search, navigate])
 
+  const orchestrationSummary = readyAttack?.summary
+    && isAttackOrchestrationSummary(readyAttack.summary)
+    ? readyAttack.summary
+    : null
+
   const chatElement = isAttackNotFound || isAttackError ? (
     <AttackNotFound
       attackId={routeAttackId ?? ''}
       variant={isAttackError ? 'error' : 'not-found'}
       onStartNew={() => navigate(VIEW_PATHS.chat)}
       onBackToHistory={() => navigate(VIEW_PATHS.history)}
+    />
+  ) : orchestrationSummary ? (
+    <AttackOrchestrationView
+      attackSummary={orchestrationSummary}
+      scenarioResultId={scenarioResultId}
     />
   ) : (
     <ChatWindow
