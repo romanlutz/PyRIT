@@ -727,6 +727,9 @@ export interface ScenarioProgressResult {
   retries: RetryEvent[]
   error_type?: string | null
   error_message?: string | null
+  result_kind?: 'attack' | 'direct_baseline' | 'adaptive_technique' | 'adaptive_orchestration' | 'unknown'
+  technique_name?: string | null
+  attempt_index?: number | null
 }
 
 export interface ScenarioRunPlanSeedGroup {
@@ -741,6 +744,7 @@ export interface ScenarioRunPlanAtomicGroup {
   display_group: string
   technique_eval_hash: string
   seed_group_ids: string[]
+  group_kind?: 'attack' | 'direct_baseline' | 'adaptive' | null
 }
 
 export interface ScenarioRunPlan {

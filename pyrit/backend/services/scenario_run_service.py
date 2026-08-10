@@ -41,6 +41,8 @@ from pyrit.memory.memory_interface import (
     ScenarioProgressKeysetCursor,
 )
 from pyrit.models import (
+    ADAPTIVE_ATTEMPT_LABEL,
+    ADAPTIVE_TECHNIQUE_NAME_LABEL,
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
     AttackOutcome,
@@ -49,11 +51,13 @@ from pyrit.models import (
     ScenarioIdentifier,
     ScenarioProgressHeader,
     ScenarioProgressResult,
+    ScenarioProgressResultKind,
     ScenarioQueueEntry,
     ScenarioQueueSnapshot,
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanGroupKind,
     ScenarioRunPlanSeedGroup,
     ScenarioRunProgress,
     ScenarioRunState,
@@ -1233,7 +1237,12 @@ class ScenarioRunService:
             scenario_result=scenario_result,
             plan=plan,
         )
-        techniques_used = (
+        configured_techniques = (
+            list(dict.fromkeys(scenario_result.scenario_identifier.techniques or []))
+            if scenario_result.scenario_identifier is not None
+            else []
+        )
+        techniques_used = configured_techniques or (
             list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
             if plan is not None
             else scenario_result.get_techniques_used()
@@ -1248,15 +1257,8 @@ class ScenarioRunService:
         attack_retries: list[AttackRetrySummary] = []
         overload_events: deque[Any] = deque(maxlen=_MAX_OVERLOAD_EVENTS)
         total_retries = 0
-        attempts_by_unit: dict[tuple[str, str], int] = {}
         for atomic_attack_name, results in scenario_result.attack_results.items():
             for attack_result in results:
-                unit_key = self._result_unit_key(
-                    atomic_attack_name=atomic_attack_name,
-                    attack_result=attack_result,
-                    plan=plan,
-                )
-                attempts_by_unit[unit_key] = attempts_by_unit.get(unit_key, 0) + 1
                 retries = getattr(attack_result, "total_retries", 0)
                 if isinstance(retries, int):
                     total_retries += retries
@@ -1282,8 +1284,6 @@ class ScenarioRunService:
                             total_retries=retries if isinstance(retries, int) else 0,
                         )
                     )
-        total_retries += sum(max(0, attempt_count - 1) for attempt_count in attempts_by_unit.values())
-
         updated_at = scenario_result.creation_time
         if terminal and scenario_result.completion_time is not None:
             updated_at = scenario_result.completion_time
@@ -1424,7 +1424,10 @@ class ScenarioRunService:
         if terminal and record.completed_at is not None:
             timestamps.append(record.completed_at)
         updated_at = max(timestamps)
-        techniques = (
+        configured_techniques = (
+            list(dict.fromkeys(scenario_identifier.techniques or [])) if scenario_identifier is not None else []
+        )
+        techniques = configured_techniques or (
             list(dict.fromkeys(group.display_group for group in atomic_groups))
             if atomic_groups is not None
             else sorted({unit.atomic_attack_name for unit in units if unit.atomic_attack_name})
@@ -1508,7 +1511,7 @@ class ScenarioRunService:
             objective_sha256=preferred.objective_sha256 or existing.objective_sha256 or incoming.objective_sha256,
             latest_outcome=preferred.latest_outcome,
             latest_timestamp=max(existing.latest_timestamp, incoming.latest_timestamp),
-            total_retries=max(0, existing.total_retries) + max(0, incoming.total_retries) + 1,
+            total_retries=max(0, existing.total_retries) + max(0, incoming.total_retries),
             error_count=max(0, existing.error_count) + max(0, incoming.error_count),
         )
 
@@ -1963,10 +1966,10 @@ class ScenarioRunService:
         )
         scenario_identifier = header_result.scenario_identifier
         target, datasets_used, scenario_parameters = self._safe_run_metadata(scenario_identifier=scenario_identifier)
-        if plan is not None:
-            techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
-        elif scenario_identifier is not None:
+        if scenario_identifier is not None:
             techniques_used = list(scenario_identifier.techniques or [])
+        elif plan is not None:
+            techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
         else:
             techniques_used = []
         return ScenarioRunProgress(
@@ -2040,6 +2043,12 @@ class ScenarioRunService:
                 seed_group_id = matching_seed_ids[0]
         if not seed_group_id:
             seed_group_id = config_hash({"objective": delta.objective})
+        result_kind, technique_name, attempt_index = ScenarioRunService._progress_result_semantics(
+            delta=delta,
+            plan=plan,
+            atomic_group_id=atomic_group_id,
+            atomic_attack_name=atomic_attack_name,
+        )
         return ScenarioProgressResult(
             attack_result_id=delta.attack_result_id,
             atomic_group_id=atomic_group_id,
@@ -2052,7 +2061,47 @@ class ScenarioRunService:
             retries=delta.retry_events,
             error_type=delta.error_type,
             error_message=delta.error_message,
+            result_kind=result_kind,
+            technique_name=technique_name,
+            attempt_index=attempt_index,
         )
+
+    @staticmethod
+    def _progress_result_semantics(
+        *,
+        delta: ScenarioAttackResultDelta,
+        plan: ScenarioRunPlan | None,
+        atomic_group_id: str,
+        atomic_attack_name: str,
+    ) -> tuple[ScenarioProgressResultKind, str | None, int | None]:
+        """
+        Resolve typed progress semantics from persisted plan and child labels.
+
+        Returns:
+            tuple[ScenarioProgressResultKind, str | None, int | None]:
+                Result role, registered technique name, and 1-based Adaptive attempt index.
+        """
+        technique_name = delta.labels.get(ADAPTIVE_TECHNIQUE_NAME_LABEL) or None
+        raw_attempt_index = delta.labels.get(ADAPTIVE_ATTEMPT_LABEL)
+        parsed_attempt_index = int(raw_attempt_index) if raw_attempt_index and raw_attempt_index.isdigit() else None
+        attempt_index = parsed_attempt_index if parsed_attempt_index and parsed_attempt_index >= 1 else None
+        if technique_name:
+            return ScenarioProgressResultKind.ADAPTIVE_TECHNIQUE, technique_name, attempt_index
+
+        matching_group = (
+            next((group for group in plan.atomic_groups if group.id == atomic_group_id), None) if plan else None
+        )
+        if matching_group is not None:
+            if matching_group.group_kind is ScenarioRunPlanGroupKind.DIRECT_BASELINE:
+                return ScenarioProgressResultKind.DIRECT_BASELINE, None, None
+            if matching_group.group_kind is ScenarioRunPlanGroupKind.ADAPTIVE:
+                return ScenarioProgressResultKind.ADAPTIVE_ORCHESTRATION, None, None
+            if matching_group.group_kind is ScenarioRunPlanGroupKind.ATTACK:
+                return ScenarioProgressResultKind.ATTACK, None, None
+
+        if atomic_attack_name == "baseline":
+            return ScenarioProgressResultKind.DIRECT_BASELINE, None, None
+        return ScenarioProgressResultKind.UNKNOWN, None, None
 
     @staticmethod
     def _synthesize_legacy_plan(*, deltas: list[ScenarioAttackResultDelta]) -> ScenarioRunPlan:

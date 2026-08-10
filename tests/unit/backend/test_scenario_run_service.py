@@ -21,6 +21,8 @@ from pyrit.backend.services.scenario_run_service import (
 from pyrit.converter import Converter
 from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord
 from pyrit.models import (
+    ADAPTIVE_ATTEMPT_LABEL,
+    ADAPTIVE_TECHNIQUE_NAME_LABEL,
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
     AttackOutcome,
@@ -29,9 +31,11 @@ from pyrit.models import (
     ComponentIdentifier,
     RetryEvent,
     ScenarioAttackResultDelta,
+    ScenarioProgressResultKind,
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanGroupKind,
     ScenarioRunPlanSeedGroup,
     ScenarioRunState,
     SeedObjective,
@@ -1068,7 +1072,7 @@ class TestScenarioRunServiceListRuns:
         assert summary.completed_attacks == 1
         assert summary.successful_attacks == 1
         assert summary.error_attacks == 1
-        assert summary.total_retries == 3
+        assert summary.total_retries == 2
         assert summary.planned_total_available is True
         assert summary.attack_details_available is False
 
@@ -1808,7 +1812,7 @@ def test_planned_progress_deduplicates_attempts_and_keeps_latest_non_error(mock_
     assert summary.completed_attacks == 1
     assert summary.objective_achieved_rate == 100
     assert len(summary.failed_attacks) == 2
-    assert summary.total_retries == 3
+    assert summary.total_retries == 0
 
 
 def test_planned_progress_maps_legacy_objective_hash_to_logical_seed_id(mock_memory) -> None:
@@ -1886,6 +1890,121 @@ def test_get_progress_uses_lightweight_queries_without_full_hydration(mock_memor
     assert str(header.id) not in service._active_tasks
 
 
+def test_get_progress_preserves_eight_progress_units_and_twelve_persisted_results(mock_memory) -> None:
+    seed_ids = [f"seed-{index}" for index in range(1, 5)]
+    baseline_group_id = config_hash({"atomic_attack_name": "baseline", "technique_eval_hash": "baseline-eval"})
+    adaptive_group_ids = [
+        config_hash({"atomic_attack_name": f"adaptive-{index}", "technique_eval_hash": f"adaptive-eval-{index}"})
+        for index in range(1, 5)
+    ]
+    plan = ScenarioRunPlan(
+        scenario_registry_name="adaptive.text",
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id=baseline_group_id,
+                atomic_attack_name="baseline",
+                display_group="Direct baseline",
+                technique_eval_hash="baseline-eval",
+                seed_group_ids=seed_ids,
+                group_kind=ScenarioRunPlanGroupKind.DIRECT_BASELINE,
+            ),
+            *[
+                ScenarioRunPlanAtomicGroup(
+                    id=group_id,
+                    atomic_attack_name=f"adaptive-{index}",
+                    display_group="Adaptive",
+                    technique_eval_hash=f"adaptive-eval-{index}",
+                    seed_group_ids=[seed_ids[index - 1]],
+                    group_kind=ScenarioRunPlanGroupKind.ADAPTIVE,
+                )
+                for index, group_id in enumerate(adaptive_group_ids, start=1)
+            ],
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(
+                id=seed_id,
+                objective_sha256=f"objective-sha-{index}",
+                objective=f"objective {index}",
+            )
+            for index, seed_id in enumerate(seed_ids, start=1)
+        ],
+    )
+    timestamp = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    deltas: list[ScenarioAttackResultDelta] = []
+    for index, (seed_id, adaptive_group_id) in enumerate(zip(seed_ids, adaptive_group_ids, strict=True), start=1):
+        common = {
+            "objective": f"objective {index}",
+            "objective_sha256": f"objective-sha-{index}",
+            "outcome": AttackOutcome.SUCCESS,
+            "execution_time_ms": 10,
+        }
+        deltas.extend(
+            [
+                ScenarioAttackResultDelta(
+                    attack_result_id=str(uuid.uuid4()),
+                    timestamp=timestamp + timedelta(seconds=index * 3),
+                    attribution_data={
+                        "parent_collection": "baseline",
+                        "parent_eval_hash": "baseline-eval",
+                        "seed_group_id": seed_id,
+                    },
+                    **common,
+                ),
+                ScenarioAttackResultDelta(
+                    attack_result_id=str(uuid.uuid4()),
+                    timestamp=timestamp + timedelta(seconds=index * 3 + 1),
+                    attribution_data={
+                        "parent_collection": f"adaptive-{index}",
+                        "parent_eval_hash": f"adaptive-eval-{index}",
+                        "seed_group_id": seed_id,
+                    },
+                    labels={
+                        ADAPTIVE_ATTEMPT_LABEL: "1",
+                        ADAPTIVE_TECHNIQUE_NAME_LABEL: f"Technique {index}",
+                    },
+                    **common,
+                ),
+                ScenarioAttackResultDelta(
+                    attack_result_id=str(uuid.uuid4()),
+                    timestamp=timestamp + timedelta(seconds=index * 3 + 2),
+                    attribution_data={
+                        "parent_collection": f"adaptive-{index}",
+                        "parent_eval_hash": f"adaptive-eval-{index}",
+                        "seed_group_id": seed_id,
+                    },
+                    **common,
+                ),
+            ]
+        )
+        assert adaptive_group_id == config_hash(
+            {"atomic_attack_name": f"adaptive-{index}", "technique_eval_hash": f"adaptive-eval-{index}"}
+        )
+    header = make_scenario_result(
+        attack_results={},
+        scenario_run_state=ScenarioRunState.COMPLETED,
+        metadata={SCENARIO_RUN_PLAN_METADATA_KEY: plan.model_dump(mode="json")},
+    )
+    mock_memory.get_scenario_result_header.return_value = header
+    mock_memory.get_scenario_attack_result_deltas.return_value = (deltas, False)
+
+    progress = ScenarioRunService().get_run_progress(
+        scenario_result_id=str(header.id),
+        since=None,
+        limit=25,
+    )
+
+    assert progress is not None
+    assert progress.plan is not None
+    assert sum(len(group.seed_group_ids) for group in progress.plan.atomic_groups) == 8
+    assert len(progress.results) == 12
+    assert sum(result.total_retries for result in progress.results) == 0
+    assert sum(result.result_kind is ScenarioProgressResultKind.DIRECT_BASELINE for result in progress.results) == 4
+    assert sum(result.result_kind is ScenarioProgressResultKind.ADAPTIVE_TECHNIQUE for result in progress.results) == 4
+    assert (
+        sum(result.result_kind is ScenarioProgressResultKind.ADAPTIVE_ORCHESTRATION for result in progress.results) == 4
+    )
+
+
 def test_get_progress_rejects_duplicate_stored_plan_groups(mock_memory) -> None:
     group = ScenarioRunPlanAtomicGroup(
         id="duplicate",
@@ -1939,6 +2058,65 @@ def test_progress_prefers_persisted_logical_seed_group_attribution() -> None:
     mapped = ScenarioRunService._map_progress_delta(delta=delta, plan=None)
 
     assert mapped.seed_group_id == "canonical-seed-id"
+
+
+def test_progress_maps_structured_adaptive_attempt_roles() -> None:
+    plan = ScenarioRunPlan(
+        scenario_registry_name="adaptive.text",
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="adaptive-group",
+                atomic_attack_name="adaptive",
+                display_group="Adaptive",
+                technique_eval_hash="eval",
+                seed_group_ids=["seed-1"],
+                group_kind=ScenarioRunPlanGroupKind.ADAPTIVE,
+            )
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(
+                id="seed-1",
+                objective_sha256="objective-sha",
+                objective="objective",
+            )
+        ],
+    )
+    child = ScenarioAttackResultDelta(
+        attack_result_id=str(uuid.uuid4()),
+        objective="objective",
+        objective_sha256="objective-sha",
+        outcome=AttackOutcome.SUCCESS,
+        execution_time_ms=10,
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        attribution_data={"parent_collection": "adaptive", "parent_eval_hash": "eval"},
+        labels={
+            ADAPTIVE_ATTEMPT_LABEL: "2",
+            ADAPTIVE_TECHNIQUE_NAME_LABEL: "Technique alpha",
+        },
+    )
+    envelope = child.model_copy(update={"attack_result_id": str(uuid.uuid4()), "labels": {}})
+    invalid_index_child = child.model_copy(
+        update={
+            "attack_result_id": str(uuid.uuid4()),
+            "labels": {
+                ADAPTIVE_ATTEMPT_LABEL: "0",
+                ADAPTIVE_TECHNIQUE_NAME_LABEL: "Technique alpha",
+            },
+        }
+    )
+
+    mapped_child = ScenarioRunService._map_progress_delta(delta=child, plan=plan)
+    mapped_envelope = ScenarioRunService._map_progress_delta(delta=envelope, plan=plan)
+    mapped_invalid_index = ScenarioRunService._map_progress_delta(delta=invalid_index_child, plan=plan)
+
+    assert mapped_child.result_kind is ScenarioProgressResultKind.ADAPTIVE_TECHNIQUE
+    assert mapped_child.technique_name == "Technique alpha"
+    assert mapped_child.attempt_index == 2
+    assert mapped_envelope.result_kind is ScenarioProgressResultKind.ADAPTIVE_ORCHESTRATION
+    assert mapped_envelope.technique_name is None
+    assert mapped_envelope.attempt_index is None
+    assert mapped_invalid_index.result_kind is ScenarioProgressResultKind.ADAPTIVE_TECHNIQUE
+    assert mapped_invalid_index.attempt_index is None
 
 
 def test_get_progress_synthesizes_incomplete_legacy_plan(mock_memory) -> None:

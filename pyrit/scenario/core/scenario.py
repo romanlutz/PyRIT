@@ -45,6 +45,7 @@ from pyrit.models import (
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanGroupKind,
     ScenarioRunPlanSeedGroup,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateStatus,
@@ -990,6 +991,11 @@ class Scenario(ABC):
                     display_group=atomic_attack.display_group,
                     technique_eval_hash=technique_eval_hash,
                     seed_group_ids=seed_group_ids,
+                    group_kind=getattr(
+                        atomic_attack,
+                        "_progress_group_kind",
+                        ScenarioRunPlanGroupKind.ATTACK,
+                    ),
                 )
             )
         return ScenarioRunPlan(

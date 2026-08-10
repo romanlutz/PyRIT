@@ -48,13 +48,17 @@ import {
   routerPathParamValue,
 } from '@/utils/routeParams'
 import {
+  getAttemptAccounting,
+  getAttemptPresentations,
+  getAttemptRollups,
   getAtomicGroupRollups,
   getElapsedMilliseconds,
   getEtaMilliseconds,
   getOverallProgress,
   getSeedGroupRollups,
-  getTechniqueRollups,
   isTerminalRunState,
+  type AttemptAccounting,
+  type ScenarioAttemptRole,
 } from '@/utils/scenarioRunProgress'
 
 import { useScenarioRunPageStyles } from './ScenarioRunPage.styles'
@@ -116,7 +120,9 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
     : 'Back to scenario history'
 
   const overall = useMemo(() => getOverallProgress(state), [state])
-  const techniques = useMemo(() => getTechniqueRollups(state), [state])
+  const attemptRollups = useMemo(() => getAttemptRollups(state), [state])
+  const attemptPresentations = useMemo(() => getAttemptPresentations(state), [state])
+  const attemptAccounting = useMemo(() => getAttemptAccounting(state), [state])
   const seedGroups = useMemo(() => getSeedGroupRollups(state), [state])
   const atomicGroups = useMemo(() => getAtomicGroupRollups(state), [state])
   const seedObjectives = useMemo(
@@ -237,8 +243,12 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
   const progressText = queued
     ? `Queued${run.queue_position ? ` · Position ${run.queue_position}` : ''}`
     : overall.planned === null
-    ? `${overall.completed} known completed units; planned total unavailable`
-    : `${overall.completed} of ${overall.planned} executable units completed`
+    ? `${overall.completed} known completed progress units; planned total unavailable`
+    : `${overall.completed} of ${overall.planned} progress units completed`
+  const terminal = isTerminalRunState(run.status)
+  const attemptAccountingSection = state.results.length > 0 ? (
+    <ObservedAttemptAccounting accounting={attemptAccounting} />
+  ) : null
 
   return (
     <main className={styles.root} data-testid="scenario-run-page">
@@ -329,7 +339,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
           </div>
           <div className={styles.summaryGrid}>
             <ConfigurationItem
-              label="Techniques"
+              label="Configured techniques"
               value={(run.techniques_used?.length ?? 0) > 0 ? run.techniques_used?.join(', ') ?? '' : 'Unavailable'}
             />
             <ConfigurationItem
@@ -384,7 +394,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
         {run.status === 'FAILED' && (
           <MessageBar intent="error">
             <MessageBarBody>
-              This run ended before all planned executable units completed. Persisted attempts remain available below.
+              This run ended before all planned progress units completed. Persisted attempts remain available below.
             </MessageBarBody>
           </MessageBar>
         )}
@@ -392,10 +402,12 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
         {!state.planComplete && (
           <MessageBar intent="info">
             <MessageBarBody>
-              This legacy run has no complete persisted execution plan. Known groups and attempts are shown, but planned totals and ETA are unavailable.
+              This legacy run has no complete persisted progress plan. Known groups and attempts are shown, but planned totals and ETA are unavailable.
             </MessageBarBody>
           </MessageBar>
         )}
+
+        {terminal && attemptAccountingSection}
 
         <section className={styles.section} aria-labelledby="overall-progress-heading">
           <div className={styles.sectionHeading}>
@@ -461,33 +473,34 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
           </span>
         </section>
 
-        <section className={styles.section} aria-labelledby="technique-summary-heading">
+        {!terminal && attemptAccountingSection}
+
+        <section className={styles.section} aria-labelledby="attempt-summary-heading">
           <div className={styles.sectionHeading}>
-            <Text as="h2" id="technique-summary-heading" size={500} weight="semibold">
-              Technique summary
+            <Text as="h2" id="attempt-summary-heading" size={500} weight="semibold">
+              Attempt summary
             </Text>
-            <Text className={styles.sectionHint}>Success is measured over evaluated non-error units.</Text>
+            <Text className={styles.sectionHint}>Persisted results grouped by their execution role.</Text>
           </div>
-          {techniques.length === 0 ? (
+          {attemptRollups.length === 0 ? (
             <EmptyState text="Technique results will appear when the first attack attempt is persisted." />
           ) : (
             <div className={styles.summaryGrid}>
-              {techniques.map((technique) => (
-                <article key={technique.id} className={styles.summaryItem}>
+              {attemptRollups.map((attempt) => (
+                <article key={attempt.id} className={styles.summaryItem}>
                   <div className={styles.summaryTitle}>
-                    <Text as="h3" size={400} weight="semibold">{technique.displayGroup}</Text>
-                    <Text weight="semibold">{formatSuccess(technique.succeeded, technique.evaluated, technique.successPercent)}</Text>
+                    <Text as="h3" size={400} weight="semibold">{attempt.label}</Text>
+                    <Text weight="semibold">
+                      {attempt.persistedAttempts} {attempt.persistedAttempts === 1 ? 'result' : 'results'}
+                    </Text>
                   </div>
                   <Text size={200} className={styles.sectionHint}>
-                    {technique.atomicAttackNames.join(', ')}
+                    {formatAttemptRole(attempt.role)}
                   </Text>
                   <div className={styles.summaryStats}>
-                    <Metric
-                      label="Progress"
-                      value={formatCompletion(technique.completed, technique.planned, state.planComplete)}
-                    />
-                    <Metric label="Errors" value={String(technique.errors)} />
-                    <Metric label="Retries" value={String(technique.retries)} />
+                    <Metric label="Succeeded" value={String(attempt.succeeded)} />
+                    <Metric label="Errors" value={String(attempt.errors)} />
+                    <Metric label="Retries" value={String(attempt.retries)} />
                   </div>
                 </article>
               ))}
@@ -510,9 +523,11 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                 <TableHeader>
                   <TableRow>
                     <TableHeaderCell>Status</TableHeaderCell>
-                    <TableHeaderCell>Display group</TableHeaderCell>
+                    <TableHeaderCell>Attack group</TableHeaderCell>
                     <TableHeaderCell>Attack</TableHeaderCell>
-                    <TableHeaderCell>Completed</TableHeaderCell>
+                    <TableHeaderCell>Progress units</TableHeaderCell>
+                    <TableHeaderCell>Persisted attempts</TableHeaderCell>
+                    <TableHeaderCell>Attack attempts</TableHeaderCell>
                     <TableHeaderCell>Success</TableHeaderCell>
                     <TableHeaderCell>Errors</TableHeaderCell>
                     <TableHeaderCell>Retries</TableHeaderCell>
@@ -527,6 +542,8 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                       <TableCell className={styles.nowrap}>
                         {formatCompletion(group.completed, group.planned, state.planComplete)}
                       </TableCell>
+                      <TableCell>{group.persistedAttempts}</TableCell>
+                      <TableCell>{group.attackAttempts}</TableCell>
                       <TableCell className={styles.nowrap}>
                         {formatSuccess(group.succeeded, group.evaluated, group.successPercent)}
                       </TableCell>
@@ -540,22 +557,24 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
           )}
         </section>
 
-        <section className={styles.section} aria-labelledby="seed-groups-heading">
+        <section className={styles.section} aria-labelledby="objectives-heading">
           <div className={styles.sectionHeading}>
-            <Text as="h2" id="seed-groups-heading" size={500} weight="semibold">
-              Logical seed groups
+            <Text as="h2" id="objectives-heading" size={500} weight="semibold">
+              Objectives
             </Text>
-            <Text className={styles.sectionHint}>Aggregated across techniques.</Text>
+            <Text className={styles.sectionHint}>Observed attempts aggregated across progress groups.</Text>
           </div>
           {seedGroups.length === 0 ? (
-            <EmptyState text="No logical seed groups have been persisted yet." />
+            <EmptyState text="No objectives have been persisted yet." />
           ) : (
             <div className={styles.tableScroll}>
-              <Table size="small" className={styles.table} aria-label="Logical seed groups">
+              <Table size="small" className={styles.table} aria-label="Objectives">
                 <TableHeader>
                   <TableRow>
                     <TableHeaderCell>Objective</TableHeaderCell>
-                    <TableHeaderCell>Completed</TableHeaderCell>
+                    <TableHeaderCell>Progress units</TableHeaderCell>
+                    <TableHeaderCell>Persisted attempts</TableHeaderCell>
+                    <TableHeaderCell>Attack attempts</TableHeaderCell>
                     <TableHeaderCell>Success</TableHeaderCell>
                     <TableHeaderCell>Errors</TableHeaderCell>
                     <TableHeaderCell>Retries</TableHeaderCell>
@@ -570,6 +589,8 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                       <TableCell className={styles.nowrap}>
                         {formatCompletion(seed.completed, seed.planned, state.planComplete)}
                       </TableCell>
+                      <TableCell>{seed.persistedAttempts}</TableCell>
+                      <TableCell>{seed.attackAttempts}</TableCell>
                       <TableCell className={styles.nowrap}>
                         {formatSuccess(seed.succeeded, seed.evaluated, seed.successPercent)}
                       </TableCell>
@@ -598,9 +619,10 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                 <TableHeader>
                   <TableRow>
                     <TableHeaderCell>Attack</TableHeaderCell>
+                    <TableHeaderCell>Role</TableHeaderCell>
+                    <TableHeaderCell>Technique</TableHeaderCell>
                     <TableHeaderCell>Outcome</TableHeaderCell>
-                    <TableHeaderCell>Group</TableHeaderCell>
-                    <TableHeaderCell>Seed</TableHeaderCell>
+                    <TableHeaderCell>Attack group</TableHeaderCell>
                     <TableHeaderCell>Objective</TableHeaderCell>
                     <TableHeaderCell>Execution</TableHeaderCell>
                     <TableHeaderCell>Retries / error</TableHeaderCell>
@@ -613,6 +635,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                       attempt.attack_result_id,
                       scenarioResultId,
                     )
+                    const presentation = attemptPresentations.get(attempt.attack_result_id)
                     return (
                       <TableRow
                         key={attempt.attack_result_id}
@@ -647,13 +670,14 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                             </Text>
                           </Link>
                         </TableCell>
+                        <TableCell>{formatAttemptRole(presentation?.role ?? 'unknown')}</TableCell>
+                        <TableCell>{presentation?.techniqueName ?? 'Not applicable'}</TableCell>
                         <TableCell>
                           <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
                             {formatOutcome(attempt.outcome)}
                           </Badge>
                         </TableCell>
                         <TableCell>{atomicGroupNames.get(attempt.atomic_group_id) ?? attempt.atomic_attack_name}</TableCell>
-                        <TableCell><Text className={styles.preview}>{attempt.seed_group_id}</Text></TableCell>
                         <TableCell>
                           <Button
                             appearance="subtle"
@@ -743,9 +767,19 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                   </Text>
                 </div>
                 <div className={styles.detailGrid}>
+                  <Metric
+                    label="Role"
+                    value={formatAttemptRole(
+                      attemptPresentations.get(selectedAttempt.attack_result_id)?.role ?? 'unknown',
+                    )}
+                  />
+                  <Metric
+                    label="Technique"
+                    value={attemptPresentations.get(selectedAttempt.attack_result_id)?.techniqueName ?? 'Not applicable'}
+                  />
                   <Metric label="Attack result ID" value={selectedAttempt.attack_result_id} />
                   <Metric label="Outcome" value={formatOutcome(selectedAttempt.outcome)} />
-                  <Metric label="Display group" value={atomicGroupNames.get(selectedAttempt.atomic_group_id) ?? selectedAttempt.atomic_attack_name} />
+                  <Metric label="Attack group" value={atomicGroupNames.get(selectedAttempt.atomic_group_id) ?? selectedAttempt.atomic_attack_name} />
                   <Metric label="Atomic attack" value={selectedAttempt.atomic_attack_name || 'Persisted attack'} />
                   <Metric label="Logical seed group" value={selectedAttempt.seed_group_id} />
                   <Metric label="Execution time" value={formatDuration(selectedAttempt.execution_time_ms)} />
@@ -775,6 +809,94 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
 interface MetricProps {
   readonly label: string
   readonly value: string
+}
+
+interface ObservedAttemptAccountingProps {
+  readonly accounting: AttemptAccounting
+}
+
+function ObservedAttemptAccounting({ accounting }: ObservedAttemptAccountingProps) {
+  const styles = useScenarioRunPageStyles()
+  const hasUniformCount = accounting.uniformAttemptsPerObjective !== null && accounting.objectiveCount > 0
+  const progress = accounting.plannedProgressUnits === null
+    ? `${accounting.completedProgressUnits} known progress units completed`
+    : `${accounting.completedProgressUnits}/${accounting.plannedProgressUnits} progress units completed`
+
+  return (
+    <section className={styles.section} aria-labelledby="observed-attempts-heading">
+      <div className={styles.sectionHeading}>
+        <Text as="h2" id="observed-attempts-heading" size={500} weight="semibold">
+          Observed execution accounting
+        </Text>
+        <Text className={styles.sectionHint}>Persisted orchestration results are shown without treating them as target-facing attempts or retries.</Text>
+      </div>
+      <div
+        className={styles.accountingSurface}
+        role="group"
+        aria-label={hasUniformCount
+          ? `${accounting.objectiveCount} objectives multiplied by ${accounting.uniformAttemptsPerObjective} persisted results per objective equals ${accounting.persistedAttempts} persisted results.`
+          : `${accounting.persistedAttempts} persisted results across ${accounting.objectiveCount} objectives.`}
+      >
+        {hasUniformCount ? (
+          <div className={styles.accountingEquation} aria-hidden="true">
+            <AccountingOperand
+              value={String(accounting.objectiveCount)}
+              label={accounting.objectiveCount === 1 ? 'objective' : 'objectives'}
+            />
+            <Text className={styles.accountingOperator} weight="semibold">×</Text>
+            <AccountingOperand
+              value={String(accounting.uniformAttemptsPerObjective)}
+              label="persisted results per objective"
+            />
+            <Text className={styles.accountingOperator} weight="semibold">=</Text>
+            <AccountingOperand
+              value={String(accounting.persistedAttempts)}
+              label="persisted results"
+              result
+            />
+          </div>
+        ) : (
+          <div className={styles.accountingEquation} aria-hidden="true">
+            <AccountingOperand
+              value={String(accounting.persistedAttempts)}
+              label="persisted results"
+              result
+            />
+            <Text className={styles.accountingOperator}>across</Text>
+            <AccountingOperand
+              value={String(accounting.objectiveCount)}
+              label={accounting.objectiveCount === 1 ? 'objective' : 'objectives'}
+            />
+          </div>
+        )}
+        {accounting.uniformRoleCounts && (
+          <Text className={styles.accountingProvenance}>
+            {accounting.uniformAttemptsPerObjective} per objective = {formatRoleBreakdown(accounting.uniformRoleCounts)}.
+          </Text>
+        )}
+        <Text className={styles.sectionHint}>
+          {accounting.attackAttempts} target-facing {accounting.attackAttempts === 1 ? 'attack attempt' : 'attack attempts'}
+          {' · '}{progress} · {accounting.retries} actual {accounting.retries === 1 ? 'retry' : 'retries'}
+        </Text>
+      </div>
+    </section>
+  )
+}
+
+interface AccountingOperandProps {
+  readonly value: string
+  readonly label: string
+  readonly result?: boolean
+}
+
+function AccountingOperand({ value, label, result = false }: AccountingOperandProps) {
+  const styles = useScenarioRunPageStyles()
+  return (
+    <span className={result ? styles.accountingResult : styles.accountingOperand}>
+      <Text size={600} weight="semibold" className={styles.metricValue}>{value}</Text>
+      <Text size={200}>{label}</Text>
+    </span>
+  )
 }
 
 interface ConfigurationItemProps {
@@ -836,6 +958,47 @@ function formatRunState(status: ScenarioRunState): string {
 
 function formatOutcome(outcome: ScenarioProgressResult['outcome']): string {
   return outcome.replace(/^\w/, (letter) => letter.toUpperCase())
+}
+
+function formatAttemptRole(role: ScenarioAttemptRole): string {
+  switch (role) {
+    case 'direct_baseline':
+      return 'Direct baseline'
+    case 'adaptive_technique':
+      return 'Adaptive technique'
+    case 'adaptive_orchestration':
+      return 'Adaptive orchestration'
+    case 'attack':
+      return 'Attack'
+    default:
+      return 'Unknown / additional'
+  }
+}
+
+function formatRoleBreakdown(counts: ReadonlyMap<ScenarioAttemptRole, number>): string {
+  const order: ScenarioAttemptRole[] = [
+    'direct_baseline',
+    'adaptive_technique',
+    'attack',
+    'adaptive_orchestration',
+    'unknown',
+  ]
+  return order.flatMap((role) => {
+    const count = counts.get(role) ?? 0
+    if (count === 0) {
+      return []
+    }
+    const label = role === 'direct_baseline'
+      ? `direct baseline ${count === 1 ? 'attempt' : 'attempts'}`
+      : role === 'adaptive_technique'
+        ? `Adaptive technique ${count === 1 ? 'attempt' : 'attempts'}`
+        : role === 'adaptive_orchestration'
+          ? `Adaptive orchestration ${count === 1 ? 'result' : 'results'}`
+          : role === 'attack'
+            ? count === 1 ? 'attack' : 'attacks'
+            : `additional persisted ${count === 1 ? 'result' : 'results'}`
+    return [`${count} ${label}`]
+  }).join(' + ')
 }
 
 function statusIcon(status: ScenarioRunState): React.ReactElement {

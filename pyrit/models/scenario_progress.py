@@ -4,6 +4,7 @@
 """Canonical models for durable scenario run plans and incremental progress."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
@@ -16,6 +17,27 @@ from pyrit.models.retry_event import RetryEvent
 
 SCENARIO_RUN_PLAN_METADATA_KEY = "run_plan"
 SCENARIO_RUN_PLAN_VERSION = 1
+ADAPTIVE_ATTEMPT_LABEL = "_adaptive_attempt"
+ADAPTIVE_TECHNIQUE_ID_LABEL = "_adaptive_technique_id"
+ADAPTIVE_TECHNIQUE_NAME_LABEL = "_adaptive_technique_name"
+
+
+class ScenarioRunPlanGroupKind(str, Enum):
+    """Semantic kind of a planned scenario progress group."""
+
+    ATTACK = "attack"
+    DIRECT_BASELINE = "direct_baseline"
+    ADAPTIVE = "adaptive"
+
+
+class ScenarioProgressResultKind(str, Enum):
+    """Semantic role of one persisted result within scenario progress."""
+
+    ATTACK = "attack"
+    DIRECT_BASELINE = "direct_baseline"
+    ADAPTIVE_TECHNIQUE = "adaptive_technique"
+    ADAPTIVE_ORCHESTRATION = "adaptive_orchestration"
+    UNKNOWN = "unknown"
 
 
 class ScenarioRunPlanSeedGroup(BaseModel):
@@ -34,6 +56,7 @@ class ScenarioRunPlanAtomicGroup(BaseModel):
     display_group: str
     technique_eval_hash: str
     seed_group_ids: list[str]
+    group_kind: ScenarioRunPlanGroupKind | None = None
 
 
 class ScenarioRunPlan(BaseModel):
@@ -111,6 +134,9 @@ class ScenarioProgressResult(BaseModel):
     retries: list[RetryEvent] = Field(default_factory=list)
     error_type: str | None = None
     error_message: str | None = None
+    result_kind: ScenarioProgressResultKind = ScenarioProgressResultKind.UNKNOWN
+    technique_name: str | None = None
+    attempt_index: int | None = Field(None, ge=1)
 
 
 class ScenarioRunProgress(BaseModel):
@@ -163,6 +189,7 @@ class ScenarioAttackResultDelta(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     attribution_data: dict[str, Any] = Field(default_factory=dict)
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 ScenarioProgressHeader.model_rebuild()

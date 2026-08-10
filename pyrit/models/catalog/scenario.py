@@ -513,8 +513,8 @@ class ScenarioRunSummary(BaseModel):
     error: str | None = Field(None, description="Error message if status is FAILED")
     error_type: str | None = Field(None, description="Exception class name if status is FAILED")
     techniques_used: list[str] = Field(default_factory=list, description="Technique names that were executed")
-    total_attacks: int = Field(0, ge=0, description="Total number of attack results persisted for this run")
-    completed_attacks: int = Field(0, ge=0, description="Number of attacks that reached a terminal outcome")
+    total_attacks: int = Field(0, ge=0, description="Total planned progress units for this run")
+    completed_attacks: int = Field(0, ge=0, description="Number of planned progress units that completed")
     objective_achieved_rate: int = Field(0, ge=0, le=100, description="Success rate as percentage (0-100)")
     failed_attacks: list[AttackErrorSummary] = Field(
         default_factory=list,

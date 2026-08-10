@@ -145,13 +145,110 @@ describe('ScenarioRunPage', () => {
     expect(screen.getByTestId('run-state-badge')).toHaveTextContent('In progress')
     expect(screen.getByRole('progressbar', { name: 'Overall scenario run progress' })).toHaveAttribute(
       'aria-valuetext',
-      '1 of 1 executable units completed',
+      '1 of 1 progress units completed',
     )
     expect(screen.getByRole('table', { name: 'Atomic attack groups' })).toBeInTheDocument()
-    expect(screen.getByRole('table', { name: 'Logical seed groups' })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Objectives' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Persisted attack attempts' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel run' })).toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
+  })
+
+  it('distinguishes persisted attempts, progress units, orchestration results, and retries', () => {
+    const objectiveIds = ['seed-1', 'seed-2', 'seed-3', 'seed-4']
+    const plan: ScenarioRunPlan = {
+      version: 1,
+      scenario_registry_name: 'adaptive.text',
+      seed_groups: objectiveIds.map((id, index) => ({
+        id,
+        objective_sha256: `sha-${index + 1}`,
+        objective: `Objective ${index + 1}`,
+      })),
+      atomic_groups: [
+        {
+          id: 'baseline',
+          atomic_attack_name: 'baseline',
+          display_group: 'Direct baseline',
+          technique_eval_hash: 'baseline-eval',
+          seed_group_ids: objectiveIds,
+        },
+        ...objectiveIds.map((seedId, index) => ({
+          id: `adaptive-${index + 1}`,
+          atomic_attack_name: 'adaptive',
+          display_group: index === 0 ? 'Fairness' : 'Harassment',
+          technique_eval_hash: `adaptive-eval-${index + 1}`,
+          seed_group_ids: [seedId],
+        })),
+      ],
+    }
+    const results: ScenarioProgressResult[] = objectiveIds.flatMap((seedId, index) => {
+      const adaptiveGroupId = `adaptive-${index + 1}`
+      return [
+        {
+          ...ATTEMPT,
+          attack_result_id: `baseline-${index}`,
+          atomic_group_id: 'baseline',
+          atomic_attack_name: 'baseline',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3).padStart(2, '0')}:00Z`,
+          total_retries: 0,
+        },
+        {
+          ...ATTEMPT,
+          attack_result_id: `technique-${index}`,
+          atomic_group_id: adaptiveGroupId,
+          atomic_attack_name: 'adaptive',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3 + 1).padStart(2, '0')}:00Z`,
+          total_retries: 0,
+          technique_name: index === 0 ? 'Fairness technique' : 'Harassment technique',
+          attempt_index: 1,
+        },
+        {
+          ...ATTEMPT,
+          attack_result_id: `envelope-${index}`,
+          atomic_group_id: adaptiveGroupId,
+          atomic_attack_name: 'adaptive',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3 + 2).padStart(2, '0')}:00Z`,
+          total_retries: 0,
+        },
+      ]
+    })
+    mockHookState(makeState({
+      run: {
+        ...makeState().run!,
+        scenario_registry_name: 'adaptive.text',
+        status: 'COMPLETED',
+        completed_at: '2026-01-01T00:15:00Z',
+      },
+      plan,
+      activeAtomicGroupIds: [],
+      results,
+    }))
+
+    renderPage()
+
+    expect(screen.getByRole('group', {
+      name: '4 objectives multiplied by 3 persisted results per objective equals 12 persisted results.',
+    })).toBeInTheDocument()
+    expect(screen.getByText(
+      '3 per objective = 1 direct baseline attempt + 1 Adaptive technique attempt + 1 Adaptive orchestration result.',
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      '8 target-facing attack attempts · 8/8 progress units completed · 0 actual retries',
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Technique summary' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('Fairness technique').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Harassment technique').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Adaptive orchestration').length).toBeGreaterThan(0)
+
+    const objectiveTable = screen.getByRole('table', { name: 'Objectives' })
+    const firstObjectiveCells = within(within(objectiveTable).getAllByRole('row')[1]).getAllByRole('cell')
+    expect(firstObjectiveCells[1]).toHaveTextContent('2/2')
+    expect(firstObjectiveCells[2]).toHaveTextContent('3')
+    expect(firstObjectiveCells[3]).toHaveTextContent('2')
+    expect(firstObjectiveCells[6]).toHaveTextContent('0')
   })
 
   it('renders contract-backed safe target and run configuration metadata', () => {
@@ -188,8 +285,8 @@ describe('ScenarioRunPage', () => {
 
     renderPage()
 
-    expect(screen.getByText(/legacy run has no complete persisted execution plan/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/1 known completed units; planned total unavailable/i)).toHaveLength(2)
+    expect(screen.getByText(/legacy run has no complete persisted progress plan/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/1 known completed progress units; planned total unavailable/i)).toHaveLength(2)
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     expect(screen.getByText('Progress percentage unavailable')).toBeInTheDocument()
     expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)

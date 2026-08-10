@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.models import AttackSeedGroup, ScenarioDatasetSummary, SeedObjective
+from pyrit.models import AttackSeedGroup, ScenarioDatasetSummary, ScenarioRunPlanGroupKind, SeedObjective
 from pyrit.models.identifiers import ComponentIdentifier
 from pyrit.prompt_target import PromptTarget
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
@@ -820,5 +820,9 @@ class TestTextAdaptiveBaselinePolicy:
             plan = scenario._build_run_plan()
             planned_units = sum(len(group.seed_group_ids) for group in plan.atomic_groups)
             assert planned_units == 2
+            assert [group.group_kind for group in plan.atomic_groups] == [
+                ScenarioRunPlanGroupKind.DIRECT_BASELINE,
+                ScenarioRunPlanGroupKind.ADAPTIVE,
+            ]
             assert estimate.total_attack_count == planned_units
             assert [component.count for component in estimate.components] == [1, 1]
