@@ -11,7 +11,15 @@ from pyrit.executor.attack.core.attack_config import AttackConverterConfig, Atta
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.executor.attack.single_turn.single_turn_attack_strategy import SingleTurnAttackContext
-from pyrit.models import AttackResult, Message, SeedPrompt
+from pyrit.models import (
+    PROMPT_COMPOSITION_METADATA_KEY,
+    AttackResult,
+    Message,
+    PromptComposition,
+    PromptCompositionStrategy,
+    PromptObjectivePlacement,
+    SeedPrompt,
+)
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 
@@ -104,6 +112,16 @@ class ManyShotJailbreakAttack(PromptSendingAttack):
             AttackResult: The result of the attack.
         """
         many_shot_prompt = self._template.render_template_value(prompt=context.objective, examples=self._examples)
-        context.next_message = Message.from_prompt(prompt=many_shot_prompt, role="user")
+        composition = PromptComposition(
+            strategy=PromptCompositionStrategy.MANY_SHOT,
+            example_count=len(self._examples),
+            objective_placement=PromptObjectivePlacement.APPENDED,
+            character_count=len(many_shot_prompt),
+        )
+        context.next_message = Message.from_prompt(
+            prompt=many_shot_prompt,
+            role="user",
+            prompt_metadata={PROMPT_COMPOSITION_METADATA_KEY: composition.model_dump(mode="json")},
+        )
 
         return await super()._perform_async(context=context)

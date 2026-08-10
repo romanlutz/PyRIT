@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import MessageList from "./MessageList";
@@ -89,6 +89,144 @@ describe("MessageList", () => {
     );
 
     expect(screen.getByText("User message test")).toBeInTheDocument();
+  });
+
+  it("should explain and collapse a structured many-shot prompt while keeping its objective visible", async () => {
+    const user = userEvent.setup();
+    const content = `${"demonstration ".repeat(500)}final objective`;
+    render(
+      <TestWrapper>
+        <MessageList
+          messages={[{
+            role: "user",
+            content,
+            timestamp: new Date().toISOString(),
+            promptComposition: {
+              strategy: "many_shot",
+              example_count: 100,
+              objective_placement: "appended",
+              character_count: content.length,
+            },
+          }]}
+          attackType="ManyShotJailbreakAttack"
+          attackObjective="Infer ethnicity from the following names"
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.getByText(
+      "This is one generated user prompt containing 100 demonstration exchanges followed by the objective. The embedded User/Assistant labels are examples, not conversation turns."
+    )).toBeInTheDocument();
+    expect(screen.getByText(`100 examples · ${content.length.toLocaleString()} characters`)).toBeInTheDocument();
+    expect(screen.getByText("Infer ethnicity from the following names")).toBeInTheDocument();
+    const details = screen.getByText("Show full generated prompt").closest("details");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(screen.getByText("Show full generated prompt"));
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByText(content)).toBeInTheDocument();
+  });
+
+  it("should collapse the original ManyShot scaffold when a converter changes the target value", () => {
+    const originalContent = "demonstration ".repeat(500);
+    render(
+      <TestWrapper>
+        <MessageList
+          messages={[{
+            role: "user",
+            content: "converted payload",
+            originalContent,
+            timestamp: new Date().toISOString(),
+            promptComposition: {
+              strategy: "many_shot",
+              example_count: 100,
+              objective_placement: "appended",
+              character_count: 139_988,
+            },
+          }]}
+          attackType="ManyShotJailbreakAttack"
+          attackObjective="Infer ethnicity from the following names"
+        />
+      </TestWrapper>
+    );
+
+    const original = screen.getByTestId("original-section");
+    expect(within(original).getByText("100 examples · 139,988 characters")).toBeInTheDocument();
+    expect(within(original).getByText("Show full generated prompt")).toBeInTheDocument();
+    expect(screen.getByText("converted payload")).toBeInTheDocument();
+    expect(screen.getByTestId("converted-label")).toBeInTheDocument();
+    const details = within(original).getByText("Show full generated prompt").closest("details");
+    expect(details).not.toHaveAttribute("open");
+    expect(details).toHaveTextContent("demonstration");
+  });
+
+  it("should identify legacy many-shot prompts without counting embedded markers", () => {
+    const content = `${"User: example\nAssistant: response\n".repeat(100)}User: objective`;
+    render(
+      <TestWrapper>
+        <MessageList
+          messages={[{
+            role: "user",
+            content,
+            timestamp: new Date().toISOString(),
+          }]}
+          attackType="ManyShotJailbreakAttack"
+          attackObjective="Infer ethnicity from the following names"
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.getByText(/stored result does not record the example count/i)).toBeInTheDocument();
+    expect(screen.getByText(`Example count unavailable · ${content.length.toLocaleString()} characters`))
+      .toBeInTheDocument();
+    expect(screen.queryByText("100 examples", { exact: false })).not.toBeInTheDocument();
+  });
+
+  it("should collapse generic long historical prompts without changing ordinary short prompts", () => {
+    const longPrompt = "x".repeat(4_001);
+    const first = render(
+      <TestWrapper>
+        <MessageList
+          messages={[{ role: "user", content: longPrompt, timestamp: new Date().toISOString() }]}
+          attackType="PromptSendingAttack"
+        />
+      </TestWrapper>
+    );
+    expect(screen.getByText("Long prompt · 4,001 characters")).toBeInTheDocument();
+    expect(screen.getByText("Show full prompt")).toBeInTheDocument();
+    first.unmount();
+
+    render(
+      <TestWrapper>
+        <MessageList
+          messages={[{ role: "user", content: "Short prompt", timestamp: new Date().toISOString() }]}
+          attackType="PromptSendingAttack"
+        />
+      </TestWrapper>
+    );
+    expect(screen.getByText("Short prompt")).toBeInTheDocument();
+    expect(screen.queryByText("Show full prompt")).not.toBeInTheDocument();
+  });
+
+  it("should copy the complete collapsed prompt", async () => {
+    const user = userEvent.setup();
+    const content = "generated ".repeat(500);
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <TestWrapper>
+        <MessageList
+          messages={[{ role: "user", content, timestamp: new Date().toISOString() }]}
+          attackType="PromptSendingAttack"
+        />
+      </TestWrapper>
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy full prompt" }));
+    expect(writeText).toHaveBeenCalledWith(content);
+    expect(screen.getByRole("button", { name: "Full prompt copied" })).toBeInTheDocument();
   });
 
   it("should render assistant messages", () => {

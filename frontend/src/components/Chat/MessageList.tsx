@@ -10,7 +10,16 @@ import {
   Spinner,
   mergeClasses,
 } from '@fluentui/react-components'
-import { ArrowDownloadRegular, ArrowReplyRegular, ArrowForwardRegular, ChatAddRegular, BranchForkRegular, OpenRegular } from '@fluentui/react-icons'
+import {
+  ArrowDownloadRegular,
+  ArrowForwardRegular,
+  ArrowReplyRegular,
+  BranchForkRegular,
+  ChatAddRegular,
+  CheckmarkRegular,
+  CopyRegular,
+  OpenRegular,
+} from '@fluentui/react-icons'
 import MarkdownContent from '@/components/Markdown/MarkdownContent'
 
 import { Message, MessageAttachment } from '../../types'
@@ -38,7 +47,13 @@ interface MessageListProps {
   noTargetSelected?: boolean
   /** Conversation-wide default: render message text as Markdown. */
   globalMarkdown?: boolean
+  /** Attack identity for explaining known generated-prompt strategies on historical runs. */
+  attackType?: string
+  /** Canonical objective for a generated prompt; shown outside collapsed scaffolding. */
+  attackObjective?: string
 }
+
+const LONG_PROMPT_CHARACTER_THRESHOLD = 4_000
 
 /** Image that shows a spinner while loading. */
 function ImageWithSpinner({ src, alt, className, hiddenClassName, containerClassName, spinnerClassName }: {
@@ -85,6 +100,89 @@ function MediaWithFallback({ type, src, className }: { type: 'video' | 'audio'; 
   return <audio src={src} controls className={className} onError={handleError} data-testid="audio-player" />
 }
 
+interface CollapsedPromptProps {
+  readonly content: string
+  readonly exampleCount?: number
+  readonly characterCount?: number
+  readonly objective?: string
+  readonly isManyShot: boolean
+  readonly globalMarkdown: boolean
+  readonly index: number
+}
+
+function CollapsedPrompt({
+  content,
+  exampleCount,
+  characterCount,
+  objective,
+  isManyShot,
+  globalMarkdown,
+  index,
+}: CollapsedPromptProps) {
+  const styles = useMessageListStyles()
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+
+  const handleCopy = useCallback(async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopyStatus('copied')
+    } catch {
+      setCopyStatus('error')
+    }
+  }, [content])
+
+  const characterSummary = `${(characterCount ?? content.length).toLocaleString()} characters`
+  const compositionSummary = isManyShot
+    ? `${exampleCount === undefined ? 'Example count unavailable' : `${exampleCount} examples`} · ${characterSummary}`
+    : `Long prompt · ${characterSummary}`
+
+  return (
+    <div className={styles.collapsedPrompt} data-testid={`collapsed-prompt-${index}`}>
+      {isManyShot && (
+        <MessageBar intent="info">
+          <MessageBarBody>
+            {exampleCount === undefined
+              ? 'This is one generated user prompt containing demonstration exchanges followed by the objective. The embedded User/Assistant labels are examples, not conversation turns. The stored result does not record the example count.'
+              : `This is one generated user prompt containing ${exampleCount} demonstration exchanges followed by the objective. The embedded User/Assistant labels are examples, not conversation turns.`}
+          </MessageBarBody>
+        </MessageBar>
+      )}
+      <div className={styles.promptSummary}>
+        <Text weight="semibold">{compositionSummary}</Text>
+        {isManyShot && objective && (
+          <div className={styles.promptObjective}>
+            <Text size={200} className={styles.promptObjectiveLabel}>Final objective</Text>
+            <Text>{objective}</Text>
+          </div>
+        )}
+      </div>
+      <div className={styles.promptActions}>
+        <Button
+          appearance="subtle"
+          icon={copyStatus === 'copied' ? <CheckmarkRegular /> : <CopyRegular />}
+          onClick={handleCopy}
+          aria-label={copyStatus === 'copied' ? 'Full prompt copied' : 'Copy full prompt'}
+        >
+          {copyStatus === 'copied' ? 'Copied' : 'Copy full prompt'}
+        </Button>
+      </div>
+      {copyStatus === 'error' && (
+        <MessageBar intent="error">
+          <MessageBarBody>Could not copy the full prompt. Expand it and copy the text manually.</MessageBarBody>
+        </MessageBar>
+      )}
+      <details className={styles.promptDetails}>
+        <summary>{isManyShot ? 'Show full generated prompt' : 'Show full prompt'}</summary>
+        <div className={styles.fullPrompt}>
+          {globalMarkdown
+            ? <MarkdownContent content={content} testId={`message-markdown-${index}`} />
+            : <pre className={styles.fullPromptText}>{content}</pre>}
+        </div>
+      </details>
+    </div>
+  )
+}
+
 /**
  * If the trimmed text is a JSON object or array, return a 2-space pretty-printed
  * version of it; otherwise return null. Used to render structured assistant
@@ -109,7 +207,21 @@ function tryFormatJson(text: string): string | null {
   }
 }
 
-export default function MessageList({ messages, onCopyToInput, onCopyToNewConversation, onBranchConversation, onBranchAttack, isLoading, isSingleTurn, isOperatorLocked, isCrossTarget, noTargetSelected, globalMarkdown = false }: MessageListProps) {
+export default function MessageList({
+  messages,
+  onCopyToInput,
+  onCopyToNewConversation,
+  onBranchConversation,
+  onBranchAttack,
+  isLoading,
+  isSingleTurn,
+  isOperatorLocked,
+  isCrossTarget,
+  noTargetSelected,
+  globalMarkdown = false,
+  attackType,
+  attackObjective,
+}: MessageListProps) {
   const styles = useMessageListStyles()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -207,9 +319,29 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
               {(message.originalContent || message.originalAttachments) && (
                 <div className={styles.originalSection} data-testid="original-section">
                   <div className={styles.sectionLabel}>Original</div>
-                  {message.originalContent && (
-                    <Text className={styles.originalText}>{message.originalContent}</Text>
-                  )}
+                  {message.originalContent && (() => {
+                    const isManyShot = isUser && (
+                      message.promptComposition?.strategy === 'many_shot'
+                      || attackType === 'ManyShotJailbreakAttack'
+                    )
+                    const shouldCollapse = isUser && (
+                      isManyShot
+                      || message.originalContent.length >= LONG_PROMPT_CHARACTER_THRESHOLD
+                    )
+                    return shouldCollapse
+                      ? (
+                          <CollapsedPrompt
+                            content={message.originalContent}
+                            exampleCount={message.promptComposition?.example_count}
+                            characterCount={message.promptComposition?.character_count}
+                            objective={isManyShot ? attackObjective : undefined}
+                            isManyShot={isManyShot}
+                            globalMarkdown={false}
+                            index={index}
+                          />
+                        )
+                      : <Text className={styles.originalText}>{message.originalContent}</Text>
+                  })()}
                   {message.originalAttachments && message.originalAttachments.length > 0 && (
                     <div className={styles.attachmentsContainer}>
                       {message.originalAttachments.map((att, i) => (
@@ -242,6 +374,27 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                     <Text className={styles.loadingEllipsis}>
                       {message.content}
                     </Text>
+                  )
+                }
+                const isManyShot = !message.originalContent && (
+                  message.promptComposition?.strategy === 'many_shot'
+                  || attackType === 'ManyShotJailbreakAttack'
+                )
+                const shouldCollapse = isUser && (
+                  isManyShot
+                  || (Boolean(attackType) && message.content.length >= LONG_PROMPT_CHARACTER_THRESHOLD)
+                )
+                if (shouldCollapse) {
+                  return (
+                    <CollapsedPrompt
+                      content={message.content}
+                      exampleCount={message.promptComposition?.example_count}
+                      characterCount={message.promptComposition?.character_count}
+                      objective={isManyShot ? attackObjective : undefined}
+                      isManyShot={isManyShot}
+                      globalMarkdown={globalMarkdown}
+                      index={index}
+                    />
                   )
                 }
                 // When Markdown rendering is enabled, it takes precedence over

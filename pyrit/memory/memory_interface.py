@@ -3660,6 +3660,7 @@ class MemoryInterface(abc.ABC):
         statement = (
             select(
                 AttackResultEntry.id,
+                AttackResultEntry.conversation_id,
                 AttackResultEntry.objective,
                 AttackResultEntry.objective_sha256,
                 AttackResultEntry.atomic_attack_identifier,
@@ -3695,6 +3696,7 @@ class MemoryInterface(abc.ABC):
             deltas.append(
                 ScenarioAttackResultDelta(
                     attack_result_id=str(row.id),
+                    conversation_id=row.conversation_id,
                     objective=row.objective,
                     objective_sha256=row.objective_sha256,
                     atomic_attack_identifier=atomic_identifier,

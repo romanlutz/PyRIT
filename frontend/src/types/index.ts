@@ -38,11 +38,20 @@ export interface Message {
   originalContent?: string
   /** Original media attachments before conversion (when different from converted). */
   originalAttachments?: MessageAttachment[]
+  /** Structured provenance for a generated prompt, when the producer recorded it. */
+  promptComposition?: PromptComposition
 }
 
 export interface MessageError {
   type: string // e.g. 'blocked', 'processing', 'empty', 'unknown'
   description?: string
+}
+
+export interface PromptComposition {
+  strategy: 'many_shot'
+  example_count: number
+  objective_placement: 'appended'
+  character_count: number
 }
 
 // ============================================================================
@@ -243,6 +252,7 @@ export interface TargetInfo {
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string
+  objective?: string
   attack_type: string
   attack_specific_params?: Record<string, unknown> | null
   target?: TargetInfo | null
@@ -714,7 +724,7 @@ export interface ScenarioQueueSnapshot {
   queued: ScenarioQueueEntry[]
 }
 
-/** One persisted attack attempt in ascending progress order. */
+/** One persisted result record in ascending progress order. */
 export interface ScenarioProgressResult {
   attack_result_id: string
   atomic_group_id: string
@@ -727,7 +737,7 @@ export interface ScenarioProgressResult {
   retries: RetryEvent[]
   error_type?: string | null
   error_message?: string | null
-  result_kind?: 'attack' | 'direct_baseline' | 'adaptive_technique' | 'adaptive_orchestration' | 'unknown'
+  result_kind?: 'attack' | 'direct_baseline' | 'adaptive_technique' | 'adaptive_orchestration' | 'aggregate_parent' | 'unknown'
   technique_name?: string | null
   attempt_index?: number | null
 }

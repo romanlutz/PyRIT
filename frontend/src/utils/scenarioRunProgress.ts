@@ -89,11 +89,16 @@ export interface AttemptAccounting {
   readonly objectiveCount: number
   readonly persistedAttempts: number
   readonly attackAttempts: number
+  readonly aggregateParentRecords: number
   readonly uniformAttemptsPerObjective: number | null
   readonly uniformRoleCounts: ReadonlyMap<ScenarioAttemptRole, number> | null
   readonly completedProgressUnits: number
   readonly plannedProgressUnits: number | null
   readonly retries: number
+}
+
+export function isTargetAttackRole(role: ScenarioAttemptRole): boolean {
+  return role === 'attack' || role === 'direct_baseline' || role === 'adaptive_technique'
 }
 
 interface UnitAttempts {
@@ -429,7 +434,7 @@ export function getAttemptPresentations(state: ScenarioRunProgressState): Map<st
         || adaptiveUnits.has(unitKey(result.atomic_group_id, result.seed_group_id))
       ) {
         role = 'adaptive_orchestration'
-      } else if (group) {
+      } else if (group?.group_kind === 'attack') {
         role = 'attack'
       }
     }
@@ -439,6 +444,10 @@ export function getAttemptPresentations(state: ScenarioRunProgressState): Map<st
         ? techniqueName ?? 'Adaptive technique'
         : role === 'adaptive_orchestration'
           ? 'Adaptive orchestration'
+          : role === 'aggregate_parent'
+            ? adaptiveUnits.has(unitKey(result.atomic_group_id, result.seed_group_id))
+              ? 'Adaptive aggregate parent'
+              : 'Aggregate parent'
           : role === 'attack'
             ? group?.display_group || result.atomic_attack_name || 'Attack'
             : 'Additional persisted result'
@@ -470,7 +479,9 @@ export function getAttemptRollups(state: ScenarioRunProgressState): AttemptRollu
       persistedAttempts: existing.persistedAttempts + 1,
       succeeded: existing.succeeded + (result.outcome === 'success' ? 1 : 0),
       errors: existing.errors + (result.outcome === 'error' ? 1 : 0),
-      retries: existing.retries + Math.max(0, result.total_retries),
+      retries: existing.retries + (
+        isTargetAttackRole(presentation.role) ? Math.max(0, result.total_retries) : 0
+      ),
     })
   }
   const roleOrder: Record<ScenarioAttemptRole, number> = {
@@ -478,7 +489,8 @@ export function getAttemptRollups(state: ScenarioRunProgressState): AttemptRollu
     adaptive_technique: 1,
     attack: 2,
     adaptive_orchestration: 3,
-    unknown: 4,
+    aggregate_parent: 4,
+    unknown: 5,
   }
   return [...rollups.values()].sort(
     (left, right) => roleOrder[left.role] - roleOrder[right.role] || left.label.localeCompare(right.label),
@@ -522,13 +534,20 @@ export function getAttemptAccounting(state: ScenarioRunProgressState): AttemptAc
     persistedAttempts: state.results.length,
     attackAttempts: state.results.filter((result) => {
       const role = presentations.get(result.attack_result_id)?.role ?? 'unknown'
-      return role === 'attack' || role === 'direct_baseline' || role === 'adaptive_technique'
+      return isTargetAttackRole(role)
     }).length,
+    aggregateParentRecords: state.results.filter((result) => (
+      presentations.get(result.attack_result_id)?.role === 'adaptive_orchestration'
+      || presentations.get(result.attack_result_id)?.role === 'aggregate_parent'
+    )).length,
     uniformAttemptsPerObjective,
     uniformRoleCounts,
     completedProgressUnits: overall.completed,
     plannedProgressUnits: overall.planned,
-    retries: state.results.reduce((total, result) => total + Math.max(0, result.total_retries), 0),
+    retries: state.results.reduce((total, result) => {
+      const role = presentations.get(result.attack_result_id)?.role ?? 'unknown'
+      return total + (isTargetAttackRole(role) ? Math.max(0, result.total_retries) : 0)
+    }, 0),
   }
 }
 
@@ -620,11 +639,14 @@ function aggregateUnits(
       }
     }
     errors += unit.attempts.filter((attempt) => attempt.outcome === 'error').length
-    retries += unit.attempts.reduce((total, attempt) => total + Math.max(0, attempt.total_retries), 0)
+    retries += unit.attempts.reduce((total, attempt) => {
+      const role = presentations.get(attempt.attack_result_id)?.role ?? 'unknown'
+      return total + (isTargetAttackRole(role) ? Math.max(0, attempt.total_retries) : 0)
+    }, 0)
     persistedAttempts += unit.attempts.length
     attackAttempts += unit.attempts.filter((attempt) => {
       const role = presentations.get(attempt.attack_result_id)?.role ?? 'unknown'
-      return role === 'attack' || role === 'direct_baseline' || role === 'adaptive_technique'
+      return isTargetAttackRole(role)
     }).length
   }
   return {

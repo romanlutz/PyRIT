@@ -37,6 +37,7 @@ class ScenarioProgressResultKind(str, Enum):
     DIRECT_BASELINE = "direct_baseline"
     ADAPTIVE_TECHNIQUE = "adaptive_technique"
     ADAPTIVE_ORCHESTRATION = "adaptive_orchestration"
+    AGGREGATE_PARENT = "aggregate_parent"
     UNKNOWN = "unknown"
 
 
@@ -121,7 +122,7 @@ class ScenarioProgressHeader(BaseModel):
 
 
 class ScenarioProgressResult(BaseModel):
-    """One persisted attack attempt in ascending progress order."""
+    """One persisted result record in ascending progress order."""
 
     attack_result_id: str
     atomic_group_id: str
@@ -178,6 +179,7 @@ class ScenarioAttackResultDelta(BaseModel):
     """Lightweight memory projection used to map one scenario progress delta."""
 
     attack_result_id: str
+    conversation_id: str = ""
     objective: str
     objective_sha256: str | None = None
     atomic_attack_identifier: AtomicAttackIdentifier | None = None

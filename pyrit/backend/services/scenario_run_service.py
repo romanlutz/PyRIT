@@ -2088,6 +2088,11 @@ class ScenarioRunService:
         if technique_name:
             return ScenarioProgressResultKind.ADAPTIVE_TECHNIQUE, technique_name, attempt_index
 
+        attack_technique = (
+            delta.atomic_attack_identifier.attack_technique if delta.atomic_attack_identifier is not None else None
+        )
+        attack_identifier = attack_technique.attack if attack_technique is not None else None
+        is_sequential_envelope = attack_identifier is not None and attack_identifier.class_name == "SequentialAttack"
         matching_group = (
             next((group for group in plan.atomic_groups if group.id == atomic_group_id), None) if plan else None
         )
@@ -2096,11 +2101,17 @@ class ScenarioRunService:
                 return ScenarioProgressResultKind.DIRECT_BASELINE, None, None
             if matching_group.group_kind is ScenarioRunPlanGroupKind.ADAPTIVE:
                 return ScenarioProgressResultKind.ADAPTIVE_ORCHESTRATION, None, None
+            if is_sequential_envelope:
+                return ScenarioProgressResultKind.AGGREGATE_PARENT, None, None
             if matching_group.group_kind is ScenarioRunPlanGroupKind.ATTACK:
                 return ScenarioProgressResultKind.ATTACK, None, None
 
         if atomic_attack_name == "baseline":
             return ScenarioProgressResultKind.DIRECT_BASELINE, None, None
+        if is_sequential_envelope:
+            return ScenarioProgressResultKind.AGGREGATE_PARENT, None, None
+        if delta.conversation_id.strip():
+            return ScenarioProgressResultKind.ATTACK, None, None
         return ScenarioProgressResultKind.UNKNOWN, None, None
 
     @staticmethod

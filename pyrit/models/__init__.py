@@ -98,6 +98,12 @@ from pyrit.models.parameter import (
     RegistryReference,
     display_choices,
 )
+from pyrit.models.prompt_composition import (
+    PROMPT_COMPOSITION_METADATA_KEY,
+    PromptComposition,
+    PromptCompositionStrategy,
+    PromptObjectivePlacement,
+)
 from pyrit.models.question_answering import QuestionAnsweringDataset, QuestionAnsweringEntry, QuestionChoice
 from pyrit.models.results.attack_result import AttackOutcome, AttackResult, AttackResultT
 from pyrit.models.results.scenario_result import ScenarioResult, ScenarioRunState
@@ -219,6 +225,10 @@ __all__ = [
     "Parameter",
     "ParameterDestination",
     "PromptDataType",
+    "PROMPT_COMPOSITION_METADATA_KEY",
+    "PromptComposition",
+    "PromptCompositionStrategy",
+    "PromptObjectivePlacement",
     "PromptResponseError",
     "QuestionAnsweringDataset",
     "QuestionAnsweringEntry",

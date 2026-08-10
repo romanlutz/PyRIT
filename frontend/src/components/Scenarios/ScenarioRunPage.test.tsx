@@ -53,6 +53,7 @@ const PLAN: ScenarioRunPlan = {
     display_group: 'Technique One',
     technique_eval_hash: 'eval-1',
     seed_group_ids: ['seed-1'],
+    group_kind: 'attack',
   }],
   seed_groups: [{
     id: 'seed-1',
@@ -71,6 +72,7 @@ const ATTEMPT: ScenarioProgressResult = {
   timestamp: '2026-01-01T00:00:05Z',
   total_retries: 1,
   retries: [],
+  result_kind: 'attack',
 }
 
 function makeState(overrides: Partial<ScenarioRunProgressState> = {}): ScenarioRunProgressState {
@@ -149,7 +151,7 @@ describe('ScenarioRunPage', () => {
     )
     expect(screen.getByRole('table', { name: 'Atomic attack groups' })).toBeInTheDocument()
     expect(screen.getByRole('table', { name: 'Objectives' })).toBeInTheDocument()
-    expect(screen.getByRole('table', { name: 'Persisted attack attempts' })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Persisted result records' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel run' })).toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
   })
@@ -171,6 +173,7 @@ describe('ScenarioRunPage', () => {
           display_group: 'Direct baseline',
           technique_eval_hash: 'baseline-eval',
           seed_group_ids: objectiveIds,
+          group_kind: 'direct_baseline',
         },
         ...objectiveIds.map((seedId, index) => ({
           id: `adaptive-${index + 1}`,
@@ -178,6 +181,7 @@ describe('ScenarioRunPage', () => {
           display_group: index === 0 ? 'Fairness' : 'Harassment',
           technique_eval_hash: `adaptive-eval-${index + 1}`,
           seed_group_ids: [seedId],
+          group_kind: 'adaptive' as const,
         })),
       ],
     }
@@ -192,6 +196,7 @@ describe('ScenarioRunPage', () => {
           seed_group_id: seedId,
           timestamp: `2026-01-01T00:${String(index * 3).padStart(2, '0')}:00Z`,
           total_retries: 0,
+          result_kind: 'direct_baseline',
         },
         {
           ...ATTEMPT,
@@ -201,6 +206,7 @@ describe('ScenarioRunPage', () => {
           seed_group_id: seedId,
           timestamp: `2026-01-01T00:${String(index * 3 + 1).padStart(2, '0')}:00Z`,
           total_retries: 0,
+          result_kind: 'adaptive_technique',
           technique_name: index === 0 ? 'Fairness technique' : 'Harassment technique',
           attempt_index: 1,
         },
@@ -211,7 +217,8 @@ describe('ScenarioRunPage', () => {
           atomic_attack_name: 'adaptive',
           seed_group_id: seedId,
           timestamp: `2026-01-01T00:${String(index * 3 + 2).padStart(2, '0')}:00Z`,
-          total_retries: 0,
+          total_retries: 7,
+          result_kind: 'aggregate_parent',
         },
       ]
     })
@@ -230,18 +237,18 @@ describe('ScenarioRunPage', () => {
     renderPage()
 
     expect(screen.getByRole('group', {
-      name: '4 objectives multiplied by 3 persisted results per objective equals 12 persisted results.',
+      name: '8 target-facing leaf attacks. 8/8 planned attacks completed. 12 persisted result records, including 4 aggregate parent records. 0 actual retries.',
     })).toBeInTheDocument()
     expect(screen.getByText(
-      '3 per objective = 1 direct baseline attempt + 1 Adaptive technique attempt + 1 Adaptive orchestration result.',
+      'Per objective: 1 direct baseline attempt + 1 Adaptive technique attempt + 1 aggregate parent result.',
     )).toBeInTheDocument()
     expect(screen.getByText(
-      '8 target-facing attack attempts · 8/8 progress units completed · 0 actual retries',
+      '8/8 planned attacks completed · 12 persisted result records · 4 aggregate parent records · 0 actual retries',
     )).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Technique summary' })).not.toBeInTheDocument()
     expect(screen.getAllByText('Fairness technique').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Harassment technique').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('Adaptive orchestration').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Aggregate parent').length).toBeGreaterThan(0)
 
     const objectiveTable = screen.getByRole('table', { name: 'Objectives' })
     const firstObjectiveCells = within(within(objectiveTable).getAllByRole('row')[1]).getAllByRole('cell')
@@ -249,6 +256,10 @@ describe('ScenarioRunPage', () => {
     expect(firstObjectiveCells[2]).toHaveTextContent('3')
     expect(firstObjectiveCells[3]).toHaveTextContent('2')
     expect(firstObjectiveCells[6]).toHaveTextContent('0')
+    const aggregateRow = screen.getByText('envelope-0').closest('tr')
+    expect(aggregateRow).not.toBeNull()
+    expect(within(aggregateRow!).queryByRole('link')).not.toBeInTheDocument()
+    expect(aggregateRow).toHaveTextContent('Not applicable')
   })
 
   it('renders contract-backed safe target and run configuration metadata', () => {
@@ -365,11 +376,11 @@ describe('ScenarioRunPage', () => {
     const user = userEvent.setup()
     renderPage()
     const detailsButton = screen.getByRole('button', {
-      name: 'View details for attack attempt attack-result-1',
+      name: 'View details for result record attack-result-1',
     })
 
     await user.click(detailsButton)
-    const dialog = screen.getByRole('dialog', { name: 'Attack attempt details' })
+    const dialog = screen.getByRole('dialog', { name: 'Result record details' })
     expect(within(dialog).getByText(PLAN.seed_groups[0].objective)).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Close' }))
 
@@ -385,8 +396,8 @@ describe('ScenarioRunPage', () => {
       `/attacks/attack-result-1?scenarioResultId=${SCENARIO_RESULT_ID}`,
     )
     expect(attackLink).toHaveTextContent('attack-result-1')
-    const attemptsTable = screen.getByRole('table', { name: 'Persisted attack attempts' })
-    expect(within(attemptsTable).getByRole('columnheader', { name: 'Attack' })).toBeInTheDocument()
+    const attemptsTable = screen.getByRole('table', { name: 'Persisted result records' })
+    expect(within(attemptsTable).getByRole('columnheader', { name: 'Result record' })).toBeInTheDocument()
     const firstBodyRow = within(attemptsTable).getAllByRole('row')[1]
     expect(within(firstBodyRow).getAllByRole('cell')[0]).toContainElement(
       attackLink,
@@ -442,9 +453,9 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', {
-      name: 'View details for attack attempt attack-result-1',
+      name: 'View details for result record attack-result-1',
     }))
-    expect(screen.getByRole('dialog', { name: 'Attack attempt details' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Result record details' })).toBeInTheDocument()
     expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
   })
 

@@ -2127,6 +2127,7 @@ def test_get_progress_synthesizes_incomplete_legacy_plan(mock_memory) -> None:
     )
     delta = ScenarioAttackResultDelta(
         attack_result_id=str(uuid.uuid4()),
+        conversation_id="legacy-conversation",
         objective="legacy objective",
         outcome=AttackOutcome.FAILURE,
         execution_time_ms=10,
@@ -2147,6 +2148,88 @@ def test_get_progress_synthesizes_incomplete_legacy_plan(mock_memory) -> None:
     assert progress.plan is not None
     assert len(progress.plan.atomic_groups) == 1
     assert len(progress.results) == 1
+    assert progress.results[0].result_kind is ScenarioProgressResultKind.ATTACK
+
+
+def test_progress_keeps_legacy_result_without_conversation_unknown() -> None:
+    delta = ScenarioAttackResultDelta(
+        attack_result_id=str(uuid.uuid4()),
+        objective="legacy aggregate",
+        outcome=AttackOutcome.FAILURE,
+        execution_time_ms=10,
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        attribution_data={"parent_collection": "legacy aggregate"},
+    )
+
+    mapped = ScenarioRunService._map_progress_delta(delta=delta, plan=None)
+
+    assert mapped.result_kind is ScenarioProgressResultKind.UNKNOWN
+
+
+def test_progress_classifies_legacy_sequential_envelope_as_aggregate_parent() -> None:
+    delta = ScenarioAttackResultDelta(
+        attack_result_id=str(uuid.uuid4()),
+        objective="legacy aggregate",
+        atomic_attack_identifier=AtomicAttackIdentifier.build(
+            attack_identifier=ComponentIdentifier(
+                class_name="SequentialAttack",
+                class_module="pyrit.executor.attack.compound.sequential_attack",
+            )
+        ),
+        outcome=AttackOutcome.FAILURE,
+        execution_time_ms=10,
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        attribution_data={"parent_collection": "legacy aggregate"},
+    )
+
+    mapped = ScenarioRunService._map_progress_delta(delta=delta, plan=None)
+
+    assert mapped.result_kind is ScenarioProgressResultKind.AGGREGATE_PARENT
+
+
+def test_progress_classifies_planned_sequential_envelope_as_aggregate_parent() -> None:
+    plan = ScenarioRunPlan(
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="sequential-group",
+                atomic_attack_name="sequential",
+                display_group="Sequential",
+                technique_eval_hash="eval",
+                seed_group_ids=["seed-1"],
+                group_kind=ScenarioRunPlanGroupKind.ATTACK,
+            )
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(
+                id="seed-1",
+                objective_sha256="objective-sha",
+                objective="objective",
+            )
+        ],
+    )
+    delta = ScenarioAttackResultDelta(
+        attack_result_id=str(uuid.uuid4()),
+        objective="objective",
+        objective_sha256="objective-sha",
+        atomic_attack_identifier=AtomicAttackIdentifier.build(
+            attack_identifier=ComponentIdentifier(
+                class_name="SequentialAttack",
+                class_module="pyrit.executor.attack.compound.sequential_attack",
+            )
+        ),
+        outcome=AttackOutcome.FAILURE,
+        execution_time_ms=10,
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        attribution_data={
+            "parent_collection": "sequential",
+            "parent_eval_hash": "eval",
+            "seed_group_id": "seed-1",
+        },
+    )
+
+    mapped = ScenarioRunService._map_progress_delta(delta=delta, plan=plan)
+
+    assert mapped.result_kind is ScenarioProgressResultKind.AGGREGATE_PARENT
 
 
 def test_decode_progress_cursor_rejects_cross_run_cursor() -> None:

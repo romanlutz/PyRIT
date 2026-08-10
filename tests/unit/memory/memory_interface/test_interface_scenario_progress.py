@@ -96,6 +96,7 @@ def test_scenario_progress_deltas_page_equal_timestamps_by_id(
     assert has_more is True
     assert [row.attack_result_id for row in second_page] == [str(second_id)]
     assert second_has_more is False
+    assert second_page[0].conversation_id == f"conversation-{second_id}"
     assert second_page[0].atomic_attack_identifier is not None
     source_identifier = AtomicAttackIdentifier.from_component_identifier(rows[1].atomic_attack_identifier)
     assert second_page[0].atomic_attack_identifier.logical_seed_group_id == source_identifier.logical_seed_group_id

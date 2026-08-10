@@ -27,7 +27,7 @@ import {
 } from './components/History/scenarioHistoryFilters'
 import type { ScenarioHistoryFilters } from './components/History/scenarioHistoryFilters'
 import type { ViewName } from './components/Sidebar/Navigation'
-import type { TargetInstance, TargetInfo } from './types'
+import type { AttackSummary, TargetInstance, TargetInfo } from './types'
 import {
   targetEndpoint,
   targetIdentifierHash,
@@ -85,6 +85,7 @@ interface LoadedAttack {
   labels: Record<string, string> | null
   target: TargetInfo | null
   relatedConversationIds: string[]
+  summary: AttackSummary | null
   status: AttackLoadStatus
 }
 
@@ -247,6 +248,7 @@ function App() {
       labels: null,
       target: null,
       relatedConversationIds: [],
+      summary: null,
     })
     attacksApi
       .getAttack(routeAttackId)
@@ -258,6 +260,7 @@ function App() {
           labels: attack.labels ?? {},
           target: attack.target ?? null,
           relatedConversationIds: attack.related_conversation_ids ?? [],
+          summary: attack,
           status: 'success',
         })
       })
@@ -274,6 +277,7 @@ function App() {
           labels: null,
           target: null,
           relatedConversationIds: [],
+          summary: null,
         })
       })
     // Drop a stale response once the route has moved on to another attack.
@@ -345,6 +349,7 @@ function App() {
       labels: null,
       target,
       relatedConversationIds: [],
+      summary: null,
       status: 'success',
     })
     // Replace when promoting an empty /chat to its attack url (first message);
@@ -391,6 +396,7 @@ function App() {
       onNavigate={handleNavigate}
       attackLabels={readyAttack ? readyAttack.labels : null}
       attackTarget={readyAttack ? readyAttack.target : null}
+      attackSummary={readyAttack ? readyAttack.summary : null}
       isLoadingAttack={isLoadingAttack}
       relatedConversationCount={readyAttack ? readyAttack.relatedConversationIds.length : 0}
       scenarioResultId={readyAttack ? scenarioResultId : null}
