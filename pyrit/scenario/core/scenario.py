@@ -738,7 +738,7 @@ class Scenario(ABC):
             selected_count = len(selected_groups.get(name, []))
             selection_note = None
             if selected_count != logical_count:
-                selection_note = f"The default selection uses {selected_count} of {logical_count} logical seed groups."
+                selection_note = f"The default selection uses {selected_count} of {logical_count} available objectives."
             datasets.append(
                 ScenarioDatasetSummary(
                     name=name,

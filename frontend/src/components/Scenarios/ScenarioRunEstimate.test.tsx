@@ -44,7 +44,7 @@ function makeEstimate(
         logical_seed_group_count: 400,
         selected_seed_group_count: 4,
         configured_caps: [],
-        selection_note: 'The default selection uses 4 of 400 logical seed groups.',
+        selection_note: 'The default selection uses 4 of 400 available objectives.',
       },
     ],
     adaptive_details: null,
@@ -76,6 +76,236 @@ describe('ScenarioRunEstimate', () => {
     expect(within(equation).getByText('planned attacks')).toBeInTheDocument()
     expect(screen.getByText('4 objectives from harmbench · 400 available')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Run calculation' })).toBeInTheDocument()
+  })
+
+  it.each([1, 4, 5])(
+    'renders a universal per-dataset cap of %i once before the objective-source rows',
+    (capCount) => {
+      renderDetails(makeEstimate({
+        datasets: [
+          {
+            name: 'airt_hate',
+            kind: 'dataset',
+            logical_seed_group_count: 4,
+            selected_seed_group_count: 4,
+            configured_caps: [{
+              label: 'per-dataset cap',
+              count: capCount,
+              configured_on: 'dataset',
+              dataset_name: 'airt_hate',
+            }],
+            selection_note: null,
+          },
+          {
+            name: 'airt_leakage',
+            kind: 'dataset',
+            logical_seed_group_count: 9,
+            selected_seed_group_count: 5,
+            configured_caps: [{
+              label: 'per-dataset cap',
+              count: capCount,
+              configured_on: 'dataset',
+              dataset_name: 'airt_leakage',
+            }],
+            selection_note: null,
+          },
+        ],
+      }))
+
+      const capText = `Per-dataset cap: ${capCount} ${capCount === 1 ? 'objective' : 'objectives'}`
+      expect(screen.getAllByText(capText)).toHaveLength(1)
+      expect(screen.getByText('4 objectives from airt_hate')).toBeInTheDocument()
+      expect(screen.getByText('5 objectives from airt_leakage · 9 available')).toBeInTheDocument()
+      const sources = screen.getByRole('group', { name: 'Objective sources' })
+      const sourceText = sources.textContent ?? ''
+      expect(sourceText.indexOf(capText)).toBeLessThan(sourceText.indexOf('4 objectives from airt_hate'))
+    },
+  )
+
+  it('keeps differing dataset caps with their affected objective-source rows', () => {
+    renderDetails(makeEstimate({
+      datasets: [
+        {
+          name: 'dataset_alpha',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 4,
+          configured_caps: [{
+            label: 'per-dataset cap',
+            count: 4,
+            configured_on: 'dataset',
+            dataset_name: 'dataset_alpha',
+          }],
+          selection_note: null,
+        },
+        {
+          name: 'dataset_beta',
+          kind: 'dataset',
+          logical_seed_group_count: 10,
+          selected_seed_group_count: 5,
+          configured_caps: [{
+            label: 'per-dataset cap',
+            count: 5,
+            configured_on: 'dataset',
+            dataset_name: 'dataset_beta',
+          }],
+          selection_note: null,
+        },
+      ],
+    }))
+
+    const alpha = screen.getByRole('group', { name: 'Objective source: dataset_alpha' })
+    const beta = screen.getByRole('group', { name: 'Objective source: dataset_beta' })
+    expect(within(alpha).getByText('Per-dataset cap: 4 objectives')).toBeInTheDocument()
+    expect(within(beta).getByText('Per-dataset cap: 5 objectives')).toBeInTheDocument()
+    expect(screen.getAllByText(/Per-dataset cap:/)).toHaveLength(2)
+  })
+
+  it('keeps a single-dataset cap attached to its objective-source row', () => {
+    renderDetails(makeEstimate({
+      datasets: [{
+        name: 'harmbench',
+        kind: 'dataset',
+        logical_seed_group_count: 8,
+        selected_seed_group_count: 4,
+        configured_caps: [{
+          label: 'per-dataset cap',
+          count: 4,
+          configured_on: 'dataset',
+          dataset_name: 'harmbench',
+        }],
+        selection_note: null,
+      }],
+    }))
+
+    const source = screen.getByRole('group', { name: 'Objective source: harmbench' })
+    expect(within(source).getByText('Per-dataset cap: 4 objectives')).toBeInTheDocument()
+  })
+
+  it('renders a global cap once while preserving differing per-dataset caps on rows', () => {
+    renderDetails(makeEstimate({
+      datasets: [
+        {
+          name: 'dataset_alpha',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 3,
+          configured_caps: [
+            {
+              label: 'per-dataset cap',
+              count: 3,
+              configured_on: 'dataset',
+              dataset_name: 'dataset_alpha',
+            },
+            {
+              label: 'combined compound cap',
+              count: 10,
+              configured_on: 'compound',
+              dataset_name: null,
+            },
+          ],
+          selection_note: null,
+        },
+        {
+          name: 'dataset_beta',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 4,
+          configured_caps: [
+            {
+              label: 'per-dataset cap',
+              count: 4,
+              configured_on: 'dataset',
+              dataset_name: 'dataset_beta',
+            },
+            {
+              label: 'combined compound cap',
+              count: 10,
+              configured_on: 'compound',
+              dataset_name: null,
+            },
+          ],
+          selection_note: null,
+        },
+      ],
+    }))
+
+    expect(screen.getAllByText('Combined compound cap: 10')).toHaveLength(1)
+    expect(within(screen.getByRole('group', {
+      name: 'Objective source: dataset_alpha',
+    })).getByText('Per-dataset cap: 3 objectives')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', {
+      name: 'Objective source: dataset_beta',
+    })).getByText('Per-dataset cap: 4 objectives')).toBeInTheDocument()
+  })
+
+  it('keeps a configuration cap on only the rows where it applies', () => {
+    renderDetails(makeEstimate({
+      datasets: [
+        {
+          name: 'dataset_alpha',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 4,
+          configured_caps: [{
+            label: 'shared configuration cap',
+            count: 6,
+            configured_on: 'configuration',
+            dataset_name: null,
+          }],
+          selection_note: null,
+        },
+        {
+          name: 'dataset_beta',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 4,
+          configured_caps: [{
+            label: 'shared configuration cap',
+            count: 6,
+            configured_on: 'configuration',
+            dataset_name: null,
+          }],
+          selection_note: null,
+        },
+        {
+          name: 'dataset_gamma',
+          kind: 'dataset',
+          logical_seed_group_count: 8,
+          selected_seed_group_count: 8,
+          configured_caps: [],
+          selection_note: null,
+        },
+      ],
+    }))
+
+    expect(within(screen.getByRole('group', {
+      name: 'Objective source: dataset_alpha',
+    })).getByText('Shared configuration cap: 6')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', {
+      name: 'Objective source: dataset_beta',
+    })).getByText('Shared configuration cap: 6')).toBeInTheDocument()
+    expect(within(screen.getByRole('group', {
+      name: 'Objective source: dataset_gamma',
+    })).queryByText(/Shared configuration cap/)).not.toBeInTheDocument()
+    expect(screen.getAllByText('Shared configuration cap: 6')).toHaveLength(2)
+  })
+
+  it('renders no cap summary for uncapped datasets and preserves the selection note', () => {
+    renderDetails(makeEstimate({
+      datasets: [{
+        name: 'harmbench',
+        kind: 'dataset',
+        logical_seed_group_count: 8,
+        selected_seed_group_count: 4,
+        configured_caps: [],
+        selection_note: 'Four compatible objectives remain after filtering.',
+      }],
+    }))
+
+    expect(screen.queryByText(/cap:/i)).not.toBeInTheDocument()
+    expect(screen.getByText('4 objectives from harmbench · 8 available')).toBeInTheDocument()
+    expect(screen.getByText('Four compatible objectives remain after filtering.')).toBeInTheDocument()
   })
 
   it('renders heterogeneous compatibility as truthful per-technique additive terms', () => {

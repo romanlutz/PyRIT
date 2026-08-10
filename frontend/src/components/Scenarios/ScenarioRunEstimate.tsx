@@ -3,6 +3,7 @@ import { Badge, Spinner, Text } from '@fluentui/react-components'
 import type {
   ScenarioRunEstimate,
   ScenarioRunEstimateComponent,
+  ScenarioRunEstimateDatasetCap,
   ScenarioRunEstimateFactor,
   ScenarioRunEstimateState,
 } from '@/types'
@@ -11,6 +12,7 @@ import {
   formatAdaptiveCapAccessibleRule,
   formatAdaptiveCapMetadata,
 } from './scenarioAdaptiveCap'
+import { normalizeDatasetCaps } from './scenarioDatasetCaps'
 import { useScenarioRunEstimateStyles } from './ScenarioRunEstimate.styles'
 
 interface ScenarioRunEstimateSummaryProps {
@@ -149,6 +151,13 @@ function operator(id: string, symbol: CalculationOperator['symbol']): Calculatio
 function humanizeLabel(label: string): string {
   const words = label.replace(/_/g, ' ').trim()
   return words.length > 0 ? `${words[0].toUpperCase()}${words.slice(1)}` : label
+}
+
+function formatDatasetCap(cap: ScenarioRunEstimateDatasetCap): string {
+  const count = cap.configuredOn === 'dataset'
+    ? countLabel(cap.count, 'objective', 'objectives')
+    : formatCount(cap.count)
+  return `${humanizeLabel(cap.label)}: ${count}`
 }
 
 function semanticFactorLabel(factor: ScenarioRunEstimateFactor): string {
@@ -535,26 +544,41 @@ function EstimateSources({ estimate }: { estimate: ScenarioRunEstimate }) {
   if (estimate.datasets.length === 0) {
     return null
   }
+  const { commonCaps, residualCapsByDatasetId } = normalizeDatasetCaps(estimate.datasets)
 
   return (
     <div className={styles.sources} role="group" aria-label="Objective sources">
-      {estimate.datasets.map((dataset) => (
-        <div className={styles.source} key={dataset.id}>
-          <Text size={200}>
-            {countLabel(dataset.selectedSeedGroupCount, 'objective', 'objectives')} from {dataset.name}
-            {dataset.logicalSeedGroupCount !== dataset.selectedSeedGroupCount
-              ? ` · ${formatCount(dataset.logicalSeedGroupCount)} available`
-              : ''}
-          </Text>
-          {dataset.configuredCaps.length > 0 && (
-            <Text size={200} className={styles.muted}>
-              {dataset.configuredCaps.map((cap) => (
-                `${cap.label}: ${formatCount(cap.count)}`
-              )).join(' · ')}
+      {commonCaps.length > 0 && (
+        <Text size={200} weight="semibold" className={styles.muted}>
+          {commonCaps.map(formatDatasetCap).join(' · ')}
+        </Text>
+      )}
+      {estimate.datasets.map((dataset) => {
+        const residualCaps = residualCapsByDatasetId.get(dataset.id) ?? []
+        return (
+          <div
+            className={styles.source}
+            key={dataset.id}
+            role="group"
+            aria-label={`Objective source: ${dataset.name}`}
+          >
+            <Text size={200}>
+              {countLabel(dataset.selectedSeedGroupCount, 'objective', 'objectives')} from {dataset.name}
+              {dataset.logicalSeedGroupCount !== dataset.selectedSeedGroupCount
+                ? ` · ${formatCount(dataset.logicalSeedGroupCount)} available`
+                : ''}
             </Text>
-          )}
-        </div>
-      ))}
+            {dataset.selectionNote && (
+              <Text size={200} className={styles.muted}>{dataset.selectionNote}</Text>
+            )}
+            {residualCaps.length > 0 && (
+              <Text size={200} className={styles.muted}>
+                {residualCaps.map(formatDatasetCap).join(' · ')}
+              </Text>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
