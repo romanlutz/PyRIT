@@ -90,8 +90,9 @@ export interface AttemptAccounting {
   readonly persistedAttempts: number
   readonly attackAttempts: number
   readonly aggregateParentRecords: number
-  readonly uniformAttemptsPerObjective: number | null
-  readonly uniformRoleCounts: ReadonlyMap<ScenarioAttemptRole, number> | null
+  readonly adaptiveAggregateParentRecords: number
+  readonly uniformTargetAttacksPerObjective: number | null
+  readonly uniformTargetRoleCounts: ReadonlyMap<ScenarioAttemptRole, number> | null
   readonly completedProgressUnits: number
   readonly plannedProgressUnits: number | null
   readonly retries: number
@@ -499,6 +500,18 @@ export function getAttemptRollups(state: ScenarioRunProgressState): AttemptRollu
 
 export function getAttemptAccounting(state: ScenarioRunProgressState): AttemptAccounting {
   const presentations = getAttemptPresentations(state)
+  const modernAdaptiveGroupIds = new Set(
+    state.plan?.atomic_groups
+      .filter((group) => group.group_kind === 'adaptive')
+      .map((group) => group.id) ?? [],
+  )
+  const legacyAdaptiveResultKeys = new Set<string>()
+  for (const result of state.results) {
+    const role = presentations.get(result.attack_result_id)?.role ?? 'unknown'
+    if (role === 'adaptive_technique' || role === 'adaptive_orchestration') {
+      legacyAdaptiveResultKeys.add(`${result.atomic_group_id}\0${result.seed_group_id}`)
+    }
+  }
   const objectiveIds = new Set(state.plan?.seed_groups.map((seed) => seed.id) ?? [])
   for (const result of state.results) {
     objectiveIds.add(result.seed_group_id)
@@ -510,12 +523,19 @@ export function getAttemptAccounting(state: ScenarioRunProgressState): AttemptAc
   for (const result of state.results) {
     attemptsByObjective.get(result.seed_group_id)?.push(result)
   }
-  const observedCounts = [...attemptsByObjective.values()].map((attempts) => attempts.length)
-  const uniformAttemptsPerObjective = observedCounts.length > 0
+  const targetAttemptsByObjective = [...attemptsByObjective.values()].map((attempts) => (
+    attempts.filter((attempt) => {
+      const role = presentations.get(attempt.attack_result_id)?.role ?? 'unknown'
+      return isTargetAttackRole(role)
+    })
+  ))
+  const observedCounts = targetAttemptsByObjective.map((attempts) => attempts.length)
+  const uniformTargetAttacksPerObjective = observedCounts.length > 0
+    && observedCounts[0] > 0
     && observedCounts.every((count) => count === observedCounts[0])
     ? observedCounts[0]
     : null
-  const roleCounts = [...attemptsByObjective.values()].map((attempts) => {
+  const roleCounts = targetAttemptsByObjective.map((attempts) => {
     const counts = new Map<ScenarioAttemptRole, number>()
     for (const attempt of attempts) {
       const role = presentations.get(attempt.attack_result_id)?.role ?? 'unknown'
@@ -524,7 +544,8 @@ export function getAttemptAccounting(state: ScenarioRunProgressState): AttemptAc
     return counts
   })
   const firstRoleSignature = roleCounts[0] ? roleCountSignature(roleCounts[0]) : null
-  const uniformRoleCounts = firstRoleSignature !== null
+  const uniformTargetRoleCounts = firstRoleSignature !== null
+    && roleCounts[0].size > 0
     && roleCounts.every((counts) => roleCountSignature(counts) === firstRoleSignature)
     ? roleCounts[0]
     : null
@@ -540,8 +561,19 @@ export function getAttemptAccounting(state: ScenarioRunProgressState): AttemptAc
       presentations.get(result.attack_result_id)?.role === 'adaptive_orchestration'
       || presentations.get(result.attack_result_id)?.role === 'aggregate_parent'
     )).length,
-    uniformAttemptsPerObjective,
-    uniformRoleCounts,
+    adaptiveAggregateParentRecords: state.results.filter((result) => {
+      const presentation = presentations.get(result.attack_result_id)
+      return presentation?.role === 'adaptive_orchestration'
+        || (
+          presentation?.role === 'aggregate_parent'
+          && (
+            modernAdaptiveGroupIds.has(result.atomic_group_id)
+            || legacyAdaptiveResultKeys.has(`${result.atomic_group_id}\0${result.seed_group_id}`)
+          )
+        )
+    }).length,
+    uniformTargetAttacksPerObjective,
+    uniformTargetRoleCounts,
     completedProgressUnits: overall.completed,
     plannedProgressUnits: overall.planned,
     retries: state.results.reduce((total, result) => {

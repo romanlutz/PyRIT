@@ -162,7 +162,11 @@ await printer.write_async(resumed_result)  # type: ignore
 # per-dataset display label set by the scenario.
 #
 # A trail shorter than `max_attempts_per_objective` means either an earlier
-# technique succeeded or the compatible-technique pool was smaller than the cap.
+# technique succeeded, or—when the envelope did not succeed—the dispatcher
+# exhausted the compatible candidates available for that objective. Compatibility
+# is objective-specific: for example, a simulated-conversation technique is
+# excluded when its seed sequence overlaps sequence positions already occupied by
+# the objective seed group.
 
 # %%
 from collections import Counter

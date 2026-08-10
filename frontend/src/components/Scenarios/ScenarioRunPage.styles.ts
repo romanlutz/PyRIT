@@ -263,6 +263,26 @@ export const useScenarioRunPageStyles = makeStyles({
     minWidth: '68rem',
     tableLayout: 'auto',
   },
+  supportingResults: {
+    marginTop: tokens.spacingVerticalL,
+    '& > summary': {
+      display: 'list-item',
+      boxSizing: 'border-box',
+      minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      width: 'fit-content',
+      paddingBlock: tokens.spacingVerticalM,
+      color: tokens.colorBrandForegroundLink,
+      cursor: 'pointer',
+      fontWeight: tokens.fontWeightSemibold,
+      ':focus-visible': {
+        outline: `2px solid ${tokens.colorStrokeFocus2}`,
+        outlineOffset: '2px',
+      },
+    },
+    '& > div': {
+      marginTop: tokens.spacingVerticalS,
+    },
+  },
   clickableAttemptRow: {
     cursor: 'pointer',
     ':hover': {

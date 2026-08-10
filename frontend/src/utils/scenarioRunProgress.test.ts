@@ -309,6 +309,7 @@ describe('scenario run progress calculations', () => {
           display_group: 'Direct baseline',
           technique_eval_hash: 'baseline-eval',
           seed_group_ids: objectiveIds,
+          group_kind: 'direct_baseline',
         },
         ...objectiveIds.map((seedId, index) => ({
           id: `adaptive-${index + 1}`,
@@ -316,6 +317,7 @@ describe('scenario run progress calculations', () => {
           display_group: index < 1 ? 'Fairness' : 'Harassment',
           technique_eval_hash: `adaptive-eval-${index + 1}`,
           seed_group_ids: [seedId],
+          group_kind: 'adaptive' as const,
         })),
       ],
     }
@@ -353,15 +355,15 @@ describe('scenario run progress calculations', () => {
       persistedAttempts: 12,
       attackAttempts: 8,
       aggregateParentRecords: 4,
-      uniformAttemptsPerObjective: 3,
+      adaptiveAggregateParentRecords: 4,
+      uniformTargetAttacksPerObjective: 2,
       completedProgressUnits: 8,
       plannedProgressUnits: 8,
       retries: 0,
     })
-    expect(Array.from(getAttemptAccounting(state).uniformRoleCounts?.entries() ?? [])).toEqual([
+    expect(Array.from(getAttemptAccounting(state).uniformTargetRoleCounts?.entries() ?? [])).toEqual([
       ['direct_baseline', 1],
       ['adaptive_technique', 1],
-      ['aggregate_parent', 1],
     ])
     expect(getSeedGroupRollups(state)[0]).toMatchObject({
       completed: 2,
@@ -376,6 +378,43 @@ describe('scenario run progress calculations', () => {
       expect.objectContaining({ role: 'adaptive_technique', label: 'Harassment technique', persistedAttempts: 3 }),
       expect.objectContaining({ role: 'aggregate_parent', persistedAttempts: 4, retries: 0 }),
     ])
+  })
+
+  it('recognizes legacy Adaptive envelopes from typed sibling technique results', () => {
+    const state = readyState([
+      makeResult('adaptive-child', 'group-a', 'seed-1', 'failure', 1, {
+        result_kind: 'adaptive_technique',
+        technique_name: 'many_shot',
+        attempt_index: 1,
+      }),
+      makeResult('adaptive-envelope', 'group-a', 'seed-1', 'failure', 2, {
+        result_kind: 'aggregate_parent',
+      }),
+      makeResult('unrelated-envelope', 'group-a', 'seed-2', 'failure', 3, {
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getAttemptAccounting(state)).toMatchObject({
+      attackAttempts: 1,
+      aggregateParentRecords: 2,
+      adaptiveAggregateParentRecords: 1,
+      retries: 0,
+    })
+  })
+
+  it('omits uniform target arithmetic when no target-facing attacks exist', () => {
+    const state = readyState([
+      makeResult('aggregate-only', 'group-a', 'seed-1', 'failure', 1, {
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getAttemptAccounting(state)).toMatchObject({
+      attackAttempts: 0,
+      uniformTargetAttacksPerObjective: null,
+      uniformTargetRoleCounts: null,
+    })
   })
 
   it('sorts atomic states and lets active IDs win while a run is nonterminal', () => {

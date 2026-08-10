@@ -247,6 +247,19 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
     ? `${overall.completed} known completed progress units; planned total unavailable`
     : `${overall.completed} of ${overall.planned} progress units completed`
   const terminal = isTerminalRunState(run.status)
+  const targetFacingResults = state.results.filter((result) => (
+    isTargetAttackRole(attemptPresentations.get(result.attack_result_id)?.role ?? 'unknown')
+  ))
+  const supportingResults = state.results.filter((result) => (
+    !isTargetAttackRole(attemptPresentations.get(result.attack_result_id)?.role ?? 'unknown')
+  ))
+  const targetFacingRollups = attemptRollups.filter((rollup) => isTargetAttackRole(rollup.role))
+  const supportingResultsLabel = supportingResults.every((result) => {
+    const role = attemptPresentations.get(result.attack_result_id)?.role ?? 'unknown'
+    return role === 'adaptive_orchestration' || role === 'aggregate_parent'
+  })
+    ? 'Orchestration results'
+    : 'Orchestration and unclassified results'
   const attemptAccountingSection = state.results.length > 0 ? (
     <ObservedAttemptAccounting accounting={attemptAccounting} />
   ) : null
@@ -481,13 +494,13 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             <Text as="h2" id="attempt-summary-heading" size={500} weight="semibold">
               Result summary
             </Text>
-            <Text className={styles.sectionHint}>Persisted results grouped by their execution role.</Text>
+            <Text className={styles.sectionHint}>Target-facing attacks grouped by their execution role.</Text>
           </div>
-          {attemptRollups.length === 0 ? (
-            <EmptyState text="Result roles will appear when the first record is persisted." />
+          {targetFacingRollups.length === 0 ? (
+            <EmptyState text="Attack roles will appear when the first target-facing result is persisted." />
           ) : (
             <div className={styles.summaryGrid}>
-              {attemptRollups.map((attempt) => (
+              {targetFacingRollups.map((attempt) => (
                 <article key={attempt.id} className={styles.summaryItem}>
                   <div className={styles.summaryTitle}>
                     <Text as="h3" size={400} weight="semibold">{attempt.label}</Text>
@@ -528,7 +541,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                     <TableHeaderCell>Attack</TableHeaderCell>
                     <TableHeaderCell>Progress units</TableHeaderCell>
                     <TableHeaderCell>Persisted result records</TableHeaderCell>
-                    <TableHeaderCell>Target-facing leaf attacks</TableHeaderCell>
+                    <TableHeaderCell>Target-facing attacks</TableHeaderCell>
                     <TableHeaderCell>Success</TableHeaderCell>
                     <TableHeaderCell>Errors</TableHeaderCell>
                     <TableHeaderCell>Retries</TableHeaderCell>
@@ -563,7 +576,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
             <Text as="h2" id="objectives-heading" size={500} weight="semibold">
               Objectives
             </Text>
-            <Text className={styles.sectionHint}>Leaf attacks and aggregate parent records grouped by objective.</Text>
+            <Text className={styles.sectionHint}>Target-facing attacks and aggregate parent records grouped by objective.</Text>
           </div>
           {seedGroups.length === 0 ? (
             <EmptyState text="No objectives have been persisted yet." />
@@ -575,7 +588,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                     <TableHeaderCell>Objective</TableHeaderCell>
                     <TableHeaderCell>Progress units</TableHeaderCell>
                     <TableHeaderCell>Persisted result records</TableHeaderCell>
-                    <TableHeaderCell>Target attack conversations</TableHeaderCell>
+                    <TableHeaderCell>Target-facing attacks</TableHeaderCell>
                     <TableHeaderCell>Success</TableHeaderCell>
                     <TableHeaderCell>Errors</TableHeaderCell>
                     <TableHeaderCell>Retries</TableHeaderCell>
@@ -608,15 +621,15 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
         <section className={styles.section} aria-labelledby="attempts-heading">
           <div className={styles.sectionHeading}>
             <Text as="h2" id="attempts-heading" size={500} weight="semibold">
-              Persisted result records
+              Target-facing attacks
             </Text>
-            <Text className={styles.sectionHint}>{state.results.length} records</Text>
+            <Text className={styles.sectionHint}>{targetFacingResults.length} attack results</Text>
           </div>
-          {state.results.length === 0 ? (
-            <EmptyState text="This run has not persisted a result record yet." />
+          {targetFacingResults.length === 0 ? (
+            <EmptyState text="This run has not persisted a target-facing attack yet." />
           ) : (
             <div className={styles.tableScroll}>
-              <Table size="small" className={styles.attemptsTable} aria-label="Persisted result records">
+              <Table size="small" className={styles.attemptsTable} aria-label="Target-facing attacks">
                 <TableHeader>
                   <TableRow>
                     <TableHeaderCell>Result record</TableHeaderCell>
@@ -631,7 +644,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...state.results].reverse().map((attempt) => {
+                  {[...targetFacingResults].reverse().map((attempt) => {
                     const presentation = attemptPresentations.get(attempt.attack_result_id)
                     const targetFacing = isTargetAttackRole(presentation?.role ?? 'unknown')
                     const attackDestination = targetFacing
@@ -713,6 +726,68 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                 </TableBody>
               </Table>
             </div>
+          )}
+          {supportingResults.length > 0 && (
+            <details className={styles.supportingResults}>
+              <summary>
+                {supportingResultsLabel} ({supportingResults.length})
+              </summary>
+              <Text className={styles.sectionHint}>
+                These persisted records summarize orchestration or cannot be classified as target-facing attacks.
+                They are not counted as attacks or retries.
+              </Text>
+              <div className={styles.tableScroll}>
+                <Table size="small" className={styles.attemptsTable} aria-label={supportingResultsLabel}>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHeaderCell>Result record</TableHeaderCell>
+                      <TableHeaderCell>Role</TableHeaderCell>
+                      <TableHeaderCell>Outcome</TableHeaderCell>
+                      <TableHeaderCell>Attack group</TableHeaderCell>
+                      <TableHeaderCell>Objective</TableHeaderCell>
+                      <TableHeaderCell>Execution</TableHeaderCell>
+                      <TableHeaderCell>Timestamp</TableHeaderCell>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {[...supportingResults].reverse().map((result) => {
+                      const presentation = attemptPresentations.get(result.attack_result_id)
+                      return (
+                        <TableRow key={result.attack_result_id}>
+                          <TableCell>
+                            <Text className={styles.preview} title={result.attack_result_id}>
+                              {result.attack_result_id}
+                            </Text>
+                          </TableCell>
+                          <TableCell>{formatAttemptRole(presentation?.role ?? 'unknown')}</TableCell>
+                          <TableCell>
+                            <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[result.outcome]}>
+                              {formatOutcome(result.outcome)}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>{atomicGroupNames.get(result.atomic_group_id) ?? result.atomic_attack_name}</TableCell>
+                          <TableCell>
+                            <Button
+                              appearance="subtle"
+                              className={styles.objectiveButton}
+                              icon={<EyeRegular />}
+                              aria-label={`View details for result record ${result.attack_result_id}`}
+                              onClick={(event) => openAttemptDetails(result, event.currentTarget)}
+                            >
+                              <Text className={styles.preview}>
+                                {objectivePreview(seedObjectives.get(result.seed_group_id) ?? null, result.seed_group_id)}
+                              </Text>
+                            </Button>
+                          </TableCell>
+                          <TableCell className={styles.nowrap}>{formatDuration(result.execution_time_ms)}</TableCell>
+                          <TableCell className={styles.nowrap}>{formatTimestamp(result.timestamp)}</TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </details>
           )}
         </section>
       </div>
@@ -834,11 +909,33 @@ interface ObservedAttemptAccountingProps {
 function ObservedAttemptAccounting({ accounting }: ObservedAttemptAccountingProps) {
   const styles = useScenarioRunPageStyles()
   const progress = accounting.plannedProgressUnits === null
-    ? `${accounting.completedProgressUnits} known planned attacks completed`
-    : `${accounting.completedProgressUnits}/${accounting.plannedProgressUnits} planned attacks completed`
-  const aggregateExplanation = accounting.aggregateParentRecords > 0
-    ? ` · ${accounting.aggregateParentRecords} aggregate parent ${accounting.aggregateParentRecords === 1 ? 'record' : 'records'}`
-    : ''
+    ? `${accounting.completedProgressUnits} known completed progress units; planned total unavailable`
+    : `${accounting.completedProgressUnits}/${accounting.plannedProgressUnits} planned progress units completed`
+  const otherAggregateRecords = accounting.aggregateParentRecords - accounting.adaptiveAggregateParentRecords
+  const unclassifiedRecords = accounting.persistedAttempts - accounting.attackAttempts - accounting.aggregateParentRecords
+  const persistedComponents = accounting.persistedAttempts === accounting.attackAttempts
+    ? []
+    : [
+        `${accounting.attackAttempts} target-facing attack ${accounting.attackAttempts === 1 ? 'result' : 'results'}`,
+        ...(accounting.adaptiveAggregateParentRecords > 0
+          ? [`${accounting.adaptiveAggregateParentRecords} Adaptive orchestration ${accounting.adaptiveAggregateParentRecords === 1 ? 'summary' : 'summaries'}`]
+          : []),
+        ...(otherAggregateRecords > 0
+          ? [`${otherAggregateRecords} aggregate parent ${otherAggregateRecords === 1 ? 'record' : 'records'}`]
+          : []),
+        ...(unclassifiedRecords > 0
+          ? [`${unclassifiedRecords} unclassified ${unclassifiedRecords === 1 ? 'record' : 'records'}`]
+          : []),
+      ]
+  const persistedBreakdown = persistedComponents.length > 0 ? `: ${persistedComponents.join(' + ')}` : ''
+  const uniformEquation = accounting.uniformTargetAttacksPerObjective !== null
+    && accounting.objectiveCount * accounting.uniformTargetAttacksPerObjective === accounting.attackAttempts
+  const observedAttackLabel = accounting.uniformTargetAttacksPerObjective === 1
+    ? 'observed attack each'
+    : 'observed attacks each'
+  const targetAttackLabel = accounting.attackAttempts === 1
+    ? 'target-facing attack'
+    : 'target-facing attacks'
 
   return (
     <section className={styles.section} aria-labelledby="observed-attempts-heading">
@@ -846,28 +943,42 @@ function ObservedAttemptAccounting({ accounting }: ObservedAttemptAccountingProp
         <Text as="h2" id="observed-attempts-heading" size={500} weight="semibold">
           Observed execution accounting
         </Text>
-        <Text className={styles.sectionHint}>Leaf attacks lead this summary. Persisted aggregate parents remain visible without being counted as attacks or retries.</Text>
+        <Text className={styles.sectionHint}>Observed target-facing attacks lead this summary. Progress and storage details follow.</Text>
       </div>
       <div
         className={styles.accountingSurface}
         role="group"
-        aria-label={`${accounting.attackAttempts} target-facing leaf attacks. ${progress}. ${accounting.persistedAttempts} persisted result records${accounting.aggregateParentRecords > 0 ? `, including ${accounting.aggregateParentRecords} aggregate parent records` : ''}. ${accounting.retries} actual retries.`}
+        aria-label={`${uniformEquation ? `${accounting.objectiveCount} ${accounting.objectiveCount === 1 ? 'objective' : 'objectives'} multiplied by ${accounting.uniformTargetAttacksPerObjective} ${observedAttackLabel} equals ` : ''}${accounting.attackAttempts} ${targetAttackLabel}. ${progress}. ${accounting.persistedAttempts} persisted result records${persistedBreakdown}. ${accounting.retries} actual retries.`}
       >
         <div className={styles.accountingEquation} aria-hidden="true">
+          {uniformEquation && (
+            <>
+              <AccountingOperand
+                value={String(accounting.objectiveCount)}
+                label={accounting.objectiveCount === 1 ? 'objective' : 'objectives'}
+              />
+              <Text size={500} weight="semibold" className={styles.accountingOperator}>×</Text>
+              <AccountingOperand
+                value={String(accounting.uniformTargetAttacksPerObjective)}
+                label={observedAttackLabel}
+              />
+              <Text size={500} weight="semibold" className={styles.accountingOperator}>=</Text>
+            </>
+          )}
           <AccountingOperand
             value={String(accounting.attackAttempts)}
-            label="target-facing leaf attacks"
+            label={targetAttackLabel}
             result
           />
         </div>
-        {accounting.uniformRoleCounts && (
+        {accounting.uniformTargetRoleCounts && (
           <Text className={styles.accountingProvenance}>
-            Per objective: {formatRoleBreakdown(accounting.uniformRoleCounts)}.
+            Per objective: {formatRoleBreakdown(accounting.uniformTargetRoleCounts)}.
           </Text>
         )}
         <Text className={styles.sectionHint}>
           {progress} · {accounting.persistedAttempts} persisted result {accounting.persistedAttempts === 1 ? 'record' : 'records'}
-          {aggregateExplanation} · {accounting.retries} actual {accounting.retries === 1 ? 'retry' : 'retries'}
+          {persistedBreakdown} · {accounting.retries} actual {accounting.retries === 1 ? 'retry' : 'retries'}
         </Text>
       </div>
     </section>
@@ -983,9 +1094,9 @@ function formatRoleBreakdown(counts: ReadonlyMap<ScenarioAttemptRole, number>): 
       return []
     }
     const label = role === 'direct_baseline'
-      ? `direct baseline ${count === 1 ? 'attempt' : 'attempts'}`
+      ? count === 1 ? 'direct baseline' : 'direct baseline attacks'
       : role === 'adaptive_technique'
-        ? `Adaptive technique ${count === 1 ? 'attempt' : 'attempts'}`
+        ? `Adaptive ${count === 1 ? 'technique' : 'techniques'}`
         : role === 'adaptive_orchestration'
           ? `Adaptive orchestration ${count === 1 ? 'result' : 'results'}`
           : role === 'aggregate_parent'
