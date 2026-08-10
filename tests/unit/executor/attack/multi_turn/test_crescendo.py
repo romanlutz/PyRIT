@@ -1855,6 +1855,91 @@ class TestAttackExecution:
         assert objective_messages[1].message_pieces[1].original_value == "/path/to/seed.png"
         assert objective_messages[2].message_pieces[1].original_value == "/tmp/accepted-base.png"
 
+    async def test_seeded_run_reports_text_only_after_seed_is_consumed(
+        self,
+        mock_objective_target: MagicMock,
+        mock_adversarial_chat: MagicMock,
+        mock_objective_scorer: MagicMock,
+        mock_refusal_scorer: MagicMock,
+        mock_prompt_normalizer: MagicMock,
+        no_refusal_score: Score,
+        failure_objective_score: Score,
+        success_objective_score: Score,
+    ) -> None:
+        """An accepted text response ends seed-media forwarding on later turns."""
+        mock_objective_target.configuration.capabilities.input_modalities = frozenset(
+            {frozenset({"text", "image_path"})}
+        )
+        attack = CrescendoAttack(
+            objective_target=mock_objective_target,
+            attack_adversarial_config=AttackAdversarialConfig(target=mock_adversarial_chat),
+            attack_scoring_config=AttackScoringConfig(
+                objective_scorer=mock_objective_scorer,
+                refusal_scorer=mock_refusal_scorer,
+            ),
+            prompt_normalizer=mock_prompt_normalizer,
+            max_turns=2,
+            max_backtracks=0,
+        )
+        seed_message = Message(
+            message_pieces=[
+                MessagePiece.adversarial_placeholder(),
+                MessagePiece(
+                    role="user",
+                    original_value="/tmp/seed.png",
+                    original_value_data_type="image_path",
+                ),
+            ]
+        )
+        context = CrescendoAttackContext(
+            params=AttackParameters(objective="goal", next_message=seed_message),
+            session=ConversationSession(),
+        )
+        first_response = create_prompt_response(text="first text response")
+        final_response = create_prompt_response(text="final text response")
+        mock_prompt_normalizer.send_prompt_async.side_effect = [
+            create_prompt_response(text=create_adversarial_json_response(question="seeded request")),
+            first_response,
+            create_prompt_response(text=create_adversarial_json_response(question="text follow-up")),
+            final_response,
+        ]
+        mock_refusal_scorer.score_async.side_effect = [[no_refusal_score], [no_refusal_score]]
+
+        with patch(
+            "pyrit.score.Scorer.score_response_async",
+            new_callable=AsyncMock,
+            side_effect=[
+                {"objective_scores": [failure_objective_score], "auxiliary_scores": []},
+                {"objective_scores": [success_objective_score], "auxiliary_scores": []},
+            ],
+        ) as mock_score_response:
+            result = await attack._perform_async(context=context)
+
+        sent_messages = [call.kwargs["message"] for call in mock_prompt_normalizer.send_prompt_async.call_args_list]
+        adversarial_messages = sent_messages[::2]
+        objective_messages = sent_messages[1::2]
+        assert mock_prompt_normalizer.send_prompt_async.await_count == 4
+        assert "seeded_run=true, seed_count=1, input_mode=seed_media" in adversarial_messages[0].get_value()
+        assert "seeded_run=true, seed_count=1, input_mode=text_only" in adversarial_messages[1].get_value()
+        assert "The original seed media is no longer attached." in adversarial_messages[1].get_value()
+        assert objective_messages[0].message_pieces[1].original_value == "/tmp/seed.png"
+        assert len(objective_messages[1].message_pieces) == 1
+        assert objective_messages[1].message_pieces[0].original_value == "text follow-up"
+        assert [call.kwargs["message"] for call in mock_refusal_scorer.score_async.await_args_list] == [
+            first_response,
+            final_response,
+        ]
+        assert [call.kwargs["response"] for call in mock_score_response.await_args_list] == [
+            first_response,
+            final_response,
+        ]
+        assert result.outcome == AttackOutcome.SUCCESS
+        assert result.executed_turns == 2
+        assert result.backtrack_count == 0
+        assert context.pending_seed_message is None
+        assert context.refused_text is None
+        assert context.last_accepted_response is final_response
+
     async def test_placeholder_seed_is_consumed_after_first_live_turn_with_prepended_history(
         self,
         mock_objective_target: MagicMock,
