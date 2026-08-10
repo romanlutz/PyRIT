@@ -11,6 +11,7 @@ import base64
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -625,6 +626,111 @@ class TestGetAttack:
         assert result is not None
         assert result.conversation_id == "test-id"
         assert result.attack_type == "My Attack"
+        assert result.orchestration is None
+
+    async def test_get_attack_returns_ordered_persisted_orchestration_children(
+        self, attack_service, mock_memory
+    ) -> None:
+        """Expose persisted compound child IDs with conversation stats and Adaptive identity."""
+        parent = make_attack_result(conversation_id="", attack_result_id="parent")
+        parent.atomic_attack_identifier = AtomicAttackIdentifier.build(
+            attack_identifier=ComponentIdentifier(
+                class_name="SequentialAttack",
+                class_module="pyrit.executor.attack.compound.sequential_attack",
+            )
+        )
+        parent.metadata.update(
+            child_attack_result_ids=["child-2", "child-1", "missing-child"],
+            completion_policy="first_success",
+        )
+        child_1 = make_attack_result(conversation_id="conversation-1", attack_result_id="child-1")
+        child_1.labels = {"_adaptive_attempt": "1", "_adaptive_technique_name": "many_shot"}
+        child_2 = make_attack_result(conversation_id="conversation-2", attack_result_id="child-2")
+        child_2.labels = {"_adaptive_attempt": "2", "_adaptive_technique_name": "role_play_movie_script"}
+
+        def get_results(**kwargs: Any) -> list[AttackResult]:
+            if kwargs.get("attack_result_ids") == ["parent"]:
+                return [parent]
+            if kwargs.get("attack_result_ids") == ["child-2", "child-1", "missing-child"]:
+                return [child_1, child_2]
+            return []
+
+        mock_memory.get_attack_results.side_effect = get_results
+        mock_memory.get_conversation_stats.side_effect = [
+            {},
+            {
+                "conversation-1": ConversationStats(message_count=2),
+                "conversation-2": ConversationStats(message_count=6),
+            },
+        ]
+
+        result = await attack_service.get_attack_async(attack_result_id="parent")
+
+        assert result is not None
+        assert result.orchestration is not None
+        assert result.orchestration.kind == "sequential"
+        assert result.orchestration.completion_policy == "first_success"
+        assert result.orchestration.child_source == "persisted_child_ids"
+        assert [child.attack_result_id for child in result.orchestration.children] == ["child-2", "child-1"]
+        assert result.orchestration.children[0].technique_name == "role_play_movie_script"
+        assert result.orchestration.children[0].attempt_index == 2
+        assert result.orchestration.children[0].message_count == 6
+        assert result.orchestration.unresolved_child_result_ids == ["missing-child"]
+
+    async def test_get_attack_does_not_misclassify_nonsequential_child_metadata(
+        self, attack_service, mock_memory
+    ) -> None:
+        """Child metadata alone does not establish a SequentialAttack envelope."""
+        attack_result = make_attack_result(conversation_id="", attack_result_id="parent")
+        attack_result.metadata["child_attack_result_ids"] = ["child"]
+        mock_memory.get_attack_results.return_value = [attack_result]
+
+        result = await attack_service.get_attack_async(attack_result_id="parent")
+
+        assert result is not None
+        assert result.orchestration is None
+
+    async def test_get_attack_legacy_orchestration_fallback_scopes_by_attribution(
+        self, attack_service, mock_memory
+    ) -> None:
+        """Legacy envelopes use exact run/group/seed provenance and typed Adaptive labels."""
+        parent = make_attack_result(conversation_id="", attack_result_id="parent")
+        parent.atomic_attack_identifier = AtomicAttackIdentifier.build(
+            attack_identifier=ComponentIdentifier(
+                class_name="SequentialAttack",
+                class_module="pyrit.executor.attack.compound.sequential_attack",
+            )
+        )
+        parent.attribution_parent_id = "scenario-1"
+        parent.attribution_data = {
+            "parent_collection": "adaptive-group",
+            "parent_eval_hash": "eval-1",
+            "seed_group_id": "seed-1",
+        }
+        child = make_attack_result(conversation_id="conversation-1", attack_result_id="child")
+        child.attribution_parent_id = "scenario-1"
+        child.attribution_data = dict(parent.attribution_data)
+        child.labels = {"_adaptive_attempt": "1", "_adaptive_technique_name": "many_shot"}
+        unrelated = make_attack_result(conversation_id="conversation-2", attack_result_id="unrelated")
+        unrelated.attribution_parent_id = "scenario-1"
+        unrelated.attribution_data = {**parent.attribution_data, "seed_group_id": "seed-2"}
+        unrelated.labels = {"_adaptive_attempt": "1", "_adaptive_technique_name": "role_play_movie_script"}
+
+        def get_results(**kwargs: Any) -> list[AttackResult]:
+            if kwargs.get("attack_result_ids") == ["parent"]:
+                return [parent]
+            if kwargs.get("scenario_result_id") == "scenario-1":
+                return [unrelated, parent, child]
+            return []
+
+        mock_memory.get_attack_results.side_effect = get_results
+
+        result = await attack_service.get_attack_async(attack_result_id="parent")
+
+        assert result is not None
+        assert result.orchestration is not None
+        assert result.orchestration.child_source == "attribution_fallback"
+        assert [item.attack_result_id for item in result.orchestration.children] == ["child"]
 
 
 # ============================================================================

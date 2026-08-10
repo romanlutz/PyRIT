@@ -139,6 +139,92 @@ export const useChatWindowStyles = makeStyles({
       fontWeight: tokens.fontWeightRegular,
     },
   },
+  orchestrationPanel: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+    overflowY: 'auto',
+    padding: `${tokens.spacingVerticalXXL} ${tokens.spacingHorizontalXXL}`,
+    gap: tokens.spacingVerticalL,
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  orchestrationHeading: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+  },
+  orchestrationFacts: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    gap: tokens.spacingVerticalM,
+    margin: 0,
+    '@media (max-width: 700px)': {
+      gridTemplateColumns: '1fr',
+    },
+  },
+  orchestrationFact: {
+    minWidth: 0,
+    '& dt': {
+      color: tokens.colorNeutralForeground3,
+      fontSize: tokens.fontSizeBase200,
+    },
+    '& dd': {
+      margin: 0,
+      color: tokens.colorNeutralForeground1,
+      overflowWrap: 'anywhere',
+    },
+  },
+  orchestrationObjective: {
+    gridColumn: '1 / -1',
+  },
+  orchestrationList: {
+    display: 'grid',
+    gap: tokens.spacingVerticalM,
+    margin: 0,
+    paddingInlineStart: tokens.spacingHorizontalXXL,
+  },
+  orchestrationChild: {
+    paddingBlock: tokens.spacingVerticalM,
+    paddingInlineStart: tokens.spacingHorizontalS,
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+  },
+  orchestrationChildHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalS,
+  },
+  orchestrationChildFacts: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalL,
+    marginBlock: tokens.spacingVerticalS,
+    color: tokens.colorNeutralForeground2,
+  },
+  orchestrationLink: {
+    ...mobileTouchTarget,
+    display: 'inline-flex',
+    alignItems: 'center',
+    width: 'fit-content',
+    paddingInline: tokens.spacingHorizontalM,
+    borderRadius: tokens.borderRadiusMedium,
+    color: tokens.colorNeutralForegroundOnBrand,
+    backgroundColor: tokens.colorBrandBackground,
+    textDecorationLine: 'none',
+    fontWeight: tokens.fontWeightSemibold,
+    ':hover': {
+      color: tokens.colorNeutralForegroundOnBrand,
+      backgroundColor: tokens.colorBrandBackgroundHover,
+    },
+    ':focus-visible': {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: '2px',
+    },
+  },
+  orchestrationEmpty: {
+    color: tokens.colorNeutralForeground2,
+  },
   newAttackButton: {
     flexShrink: 0,
     ...mobileTouchTarget,

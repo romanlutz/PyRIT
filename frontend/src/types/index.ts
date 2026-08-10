@@ -242,6 +242,8 @@ export interface TargetCatalogResponse {
 
 // --- Attacks ---
 
+export type AttackOutcome = 'undetermined' | 'success' | 'failure' | 'error'
+
 export interface TargetInfo {
   target_type: string
   endpoint?: string | null
@@ -255,6 +257,29 @@ export interface AttackResultMetadata {
   [key: string]: unknown
 }
 
+export interface AttackOrchestrationChild {
+  attack_result_id: string
+  conversation_id: string
+  objective: string
+  attack_type: string
+  technique_name?: string | null
+  attempt_index?: number | null
+  outcome: AttackOutcome
+  executed_turns: number
+  execution_time_ms: number
+  message_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface AttackOrchestrationSummary {
+  kind: 'sequential'
+  completion_policy?: string | null
+  child_source: 'persisted_child_ids' | 'attribution_fallback'
+  children: AttackOrchestrationChild[]
+  unresolved_child_result_ids: string[]
+}
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string
@@ -263,15 +288,17 @@ export interface AttackSummary {
   attack_specific_params?: Record<string, unknown> | null
   target?: TargetInfo | null
   converters: string[]
-  outcome?: 'undetermined' | 'success' | 'failure' | 'error' | null
+  outcome?: AttackOutcome | null
+  executed_turns?: number
+  execution_time_ms?: number
   last_message_preview?: string | null
   message_count: number
   related_conversation_ids: string[]
   labels: Record<string, string>
   created_at: string
   updated_at: string
-  execution_time_ms?: number
   metadata?: AttackResultMetadata
+  orchestration?: AttackOrchestrationSummary | null
 }
 
 export interface CreateAttackRequest {

@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import {
   Text,
   Avatar,
-  tokens,
   MessageBar,
   MessageBarBody,
   Button,
@@ -51,6 +50,8 @@ interface MessageListProps {
   attackType?: string
   /** Canonical objective for a generated prompt; shown outside collapsed scaffolding. */
   attackObjective?: string
+  /** Context-specific copy for a loaded historical result with no messages. */
+  emptyStateText?: string
 }
 
 const LONG_PROMPT_CHARACTER_THRESHOLD = 4_000
@@ -221,6 +222,7 @@ export default function MessageList({
   globalMarkdown = false,
   attackType,
   attackObjective,
+  emptyStateText = 'There are no messages in this conversation yet.',
 }: MessageListProps) {
   const styles = useMessageListStyles()
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -260,8 +262,8 @@ export default function MessageList({
   if (messages.length === 0) {
     return (
       <div className={styles.emptyState}>
-        <Text size={300} style={{ color: tokens.colorNeutralForeground3 }}>
-          There are no messages in this conversation yet.
+        <Text size={300} className={styles.emptyStateText}>
+          {emptyStateText}
         </Text>
       </div>
     )

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import type { ChangeEvent } from 'react'
 import {
+  Badge,
   Button,
   Breadcrumb,
   BreadcrumbDivider,
@@ -12,6 +13,8 @@ import {
   MenuPopover,
   MenuTrigger,
   mergeClasses,
+  MessageBar,
+  MessageBarBody,
   Switch,
   Text,
   Tooltip,
@@ -36,9 +39,20 @@ import { toApiError } from '../../services/errors'
 import { buildMessagePieces, backendMessagesToFrontend } from '../../utils/messageMapper'
 import { exportConversation } from '../../utils/conversationExport'
 import type { ExportFormat } from '../../utils/conversationExport'
-import type { AttackSummary, Message, MessageAttachment, TargetInstance, TargetInfo } from '../../types'
+import {
+  ATTACK_OUTCOME_BADGE_COLORS,
+  formatAttackOutcome,
+} from '../../utils/attackOutcome'
+import type {
+  AttackOrchestrationSummary,
+  AttackSummary,
+  Message,
+  MessageAttachment,
+  TargetInstance,
+  TargetInfo,
+} from '../../types'
 import { targetInfoMatchesTarget } from '../../utils/targetIdentity'
-import { scenarioRunRoutePath } from '../../utils/routeParams'
+import { attackRoutePath, scenarioRunRoutePath } from '../../utils/routeParams'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
 
@@ -68,6 +82,125 @@ function matchesNarrowScreen(): boolean {
   return typeof window !== 'undefined'
     && typeof window.matchMedia === 'function'
     && window.matchMedia(NARROW_SCREEN_QUERY).matches
+}
+
+interface OrchestrationResultPanelProps {
+  readonly attackSummary: AttackSummary
+  readonly orchestration: AttackOrchestrationSummary
+  readonly scenarioResultId?: string | null
+}
+
+function formatExecutionTime(milliseconds?: number): string {
+  if (milliseconds === undefined) return 'Unavailable'
+  if (milliseconds < 1_000) return `${milliseconds} ms`
+  return `${(milliseconds / 1_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`
+}
+
+function OrchestrationResultPanel({
+  attackSummary,
+  orchestration,
+  scenarioResultId,
+}: OrchestrationResultPanelProps) {
+  const styles = useChatWindowStyles()
+  const completionPolicy = orchestration.completion_policy
+    ? orchestration.completion_policy.replace(/_/g, ' ')
+    : 'Unavailable'
+
+  return (
+    <section className={styles.orchestrationPanel} aria-labelledby="orchestration-result-heading">
+      <div className={styles.orchestrationHeading}>
+        <Text as="h2" id="orchestration-result-heading" size={600} weight="semibold">
+          Adaptive orchestration result
+        </Text>
+        <Text>
+          This result coordinates Adaptive techniques and does not own a target conversation.
+        </Text>
+      </div>
+
+      <MessageBar intent="info">
+        <MessageBarBody>
+          Open a child technique below to inspect the target-facing conversation it produced.
+          {orchestration.child_source === 'attribution_fallback' && (
+            <> These child links were reconstructed from legacy scenario attribution because persisted child IDs are unavailable.</>
+          )}
+        </MessageBarBody>
+      </MessageBar>
+
+      <dl className={styles.orchestrationFacts}>
+        <div className={styles.orchestrationFact}>
+          <dt>Outcome</dt>
+          <dd>{formatAttackOutcome(attackSummary.outcome)}</dd>
+        </div>
+        <div className={styles.orchestrationFact}>
+          <dt>Completion policy</dt>
+          <dd>{completionPolicy}</dd>
+        </div>
+        <div className={styles.orchestrationFact}>
+          <dt>Execution time</dt>
+          <dd>{formatExecutionTime(attackSummary.execution_time_ms)}</dd>
+        </div>
+        <div className={mergeClasses(styles.orchestrationFact, styles.orchestrationObjective)}>
+          <dt>Objective</dt>
+          <dd>{attackSummary.objective || 'Objective unavailable'}</dd>
+        </div>
+      </dl>
+
+      <div>
+        <Text as="h3" size={500} weight="semibold">
+          Child techniques ({orchestration.children.length})
+        </Text>
+        {orchestration.children.length > 0 ? (
+          <ol className={styles.orchestrationList}>
+            {orchestration.children.map((child) => {
+              const techniqueName = child.technique_name || child.attack_type
+              return (
+                <li key={child.attack_result_id} className={styles.orchestrationChild}>
+                  <div className={styles.orchestrationChildHeader}>
+                    <Text size={400} weight="semibold">{techniqueName}</Text>
+                    <Badge appearance="tint" color={ATTACK_OUTCOME_BADGE_COLORS[child.outcome]}>
+                      {formatAttackOutcome(child.outcome)}
+                    </Badge>
+                  </div>
+                  <div className={styles.orchestrationChildFacts}>
+                    {child.attempt_index && <Text>Adaptive attempt {child.attempt_index}</Text>}
+                    <Text>{child.message_count} {child.message_count === 1 ? 'message' : 'messages'}</Text>
+                    <Text>{child.executed_turns} {child.executed_turns === 1 ? 'turn' : 'turns'}</Text>
+                    <Text>{formatExecutionTime(child.execution_time_ms)}</Text>
+                  </div>
+                  {child.conversation_id ? (
+                    <Link
+                      className={styles.orchestrationLink}
+                      to={attackRoutePath(child.attack_result_id, scenarioResultId)}
+                    >
+                      Open {techniqueName} conversation
+                    </Link>
+                  ) : (
+                    <Text className={styles.orchestrationEmpty}>
+                      No target conversation was persisted for this child result.
+                    </Text>
+                  )}
+                </li>
+              )
+            })}
+          </ol>
+        ) : (
+          <Text as="p" className={styles.orchestrationEmpty}>
+            No child result records could be resolved for this orchestration result.
+          </Text>
+        )}
+      </div>
+
+      {orchestration.unresolved_child_result_ids.length > 0 && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            {orchestration.unresolved_child_result_ids.length}{' '}
+            {orchestration.unresolved_child_result_ids.length === 1 ? 'child result is' : 'child results are'} no
+            longer available.
+          </MessageBarBody>
+        </MessageBar>
+      )}
+    </section>
+  )
 }
 
 interface ChatWindowProps {
@@ -114,6 +247,7 @@ export default function ChatWindow({
   attackSummary,
 }: ChatWindowProps) {
   const styles = useChatWindowStyles()
+  const orchestration = attackSummary?.orchestration ?? null
   const restoreFocusTargetAttributes = useRestoreFocusTarget()
   const restoreFocusSourceAttributes = useRestoreFocusSource()
   const [messages, setMessages] = useState<Message[]>([])
@@ -716,27 +850,31 @@ export default function ChatWindow({
         )}
         <div className={styles.ribbon}>
           <div className={styles.conversationInfo}>
-            {activeTarget ? (
+            {orchestration && attackSummary ? (
+              <Text size={200} weight="semibold">
+                Adaptive orchestration result
+              </Text>
+            ) : activeTarget ? (
               <TargetBadge target={activeTarget} />
             ) : (
               <Text size={200} className={styles.noTarget}>
                 No target selected
               </Text>
             )}
-            {labels && onLabelsChange && (
+            {!orchestration && labels && onLabelsChange && (
               <LabelsBar labels={labels} onLabelsChange={onLabelsChange} />
             )}
           </div>
           <div className={styles.ribbonActions}>
-            <Tooltip content="Render all messages as Markdown by default" relationship="label">
+            {!orchestration && <Tooltip content="Render all messages as Markdown by default" relationship="label">
               <Switch
                 checked={globalMarkdown}
                 onChange={handleMarkdownChange}
                 label="Markdown"
                 data-testid="global-markdown-toggle"
               />
-            </Tooltip>
-            <Menu>
+            </Tooltip>}
+            {!orchestration && <Menu>
               <MenuTrigger disableButtonEnhancement>
                 <Tooltip content="Export conversation" relationship="label">
                   <Button
@@ -759,8 +897,8 @@ export default function ChatWindow({
                   </MenuItem>
                 </MenuList>
               </MenuPopover>
-            </Menu>
-            <Tooltip content="Toggle conversations panel" relationship="label">
+            </Menu>}
+            {!orchestration && <Tooltip content="Toggle conversations panel" relationship="label">
               <Button
                 {...restoreFocusTargetAttributes}
                 appearance="subtle"
@@ -773,7 +911,7 @@ export default function ChatWindow({
                 aria-expanded={isPanelOpen}
                 aria-controls="conversation-panel"
               />
-            </Tooltip>
+            </Tooltip>}
             <Tooltip content="New Attack" relationship="label">
               <Button
                 appearance="primary"
@@ -789,7 +927,7 @@ export default function ChatWindow({
             </Tooltip>
           </div>
         </div>
-        {attackSummary && (
+        {attackSummary && !orchestration && (
           <section className={styles.attackContext} aria-labelledby="attack-context-heading">
             <Text as="h2" id="attack-context-heading" size={400} weight="semibold">
               Attack details
@@ -820,74 +958,89 @@ export default function ChatWindow({
             </dl>
           </section>
         )}
-        {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
-        <MessageList
-          messages={messages}
-          onCopyToInput={handleCopyToInput}
-          onCopyToNewConversation={attackResultId ? handleCopyToNewConversation : undefined}
-          onBranchConversation={attackResultId && activeConversationId ? handleBranchConversation : undefined}
-          onBranchAttack={activeTarget && activeConversationId ? handleBranchAttack : undefined}
-          isLoading={isLoadingAttack || isLoadingMessages || awaitingConversationLoad}
-          isSingleTurn={activeTarget?.capabilities?.supports_multi_turn === false}
-          isOperatorLocked={isOperatorLocked}
-          isCrossTarget={isCrossTargetLocked}
-          noTargetSelected={!activeTarget}
-          globalMarkdown={globalMarkdown}
-          attackType={attackSummary?.attack_type}
-          attackObjective={attackSummary?.objective}
-        />
-        <ChatInputArea
-          ref={inputBoxRef}
-          onSend={handleSend}
-          showSystemPrompt={!attackResultId}
-          supportsSystemPrompt={supportsSystemPrompt}
-          systemPrompt={systemPrompt}
-          onSystemPromptChange={setSystemPrompt}
-          disabled={isSending || !activeTarget || singleTurnLimitReached || isOperatorLocked || isCrossTargetLocked}
-          activeTarget={activeTarget}
-          singleTurnLimitReached={singleTurnLimitReached}
-          onNewConversation={handleNewConversation}
-          operatorLocked={isOperatorLocked}
-          crossTargetLocked={isCrossTargetLocked}
-          onUseAsTemplate={handleUseAsTemplate}
-          attackOperator={isOperatorLocked ? attackOperator ?? undefined : undefined}
-          noTargetSelected={!activeTarget}
-          onConfigureTarget={() => onNavigate?.('config')}
-          onToggleConverterPanel={() => setIsConverterPanelOpen(prev => !prev)}
-          isConverterPanelOpen={isConverterPanelOpen}
-          onInputChange={setChatInputText}
-          onAttachmentsChange={handleAttachmentsChange}
-          convertedValue={activePieceConversions['text']?.convertedDataType === 'text' ? (activePieceConversions['text']?.convertedValue ?? null) : null}
-          originalValue={activePieceConversions['text']?.originalValue ?? null}
-          onClearConversion={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
-          onConvertedValueChange={(val) => setPieceConversions((prev) => {
-            const existing = prev['text']
-            if (!existing) return prev
-            return { ...prev, text: { ...existing, convertedValue: val } }
-          })}
-          convertedFileChip={(() => {
-            const tc = activePieceConversions['text']
-            if (!tc || tc.convertedDataType === 'text') return null
-            if (!isPathDataType(tc.convertedDataType)) return null
-            return {
-              name: basenameFromValue(tc.convertedValue, 'output'),
-              url: buildMediaUrl(tc.convertedValue),
-              iconKind: dataTypeToAttachmentKind(tc.convertedDataType),
-            }
-          })()}
-          onClearConvertedFileChip={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
-          converterOutputDataTypes={Object.values(activePieceConversions).map((c) => c.convertedDataType)}
-          mediaConversions={Object.entries(activePieceConversions)
-            .filter(([k]) => k !== 'text')
-            .map(([k, v]) => ({ pieceType: k, convertedValue: v.convertedValue, convertedDataType: v.convertedDataType }))}
-          onClearMediaConversion={(pieceType) => setPieceConversions((prev) => {
-            const next = { ...prev }
-            delete next[pieceType]
-            return next
-          })}
-        />
+        {orchestration && attackSummary ? (
+          <OrchestrationResultPanel
+            attackSummary={attackSummary}
+            orchestration={orchestration}
+            scenarioResultId={scenarioResultId}
+          />
+        ) : (
+          <>
+            {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
+            <MessageList
+              messages={messages}
+              onCopyToInput={handleCopyToInput}
+              onCopyToNewConversation={attackResultId ? handleCopyToNewConversation : undefined}
+              onBranchConversation={attackResultId && activeConversationId ? handleBranchConversation : undefined}
+              onBranchAttack={activeTarget && activeConversationId ? handleBranchAttack : undefined}
+              isLoading={isLoadingAttack || isLoadingMessages || awaitingConversationLoad}
+              isSingleTurn={activeTarget?.capabilities?.supports_multi_turn === false}
+              isOperatorLocked={isOperatorLocked}
+              isCrossTarget={isCrossTargetLocked}
+              noTargetSelected={!activeTarget}
+              globalMarkdown={globalMarkdown}
+              attackType={attackSummary?.attack_type}
+              attackObjective={attackSummary?.objective}
+              emptyStateText={attackSummary && attackResultId
+                ? attackSummary.outcome === 'error'
+                  ? 'This target-facing attack ended with an error before any conversation messages were persisted.'
+                  : 'This target-facing attack has no persisted conversation messages.'
+                : undefined}
+            />
+            <ChatInputArea
+              ref={inputBoxRef}
+              onSend={handleSend}
+              showSystemPrompt={!attackResultId}
+              supportsSystemPrompt={supportsSystemPrompt}
+              systemPrompt={systemPrompt}
+              onSystemPromptChange={setSystemPrompt}
+              disabled={isSending || !activeTarget || singleTurnLimitReached || isOperatorLocked || isCrossTargetLocked}
+              activeTarget={activeTarget}
+              singleTurnLimitReached={singleTurnLimitReached}
+              onNewConversation={handleNewConversation}
+              operatorLocked={isOperatorLocked}
+              crossTargetLocked={isCrossTargetLocked}
+              onUseAsTemplate={handleUseAsTemplate}
+              attackOperator={isOperatorLocked ? attackOperator ?? undefined : undefined}
+              noTargetSelected={!activeTarget}
+              onConfigureTarget={() => onNavigate?.('config')}
+              onToggleConverterPanel={() => setIsConverterPanelOpen(prev => !prev)}
+              isConverterPanelOpen={isConverterPanelOpen}
+              onInputChange={setChatInputText}
+              onAttachmentsChange={handleAttachmentsChange}
+              convertedValue={activePieceConversions['text']?.convertedDataType === 'text' ? (activePieceConversions['text']?.convertedValue ?? null) : null}
+              originalValue={activePieceConversions['text']?.originalValue ?? null}
+              onClearConversion={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
+              onConvertedValueChange={(val) => setPieceConversions((prev) => {
+                const existing = prev['text']
+                if (!existing) return prev
+                return { ...prev, text: { ...existing, convertedValue: val } }
+              })}
+              convertedFileChip={(() => {
+                const tc = activePieceConversions['text']
+                if (!tc || tc.convertedDataType === 'text') return null
+                if (!isPathDataType(tc.convertedDataType)) return null
+                return {
+                  name: basenameFromValue(tc.convertedValue, 'output'),
+                  url: buildMediaUrl(tc.convertedValue),
+                  iconKind: dataTypeToAttachmentKind(tc.convertedDataType),
+                }
+              })()}
+              onClearConvertedFileChip={() => setPieceConversions((prev) => { const next = { ...prev }; delete next['text']; return next })}
+              converterOutputDataTypes={Object.values(activePieceConversions).map((c) => c.convertedDataType)}
+              mediaConversions={Object.entries(activePieceConversions)
+                .filter(([k]) => k !== 'text')
+                .map(([k, v]) => ({ pieceType: k, convertedValue: v.convertedValue, convertedDataType: v.convertedDataType }))}
+              onClearMediaConversion={(pieceType) => setPieceConversions((prev) => {
+                const next = { ...prev }
+                delete next[pieceType]
+                return next
+              })}
+            />
+          </>
+        )}
       </div>
-      <Drawer
+      {!orchestration && <Drawer
         as="aside"
         {...restoreFocusSourceAttributes}
         type={isNarrowScreen ? 'overlay' : 'inline'}
@@ -916,7 +1069,7 @@ export default function ChatWindow({
           }
           refreshKey={panelRefreshKey}
         />
-      </Drawer>
+      </Drawer>}
     </div>
   )
 }

@@ -48,6 +48,10 @@ import {
   routerPathParamValue,
 } from '@/utils/routeParams'
 import {
+  ATTACK_OUTCOME_BADGE_COLORS,
+  formatAttackOutcome,
+} from '@/utils/attackOutcome'
+import {
   getAttemptAccounting,
   getAttemptPresentations,
   getAttemptRollups,
@@ -76,13 +80,6 @@ const RUN_BADGE_COLORS: Record<ScenarioRunState, 'informative' | 'brand' | 'succ
   COMPLETED: 'success',
   FAILED: 'danger',
   CANCELLED: 'warning',
-}
-
-const OUTCOME_BADGE_COLORS: Record<ScenarioProgressResult['outcome'], 'success' | 'danger' | 'warning' | 'informative'> = {
-  success: 'success',
-  failure: 'danger',
-  error: 'warning',
-  undetermined: 'informative',
 }
 
 export default function ScenarioRunPage() {
@@ -693,8 +690,8 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                         <TableCell>{formatAttemptRole(presentation?.role ?? 'unknown')}</TableCell>
                         <TableCell>{presentation?.techniqueName ?? 'Not applicable'}</TableCell>
                         <TableCell>
-                          <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[attempt.outcome]}>
-                            {formatOutcome(attempt.outcome)}
+                          <Badge appearance="tint" color={ATTACK_OUTCOME_BADGE_COLORS[attempt.outcome]}>
+                            {formatAttackOutcome(attempt.outcome)}
                           </Badge>
                         </TableCell>
                         <TableCell>{atomicGroupNames.get(attempt.atomic_group_id) ?? attempt.atomic_attack_name}</TableCell>
@@ -761,8 +758,8 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                           </TableCell>
                           <TableCell>{formatAttemptRole(presentation?.role ?? 'unknown')}</TableCell>
                           <TableCell>
-                            <Badge appearance="tint" color={OUTCOME_BADGE_COLORS[result.outcome]}>
-                              {formatOutcome(result.outcome)}
+                            <Badge appearance="tint" color={ATTACK_OUTCOME_BADGE_COLORS[result.outcome]}>
+                              {formatAttackOutcome(result.outcome)}
                             </Badge>
                           </TableCell>
                           <TableCell>{atomicGroupNames.get(result.atomic_group_id) ?? result.atomic_attack_name}</TableCell>
@@ -862,7 +859,7 @@ function ScenarioRunPageContent({ scenarioResultId }: ScenarioRunPageContentProp
                     value={attemptPresentations.get(selectedAttempt.attack_result_id)?.techniqueName ?? 'Not applicable'}
                   />
                   <Metric label="Attack result ID" value={selectedAttempt.attack_result_id} />
-                  <Metric label="Outcome" value={formatOutcome(selectedAttempt.outcome)} />
+                  <Metric label="Outcome" value={formatAttackOutcome(selectedAttempt.outcome)} />
                   <Metric label="Attack group" value={atomicGroupNames.get(selectedAttempt.atomic_group_id) ?? selectedAttempt.atomic_attack_name} />
                   <Metric label="Atomic attack" value={selectedAttempt.atomic_attack_name || 'Persisted attack'} />
                   <Metric label="Logical seed group" value={selectedAttempt.seed_group_id} />
@@ -1056,10 +1053,6 @@ function AtomicStatusBadge({ status }: AtomicStatusBadgeProps) {
 
 function formatRunState(status: ScenarioRunState): string {
   return status.toLowerCase().replace('_', ' ').replace(/^\w/, (letter) => letter.toUpperCase())
-}
-
-function formatOutcome(outcome: ScenarioProgressResult['outcome']): string {
-  return outcome.replace(/^\w/, (letter) => letter.toUpperCase())
 }
 
 function formatAttemptRole(role: ScenarioAttemptRole): string {

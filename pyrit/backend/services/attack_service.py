@@ -42,6 +42,8 @@ from pyrit.backend.models.attacks import (
     AddMessageResponse,
     AttackConversationsResponse,
     AttackListResponse,
+    AttackOrchestrationChild,
+    AttackOrchestrationSummary,
     AttackSummary,
     ConversationMessagesResponse,
     ConversationSummary,
@@ -60,6 +62,8 @@ from pyrit.backend.services.converter_service import get_converter_service
 from pyrit.backend.services.target_service import get_target_service
 from pyrit.memory import AttackResultsKeysetCursor, CentralMemory, data_serializer_factory
 from pyrit.models import (
+    ADAPTIVE_ATTEMPT_LABEL,
+    ADAPTIVE_TECHNIQUE_NAME_LABEL,
     AtomicAttackIdentifier,
     AttackIdentifier,
     AttackOutcome,
@@ -264,7 +268,9 @@ class AttackService:
         ar = results[0]
         stats_map = self._memory.get_conversation_stats(conversation_ids=[ar.conversation_id])
         stats = stats_map.get(ar.conversation_id, ConversationStats(message_count=0))
-        return await attack_result_to_summary_async(ar, stats=stats)
+        summary = await attack_result_to_summary_async(ar, stats=stats)
+        orchestration = await self._get_orchestration_summary_async(attack_result=ar)
+        return summary.model_copy(update={"orchestration": orchestration})
 
     async def get_conversation_messages_async(
         self,
@@ -687,6 +693,131 @@ class AttackService:
             raise ValueError(f"Attack '{attack_result_id}' messages not found after update")
 
         return AddMessageResponse(attack=attack_detail, messages=attack_messages)
+
+    async def _get_orchestration_summary_async(
+        self,
+        *,
+        attack_result: AttackResult,
+    ) -> AttackOrchestrationSummary | None:
+        strategy_identifier = attack_result.get_attack_strategy_identifier()
+        is_sequential = strategy_identifier is not None and (
+            strategy_identifier.class_name == "SequentialAttack"
+            and strategy_identifier.class_module == "pyrit.executor.attack.compound.sequential_attack"
+        )
+        if not is_sequential:
+            return None
+
+        raw_child_ids = attack_result.metadata.get("child_attack_result_ids")
+        child_results, unresolved_ids, source = self._resolve_orchestration_children(
+            attack_result=attack_result,
+            raw_child_ids=raw_child_ids,
+        )
+        conversation_ids = [result.conversation_id for result in child_results if result.conversation_id]
+        stats_map = self._memory.get_conversation_stats(conversation_ids=conversation_ids)
+        children = [
+            await self._to_orchestration_child_async(
+                attack_result=child_result,
+                stats=stats_map.get(child_result.conversation_id, ConversationStats(message_count=0)),
+            )
+            for child_result in child_results
+        ]
+        completion_policy = attack_result.metadata.get("completion_policy")
+        return AttackOrchestrationSummary(
+            kind="sequential",
+            completion_policy=completion_policy if isinstance(completion_policy, str) else None,
+            child_source=source,
+            children=children,
+            unresolved_child_result_ids=unresolved_ids,
+        )
+
+    def _resolve_orchestration_children(
+        self,
+        *,
+        attack_result: AttackResult,
+        raw_child_ids: Any,
+    ) -> tuple[list[AttackResult], list[str], Literal["persisted_child_ids", "attribution_fallback"]]:
+        if raw_child_ids is not None:
+            child_ids = self._normalize_child_result_ids(
+                parent_result_id=attack_result.attack_result_id,
+                raw_child_ids=raw_child_ids,
+            )
+            child_results = self._memory.get_attack_results(attack_result_ids=child_ids) if child_ids else []
+            results_by_id = {result.attack_result_id: result for result in child_results}
+            return (
+                [results_by_id[child_id] for child_id in child_ids if child_id in results_by_id],
+                [child_id for child_id in child_ids if child_id not in results_by_id],
+                "persisted_child_ids",
+            )
+
+        return self._resolve_legacy_orchestration_children(attack_result=attack_result), [], "attribution_fallback"
+
+    def _resolve_legacy_orchestration_children(self, *, attack_result: AttackResult) -> list[AttackResult]:
+        if not attack_result.attribution_parent_id:
+            return []
+        required_keys = ("parent_collection", "parent_eval_hash", "seed_group_id")
+        provenance = attack_result.attribution_data or {}
+        if any(not provenance.get(key) for key in required_keys):
+            return []
+
+        candidates = self._memory.get_attack_results(scenario_result_id=attack_result.attribution_parent_id)
+        children = [
+            candidate
+            for candidate in candidates
+            if candidate.attack_result_id != attack_result.attack_result_id
+            and candidate.labels.get(ADAPTIVE_TECHNIQUE_NAME_LABEL)
+            and self._adaptive_attempt_index(candidate) is not None
+            and all((candidate.attribution_data or {}).get(key) == provenance[key] for key in required_keys)
+        ]
+        return sorted(children, key=lambda child: (self._adaptive_attempt_index(child) or 0, child.attack_result_id))
+
+    @staticmethod
+    def _normalize_child_result_ids(*, parent_result_id: str, raw_child_ids: Any) -> list[str]:
+        if not isinstance(raw_child_ids, list):
+            logger.warning(
+                "Attack result '%s' has malformed child_attack_result_ids metadata.",
+                parent_result_id,
+            )
+            return []
+        return list(
+            dict.fromkeys(
+                child_id
+                for child_id in raw_child_ids
+                if isinstance(child_id, str) and child_id and child_id != parent_result_id
+            )
+        )
+
+    @staticmethod
+    def _adaptive_attempt_index(attack_result: AttackResult) -> int | None:
+        raw_attempt = attack_result.labels.get(ADAPTIVE_ATTEMPT_LABEL)
+        if not raw_attempt:
+            return None
+        try:
+            attempt_index = int(raw_attempt)
+        except ValueError:
+            return None
+        return attempt_index if attempt_index >= 1 else None
+
+    async def _to_orchestration_child_async(
+        self,
+        *,
+        attack_result: AttackResult,
+        stats: ConversationStats,
+    ) -> AttackOrchestrationChild:
+        summary = await attack_result_to_summary_async(attack_result, stats=stats)
+        return AttackOrchestrationChild(
+            attack_result_id=summary.attack_result_id,
+            conversation_id=summary.conversation_id,
+            objective=summary.objective,
+            attack_type=summary.attack_type,
+            technique_name=summary.labels.get(ADAPTIVE_TECHNIQUE_NAME_LABEL),
+            attempt_index=self._adaptive_attempt_index(attack_result),
+            outcome=summary.outcome,
+            executed_turns=summary.executed_turns,
+            execution_time_ms=summary.execution_time_ms,
+            message_count=summary.message_count,
+            created_at=summary.created_at,
+            updated_at=summary.updated_at,
+        )
 
     def _validate_target_match(
         self, *, attack_identifier: ComponentIdentifier | None, request: AddMessageRequest

@@ -131,6 +131,7 @@ jest.mock("./components/Chat/ChatWindow", () => {
     onSelectConversation,
     labels,
     scenarioResultId,
+    attackSummary,
   }: {
     onNewAttack: () => void;
     activeTarget: unknown;
@@ -142,18 +143,26 @@ jest.mock("./components/Chat/ChatWindow", () => {
     onSelectConversation: (convId: string) => void;
     labels: Record<string, string>;
     scenarioResultId?: string | null;
+    attackSummary?: {
+      orchestration?: {
+        children: Array<{ attack_result_id: string }>;
+      } | null;
+    } | null;
   }) => {
     const location = useLocation();
     return (
       <div data-testid="chat-window">
         <span data-testid="attack-result-id">{attackResultId ?? "none"}</span>
-        <span data-testid="conversation-id">{conversationId ?? "none"}</span>
-        <span data-testid="active-conversation-id">{activeConversationId ?? "none"}</span>
+        <span data-testid="conversation-id">{conversationId || "none"}</span>
+        <span data-testid="active-conversation-id">{activeConversationId || "none"}</span>
         <span data-testid="has-target">{activeTarget ? "yes" : "no"}</span>
         <span data-testid="attack-target-hash">{attackTarget?.identifier_hash ?? "none"}</span>
         <span data-testid="labels-operator">{labels.operator ?? ""}</span>
         <span data-testid="labels-json">{JSON.stringify(labels)}</span>
         <span data-testid="scenario-result-id">{scenarioResultId ?? "none"}</span>
+        <span data-testid="orchestration-child-id">
+          {attackSummary?.orchestration?.children[0]?.attack_result_id ?? "none"}
+        </span>
         <span data-testid="route-location">{`${location.pathname}${location.search}`}</span>
         <button onClick={onNewAttack} data-testid="new-attack">
           New Attack
@@ -855,6 +864,30 @@ describe("App", () => {
     expect(screen.getByTestId("scenario-result-id")).toHaveTextContent("none");
   });
 
+  it("hydrates typed orchestration provenance for a direct envelope reload", async () => {
+    mockGetAttack.mockResolvedValue({
+      attack_result_id: "0ae",
+      conversation_id: "",
+      labels: {},
+      related_conversation_ids: [],
+      orchestration: {
+        kind: "sequential",
+        completion_policy: "first_success",
+        child_source: "persisted_child_ids",
+        children: [{ attack_result_id: "5d691b13" }],
+        unresolved_child_result_ids: [],
+      },
+    });
+
+    renderApp("/attacks/0ae");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("orchestration-child-id")).toHaveTextContent("5d691b13")
+    );
+    expect(screen.getByTestId("conversation-id")).toHaveTextContent("none");
+    expect(screen.getByTestId("active-conversation-id")).toHaveTextContent("none");
+  });
+
   it("hydrates validated scenario provenance on a direct attack reload", async () => {
     const scenarioResultId = "123e4567-e89b-12d3-a456-426614174000";
     mockGetAttack.mockResolvedValue({
@@ -871,51 +904,6 @@ describe("App", () => {
     );
     expect(screen.getByTestId("route-location")).toHaveTextContent(
       `/attacks/ar-1?scenarioResultId=${scenarioResultId}`
-    );
-  });
-
-  it("renders a message-less SequentialAttack as an orchestration result instead of chat", async () => {
-    const scenarioResultId = "123e4567-e89b-12d3-a456-426614174000";
-    mockGetAttack
-      .mockResolvedValueOnce({
-        attack_result_id: "parent-1",
-        conversation_id: "",
-        objective: "Test objective",
-        attack_type: "SequentialAttack",
-        message_count: 0,
-        labels: {},
-        related_conversation_ids: [],
-        metadata: {
-          child_attack_result_ids: ["child-1"],
-          completion_policy: "first_success",
-        },
-      })
-      .mockResolvedValueOnce({
-        attack_result_id: "child-1",
-        conversation_id: "child-conversation",
-        objective: "Test objective",
-        attack_type: "PromptSendingAttack",
-        outcome: "success",
-        message_count: 2,
-        labels: {
-          _adaptive_technique_name: "many_shot",
-          _adaptive_attempt: "1",
-        },
-        related_conversation_ids: [],
-      });
-
-    renderApp(`/attacks/parent-1?scenarioResultId=${scenarioResultId}`);
-
-    expect(await screen.findByRole("heading", {
-      level: 1,
-      name: "Adaptive orchestration result",
-    })).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-window")).not.toBeInTheDocument();
-    expect(await screen.findByRole("link", {
-      name: "Open conversation for attempt 1: many_shot",
-    })).toHaveAttribute(
-      "href",
-      `/attacks/child-1?scenarioResultId=${scenarioResultId}`
     );
   });
 

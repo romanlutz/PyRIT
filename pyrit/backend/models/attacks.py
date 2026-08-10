@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, computed_field, field_serializer
 from pyrit.backend.models._media import build_filename, infer_mime_type
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.models import (
+    AttackOutcome,
     AttackResult,
     ChatMessageRole,
     ConversationReference,
@@ -23,6 +24,33 @@ from pyrit.models import (
     MessagePiece,
     Score,
 )
+
+
+class AttackOrchestrationChild(BaseModel):
+    """One child result owned by a compound attack envelope."""
+
+    attack_result_id: str
+    conversation_id: str
+    objective: str
+    attack_type: str
+    technique_name: str | None = None
+    attempt_index: int | None = Field(default=None, ge=1)
+    outcome: AttackOutcome
+    executed_turns: int = Field(ge=0)
+    execution_time_ms: int = Field(ge=0)
+    message_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AttackOrchestrationSummary(BaseModel):
+    """Typed compound-attack provenance for an envelope result."""
+
+    kind: Literal["sequential"]
+    completion_policy: str | None = None
+    child_source: Literal["persisted_child_ids", "attribution_fallback"]
+    children: list[AttackOrchestrationChild] = Field(default_factory=list)
+    unresolved_child_result_ids: list[str] = Field(default_factory=list)
 
 
 class TargetInfo(BaseModel):
@@ -209,6 +237,10 @@ class AttackSummary(AttackResult):
     )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp"
+    )
+    orchestration: AttackOrchestrationSummary | None = Field(
+        default=None,
+        description="Compound-attack envelope provenance and ordered child results",
     )
 
     @field_serializer("related_conversations")

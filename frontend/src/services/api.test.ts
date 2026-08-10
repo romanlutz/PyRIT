@@ -255,9 +255,16 @@ describe("api service", () => {
     it("should get an attack by attack result id", async () => {
       const mockResponse = {
         data: {
-          conversation_id: "conv-123",
-          attack_type: "ManualAttack",
-          message_count: 2,
+          conversation_id: "",
+          attack_type: "SequentialAttack",
+          message_count: 0,
+          orchestration: {
+            kind: "sequential",
+            completion_policy: "first_success",
+            child_source: "persisted_child_ids",
+            children: [{ attack_result_id: "child-1" }],
+            unresolved_child_result_ids: [],
+          },
         },
       };
       (apiClient.get as jest.Mock).mockResolvedValueOnce(mockResponse);
@@ -265,7 +272,8 @@ describe("api service", () => {
       const result = await attacksApi.getAttack("ar-conv-123");
 
       expect(apiClient.get).toHaveBeenCalledWith("/attacks/ar-conv-123");
-      expect(result.attack_type).toBe("ManualAttack");
+      expect(result.attack_type).toBe("SequentialAttack");
+      expect(result.orchestration?.children[0]?.attack_result_id).toBe("child-1");
     });
 
     it("should get attack messages", async () => {

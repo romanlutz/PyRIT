@@ -247,6 +247,12 @@ export const useMessageListStyles = makeStyles({
     height: '100%',
     gap: tokens.spacingVerticalM,
   },
+  emptyStateText: {
+    color: tokens.colorNeutralForeground3,
+    maxWidth: '70ch',
+    paddingInline: tokens.spacingHorizontalL,
+    textAlign: 'center',
+  },
   errorContainer: {
     marginTop: tokens.spacingVerticalS,
   },

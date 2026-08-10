@@ -19,6 +19,8 @@ from pyrit.backend.main import app
 from pyrit.backend.models.attacks import (
     AddMessageResponse,
     AttackListResponse,
+    AttackOrchestrationChild,
+    AttackOrchestrationSummary,
     AttackSummary,
     ConversationMessagesResponse,
     CreateAttackResponse,
@@ -38,7 +40,7 @@ from pyrit.backend.models.targets import (
     TargetCatalogResponse,
     TargetListResponse,
 )
-from pyrit.models import ConverterIdentifier, MessagePiece, TargetCapabilities, TargetIdentifier
+from pyrit.models import AttackOutcome, ConverterIdentifier, MessagePiece, TargetCapabilities, TargetIdentifier
 from pyrit.models.catalog.target import TargetInstance
 
 
@@ -239,6 +241,66 @@ class TestAttackRoutes:
             assert response.status_code == status.HTTP_200_OK
             data = response.json()
             assert data["conversation_id"] == "attack-1"
+
+    def test_get_attack_serializes_orchestration_children(self, client: TestClient) -> None:
+        """Expose ordered compound child provenance through the canonical attack route."""
+        now = datetime.now(timezone.utc)
+        orchestration = AttackOrchestrationSummary(
+            kind="sequential",
+            completion_policy="first_success",
+            child_source="persisted_child_ids",
+            children=[
+                AttackOrchestrationChild(
+                    attack_result_id="child-1",
+                    conversation_id="conversation-1",
+                    objective="test objective",
+                    attack_type="PromptSendingAttack",
+                    technique_name="role_play_movie_script",
+                    attempt_index=1,
+                    outcome=AttackOutcome.SUCCESS,
+                    executed_turns=3,
+                    execution_time_ms=900,
+                    message_count=6,
+                    created_at=now,
+                    updated_at=now,
+                )
+            ],
+        )
+
+        with patch("pyrit.backend.routes.attacks.get_attack_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.get_attack_async = AsyncMock(
+                return_value=AttackSummary(
+                    attack_result_id="parent-1",
+                    conversation_id="",
+                    objective="test objective",
+                    message_count=0,
+                    created_at=now,
+                    updated_at=now,
+                    orchestration=orchestration,
+                )
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.get("/api/attacks/parent-1")
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        assert data["orchestration"]["completion_policy"] == "first_success"
+        assert data["orchestration"]["children"][0] == {
+            "attack_result_id": "child-1",
+            "conversation_id": "conversation-1",
+            "objective": "test objective",
+            "attack_type": "PromptSendingAttack",
+            "technique_name": "role_play_movie_script",
+            "attempt_index": 1,
+            "outcome": "success",
+            "executed_turns": 3,
+            "execution_time_ms": 900,
+            "message_count": 6,
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "updated_at": now.isoformat().replace("+00:00", "Z"),
+        }
 
     def test_get_attack_not_found(self, client: TestClient) -> None:
         """Test getting a non-existent attack."""

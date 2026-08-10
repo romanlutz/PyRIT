@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -379,6 +379,146 @@ describe("ChatWindow Integration", () => {
     expect(details).toHaveTextContent("1");
     expect(details).toHaveTextContent("Objective");
     expect(details).toHaveTextContent("Infer ethnicity from the following names");
+  });
+
+  it("renders an orchestration envelope with ordered child conversation links", () => {
+    const scenarioResultId = "123e4567-e89b-12d3-a456-426614174000";
+    const attackSummary: AttackSummary = {
+      attack_result_id: "0ae",
+      conversation_id: "",
+      objective: "Write an insulting response",
+      attack_type: "SequentialAttack",
+      target: null,
+      converters: [],
+      outcome: "success",
+      executed_turns: 1,
+      execution_time_ms: 1_250,
+      message_count: 0,
+      related_conversation_ids: [],
+      labels: {},
+      created_at: "2026-08-09T00:00:00Z",
+      updated_at: "2026-08-09T00:00:01Z",
+      orchestration: {
+        kind: "sequential",
+        completion_policy: "first_success",
+        child_source: "persisted_child_ids",
+        children: [
+          {
+            attack_result_id: "child-1",
+            conversation_id: "conversation-1",
+            objective: "Write an insulting response",
+            attack_type: "PromptSendingAttack",
+            technique_name: "role_play_movie_script",
+            attempt_index: 1,
+            outcome: "success",
+            executed_turns: 3,
+            execution_time_ms: 900,
+            message_count: 6,
+            created_at: "2026-08-09T00:00:00Z",
+            updated_at: "2026-08-09T00:00:01Z",
+          },
+          {
+            attack_result_id: "child-2",
+            conversation_id: "",
+            objective: "Write an insulting response",
+            attack_type: "ManyShotJailbreakAttack",
+            technique_name: "many_shot",
+            attempt_index: 2,
+            outcome: "failure",
+            executed_turns: 1,
+            execution_time_ms: 350,
+            message_count: 0,
+            created_at: "2026-08-09T00:00:01Z",
+            updated_at: "2026-08-09T00:00:01Z",
+          },
+        ],
+        unresolved_child_result_ids: [],
+      },
+    };
+
+    const { rerender } = render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="0ae"
+          attackSummary={attackSummary}
+          scenarioResultId={scenarioResultId}
+        />
+      </TestWrapper>
+    );
+
+    const panel = screen.getByRole("region", { name: "Adaptive orchestration result" });
+    expect(panel).toHaveTextContent("does not own a target conversation");
+    expect(panel).toHaveTextContent("Completion policyfirst success");
+    expect(panel).toHaveTextContent("Child techniques (2)");
+    expect(within(panel).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("role_play_movie_script"),
+      expect.stringContaining("many_shot"),
+    ]);
+    expect(screen.getByRole("link", {
+      name: "Open role_play_movie_script conversation",
+    })).toHaveAttribute(
+      "href",
+      `/attacks/child-1?scenarioResultId=${scenarioResultId}`,
+    );
+    expect(panel).toHaveTextContent("No target conversation was persisted for this child result.");
+    expect(screen.queryByText("There are no messages in this conversation yet.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export conversation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Toggle conversations panel" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/reconstructed from legacy scenario attribution/i)).not.toBeInTheDocument();
+
+    const fallbackSummary: AttackSummary = {
+      ...attackSummary,
+      orchestration: {
+        ...attackSummary.orchestration!,
+        child_source: "attribution_fallback",
+      },
+    };
+    rerender(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="0ae"
+          attackSummary={fallbackSummary}
+          scenarioResultId={scenarioResultId}
+        />
+      </TestWrapper>
+    );
+    expect(screen.getByText(/reconstructed from legacy scenario attribution/i)).toBeInTheDocument();
+  });
+
+  it("distinguishes a genuine empty target-facing result from an orchestration envelope", () => {
+    const attackSummary: AttackSummary = {
+      attack_result_id: "leaf-empty",
+      conversation_id: "",
+      objective: "Test objective",
+      attack_type: "PromptSendingAttack",
+      target: null,
+      converters: [],
+      outcome: "error",
+      message_count: 0,
+      related_conversation_ids: [],
+      labels: {},
+      created_at: "2026-08-09T00:00:00Z",
+      updated_at: "2026-08-09T00:00:01Z",
+    };
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="leaf-empty"
+          attackSummary={attackSummary}
+        />
+      </TestWrapper>
+    );
+
+    expect(screen.getByText(
+      "This target-facing attack ended with an error before any conversation messages were persisted.",
+    )).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Adaptive orchestration result" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
   it("returns to the originating scenario run from the breadcrumb", async () => {
