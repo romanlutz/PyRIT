@@ -159,7 +159,6 @@ def get_technique_factories() -> list[AttackTechniqueFactory]:
             attack_class=PromptSendingAttack,
             description="Reverses the objective text so it slips past filters, then asks the target to flip it back.",
             technique_tags=["single_turn", "light"],
-            supports_request_converter_composition=True,
             attack_kwargs={
                 "attack_converter_config": AttackConverterConfig(
                     request_converters=ConverterConfiguration.from_converters(
