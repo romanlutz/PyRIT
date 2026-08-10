@@ -364,6 +364,9 @@ class ConversationManager:
         Returns:
             Empty ConversationState (non-chat targets don't track turns).
         """
+        if context.next_message and context.next_message.request_converters_applied:
+            return ConversationState()
+
         normalizer = config.get_message_normalizer()
         original_context = await self._normalize_non_chat_context_async(
             messages=self._build_original_normalizer_view(prepended_conversation),
@@ -732,12 +735,10 @@ class ConversationManager:
             request_converters: Converter configurations to apply.
             apply_to_roles: Only apply to pieces with these roles.
         """
-        for piece in message.message_pieces:
-            if piece.api_role not in apply_to_roles:
-                continue
+        if message.api_role not in apply_to_roles:
+            return
 
-            temp_message = Message(message_pieces=[piece])
-            await self._prompt_normalizer.convert_values_async(
-                message=temp_message,
-                converter_configurations=request_converters,
-            )
+        await self._prompt_normalizer.convert_values_async(
+            message=message,
+            converter_configurations=request_converters,
+        )

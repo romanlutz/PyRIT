@@ -71,6 +71,20 @@ class _ImageOutputConverter(Converter):
         return ConverterResult(output_text="converted.png", output_type="image_path")
 
 
+class _CountingTextConverter(Converter):
+    """A text converter that produces a different result on each call."""
+
+    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
+    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        self.call_count += 1
+        return ConverterResult(output_text=f"conversion-{self.call_count}<{prompt}>", output_type="text")
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -1184,6 +1198,85 @@ class TestPrependedConversationConfigSettings:
             )
 
         assert sample_conversation[0].get_piece().converted_value_data_type == "text"
+
+    async def test_non_chat_target_repeated_setup_reuses_prepared_request(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        context.next_message = Message.from_prompt(prompt="live request", role="user")
+        converter = _CountingTextConverter()
+        converter_config = ConverterConfiguration.from_converters(converters=[converter])
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=str(uuid.uuid4()),
+            request_converters=converter_config,
+        )
+        assert context.next_message is not None
+        first_prepared_value = context.next_message.get_piece().converted_value
+        assert converter.call_count == 2
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=str(uuid.uuid4()),
+            request_converters=converter_config,
+        )
+
+        assert context.next_message.get_piece().converted_value == first_prepared_value
+        assert converter.call_count == 2
+
+    async def test_non_chat_target_preserves_converter_piece_indexes(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = [
+            Message(
+                message_pieces=[
+                    MessagePiece(
+                        role="user",
+                        original_value="first piece",
+                        conversation_id="seed",
+                        sequence=0,
+                    ),
+                    MessagePiece(
+                        role="user",
+                        original_value="second piece",
+                        conversation_id="seed",
+                        sequence=0,
+                    ),
+                ]
+            )
+        ]
+        context.next_message = Message.from_prompt(prompt="live request", role="user")
+        converter_config = [
+            ConverterConfiguration(
+                converters=[Base64Converter()],
+                indexes_to_apply=[0],
+            )
+        ]
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=str(uuid.uuid4()),
+            request_converters=converter_config,
+        )
+
+        assert context.next_message is not None
+        converted_value = context.next_message.get_piece().converted_value
+        assert base64.b64encode(b"first piece").decode() in converted_value
+        assert "second piece" in converted_value
+        assert base64.b64encode(b"second piece").decode() not in converted_value
 
     async def test_non_chat_target_behavior_normalize_first_turn_creates_next_message(
         self,
