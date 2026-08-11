@@ -39,7 +39,7 @@ from pyrit.models.identifiers.identifier_filters import IdentifierFilter, Identi
 from pyrit.models.identifiers.param_markers import Param, ParamMarker
 from pyrit.models.identifiers.scenario_identifier import ScenarioIdentifier
 from pyrit.models.identifiers.scorer_identifier import ScorerIdentifier
-from pyrit.models.identifiers.seed_identifier import SeedIdentifier
+from pyrit.models.identifiers.seed_identifier import SeedIdentifier, logical_seed_group_fingerprint
 from pyrit.models.identifiers.target_identifier import TargetIdentifier
 
 __all__ = [
@@ -70,6 +70,7 @@ __all__ = [
     "ScorerIdentifier",
     "ScenarioIdentifier",
     "SeedIdentifier",
+    "logical_seed_group_fingerprint",
     "snake_case_to_class_name",
     "TARGET_EVAL_PARAM_FALLBACKS",
     "TARGET_EVAL_PARAMS",
