@@ -73,7 +73,6 @@ def run_tasks_command(args: argparse.Namespace) -> int:
         {
             **task,
             "family": family.family,
-            "compatibility_status": family.compatibility_status,
             "task_spec": _task_spec(task=task, source_directory=family.source_directory),
         }
         for family in catalog.families
@@ -153,7 +152,11 @@ def run_execute_command(args: argparse.Namespace) -> int:
 
 async def _run_execute_command_async(*, args: argparse.Namespace, loaded: LoadedInspectEval) -> int:
     target = await _resolve_target_async(target_name=args.target, target_role=args.target_role, config_file=args.config)
-    request_options_factory = _validate_target_and_request_options(target=target, manifest=loaded.suite)
+    request_options_factory = _validate_target_and_request_options(
+        target=target,
+        manifest=loaded.suite,
+        task=loaded.task,
+    )
     cancellation_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     registered_signals: list[signal.Signals] = []
@@ -190,13 +193,13 @@ async def _run_execute_command_async(*, args: argparse.Namespace, loaded: Loaded
 def _load_and_restrict(args: argparse.Namespace) -> LoadedInspectEval:
     parameters = _parse_task_parameters(args.task_param)
     _apply_named_task_parameters(args=args, parameters=parameters)
-    dataset_loader = _local_dataset_loader(args.data) if args.data is not None else None
+    dataset_records = _local_dataset_records(args.data) if args.data is not None else None
     loaded = load_inspect_eval(
         source_root=args.source,
         task_spec=args.task,
         task_parameters=parameters,
         profile_id=args.profile,
-        dataset_loader=dataset_loader,
+        dataset_records=dataset_records,
         inspect_evals_cache_dir=args.inspect_evals_cache_dir,
         allow_network=args.allow_network,
         verify_source_revision=not args.no_verify_source,
@@ -250,16 +253,18 @@ def _apply_named_task_parameters(*, args: argparse.Namespace, parameters: dict[s
         parameters["epochs"] = args.epochs
 
 
-def _local_dataset_loader(path: Path) -> Any:
+def _local_dataset_records(path: Path) -> list[dict[str, object]] | dict[str, list[dict[str, object]]]:
     records = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
-        raise ValueError(f"Local dataset '{path}' must contain a JSON array of objects.")
-
-    def _loader(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        del args, kwargs
+    if isinstance(records, list) and all(isinstance(record, dict) for record in records):
         return records
-
-    return _loader
+    if isinstance(records, dict) and all(
+        isinstance(key, str) and isinstance(value, list) and all(isinstance(record, dict) for record in value)
+        for key, value in records.items()
+    ):
+        return records
+    raise ValueError(
+        f"Local dataset '{path}' must contain a JSON array of objects or an object mapping dataset keys to arrays."
+    )
 
 
 def _restrict_manifest(
@@ -400,8 +405,13 @@ async def _resolve_target_async(*, target_name: str | None, target_role: str, co
     return matches[0].instance
 
 
-def _validate_target_and_request_options(*, target: Any, manifest: CapabilitySuiteManifest) -> Any:
-    from pyrit.compat.inspect_ai.loader import _NoToolRequestOptionsFactory
+def _validate_target_and_request_options(
+    *,
+    target: Any,
+    manifest: CapabilitySuiteManifest,
+    task: Any | None = None,
+) -> Any:
+    from pyrit.compat.inspect_ai.loader import _effective_generate_config, _NoToolRequestOptionsFactory
     from pyrit.executor.capability import (
         build_capability_request_options_factory,
         validate_capability_target,
@@ -421,7 +431,10 @@ def _validate_target_and_request_options(*, target: Any, manifest: CapabilitySui
     factory = (
         build_capability_request_options_factory(target=target)
         if target_requirements.requires_tools
-        else _NoToolRequestOptionsFactory(request_options_type=target.request_options_type)
+        else _NoToolRequestOptionsFactory(
+            request_options_type=target.request_options_type,
+            generate_config=_effective_generate_config(task) if task is not None else None,
+        )
     )
     validate_capability_target(
         target=target,
@@ -463,6 +476,7 @@ def _loaded_summary(loaded: LoadedInspectEval) -> dict[str, object]:
 
 
 def _loaded_report(loaded: LoadedInspectEval) -> dict[str, object]:
+    suite_metadata = loaded.suite.metadata
     return {
         "profile_id": loaded.report.profile_id,
         "inspect_api_profile": loaded.report.inspect_api_profile,
@@ -474,6 +488,17 @@ def _loaded_report(loaded: LoadedInspectEval) -> dict[str, object]:
         "api_inventory": loaded.report.api_inventory.to_dict(),
         "capabilities": loaded.report.capabilities,
         "limitations": list(loaded.report.limitations),
+        "construction_inventory": {
+            "factory_parameters": loaded.report.task_parameters,
+            "dataset": suite_metadata.get("dataset", {}),
+            "dataset_provenance": suite_metadata.get("dataset_provenance", {}),
+            "solver": suite_metadata.get("solver"),
+            "scorer": suite_metadata.get("scorer"),
+            "task_config": suite_metadata.get("task_config", {}),
+            "case_count": len(loaded.suite.cases),
+            "case_ids": [case.case_id for case in loaded.suite.cases],
+            "case_scorers": [scorer.model_dump(mode="json") for case in loaded.suite.cases for scorer in case.scorers],
+        },
     }
 
 

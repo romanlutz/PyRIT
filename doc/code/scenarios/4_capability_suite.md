@@ -119,8 +119,8 @@ reviewed, trusted source. Verified loads require both the exact pinned Git commi
 clean tracked, untracked, and ignored worktree. Worker bytecode generation is disabled
 so verified loads do not mutate the supplied checkout. If revision verification is
 explicitly disabled, reports and manifests retain the detected revision but mark it
-unverified. Offline dataset loading is the default; callers can inject local ARC records
-or explicitly opt in to the pinned Hugging Face request. Worker execution is bounded by
+unverified. Offline dataset loading is the default; callers can inject local records for any
+supported factory or explicitly opt in to the pinned Hugging Face request. Worker execution is bounded by
 `worker_timeout_seconds` (300 seconds by default), and Git verification is bounded by
 `source_verification_timeout_seconds` (120 seconds by default).
 
@@ -148,7 +148,7 @@ execution = await run_inspect_eval_async(
 )
 ```
 
-The unchanged-source surface supports ARC Easy/Challenge plus
+The unchanged-source surface supports ARC Easy/Challenge, the static factories below, plus
 `gdm_intercode_ctf@gdm_intercode_ctf` and
 `gdm_in_house_ctf@gdm_in_house_ctf`. The GDM tasks compile standard ReAct,
 `bash`, `python`, and `submit` construction nodes to the native capability executor.
@@ -157,6 +157,28 @@ preserves per-sample Compose topology, default service and user selection, targe
 epochs, and scorer-only live flag reads before sandbox cleanup. Tool implementations and
 the in-house scorer are selected through explicit registries; the scorer proxy allows one
 bounded command in its declared service and exposes no credentials or host-file access.
+
+| Static family | Supported unchanged factories | Pinned dataset requirement |
+|---|---|---|
+| BBQ | `bbq` | `heegyu/bbq@5d6faae52070aa5eb71b46d1c0723d3ba7930209`; CC-BY-4.0; script-backed rows must be cached and passed with `--data`. |
+| BoolQ | `boolq` | `google/boolq@35b264d03638db9f4ce671b711558bf7ff0f80d5`. |
+| CommonsenseQA | `commonsense_qa` | `tau/commonsense_qa@94630fe30dad47192a8546eb75f094926d47e155`. |
+| HellaSwag | `hellaswag` | `Rowan/hellaswag@218ec52e09a7e7462a5400043bb9a69a41d06b76`. |
+| MuSR | `musr` | `TAUR-Lab/MuSR@7c365b439a222150f317764d4f16ae6c96d7d94a`. |
+| O-NET | `onet_m6` | `matichon/thai-onet-m6-exam@93ffb5e3f3ec630b73e501937805984dd24f2365`. |
+| PAWS | `paws` | `google-research-datasets/paws@161ece9501cf0a11f3e48bd356eaa82de46d6a09`. |
+| Pre-Flight | `pre_flight` | `AirsideLabs/pre-flight-06@439d2d118fed7d9b009c1f87b9eb1205ab94766e`. |
+| PubMedQA | `pubmedqa` | `qiaojin/PubMedQA@9001f2853fb87cab8d220904e0de81ac6973b318`; only IDs in the pinned task's test-ground-truth file are retained. |
+| RACE-H | `race_h` | `ehovy/race@2fec9fd81f1dc971569a9b729c43f2f0e6436637`. |
+| SecQA | `sec_qa_v1`, `sec_qa_v1_5_shot`, `sec_qa_v2`, `sec_qa_v2_5_shot` | `zefang-liu/secqa@d00a07484283be5602e2bae36dbefdaaf555a9fb`; five-shot tasks require both `dev` and `test`. |
+| WMDP | `wmdp_bio`, `wmdp_chem`, `wmdp_cyber` | `cais/wmdp@7125571f22f032c56415e7980f48d877dd830ff8`. |
+
+`medqa@medqa` is partial because the pinned `bigbio/med_qa` source declares its
+license as `UNKNOWN`. `piqa@piqa` is partial because its pinned builder resolves
+floating external assets without source-declared content hashes. Both unchanged factories
+compile and run with locally authorized/content-verified `--data` records, but the catalog
+does not claim full acquisition support. The other static factories preserve declared
+splits/configs, mapping, IDs, metadata, solver/setup order, scorer options, and metrics.
 
 The compatibility layer also provides reusable declarative foundations for later adapters.
 These foundations do **not** make another task family supported by themselves:
@@ -185,6 +207,10 @@ These foundations do **not** make another task family supported by themselves:
   metadata. Typed accuracy, mean, standard-error, grouped, clustered, mean-reducer,
   `at_least`, `pass_at`, and `pass_k` specifications aggregate deterministically. Unknown
   scorer, metric, reducer, or option nodes fail at compile time.
+- Static multiple-choice chains preserve preceding system/prompt/message setup, custom templates,
+  chain-of-thought formatting, task-level accuracy/clustered-standard-error metrics, and
+  deterministic generation controls. `pattern()` executes with Inspect 0.3.233 capture-group
+  semantics. Target request-option compatibility is preflighted before any model call.
 
 Manifest schema version 3 carries ordered multipart messages and typed metric/reducer
 specifications; version 2 manifests migrate by retaining their legacy single-content shape.
@@ -241,6 +267,26 @@ uv run pyrit_capability_suite inspect-evals dry-run \
   --manifest ./arc-manifest.json \
   --report ./arc-compatibility.json
 ```
+
+For a static family, materialize revision-pinned records once and then run fully offline.
+This PowerShell example uses one real BoolQ row; omit `[:1]` when preparing a complete run:
+
+```powershell
+uv run python -c "import json; from datasets import load_dataset; d=load_dataset('google/boolq', split='validation[:1]', revision='35b264d03638db9f4ce671b711558bf7ff0f80d5', trust_remote_code=False); json.dump([dict(d[0])], open('boolq-records.json','w',encoding='utf-8'))"
+$env:HF_HUB_OFFLINE = "1"
+uv run pyrit_capability_suite inspect-evals tasks --source <source> --family boolq
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task boolq/boolq.py@boolq --data .\boolq-records.json --manifest .\boolq-manifest.json
+uv run pyrit_capability_suite inspect-evals run --config .\.pyrit_conf --source <source> --task boolq/boolq.py@boolq --data .\boolq-records.json --target openai_chat --result .\results\boolq.json
+```
+
+`--data` accepts either one JSON array for a task that makes exactly one unique dataset
+request or a JSON object whose values are record arrays. Multi-subset/config/split tasks
+must use distinct keys in descending specificity:
+`path|config|split|revision`, `path|config|split`, `path|config`, then `path`. This allows
+SecQA five-shot `dev` and `test` rows to remain distinct. Dataset records are hashed into
+manifest provenance. With `--data`, source construction, `catalog --check`, `dry-run`, and
+`run` make no dataset network request. `--allow-network` remains explicit and only requests
+the exact source-declared revision with remote dataset code disabled.
 
 `catalog --check` is intended for CI. At the pinned revision it expects 129
 families, 249 task factories, and 262 referenced `inspect_ai` APIs with inventory

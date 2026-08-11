@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import inspect
 import json
 import math
@@ -492,6 +493,19 @@ def includes(*, ignore_case: bool = True) -> ScorerSpec:
     )
 
 
+def pattern(pattern: str, ignore_case: bool = True, match_all: bool = False) -> ScorerSpec:
+    """Construct the pinned deterministic regular-expression scorer."""
+    return ScorerSpec(
+        name="pattern",
+        config={
+            "pattern": pattern,
+            "ignore_case": ignore_case,
+            "match_all": match_all,
+        },
+        metrics=(MetricSpec(name="accuracy"), MetricSpec(name="stderr", config={"cluster": None})),
+    )
+
+
 def accuracy(to_float: object = None) -> MetricSpec:
     """Construct an accuracy metric reference."""
     if to_float is not None:
@@ -736,6 +750,72 @@ def load_json_dataset(
         name=eval_name,
         shuffle=shuffle,
     )
+
+
+def load_hf_dataset_with_script(
+    repo_id: str,
+    record_to_sample: RecordMapper,
+    builder_cls: type[object],
+    cache_dir_fp: Path,
+    subset: str | None = None,
+    split: str | object | list[str] | list[object] | None = None,
+    shuffle: bool = False,
+    seed: int = 42,
+    keep_in_memory: bool = False,
+    auto_id: bool = False,
+    *,
+    revision: str,
+) -> MemoryDataset:
+    """Load a reviewed script-backed dataset through the strict pinned-record loader."""
+    del builder_cls, cache_dir_fp, keep_in_memory
+    if not isinstance(split, (str, type(None))):
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_evals.hf_dataset_script_helper.load_hf_dataset_with_script(split=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    if _ACTIVE_DATASET_LOADER.get() is None:
+        raise ValueError(
+            "Script-backed Hugging Face datasets require locally materialized, revision-verified records. "
+            "Inject dataset records instead of enabling network acquisition."
+        )
+    dataset = hf_dataset(
+        path=repo_id,
+        name=subset,
+        split=split,
+        sample_fields=record_to_sample,
+        revision=revision,
+        auto_id=auto_id,
+        shuffle=shuffle,
+        seed=seed,
+    )
+    return MemoryDataset(
+        dataset,
+        name=dataset.name,
+        location=dataset.location,
+        shuffled=dataset.shuffled,
+        metadata=dict(dataset.metadata),
+        provenance=dict(dataset.provenance),
+    )
+
+
+def create_stable_id(*fields: Any, prefix: str = "", length: int = 8) -> str:
+    """Create the content-derived identifier used by the pinned source."""
+    combined = "\0".join(str(field) for field in fields)
+    value = hashlib.md5(combined.encode(), usedforsecurity=False).hexdigest()[:length]
+    return f"{prefix}_{value}" if prefix else value
+
+
+def filter_duplicate_ids(dataset: Dataset) -> Dataset:
+    """Keep the first sample for each pinned source identifier."""
+    seen: set[str | int | None] = set()
+
+    def _unique(sample: Sample) -> bool:
+        if sample.id in seen:
+            return False
+        seen.add(sample.id)
+        return True
+
+    return dataset.filter(_unique)
 
 
 def download_and_verify(*args: Any, **kwargs: Any) -> None:
@@ -1061,16 +1141,25 @@ def _dataset_with_provenance(
     provenance: dict[str, Any] | None = None,
 ) -> Dataset:
     materialized = tuple(samples)
+    dataset_provenance = {
+        **(provenance or {}),
+        **dataset_records_provenance(materialized),
+    }
+    materialized = tuple(
+        sample.model_copy(
+            update={
+                "_dataset_source_metadata": dict(metadata),
+            }
+        )
+        for sample in materialized
+    )
     return Dataset(
         materialized,
         name=name,
         location=location,
         shuffled=shuffled,
         metadata=metadata,
-        provenance={
-            **(provenance or {}),
-            **dataset_records_provenance(materialized),
-        },
+        provenance=dataset_provenance,
     )
 
 
@@ -1202,6 +1291,7 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "mean_score": mean_score,
             "pass_at": pass_at,
             "pass_k": pass_k,
+            "pattern": pattern,
             "scorer": scorer,
             "stderr": stderr,
         },

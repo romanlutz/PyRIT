@@ -17,6 +17,7 @@ from pyrit.compat.inspect_ai.source import validate_inspect_source
 from pyrit.scenario.capability_suite.inspect_evals import (
     FidelityClassification,
     InspectEvalFamilyReport,
+    InspectEvalTaskFactory,
     analyze_inspect_evals_source_tree,
 )
 
@@ -29,9 +30,55 @@ _GOLDEN_FAMILY_COUNT = 129
 _GOLDEN_TASK_COUNT = 249
 _SUPPORTED_TASKS = {
     "arc": ("arc_challenge", "arc_easy"),
+    "bbq": ("bbq",),
+    "boolq": ("boolq",),
+    "commonsense_qa": ("commonsense_qa",),
     "gdm_in_house_ctf": ("gdm_in_house_ctf",),
     "gdm_intercode_ctf": ("gdm_intercode_ctf",),
+    "hellaswag": ("hellaswag",),
+    "musr": ("musr",),
+    "onet": ("onet_m6",),
+    "paws": ("paws",),
+    "pre_flight": ("pre_flight",),
+    "pubmedqa": ("pubmedqa",),
+    "race_h": ("race_h",),
+    "sec_qa": ("sec_qa_v1", "sec_qa_v1_5_shot", "sec_qa_v2", "sec_qa_v2_5_shot"),
+    "wmdp": ("wmdp_bio", "wmdp_chem", "wmdp_cyber"),
 }
+_FACTORY_BLOCKERS = {
+    ("medqa", "medqa"): (
+        (
+            "The pinned bigbio/med_qa source declares its dataset license as UNKNOWN. The unchanged factory compiles "
+            "and runs with content-verified cached records, but full acquisition support requires the user to confirm "
+            "upstream terms and pass locally authorized records with --data."
+        ),
+    ),
+    ("piqa", "piqa"): (
+        (
+            "The pinned dataset builder resolves floating external Google Storage assets without source-declared "
+            "content hashes. Cache content-verified PIQA records and pass them with --data; full source acquisition "
+            "remains unsupported."
+        ),
+    ),
+}
+_STATIC_MAPPING_FAMILIES = frozenset(
+    {
+        "bbq",
+        "boolq",
+        "commonsense_qa",
+        "hellaswag",
+        "medqa",
+        "musr",
+        "onet",
+        "paws",
+        "piqa",
+        "pre_flight",
+        "pubmedqa",
+        "race_h",
+        "sec_qa",
+        "wmdp",
+    }
+)
 _CLOUD_SURFACES = {
     "aws": ("aws", "amazon web services"),
     "bedrock": ("bedrock",),
@@ -130,7 +177,9 @@ class InspectCatalogReport:
             "Supported unchanged tasks:",
         ]
         for family in supported:
-            tasks = ", ".join(str(task["name"]) for task in family.task_factories)
+            tasks = ", ".join(
+                str(task["name"]) for task in family.task_factories if task["compatibility_status"] == "supported"
+            )
             lines.append(f"  {family.family}: {tasks}")
         lines.extend(("", "Excluded cloud surfaces:"))
         lines.extend(f"  {surface.surface}: {surface.status}" for surface in self.excluded_cloud_surfaces)
@@ -178,11 +227,11 @@ def build_inspect_catalog(
         task_factory_count=sum(len(family.task_factories) for family in families),
         families=families,
         excluded_cloud_surfaces=cloud_surfaces,
-        compatibility_claims=(
-            "arc/arc.py@arc_easy",
-            "arc/arc.py@arc_challenge",
-            "gdm_intercode_ctf/gdm_intercode_ctf.py@gdm_intercode_ctf",
-            "gdm_in_house_ctf/gdm_in_house_ctf.py@gdm_in_house_ctf",
+        compatibility_claims=tuple(
+            _task_claim(source_directory=family.source_directory, task=task)
+            for family in families
+            for task in family.task_factories
+            if task["compatibility_status"] == "supported"
         ),
     )
 
@@ -209,9 +258,11 @@ def check_inspect_catalog_regression(*, report: InspectCatalogReport) -> None:
     if report.task_factory_count != _GOLDEN_TASK_COUNT:
         errors.append(f"expected {_GOLDEN_TASK_COUNT} task factories, got {report.task_factory_count}")
     observed_supported = {
-        family.family: tuple(sorted(str(task["name"]) for task in family.task_factories))
+        family.family: tuple(
+            sorted(str(task["name"]) for task in family.task_factories if task["compatibility_status"] == "supported")
+        )
         for family in report.families
-        if family.compatibility_status == "supported"
+        if any(task["compatibility_status"] == "supported" for task in family.task_factories)
     }
     if observed_supported != _SUPPORTED_TASKS:
         errors.append(f"supported task claims changed: expected {_SUPPORTED_TASKS}, got {observed_supported}")
@@ -236,17 +287,30 @@ def _catalog_family(
     )
     supported = PINNED_INSPECT_EVALS_PROFILE.supported_symbols
     unsupported = tuple(symbol for symbol in symbols if symbol not in supported)
-    status = _compatibility_status(report)
+    task_factories = tuple(_task_factory_record(report=report, task=task) for task in report.tasks)
+    status = _compatibility_status(report=report, task_factories=task_factories)
+    reviewed_status = (
+        report.family in _STATIC_MAPPING_FAMILIES
+        and status in {"supported", "partial"}
+        and any(str(task["compatibility_status"]) in {"supported", "partial"} for task in task_factories)
+    )
     providers = set(report.sandboxes)
     providers.update("docker" for item in report.executable_setup if "compose" in item or "container" in item)
-    blockers = list(report.portability_blockers)
+    blockers = [] if reviewed_status else list(report.portability_blockers)
     blockers.extend(_family_cloud_blockers(report=report))
+    blockers.extend(blocker for task in task_factories for blocker in _factory_blockers(task))
     return InspectCatalogFamily(
         family=report.family,
         source_directory=report.source_directory,
-        task_factories=tuple(asdict(task) for task in report.tasks),
+        task_factories=task_factories,
         compatibility_status=status,
-        fidelity=report.fidelity.value,
+        fidelity=(
+            FidelityClassification.NATIVE.value
+            if status == "supported"
+            else FidelityClassification.PARTIAL.value
+            if reviewed_status
+            else report.fidelity.value
+        ),
         inspect_api_symbols=symbols,
         unsupported_inspect_api_symbols=unsupported,
         external_data=report.datasets,
@@ -262,12 +326,63 @@ def _catalog_family(
     )
 
 
-def _compatibility_status(report: InspectEvalFamilyReport) -> str:
-    if report.family in _SUPPORTED_TASKS:
+def _compatibility_status(
+    *,
+    report: InspectEvalFamilyReport,
+    task_factories: tuple[dict[str, object], ...],
+) -> str:
+    statuses = {str(task["compatibility_status"]) for task in task_factories}
+    if statuses == {"supported"}:
         return "supported"
+    if "supported" in statuses or "partial" in statuses:
+        return "partial"
     if report.fidelity is FidelityClassification.PARTIAL:
         return "partial"
     return "unsupported"
+
+
+def _task_factory_record(*, report: InspectEvalFamilyReport, task: InspectEvalTaskFactory) -> dict[str, object]:
+    record = asdict(task)
+    name = str(record["name"])
+    blockers = _FACTORY_BLOCKERS.get((report.family, name), ())
+    if name in _SUPPORTED_TASKS.get(report.family, ()):
+        status = "supported"
+    elif blockers:
+        status = "partial"
+    else:
+        status = "unsupported"
+        blockers = tuple(report.portability_blockers) or (
+            "This unchanged factory has not been validated through the pinned native compatibility compiler.",
+        )
+    record.update(
+        {
+            "compatibility_status": status,
+            "blockers": blockers,
+            "dataset_policy": (
+                "Pinned public source revision; remote dataset code disabled; cacheable and offline-safe after "
+                "content acquisition."
+                if status == "supported"
+                else None
+            ),
+        }
+    )
+    return record
+
+
+def _factory_blockers(task: dict[str, object]) -> tuple[str, ...]:
+    blockers = task.get("blockers")
+    if not isinstance(blockers, tuple) or not all(isinstance(blocker, str) for blocker in blockers):
+        return ()
+    return tuple(str(blocker) for blocker in blockers)
+
+
+def _task_claim(*, source_directory: str, task: dict[str, object]) -> str:
+    source_file = str(task["source_file"])
+    marker = "/inspect_evals/"
+    relative = source_file.split(marker, maxsplit=1)[-1] if marker in source_file else source_file
+    if relative == source_directory:
+        relative = relative.rsplit("/", maxsplit=1)[-1]
+    return f"{relative}@{task['name']}"
 
 
 def _family_cloud_blockers(*, report: InspectEvalFamilyReport) -> tuple[str, ...]:

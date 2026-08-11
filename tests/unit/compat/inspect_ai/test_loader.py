@@ -27,15 +27,22 @@ from pyrit.compat.inspect_ai import (
     run_inspect_eval_async,
 )
 from pyrit.compat.inspect_ai.scorer import (
+    InspectPatternScorer,
+    InspectPatternScorerConfig,
     InspectTextScorer,
     InspectTextScorerConfig,
     normalize_inspect_score,
     parse_inspect_choice_answer,
 )
-from pyrit.compat.inspect_ai.types import Dataset, Sample
+from pyrit.compat.inspect_ai.types import Dataset, Sample, Target
 from pyrit.compat.inspect_ai.types import Score as InspectScore
 from pyrit.models import Message, TargetResponseMetadata
-from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
+from pyrit.prompt_target import (
+    OpenAIChatRequestOptions,
+    PromptTarget,
+    TargetCapabilities,
+    TargetConfiguration,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,6 +182,33 @@ class _ScriptedTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         return
+
+
+class _ConfigurableScriptedTarget(_ScriptedTarget):
+    def __init__(self, *, response: str) -> None:
+        super().__init__(response=response)
+        self.temperatures: list[float | None] = []
+        self.max_completion_tokens: list[int | None] = []
+
+    def _get_default_request_options(self) -> OpenAIChatRequestOptions:
+        return OpenAIChatRequestOptions(
+            temperature=None,
+            top_p=None,
+            max_completion_tokens=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            n=None,
+            extra_body_parameters=None,
+        )
+
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        options = self._get_request_options(OpenAIChatRequestOptions)
+        self.temperatures.append(options.temperature if isinstance(options.temperature, float) else None)
+        self.max_completion_tokens.append(
+            options.max_completion_tokens if isinstance(options.max_completion_tokens, int) else None
+        )
+        return await super()._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
 
 
 @pytest.fixture
@@ -902,7 +936,7 @@ def test_static_solver_composition_compiles_and_runs_through_public_seam(tmp_pat
         "epochs=2, epochs_reducer=pass_at(1))\n",
         encoding="utf-8",
     )
-    target = _ScriptedTarget(response="done")
+    target = _ConfigurableScriptedTarget(response="done")
 
     run = asyncio.run(
         run_inspect_eval_async(
@@ -926,12 +960,288 @@ def test_static_solver_composition_compiles_and_runs_through_public_seam(tmp_pat
     assert all(scorer.metrics[0].group_aggregate == "samples" for scorer in case.scorers)
     assert all(scorer.reducers for scorer in case.scorers)
     assert len(target.received) == 4
+    assert target.max_completion_tokens == [32, 32, 32, 32]
     assert set(run.result.aggregate.reducer_values.values()) == {0.5}
     grouped = next(iter(run.result.aggregate.grouped_metric_values.values()))
     assert grouped == {
         "metadata.topic=history": 0.0,
         "metadata.topic=science": 1.0,
     }
+
+
+def test_pattern_scorer_runs_correct_incorrect_and_no_match_cases(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "pattern_eval.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import pattern\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def pattern_eval():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='q', target='Yes')]), "
+        "solver=generate(), scorer=pattern(r'(Yes|No).?\\Z'))\n",
+        encoding="utf-8",
+    )
+
+    correct = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="pattern_eval.py@pattern_eval",
+            verify_source_revision=False,
+            target=_ScriptedTarget(response="Yes."),
+        )
+    )
+    incorrect = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="pattern_eval.py@pattern_eval",
+            verify_source_revision=False,
+            target=_ScriptedTarget(response="No"),
+        )
+    )
+    no_match = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="pattern_eval.py@pattern_eval",
+            verify_source_revision=False,
+            target=_ScriptedTarget(response="Maybe"),
+        )
+    )
+
+    assert correct.result.attempts[0].task_result.scores[0].score_value == "True"
+    assert incorrect.result.attempts[0].task_result.scores[0].score_value == "False"
+    assert no_match.result.attempts[0].task_result.scores[0].score_value == "False"
+    assert correct.loaded.suite.cases[0].scorers[0].kind == "inspect_pattern"
+
+
+def test_multiple_choice_setup_metrics_and_temperature_run_natively(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "mc_eval.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.model import GenerateConfig\n"
+        "from inspect_ai.scorer import accuracy, choice, stderr\n"
+        "from inspect_ai.solver import multiple_choice, system_message\n"
+        "@task\n"
+        "def mc_eval():\n"
+        "    return Task(dataset=MemoryDataset([Sample(id='case', input='q', target='A', "
+        "choices=['right', 'wrong'], metadata={'cluster': 'one'})]), "
+        "solver=[system_message('rules'), multiple_choice(cot=True)], scorer=choice(), "
+        "metrics=[accuracy(), stderr(cluster='cluster')], config=GenerateConfig(temperature=0))\n",
+        encoding="utf-8",
+    )
+    target = _ConfigurableScriptedTarget(response="ANSWER: A")
+
+    run = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="mc_eval.py@mc_eval",
+            verify_source_revision=False,
+            target=target,
+        )
+    )
+
+    case = run.loaded.suite.cases[0]
+    assert [message.role for message in case.messages] == ["system", "user"]
+    assert case.scorers[0].metrics[1].cluster_by == "cluster"
+    assert target.received
+    assert run.result.attempts[0].task_result.scores[0].score_value == "True"
+    assert target.temperatures == [0.0]
+
+
+def test_generation_option_preflight_fails_before_model_call(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "configured.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.model import GenerateConfig\n"
+        "from inspect_ai.scorer import choice\n"
+        "from inspect_ai.solver import multiple_choice\n"
+        "@task\n"
+        "def configured():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='q', target='A', choices=['a', 'b'])]), "
+        "solver=multiple_choice(), scorer=choice(), config=GenerateConfig(temperature=0))\n",
+        encoding="utf-8",
+    )
+    target = _ScriptedTarget(response="ANSWER: A")
+
+    with pytest.raises(ValueError, match="cannot preserve Inspect generation option 'temperature'"):
+        asyncio.run(
+            run_inspect_eval_async(
+                source_root=root,
+                task_spec="configured.py@configured",
+                verify_source_revision=False,
+                target=target,
+            )
+        )
+
+    assert target.received == []
+
+
+def test_dataset_records_support_request_specific_multi_split_data(arc_source_root: Path) -> None:
+    records = {
+        "allenai/ai2_arc|ARC-Challenge|test|210d026faf9955653af8916fad021475a3f00453": [
+            {
+                "id": "case",
+                "question": "q",
+                "choices": {"label": ["A", "B"], "text": ["right", "wrong"]},
+                "answerKey": "A",
+            }
+        ]
+    }
+
+    loaded = load_inspect_eval(
+        source_root=arc_source_root,
+        task_spec="arc/arc.py@arc_challenge",
+        dataset_records=records,
+        verify_source_revision=False,
+    )
+
+    assert loaded.suite.cases[0].case_id == "case"
+
+
+def test_unkeyed_dataset_records_reject_distinct_requests() -> None:
+    loader = inspect_loader._injected_records_loader([{"input": "fixture"}])
+
+    assert loader("fixture/path", "first", split="test", revision="pinned")
+    with pytest.raises(ValueError, match="Unkeyed injected dataset records"):
+        loader("fixture/path", "second", split="test", revision="pinned")
+
+
+def test_generic_dataset_key_rejects_distinct_requests() -> None:
+    loader = inspect_loader._injected_records_loader({"fixture/path": [{"input": "fixture"}]})
+
+    assert loader("fixture/path", "first", split="test", revision="pinned")
+    with pytest.raises(ValueError, match="matches multiple distinct dataset requests"):
+        loader("fixture/path", "second", split="test", revision="pinned")
+
+
+def test_empty_dataset_records_do_not_fall_back_to_acquisition(arc_source_root: Path) -> None:
+    with pytest.raises(ValueError, match="produced an empty dataset"):
+        load_inspect_eval(
+            source_root=arc_source_root,
+            task_spec="arc/arc.py@arc_challenge",
+            dataset_records=[],
+            allow_network=True,
+            verify_source_revision=False,
+        )
+
+
+def test_combined_dataset_recomputes_provenance_and_aggregates_source_metadata() -> None:
+    first = Dataset(
+        [Sample(id="one", input="q1", target="A")],
+        name="first",
+        location="fixture/combined",
+        metadata={"path": "fixture/combined", "name": "first", "revision": "pinned"},
+    )
+    second = Dataset(
+        [Sample(id="two", input="q2", target="B")],
+        name="second",
+        location="fixture/combined",
+        metadata={"path": "fixture/combined", "name": "second", "revision": "pinned"},
+    )
+
+    combined = Dataset(
+        [first[0], second[0]],
+        name="first",
+        location="fixture/combined",
+    )
+
+    assert combined.provenance["record_count"] == 2
+    assert combined.metadata["source_type"] == "combined"
+    assert [source["name"] for source in combined.metadata["sources"]] == ["first", "second"]
+
+
+def test_pattern_group_matching_preserves_pinned_answer_semantics() -> None:
+    scorer = InspectPatternScorer(
+        config=InspectPatternScorerConfig(
+            expected_values=("foo",),
+            pattern="(foo)",
+            ignore_case=True,
+        )
+    )
+    match_all = InspectPatternScorer(
+        config=InspectPatternScorerConfig(
+            expected_values=("foo",),
+            pattern="(foo) (foo)",
+            ignore_case=True,
+            match_all=True,
+        )
+    )
+
+    assert scorer._match_groups(("FOO",)) == ("FOO", "C")
+    assert scorer._match_groups(("bar",)) == ("bar", "I")
+    assert match_all._match_groups(("foo", "foo")) == ("foo", "C")
+
+    empty_target = InspectPatternScorer(
+        config=InspectPatternScorerConfig(
+            expected_values=("",),
+            pattern="(.*)",
+            ignore_case=True,
+        )
+    )
+    empty_target_all = InspectPatternScorer(
+        config=InspectPatternScorerConfig(
+            expected_values=("",),
+            pattern="(.*)",
+            ignore_case=True,
+            match_all=True,
+        )
+    )
+    assert empty_target._match_groups(("",)) == ("", "I")
+    assert empty_target_all._match_groups(("",)) == ("", "I")
+    assert Target(["A", "B"]).text == "AB"
+    assert Target().text == ""
+
+    unicode_case = InspectPatternScorer(
+        config=InspectPatternScorerConfig(
+            expected_values=("SS",),
+            pattern="(.*)",
+            ignore_case=True,
+        )
+    )
+    assert unicode_case._match_groups(("ß",)) == ("ß", "I")
+
+
+def test_script_backed_dataset_requires_injected_records_before_network(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "scripted.py").write_text(
+        "from pathlib import Path\n"
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.scorer import match\n"
+        "from inspect_ai.solver import generate\n"
+        "from inspect_evals.hf_dataset_script_helper import load_hf_dataset_with_script\n"
+        "def map_record(record):\n"
+        "    from inspect_ai.dataset import Sample\n"
+        "    return Sample(input=record['input'], target=record['target'])\n"
+        "@task\n"
+        "def scripted():\n"
+        "    dataset = load_hf_dataset_with_script(repo_id='fixture/scripted', "
+        "record_to_sample=map_record, builder_cls=object, cache_dir_fp=Path('.'), "
+        "split='test', revision='pinned')\n"
+        "    return Task(dataset=dataset, solver=generate(), scorer=match())\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Script-backed Hugging Face datasets require locally materialized"):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="scripted.py@scripted",
+            allow_network=True,
+            verify_source_revision=False,
+        )
 
 
 def test_static_solver_compile_rejects_unknown_generate_option_before_model_execution(tmp_path: Path) -> None:

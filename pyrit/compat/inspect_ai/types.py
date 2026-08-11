@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from typing import Any, Literal, overload
 
 
@@ -83,6 +84,11 @@ class Sample:
     sandbox: SandboxSpec | tuple[str, str] | str | None = None
     setup: str | None = None
     files: dict[str, str] | None = None
+    _dataset_source_metadata: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def model_copy(self, *, update: dict[str, Any] | None = None) -> Sample:
+        """Return a copy with the requested field updates."""
+        return replace(self, **(update or {}))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,12 +119,35 @@ class Dataset(Sequence[Sample]):
         provenance: dict[str, Any] | None = None,
     ) -> None:
         """Initialize a materialized dataset."""
-        self._samples = tuple(samples)
+        materialized = tuple(samples)
         self.name = name
         self.location = location
         self.shuffled = shuffled
-        self.metadata = metadata or {}
-        self.provenance = provenance or {}
+        if metadata:
+            self.metadata = dict(metadata)
+            self._samples = tuple(
+                sample
+                if sample._dataset_source_metadata
+                else sample.model_copy(update={"_dataset_source_metadata": dict(self.metadata)})
+                for sample in materialized
+            )
+        else:
+            source_metadata = []
+            for sample in materialized:
+                if sample._dataset_source_metadata and sample._dataset_source_metadata not in source_metadata:
+                    source_metadata.append(dict(sample._dataset_source_metadata))
+            if len(source_metadata) == 1:
+                self.metadata = source_metadata[0]
+            elif source_metadata:
+                self.metadata = {
+                    "source_type": "combined",
+                    "location": location,
+                    "sources": source_metadata,
+                }
+            else:
+                self.metadata = {}
+            self._samples = materialized
+        self.provenance = dict(provenance) if provenance is not None else dataset_records_provenance(self._samples)
 
     @overload
     def __getitem__(self, index: int) -> Sample: ...
@@ -158,6 +187,27 @@ class Dataset(Sequence[Sample]):
                 "filter_applied": True,
             },
         )
+
+    def shuffle(self, seed: int | None = None) -> None:
+        """Shuffle samples in place using the pinned Inspect dataset contract."""
+        samples = list(self._samples)
+        if seed is None:
+            random.shuffle(samples)
+        else:
+            random.Random(seed).shuffle(samples)
+        self._samples = tuple(samples)
+        self.shuffled = True
+        previous_selection = self.provenance.get("selection")
+        selection = dict(previous_selection) if isinstance(previous_selection, dict) else {}
+        self.provenance = {
+            **self.provenance,
+            **dataset_records_provenance(self._samples),
+            "selection": {
+                **selection,
+                "shuffle": True,
+                "seed": seed,
+            },
+        }
 
 
 class MemoryDataset(Dataset):
@@ -317,8 +367,8 @@ class Target(list[str]):
 
     @property
     def text(self) -> str:
-        """The first accepted target value."""
-        return self[0] if self else ""
+        """Concatenate accepted target values using pinned Inspect semantics."""
+        return "".join(self)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -373,6 +423,17 @@ def dataset_records_provenance(samples: Iterable[Sample]) -> dict[str, int | str
 def _dataset_json_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, Sample):
+        return {
+            "input": _dataset_json_value(value.input),
+            "target": _dataset_json_value(value.target),
+            "choices": _dataset_json_value(value.choices),
+            "id": _dataset_json_value(value.id),
+            "metadata": _dataset_json_value(value.metadata),
+            "sandbox": _dataset_json_value(value.sandbox),
+            "setup": _dataset_json_value(value.setup),
+            "files": _dataset_json_value(value.files),
+        }
     if is_dataclass(value) and not isinstance(value, type):
         return _dataset_json_value(asdict(value))
     if isinstance(value, dict):

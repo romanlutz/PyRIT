@@ -88,6 +88,8 @@ class InspectEvalTaskFactory:
     source_file: str
     line: int
     parameters: tuple[str, ...]
+    parameter_annotations: dict[str, str]
+    parameter_defaults: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -270,12 +272,33 @@ class InspectEvalSourceTreeAnalyzer:
                         for item in node.decorator_list
                     }
                     if "task" in decorators:
+                        positional = node.args.args
+                        positional_defaults = {
+                            argument.arg: ast.unparse(default)
+                            for argument, default in zip(
+                                positional[-len(node.args.defaults) :] if node.args.defaults else (),
+                                node.args.defaults,
+                                strict=True,
+                            )
+                        }
+                        keyword_defaults = {
+                            argument.arg: ast.unparse(default)
+                            for argument, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True)
+                            if default is not None
+                        }
+                        arguments = positional + node.args.kwonlyargs
                         tasks.append(
                             InspectEvalTaskFactory(
                                 name=node.name,
                                 source_file=relative,
                                 line=node.lineno,
-                                parameters=tuple(argument.arg for argument in node.args.args + node.args.kwonlyargs),
+                                parameters=tuple(argument.arg for argument in arguments),
+                                parameter_annotations={
+                                    argument.arg: ast.unparse(argument.annotation)
+                                    for argument in arguments
+                                    if argument.annotation is not None
+                                },
+                                parameter_defaults={**positional_defaults, **keyword_defaults},
                             )
                         )
                     for component_type in decorated_components:

@@ -97,6 +97,8 @@ def test_build_catalog_classifies_supported_and_excluded_cloud_families(catalog_
     families = {family.family: family for family in report.families}
 
     assert families["arc"].compatibility_status == "supported"
+    assert families["arc"].fidelity == "native"
+    assert families["arc"].blockers == ()
     assert families["cloud_fixture"].compatibility_status == "unsupported"
     assert any(blocker.startswith("modal provider/") for blocker in families["cloud_fixture"].blockers)
     modal = next(surface for surface in report.excluded_cloud_surfaces if surface.surface == "modal")

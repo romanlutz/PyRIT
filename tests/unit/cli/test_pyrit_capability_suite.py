@@ -9,6 +9,7 @@ import pytest
 from pyrit.cli import pyrit_capability_suite
 from pyrit.compat.inspect_ai import cli as inspect_cli
 from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
+from pyrit.compat.inspect_ai.types import Dataset, GenerateConfig, Task
 from pyrit.executor.capability import ToolExecutionPolicy
 from pyrit.models import Message, TargetResponseMetadata
 from pyrit.prompt_target import (
@@ -60,6 +61,32 @@ def test_non_tool_preflight_uses_resolved_target_request_options_transport() -> 
         factory.build_request_options(declarations=(), execution_policy=ToolExecutionPolicy.SEQUENTIAL),
         OpenAIResponsesRequestOptions,
     )
+
+
+def test_non_tool_preflight_preserves_task_generation_config() -> None:
+    manifest = _tool_manifest().model_copy(
+        update={"cases": (_tool_manifest().cases[0].model_copy(update={"sandbox_tools_prefix": None}),)}
+    )
+    task = Task(
+        dataset=Dataset([]),
+        solver=None,
+        scorer=None,
+        config=GenerateConfig(temperature=0, max_tokens=17),
+    )
+
+    factory = inspect_cli._validate_target_and_request_options(
+        target=_MissingToolResultTarget(),
+        manifest=manifest,
+        task=task,
+    )
+    options = factory.build_request_options(
+        declarations=(),
+        execution_policy=ToolExecutionPolicy.SEQUENTIAL,
+    )
+
+    assert isinstance(options, OpenAIResponsesRequestOptions)
+    assert options.temperature == 0
+    assert options.max_output_tokens == 17
 
 
 class _ArcTarget(PromptTarget):

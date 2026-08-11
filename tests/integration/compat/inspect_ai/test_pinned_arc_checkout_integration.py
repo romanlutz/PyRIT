@@ -144,6 +144,127 @@ async def test_user_supplied_pinned_checkout_runs_unchanged_arc_source(sqlite_in
 
 
 @pytest.mark.run_only_if_all_tests
+def test_user_supplied_pinned_checkout_constructs_static_multi_dataset_factories() -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+    source_root = Path(source_value)
+    bbq_record = {
+        "example_id": 0,
+        "question_index": "1",
+        "question_polarity": "neg",
+        "context_condition": "ambig",
+        "category": "Age",
+        "answer_info": {"ans0": ["unknown", "unknown"], "ans1": ["old", "old"], "ans2": ["young", "young"]},
+        "additional_metadata": {
+            "subcategory": "fixture",
+            "stereotyped_groups": ["old"],
+            "version": "1",
+            "source": "fixture",
+        },
+        "context": "An older and younger person arrived.",
+        "question": "Who arrived?",
+        "ans0": "Unknown",
+        "ans1": "The older person",
+        "ans2": "The younger person",
+        "label": 0,
+    }
+    secqa_dev = {
+        "Question": "Which protocol provides encrypted remote login?",
+        "A": "SSH",
+        "B": "FTP",
+        "C": "HTTP",
+        "D": "Telnet",
+        "Answer": "A",
+    }
+    secqa_test = {
+        "Question": "Which property prevents unauthorized disclosure?",
+        "A": "Availability",
+        "B": "Confidentiality",
+        "C": "Integrity",
+        "D": "Non-repudiation",
+        "Answer": "B",
+    }
+
+    bbq = load_inspect_eval(
+        source_root=source_root,
+        task_spec="bbq/bbq.py@bbq",
+        task_parameters={"subsets": "Age", "shuffle": False},
+        dataset_records={
+            "heegyu/bbq|Age|test|5d6faae52070aa5eb71b46d1c0723d3ba7930209": [bbq_record],
+        },
+    )
+    secqa = load_inspect_eval(
+        source_root=source_root,
+        task_spec="sec_qa/sec_qa.py@sec_qa_v1_5_shot",
+        dataset_records={
+            "zefang-liu/secqa|secqa_v1|dev|d00a07484283be5602e2bae36dbefdaaf555a9fb": [secqa_dev],
+            "zefang-liu/secqa|secqa_v1|test|d00a07484283be5602e2bae36dbefdaaf555a9fb": [secqa_test],
+        },
+    )
+
+    assert bbq.report.source_revision_verified is True
+    assert bbq.suite.cases[0].case_id == "Age_00000"
+    assert bbq.suite.cases[0].source is not None
+    assert bbq.suite.cases[0].source.metadata["dataset"]["name"] == "Age"
+    assert secqa.report.source_revision_verified is True
+    assert secqa.suite.cases[0].case_id.startswith("secqa_")
+    assert secqa.suite.cases[0].messages[0].role == "system"
+    assert secqa_dev["Question"] in secqa.suite.cases[0].messages[0].content
+    assert secqa_test["Question"] in secqa.suite.cases[0].messages[-1].content
+
+
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.parametrize(
+    ("task_spec", "task_parameters", "records"),
+    [
+        (
+            "bbq/bbq.py@bbq",
+            {"subsets": ["Age", "Religion"], "shuffle": False},
+            [
+                {
+                    "example_id": 0,
+                    "question_index": "1",
+                    "question_polarity": "neg",
+                    "context_condition": "ambig",
+                    "category": "Age",
+                    "answer_info": {},
+                    "additional_metadata": {},
+                    "context": "context",
+                    "question": "question",
+                    "ans0": "unknown",
+                    "ans1": "first",
+                    "ans2": "second",
+                    "label": 0,
+                }
+            ],
+        ),
+        (
+            "sec_qa/sec_qa.py@sec_qa_v1_5_shot",
+            {},
+            [{"Question": "question", "A": "a", "B": "b", "C": "c", "D": "d", "Answer": "A"}],
+        ),
+    ],
+)
+def test_user_supplied_pinned_checkout_rejects_unkeyed_multi_dataset_records(
+    task_spec: str,
+    task_parameters: dict[str, object],
+    records: list[dict[str, object]],
+) -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    with pytest.raises(ValueError, match="Unkeyed injected dataset records"):
+        load_inspect_eval(
+            source_root=Path(source_value),
+            task_spec=task_spec,
+            task_parameters=task_parameters,
+            dataset_records=records,
+        )
+
+
+@pytest.mark.run_only_if_all_tests
 def test_user_supplied_pinned_checkout_constructs_unchanged_in_house_ctf_source() -> None:
     source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
     if not source_value:

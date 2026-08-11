@@ -114,6 +114,7 @@ _CORE_SYMBOLS = frozenset(
         "inspect_ai.scorer.mean_score",
         "inspect_ai.scorer.pass_at",
         "inspect_ai.scorer.pass_k",
+        "inspect_ai.scorer.pattern",
         "inspect_ai.scorer.scorer",
         "inspect_ai.scorer.stderr",
         "inspect_ai.solver",

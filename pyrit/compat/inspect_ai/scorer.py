@@ -203,6 +203,98 @@ class InspectTextScorer:
         return left.endswith(right)
 
 
+class InspectPatternScorerConfig(BaseModel):
+    """Strict configuration for native Inspect regular-expression scoring."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    expected_values: tuple[str, ...]
+    pattern: str
+    ignore_case: bool = True
+    match_all: bool = False
+
+
+class InspectPatternScorer:
+    """Native execution of Inspect 0.3.233 ``pattern`` scorer semantics."""
+
+    def __init__(
+        self,
+        *,
+        config: InspectPatternScorerConfig,
+        memory: MemoryInterface | None = None,
+    ) -> None:
+        """Initialize the scorer."""
+        self._config = config
+        self._memory = memory or CentralMemory.get_memory_instance()
+        self._compiled = re.compile(config.pattern, re.IGNORECASE if config.ignore_case else 0)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, JSONValue]) -> InspectPatternScorer:
+        """
+        Build the scorer from strict manifest configuration.
+
+        Returns:
+            InspectPatternScorer: The configured native scorer.
+        """
+        return cls(config=InspectPatternScorerConfig.model_validate(dict(config)))
+
+    async def score_result_async(self, *, result: CapabilityTaskResult, objective: str) -> list[Score]:
+        """
+        Score the final completion using captured regular-expression groups.
+
+        Returns:
+            list[Score]: The normalized score.
+        """
+        completion = _result_completion(result=result, memory=self._memory)
+        match = self._compiled.search(completion)
+        answer, value = self._match_groups(match.groups() if match else ())
+        piece_id = str(result.final_message_piece_ids[-1]) if result.final_message_piece_ids else str(result.case_id)
+        return normalize_inspect_score(
+            score=InspectScore(
+                value=value,
+                answer=answer,
+                explanation=completion if match else f"Scoring pattern not matched in output: {completion}",
+            ),
+            message_piece_id=piece_id,
+            objective=objective,
+        )
+
+    def _match_groups(self, groups: tuple[str | None, ...]) -> tuple[str | None, str]:
+        if not groups:
+            return None, "N"
+        targets = {
+            target.lower() if self._config.ignore_case else target: target for target in self._config.expected_values
+        }
+        normalized = tuple(
+            group.lower() if self._config.ignore_case and isinstance(group, str) else group for group in groups
+        )
+        if self._config.match_all:
+            for group in normalized:
+                if isinstance(group, str) and group not in targets:
+                    return None, "I"
+            # Preserve Inspect 0.3.233's Target.text behavior, including optional unmatched groups.
+            answer = "".join(self._config.expected_values)
+            return answer, "C" if answer else "I"
+        found_index = next(
+            (index for index, group in enumerate(normalized) if isinstance(group, str) and group in targets),
+            None,
+        )
+        if found_index is not None:
+            answer = groups[found_index]
+            return answer, "C" if answer else "I"
+        return (groups[0] if len(groups) == 1 else None), "I"
+
+
+def _result_completion(*, result: CapabilityTaskResult, memory: MemoryInterface) -> str:
+    pieces = memory.get_message_pieces(prompt_ids=list(result.final_message_piece_ids))
+    by_id = {piece.id: piece for piece in pieces}
+    return "\n".join(
+        by_id[piece_id].converted_value
+        for piece_id in result.final_message_piece_ids
+        if piece_id in by_id and by_id[piece_id].converted_value
+    )
+
+
 def normalize_inspect_score(
     *,
     score: InspectScore,

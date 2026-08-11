@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Contained source loading and ARC graph conversion for the Inspect facade."""
+"""Contained source loading and native graph conversion for the Inspect facade."""
 
 from __future__ import annotations
 
@@ -39,9 +39,12 @@ from pyrit.compat.inspect_ai.facade import (
     TaskFactory,
     activate_facade_context,
     build_compatibility_modules,
+    create_stable_id,
     deactivate_facade_context,
     download_and_verify,
+    filter_duplicate_ids,
     hf_dataset,
+    load_hf_dataset_with_script,
     load_json_dataset,
 )
 from pyrit.compat.inspect_ai.inventory import InspectApiInventory, inventory_inspect_api_usage
@@ -58,6 +61,7 @@ from pyrit.compat.inspect_ai.types import (
     ContentText,
     Dataset,
     Epochs,
+    GenerateConfig,
     MetricSpec,
     ReducerSpec,
     Sample,
@@ -226,9 +230,11 @@ class _NoToolRequestOptionsFactory:
         self,
         *,
         request_options_type: type[TargetRequestOptions] = TargetRequestOptions,
+        generate_config: GenerateConfig | None = None,
     ) -> None:
         """Initialize a no-tool factory for the resolved target transport."""
         self._request_options_type = request_options_type
+        self._generate_config = generate_config
 
     def build_request_options(
         self,
@@ -242,7 +248,39 @@ class _NoToolRequestOptionsFactory:
                 symbol="inspect_ai.tool runtime",
                 source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
             )
-        return self._request_options_type()
+        options = self._request_options_type()
+        if self._generate_config is None:
+            return options
+        fields = type(options).model_fields
+        updates: dict[str, object] = {}
+        unsupported = None
+        for name, value in vars(self._generate_config).items():
+            if value is None or name == "system_message":
+                continue
+            target_name = name
+            target_value: object = value
+            if name == "max_tokens":
+                target_name = next(
+                    (
+                        candidate
+                        for candidate in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+                        if candidate in fields
+                    ),
+                    "",
+                )
+            elif name == "stop_seqs":
+                target_name = "stop" if "stop" in fields else ""
+                target_value = tuple(value)
+            if not target_name or target_name not in fields:
+                unsupported = name
+                break
+            updates[target_name] = float(cast("float", value)) if name in {"temperature", "top_p"} else target_value
+        if unsupported is not None:
+            raise ValueError(
+                f"Target request-options transport '{type(options).__name__}' cannot preserve Inspect generation "
+                f"option '{unsupported}'. Select a target whose request options declare that field."
+            )
+        return options.model_copy(update=updates)
 
 
 def load_inspect_eval(
@@ -252,6 +290,7 @@ def load_inspect_eval(
     task_parameters: Mapping[str, object] | None = None,
     profile_id: str = PINNED_INSPECT_EVALS_PROFILE.profile_id,
     dataset_loader: DatasetLoader | None = None,
+    dataset_records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None = None,
     inspect_evals_cache_dir: Path | None = None,
     allow_network: bool = False,
     verify_source_revision: bool = True,
@@ -273,6 +312,7 @@ def load_inspect_eval(
     Raises:
         InspectProfileMismatchError: If the profile or checkout revision is not pinned.
         UnsupportedInspectFeatureError: If source requests an unsupported Inspect API.
+        ValueError: If incompatible injected-dataset arguments are supplied.
     """
     profile = resolve_profile(profile_id)
     _validate_positive_timeout(
@@ -312,9 +352,15 @@ def load_inspect_eval(
             timeout_seconds=source_verification_timeout_seconds,
         )
         revision_verified = True
-    records = _materialize_injected_arc_records(
-        task_name=task_name,
-        dataset_loader=dataset_loader,
+    if dataset_loader is not None and dataset_records is not None:
+        raise ValueError("Pass only one of dataset_loader or dataset_records.")
+    records = (
+        dataset_records
+        if dataset_records is not None
+        else _materialize_injected_arc_records(
+            task_name=task_name,
+            dataset_loader=dataset_loader,
+        )
     )
     return _run_worker(
         source_root=resolved_root,
@@ -340,7 +386,7 @@ def _load_inspect_eval_in_process(
     task_spec: str,
     task_parameters: Mapping[str, object] | None = None,
     profile_id: str = PINNED_INSPECT_EVALS_PROFILE.profile_id,
-    dataset_records: list[dict[str, Any]] | None = None,
+    dataset_records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None = None,
     inspect_evals_cache_dir: Path | None = None,
     allow_network: bool = False,
     verify_source_revision: bool = True,
@@ -383,7 +429,7 @@ def _load_inspect_eval_in_process(
         )
         revision_verified = True
     parameters = dict(task_parameters or {})
-    loader = (lambda *args, **kwargs: dataset_records) if dataset_records is not None else None
+    loader = _injected_records_loader(dataset_records) if dataset_records is not None else None
     construction_root: Path | None = None
     construction_package_root = package_root
     construction_package_parent = package_parent
@@ -440,7 +486,7 @@ def _load_inspect_eval_in_process(
         capabilities=profile.capability_report(),
         limitations=(
             "Source loading executes arbitrary trusted Python in a dedicated compatibility worker process.",
-            "Only the pinned ARC and GDM CTF construction/runtime surfaces are implemented.",
+            "Only reviewed pinned static mappings and GDM CTF construction/runtime surfaces are implemented.",
             "Model calls route only through the injected PyRIT PromptTarget.",
             "AWS, Bedrock, SageMaker, EC2, GCP, Modal, Daytona, and other non-Azure providers are excluded.",
             "Stores, hooks, EvalLog parity, and non-pinned compatibility callbacks are excluded.",
@@ -458,6 +504,7 @@ async def run_inspect_eval_async(
     task_parameters: Mapping[str, object] | None = None,
     profile_id: str = PINNED_INSPECT_EVALS_PROFILE.profile_id,
     dataset_loader: DatasetLoader | None = None,
+    dataset_records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None = None,
     inspect_evals_cache_dir: Path | None = None,
     allow_network: bool = False,
     verify_source_revision: bool = True,
@@ -481,6 +528,7 @@ async def run_inspect_eval_async(
         task_parameters=task_parameters,
         profile_id=profile_id,
         dataset_loader=dataset_loader,
+        dataset_records=dataset_records,
         inspect_evals_cache_dir=inspect_evals_cache_dir,
         allow_network=allow_network,
         verify_source_revision=verify_source_revision,
@@ -508,6 +556,7 @@ async def _load_inspect_eval_async(
     task_parameters: Mapping[str, object] | None,
     profile_id: str,
     dataset_loader: DatasetLoader | None,
+    dataset_records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None,
     inspect_evals_cache_dir: Path | None,
     allow_network: bool,
     verify_source_revision: bool,
@@ -527,6 +576,7 @@ async def _load_inspect_eval_async(
             task_parameters=task_parameters,
             profile_id=profile_id,
             dataset_loader=dataset_loader,
+            dataset_records=dataset_records,
             inspect_evals_cache_dir=inspect_evals_cache_dir,
             allow_network=allow_network,
             verify_source_revision=verify_source_revision,
@@ -581,7 +631,12 @@ async def run_loaded_inspect_eval_async(
         CapabilitySuiteRunResult: The complete native suite execution result.
     """
     from pyrit.compat.inspect_ai.runtime import build_inspect_tool_registry
-    from pyrit.compat.inspect_ai.scorer import InspectCheckFlagScorer, InspectChoiceScorer, InspectTextScorer
+    from pyrit.compat.inspect_ai.scorer import (
+        InspectCheckFlagScorer,
+        InspectChoiceScorer,
+        InspectPatternScorer,
+        InspectTextScorer,
+    )
     from pyrit.executor.capability import build_capability_request_options_factory, validate_capability_target
     from pyrit.scenario.capability_suite import (
         CapabilitySuiteRunner,
@@ -605,6 +660,10 @@ async def run_loaded_inspect_eval_async(
         kind="inspect_text",
         factory=lambda config: ResultOnlyScorerAdapter(scorer=InspectTextScorer.from_config(config)),
     )
+    scorer_registry.register(
+        kind="inspect_pattern",
+        factory=lambda config: ResultOnlyScorerAdapter(scorer=InspectPatternScorer.from_config(config)),
+    )
     asset_resolver = (
         LocalAssetSourceResolver(root=inspect_evals_cache_dir)
         if inspect_evals_cache_dir is not None and any(case.assets for case in loaded.suite.cases)
@@ -625,7 +684,10 @@ async def run_loaded_inspect_eval_async(
         resolved_request_options_factory = (
             build_capability_request_options_factory(target=target)
             if target_requirements.requires_tools
-            else _NoToolRequestOptionsFactory(request_options_type=target.request_options_type)
+            else _NoToolRequestOptionsFactory(
+                request_options_type=target.request_options_type,
+                generate_config=_effective_generate_config(loaded.task),
+            )
         )
     return await CapabilitySuiteRunner(
         manifest=loaded.suite,
@@ -746,6 +808,67 @@ def _materialize_injected_arc_records(
     return [dict(cast("Mapping[Any, Any]", record)) for record in records]
 
 
+def _injected_records_loader(
+    records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]],
+) -> DatasetLoader:
+    unkeyed_request: tuple[str, str | None, str | None, str] | None = None
+    keyed_requests: dict[str, tuple[str, str | None, str | None, str]] = {}
+
+    def _loader(
+        path: str,
+        name: str | None = None,
+        *,
+        split: str | None = None,
+        revision: str,
+        **kwargs: Any,
+    ) -> object:
+        nonlocal unkeyed_request
+        del kwargs
+        request = (path, name, split, revision)
+        if isinstance(records, list):
+            if unkeyed_request is not None and request != unkeyed_request:
+                raise ValueError(
+                    "Unkeyed injected dataset records can satisfy only one unique dataset request. "
+                    "Use a keyed JSON object for tasks with multiple subsets, configs, or splits."
+                )
+            unkeyed_request = request
+            return records
+        keys = (
+            f"{path}|{name or ''}|{split or ''}|{revision}",
+            f"{path}|{name or ''}|{split or ''}",
+            f"{path}|{name or ''}",
+            path,
+        )
+        selected_key = next((key for key in keys if key in records), None)
+        if selected_key is None:
+            raise ValueError(
+                "Injected dataset records have no entry for "
+                f"path={path!r}, name={name!r}, split={split!r}, revision={revision!r}."
+            )
+        prior_request = keyed_requests.get(selected_key)
+        if prior_request is not None and request != prior_request:
+            raise ValueError(
+                f"Injected dataset key {selected_key!r} matches multiple distinct dataset requests. "
+                "Use split- and config-specific keys to preserve source provenance."
+            )
+        keyed_requests[selected_key] = request
+        return records[selected_key]
+
+    return _loader
+
+
+def _effective_generate_config(task: Task) -> GenerateConfig | None:
+    values = vars(task.config).copy() if task.config is not None else {}
+    solvers, _ = _solver_steps(task)
+    terminal = solvers[-1] if solvers and solvers[-1].name == "generate" else None
+    if terminal is not None:
+        for name, value in terminal.config.items():
+            if name in GenerateConfig.__dataclass_fields__ and value is not None:
+                values[name] = value
+    values["system_message"] = None
+    return GenerateConfig(**values) if values else None
+
+
 def _run_worker(
     *,
     source_root: Path,
@@ -754,7 +877,7 @@ def _run_worker(
     profile: InspectCompatibilityProfile,
     allow_network: bool,
     verify_source_revision: bool,
-    records: list[dict[str, Any]] | None,
+    records: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None,
     inspect_evals_cache_dir: Path | None,
     inventory: InspectApiInventory,
     revision_verified: bool,
@@ -1256,15 +1379,20 @@ def _build_pinned_source_shims(*, data_root: Path | None) -> dict[str, ModuleTyp
     utils.__path__ = []
     utils.__dict__["load_json_dataset"] = load_json_dataset
     utils.__dict__["download_and_verify"] = download_and_verify
+    utils.__dict__["create_stable_id"] = create_stable_id
+    utils.__dict__["filter_duplicate_ids"] = filter_duplicate_ids
     huggingface = ModuleType("inspect_evals.utils.huggingface")
     huggingface.__dict__["hf_dataset"] = hf_dataset
     utils.__dict__["huggingface"] = huggingface
     constants = ModuleType("inspect_evals.constants")
     constants.__dict__["INSPECT_EVALS_CACHE_PATH"] = data_root or Path.home() / ".cache" / "inspect_evals"
+    script_helper = ModuleType("inspect_evals.hf_dataset_script_helper")
+    script_helper.__dict__["load_hf_dataset_with_script"] = load_hf_dataset_with_script
     return {
         "inspect_evals.utils": utils,
         "inspect_evals.utils.huggingface": huggingface,
         "inspect_evals.constants": constants,
+        "inspect_evals.hf_dataset_script_helper": script_helper,
     }
 
 
@@ -1439,7 +1567,7 @@ def _compile_task_suite(
         )
     solvers, solver_paths = _solver_steps(task)
     scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
-    if len(solvers) == 1 and solvers[0].name == "multiple_choice":
+    if solvers and solvers[-1].name == "multiple_choice":
         return _compile_arc_suite(
             task=task,
             task_name=task_name,
@@ -1450,6 +1578,8 @@ def _compile_task_suite(
             case_timeout_seconds=case_timeout_seconds,
             package_root=package_root,
             data_root=data_root,
+            solvers=solvers,
+            solver_paths=solver_paths,
         )
     return _compile_static_suite(
         task=task,
@@ -2054,7 +2184,9 @@ def _compile_static_suite(
             "case_timeout_seconds": case_timeout_seconds,
             "task_version": _json_scalar(task.version),
             "task_metadata": _json_mapping(task.metadata),
-            "solver": [_serialize_spec(spec) for spec in solvers],
+            "solver": (
+                _serialize_spec(solvers[0]) if len(solvers) == 1 else [_serialize_spec(spec) for spec in solvers]
+            ),
             "scorer": [_serialize_spec(spec) for spec in scorers],
             "dataset": _json_mapping(dataset.metadata),
             "dataset_provenance": _json_mapping(dataset.provenance),
@@ -2478,12 +2610,30 @@ def _compile_static_scorers(
     manifests = []
     for index, scorer in enumerate(scorers):
         scorer_id = _safe_identifier(f"{scorer.name}-{index + 1}")
-        if scorer.name not in {"match", "includes"}:
+        if scorer.name not in {"match", "includes", "pattern"}:
             raise UnsupportedInspectFeatureError(
                 symbol=f"inspect_ai.Task.scorer[{index}].{scorer.name}",
                 source_profile=profile.profile_id,
             )
-        if scorer.name == "match":
+        if scorer.name == "pattern":
+            allowed = {"pattern", "ignore_case", "match_all"}
+            unknown = next((name for name in scorer.config if name not in allowed), None)
+            if unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"inspect_ai.Task.scorer[{index}].pattern({unknown}=...)",
+                    source_profile=profile.profile_id,
+                )
+            expression = scorer.config.get("pattern")
+            if not isinstance(expression, str):
+                raise TypeError(f"inspect_ai.Task.scorer[{index}].pattern(pattern=...) must be a string.")
+            try:
+                compiled = re.compile(expression)
+            except re.error as error:
+                raise ValueError(f"inspect_ai.Task.scorer[{index}].pattern is invalid: {error}") from error
+            if compiled.groups == 0:
+                raise ValueError(f"inspect_ai.Task.scorer[{index}].pattern requires at least one capture group.")
+            location = "any"
+        elif scorer.name == "match":
             allowed = {"location", "ignore_case", "numeric"}
             unknown = next((name for name in scorer.config if name not in allowed), None)
             if unknown is not None or scorer.config.get("numeric") not in (None, False):
@@ -2525,16 +2675,26 @@ def _compile_static_scorers(
             ),
             reducers=reducers,
         )
+        scorer_config = (
+            {
+                "expected_values": list(targets),
+                "pattern": scorer.config["pattern"],
+                "ignore_case": ignore_case,
+                "match_all": scorer.config.get("match_all", False),
+            }
+            if scorer.name == "pattern"
+            else {
+                "expected_values": list(targets),
+                "mode": scorer.name,
+                "location": location,
+                "ignore_case": ignore_case,
+            }
+        )
         manifests.append(
             CaseScorerManifest(
-                kind="inspect_text",
+                kind="inspect_pattern" if scorer.name == "pattern" else "inspect_text",
                 scorer_id=scorer_id,
-                config={
-                    "expected_values": list(targets),
-                    "mode": scorer.name,
-                    "location": location,
-                    "ignore_case": ignore_case,
-                },
+                config=scorer_config,
                 metrics=metrics,
                 reducers=reducers,
             )
@@ -2809,7 +2969,7 @@ def _reject_static_task_options(*, task: Task, profile: InspectCompatibilityProf
             remediation="Native compatibility currently accepts only positive integer total-token limits.",
         )
     if task.config is not None:
-        supported = {"max_tokens", "system_message"}
+        supported = {"max_tokens", "temperature", "top_p", "seed", "stop_seqs", "system_message"}
         configured = next(
             (name for name, value in vars(task.config).items() if value is not None and name not in supported),
             None,
@@ -2832,13 +2992,21 @@ def _compile_arc_suite(
     case_timeout_seconds: float,
     package_root: Path,
     data_root: Path | None,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
 ) -> CapabilitySuiteManifest:
     _reject_unsupported_task_options(task=task, profile=profile)
-    solvers = _spec_sequence(task.solver, expected_type=SolverSpec)
     scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
-    if len(solvers) != 1 or solvers[0].name != "multiple_choice":
-        symbol = f"inspect_ai.solver.{solvers[0].name}" if solvers else "inspect_ai.solver.<empty>"
+    if not solvers or solvers[-1].name != "multiple_choice":
+        symbol = f"inspect_ai.solver.{solvers[-1].name}" if solvers else "inspect_ai.solver.<empty>"
         raise UnsupportedInspectFeatureError(symbol=symbol, source_profile=profile.profile_id)
+    supported_prefixes = {"system_message", "prompt_template", "user_message", "assistant_message"}
+    unsupported_solver = next((solver for solver in solvers[:-1] if solver.name not in supported_prefixes), None)
+    if unsupported_solver is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.solver.{unsupported_solver.name}",
+            source_profile=profile.profile_id,
+        )
     if len(scorers) != 1 or scorers[0].name != "choice":
         symbol = f"inspect_ai.scorer.{scorers[0].name}" if scorers else "inspect_ai.scorer.<empty>"
         raise UnsupportedInspectFeatureError(symbol=symbol, source_profile=profile.profile_id)
@@ -2850,7 +3018,10 @@ def _compile_arc_suite(
             sample=sample,
             index=index,
             task=task,
-            solver=solvers[0],
+            solver=solvers[-1],
+            solvers=solvers,
+            solver_paths=solver_paths,
+            scorer=scorers[0],
             dataset=dataset,
             case_timeout_seconds=case_timeout_seconds,
             package_root=package_root,
@@ -2885,7 +3056,11 @@ def _compile_arc_suite(
         sandbox_provider=LocalSandboxProviderManifestConfig(),
         run_policy=RunPolicyManifest(epochs=task.epochs if isinstance(task.epochs, int) else 1),
         cases=cases,
-        tags=("inspect-evals", "compatibility", "arc", "native"),
+        tags=(
+            ("inspect-evals", "compatibility", "arc", "native")
+            if task_name in {"arc_easy", "arc_challenge"}
+            else ("inspect-evals", "compatibility", "static", "native")
+        ),
         metadata={
             "compatibility_profile": profile.profile_id,
             "expected_revision": profile.inspect_evals_revision,
@@ -2894,8 +3069,11 @@ def _compile_arc_suite(
             "case_timeout_seconds": case_timeout_seconds,
             "task_version": _json_scalar(task.version),
             "task_metadata": _json_mapping(task.metadata),
-            "solver": {"name": solvers[0].name, "config": _json_mapping(solvers[0].config)},
+            "solver": (
+                _serialize_spec(solvers[0]) if len(solvers) == 1 else [_serialize_spec(spec) for spec in solvers]
+            ),
             "scorer": {"name": scorers[0].name, "config": _json_mapping(scorers[0].config)},
+            "task_config": _json_mapping(vars(task.config)) if task.config is not None else {},
             "dataset": _json_mapping(dataset.metadata),
             "dataset_provenance": _json_mapping(dataset.provenance),
         },
@@ -2904,7 +3082,14 @@ def _compile_arc_suite(
 
 def _reject_unsupported_task_options(*, task: Task, profile: InspectCompatibilityProfile) -> None:
     if task.config is not None:
-        configured_field = next((name for name, value in vars(task.config).items() if value is not None), None)
+        configured_field = next(
+            (
+                name
+                for name, value in vars(task.config).items()
+                if value is not None and not ((name == "temperature" and value in (0, 0.0)) or name == "system_message")
+            ),
+            None,
+        )
         if configured_field is not None:
             raise UnsupportedInspectFeatureError(
                 symbol=f"inspect_ai.Task.config.{configured_field}",
@@ -2924,6 +3109,9 @@ def _compile_arc_sample(
     index: int,
     task: Task,
     solver: SolverSpec,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    scorer: ScorerSpec,
     dataset: Dataset,
     case_timeout_seconds: float,
     package_root: Path,
@@ -2940,7 +3128,7 @@ def _compile_arc_sample(
                 source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
             )
     if not sample.choices:
-        raise ValueError(f"ARC sample '{sample.id or index}' must declare choices.")
+        raise ValueError(f"Multiple-choice sample '{sample.id or index}' must declare choices.")
     if isinstance(sample.target, list):
         if len(sample.target) != 1:
             raise UnsupportedInspectFeatureError(
@@ -2955,10 +3143,14 @@ def _compile_arc_sample(
         sample=sample,
         labels=labels,
         solver=solver,
+        prefix_solvers=solvers[:-1],
+        prefix_paths=solver_paths[:-1],
         dataset=dataset,
         package_root=package_root,
         data_root=data_root,
     )
+    if task.config is not None and task.config.system_message:
+        messages = (CaseMessageManifest(role="system", content=task.config.system_message), *messages)
     max_tokens = solver.config.get("max_tokens")
     if max_tokens is not None:
         raise UnsupportedInspectFeatureError(
@@ -2969,6 +3161,26 @@ def _compile_arc_sample(
         max_wall_clock_seconds=case_timeout_seconds,
     )
     case_id = _safe_identifier(str(sample.id if sample.id is not None else f"sample-{index + 1}"))
+    scorer_id = _safe_identifier(f"{scorer.name}-1")
+    reducers = _compile_reducer_specs(
+        scorer_id=scorer_id,
+        reducers=_reducers_for_task(task=task),
+        profile=PINNED_INSPECT_EVALS_PROFILE,
+    )
+    metrics = _metrics_with_reducers(
+        metrics=_compile_metric_specs(
+            scorer_id=scorer_id,
+            metrics=_metrics_for_scorer(
+                task=task,
+                scorer=scorer,
+                scorer_index=0,
+                profile=PINNED_INSPECT_EVALS_PROFILE,
+            ),
+            sample_metadata=sample.metadata,
+            profile=PINNED_INSPECT_EVALS_PROFILE,
+        ),
+        reducers=reducers,
+    )
     return CapabilityCaseManifest(
         case_id=case_id,
         objective=objective,
@@ -2976,10 +3188,13 @@ def _compile_arc_sample(
         scorers=(
             CaseScorerManifest(
                 kind="inspect_choice",
+                scorer_id=scorer_id,
                 config={
                     "expected_value": str(target).upper(),
                     "allowed_options": labels,
                 },
+                metrics=metrics,
+                reducers=reducers,
             ),
         ),
         limits=limits,
@@ -3010,6 +3225,8 @@ def _sample_messages(
     sample: Sample,
     labels: list[str],
     solver: SolverSpec,
+    prefix_solvers: tuple[SolverSpec, ...],
+    prefix_paths: tuple[str, ...],
     dataset: Dataset,
     package_root: Path,
     data_root: Path | None,
@@ -3048,7 +3265,7 @@ def _sample_messages(
     def render(question: str) -> str:
         return template.format(question=question, choices=choice_text, letters=letters)
 
-    if isinstance(sample.input, str):
+    if not prefix_solvers and isinstance(sample.input, str):
         return (CaseMessageManifest(role="user", content=render(sample.input)),), sample.input
     messages = list(
         _sample_input_messages(
@@ -3059,6 +3276,42 @@ def _sample_messages(
             profile=PINNED_INSPECT_EVALS_PROFILE,
         )
     )
+    for prefix_solver, path in zip(prefix_solvers, prefix_paths, strict=True):
+        if prefix_solver.name == "system_message":
+            content = _render_solver_template(
+                solver=prefix_solver,
+                sample=sample,
+                prompt=None,
+                path=path,
+            )
+            insert_at = max(
+                (index + 1 for index, existing in enumerate(messages) if existing.role == "system"),
+                default=0,
+            )
+            messages.insert(insert_at, CaseMessageManifest(role="system", content=content))
+        elif prefix_solver.name == "prompt_template":
+            user_index = _last_user_message_index(messages=messages, path=path)
+            prompt = _case_message_text(message=messages[user_index], path=path)
+            content = _render_solver_template(
+                solver=prefix_solver,
+                sample=sample,
+                prompt=prompt,
+                path=path,
+            )
+            messages[user_index] = _replace_case_message_text(
+                message=messages[user_index],
+                text=content,
+                path=path,
+            )
+        elif prefix_solver.name in {"user_message", "assistant_message"}:
+            content = _render_solver_template(
+                solver=prefix_solver,
+                sample=sample,
+                prompt=None,
+                path=path,
+            )
+            role: Literal["user", "assistant"] = "user" if prefix_solver.name == "user_message" else "assistant"
+            messages.append(CaseMessageManifest(role=role, content=content))
     user_prompt_index = _last_user_message_index(
         messages=messages,
         path="inspect_ai.solver.multiple_choice",
