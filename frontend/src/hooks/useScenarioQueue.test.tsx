@@ -72,4 +72,23 @@ describe('useScenarioQueue', () => {
     expect(result.current.error).toBe('temporary queue failure')
     unmount()
   })
+
+  it('retries an initial failure without presenting stale queue data', async () => {
+    mockGetQueue
+      .mockRejectedValueOnce(new Error('queue unavailable'))
+      .mockResolvedValueOnce(FIRST_SNAPSHOT)
+
+    const { result, unmount } = renderHook(() => useScenarioQueue())
+    await waitFor(() => expect(result.current.error).toBe('queue unavailable'))
+
+    expect(result.current.snapshot).toBeNull()
+    expect(result.current.loading).toBe(false)
+    expect(result.current.stale).toBe(false)
+
+    act(() => result.current.retry())
+    expect(result.current.loading).toBe(true)
+    expect(result.current.error).toBeNull()
+    await waitFor(() => expect(result.current.snapshot).toEqual(FIRST_SNAPSHOT))
+    unmount()
+  })
 })

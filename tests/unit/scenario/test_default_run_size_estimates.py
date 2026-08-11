@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.executor.attack.core.attack_config import AttackScoringConfig
+from pyrit.executor.attack import AttackScoringConfig
 from pyrit.models import (
     AttackSeedGroup,
     AttackTechniqueSeedGroup,
@@ -21,14 +21,12 @@ from pyrit.models import (
     SeedSimulatedConversation,
 )
 from pyrit.prompt_target import PromptTarget
-from pyrit.scenario.core import BaselineAttackPolicy, DatasetAttackConfiguration, Scenario, ScenarioTechnique
-from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
-from pyrit.scenario.scenarios.airt.jailbreak import Jailbreak
-from pyrit.scenario.scenarios.airt.psychosocial import Psychosocial
-from pyrit.scenario.scenarios.benchmark.adversarial import AdversarialBenchmark
-from pyrit.scenario.scenarios.foundry.red_team_agent import FoundryComposite, FoundryTechnique, RedTeamAgent
-from pyrit.scenario.scenarios.garak.encoding import Encoding
-from pyrit.scenario.scenarios.garak.web_injection import WebInjection
+from pyrit.scenario import BaselineAttackPolicy, DatasetAttackConfiguration, Scenario, ScenarioTechnique
+from pyrit.scenario.scenarios.adaptive import TextAdaptive
+from pyrit.scenario.scenarios.airt import Jailbreak, Psychosocial
+from pyrit.scenario.scenarios.benchmark import AdversarialBenchmark
+from pyrit.scenario.scenarios.foundry import FoundryComposite, FoundryTechnique, RedTeamAgent
+from pyrit.scenario.scenarios.garak import Encoding, WebInjection
 from pyrit.score import TrueFalseScorer
 
 

@@ -3,13 +3,12 @@
 
 """Canonical models for durable scenario run plans and incremental progress."""
 
-from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
-from pyrit.models.catalog.scenario import ScenarioOverloadSummary, ScenarioTargetSummary  # noqa: TC001
+from pyrit.models.catalog.scenario import ScenarioRunHeader
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
 from pyrit.models.results.attack_result import AttackOutcome
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -100,25 +99,8 @@ class ScenarioRunPlan(BaseModel):
         return self
 
 
-class ScenarioProgressHeader(BaseModel):
+class ScenarioProgressHeader(ScenarioRunHeader):
     """Compact persisted run header returned by the progress endpoint."""
-
-    scenario_result_id: str
-    scenario_name: str
-    scenario_registry_name: str | None = None
-    scenario_version: int
-    status: ScenarioRunState
-    created_at: datetime
-    completed_at: datetime | None = None
-    pyrit_version: str | None = None
-    target: "ScenarioTargetSummary | None" = None
-    techniques_used: list[str] = Field(default_factory=list)
-    datasets_used: list[str] = Field(default_factory=list)
-    scenario_parameters: dict[str, Any] = Field(default_factory=dict)
-    labels: dict[str, str] = Field(default_factory=dict)
-    queue_position: int | None = Field(None, ge=1)
-    active_scenario_result_id: str | None = None
-    overload_summaries: list["ScenarioOverloadSummary"] = Field(default_factory=list)
 
 
 class ScenarioProgressResult(BaseModel):

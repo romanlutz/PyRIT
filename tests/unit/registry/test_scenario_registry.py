@@ -8,16 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.registry.components.scenario_registry import ScenarioRegistry
-from pyrit.scenario.core import (
+from pyrit.registry import ScenarioRegistry
+from pyrit.scenario import (
     BaselineAttackPolicy,
     CompoundDatasetAttackConfiguration,
     DatasetAttackConfiguration,
     ScenarioTechnique,
 )
-from pyrit.scenario.scenarios.adaptive.text_adaptive import TextAdaptive
-from pyrit.scenario.scenarios.airt.psychosocial import Psychosocial
-from pyrit.scenario.scenarios.garak.web_injection import WebInjection
+from pyrit.scenario.scenarios.adaptive import TextAdaptive
+from pyrit.scenario.scenarios.airt import Psychosocial
+from pyrit.scenario.scenarios.garak import WebInjection
 
 
 class _NotNoArgScenario:

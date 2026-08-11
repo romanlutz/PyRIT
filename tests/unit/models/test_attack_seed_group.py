@@ -4,8 +4,7 @@
 
 import pytest
 
-from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
-from pyrit.models.identifiers.component_identifier import ComponentIdentifier
+from pyrit.models import AtomicAttackIdentifier, ComponentIdentifier
 from pyrit.models.seeds.attack_seed_group import AttackSeedGroup
 from pyrit.models.seeds.seed_objective import SeedObjective
 from pyrit.models.seeds.seed_prompt import SeedPrompt

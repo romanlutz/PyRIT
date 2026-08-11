@@ -8,8 +8,7 @@ from datetime import datetime, timezone
 
 from unit.mocks import make_scenario_result
 
-from pyrit.memory import MemoryInterface
-from pyrit.memory.memory_interface import ScenarioProgressKeysetCursor
+from pyrit.memory import MemoryInterface, ScenarioProgressKeysetCursor
 from pyrit.models import (
     AtomicAttackIdentifier,
     AttackOutcome,

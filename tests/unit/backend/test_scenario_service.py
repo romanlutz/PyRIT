@@ -17,8 +17,8 @@ from fastapi.testclient import TestClient
 from pyrit.backend.main import app
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
-from pyrit.backend.services.scenario_run_service import ScenarioRunService
-from pyrit.backend.services.scenario_service import (
+from pyrit.backend.services import (
+    ScenarioRunService,
     ScenarioService,
     get_scenario_service,
 )
@@ -32,7 +32,7 @@ from pyrit.models import (
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
 )
-from pyrit.models.catalog.scenario import RegisteredScenario
+from pyrit.models.catalog import RegisteredScenario
 from pyrit.registry import ScenarioMetadata
 from pyrit.scenario.core import DatasetAttackConfiguration, ScenarioTechnique
 

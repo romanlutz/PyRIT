@@ -15,9 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import pyrit.backend.services.scenario_run_service as _svc_mod
-from pyrit.backend.services.scenario_run_service import (
-    ScenarioRunService,
-)
+from pyrit.backend.services import ScenarioRunService
 from pyrit.converter import Converter
 from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord
 from pyrit.models import (
@@ -41,7 +39,7 @@ from pyrit.models import (
     SeedObjective,
     config_hash,
 )
-from pyrit.models.catalog.scenario import RunScenarioRequest
+from pyrit.models.catalog import RunScenarioRequest
 from pyrit.scenario.core import (
     CompoundDatasetAttackConfiguration,
     DatasetAttackConfiguration,

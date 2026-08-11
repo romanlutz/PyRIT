@@ -29,14 +29,12 @@ export function useScenarioQueue(): UseScenarioQueueResult {
 
   useEffect(() => {
     let active = true
-    let requestInFlight = false
     const controller = new AbortController()
 
     const fetchQueueAsync = async (): Promise<void> => {
-      if (!active || requestInFlight) {
+      if (!active) {
         return
       }
-      requestInFlight = true
       try {
         const snapshot = await scenariosApi.getQueue(controller.signal)
         if (!active) {
@@ -55,7 +53,6 @@ export function useScenarioQueue(): UseScenarioQueueResult {
           error: message,
         }))
       } finally {
-        requestInFlight = false
         if (active) {
           timerRef.current = setTimeout(() => {
             timerRef.current = null

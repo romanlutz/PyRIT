@@ -45,23 +45,6 @@ export const useMessageListStyles = makeStyles({
     gap: tokens.spacingVerticalM,
     minWidth: 0,
   },
-  promptSummary: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalS,
-  },
-  promptObjective: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: tokens.spacingVerticalXXS,
-    padding: `${tokens.spacingVerticalS} ${tokens.spacingHorizontalM}`,
-    backgroundColor: tokens.colorNeutralBackground2,
-    borderRadius: tokens.borderRadiusMedium,
-  },
-  promptObjectiveLabel: {
-    color: tokens.colorNeutralForeground3,
-    fontWeight: tokens.fontWeightSemibold,
-  },
   promptActions: {
     display: 'flex',
     flexWrap: 'wrap',

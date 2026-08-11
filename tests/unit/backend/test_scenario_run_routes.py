@@ -24,7 +24,7 @@ from pyrit.models import (
     ScenarioRunProgress,
     ScenarioRunState,
 )
-from pyrit.models.catalog.scenario import ScenarioRunSummary
+from pyrit.models.catalog import ScenarioRunSummary
 from unit.mocks import make_scenario_result
 
 

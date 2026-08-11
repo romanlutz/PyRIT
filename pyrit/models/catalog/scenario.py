@@ -500,8 +500,17 @@ class ScenarioOverloadSummary(BaseModel):
     latest_timestamp: datetime = Field(..., description="Latest overload signal timestamp")
 
 
-class ScenarioRunSummary(BaseModel):
-    """Response for a scenario run (status + result details)."""
+class ScenarioTargetSummary(BaseModel):
+    """Safe target identity suitable for scenario history and run headers."""
+
+    target_type: str = Field(..., description="Target implementation type")
+    endpoint: str | None = Field(None, description="Configured endpoint, when present")
+    model_name: str | None = Field(None, description="Configured model or deployment name")
+    identifier_hash: str | None = Field(None, description="Canonical target identifier hash")
+
+
+class ScenarioRunHeader(BaseModel):
+    """Fields shared by scenario summaries and incremental progress headers."""
 
     scenario_result_id: str = Field(..., description="UUID of the ScenarioResult in memory")
     scenario_name: str = Field(..., description="Registry key of the scenario being run")
@@ -509,10 +518,30 @@ class ScenarioRunSummary(BaseModel):
     scenario_version: int = Field(0, ge=0, description="Version of the scenario")
     status: ScenarioRunState = Field(..., description="Current run status")
     created_at: datetime = Field(..., description="When the run was created")
+    techniques_used: list[str] = Field(default_factory=list, description="Technique names that were executed")
+    labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
+    completed_at: datetime | None = Field(None, description="When the scenario finished")
+    pyrit_version: str | None = Field(None, description="PyRIT version that created the run")
+    target: ScenarioTargetSummary | None = Field(None, description="Safe objective-target identity")
+    datasets_used: list[str] = Field(default_factory=list, description="Resolved datasets selected for the run")
+    scenario_parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Safe resolved scenario parameters; sensitive fields are removed",
+    )
+    queue_position: int | None = Field(None, ge=1, description="Current 1-based waiting position")
+    active_scenario_result_id: str | None = Field(None, description="Currently executing scenario result ID")
+    overload_summaries: list[ScenarioOverloadSummary] = Field(
+        default_factory=list,
+        description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
+    )
+
+
+class ScenarioRunSummary(ScenarioRunHeader):
+    """Response for a scenario run (status + result details)."""
+
     updated_at: datetime = Field(..., description="When the run status last changed")
     error: str | None = Field(None, description="Error message if status is FAILED")
     error_type: str | None = Field(None, description="Exception class name if status is FAILED")
-    techniques_used: list[str] = Field(default_factory=list, description="Technique names that were executed")
     total_attacks: int = Field(0, ge=0, description="Total planned progress units for this run")
     completed_attacks: int = Field(0, ge=0, description="Number of planned progress units that completed")
     objective_achieved_rate: int = Field(0, ge=0, le=100, description="Success rate as percentage (0-100)")
@@ -527,15 +556,6 @@ class ScenarioRunSummary(BaseModel):
     total_retries: int = Field(
         0, ge=0, description="Total retry attempts recorded across all attack results (endpoint-stress signal)"
     )
-    labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
-    completed_at: datetime | None = Field(None, description="When the scenario finished")
-    pyrit_version: str | None = Field(None, description="PyRIT version that created the run")
-    target: "ScenarioTargetSummary | None" = Field(None, description="Safe objective-target identity")
-    datasets_used: list[str] = Field(default_factory=list, description="Resolved datasets selected for the run")
-    scenario_parameters: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Safe resolved scenario parameters; sensitive fields are removed",
-    )
     planned_total_available: bool = Field(
         True,
         description="Whether total_attacks comes from a complete persisted run plan",
@@ -546,21 +566,3 @@ class ScenarioRunSummary(BaseModel):
         True,
         description="Whether failed_attacks and attack_retries contain per-attempt details",
     )
-    queue_position: int | None = Field(None, ge=1, description="Current 1-based waiting position")
-    active_scenario_result_id: str | None = Field(None, description="Currently executing scenario result ID")
-    overload_summaries: list[ScenarioOverloadSummary] = Field(
-        default_factory=list,
-        description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
-    )
-
-
-class ScenarioTargetSummary(BaseModel):
-    """Safe target identity suitable for scenario history and run headers."""
-
-    target_type: str = Field(..., description="Target implementation type")
-    endpoint: str | None = Field(None, description="Configured endpoint, when present")
-    model_name: str | None = Field(None, description="Configured model or deployment name")
-    identifier_hash: str | None = Field(None, description="Canonical target identifier hash")
-
-
-ScenarioRunSummary.model_rebuild()

@@ -121,68 +121,6 @@ describe("messageMapper", () => {
       expect(result.error).toBeUndefined();
     });
 
-    it("should preserve valid generated-prompt composition metadata", () => {
-      const msg: BackendMessage = {
-        turn_number: 1,
-        role: "user",
-        message_pieces: [
-          {
-            id: "p1",
-            original_value_data_type: "text",
-            converted_value_data_type: "text",
-            original_value: "Many-shot prompt",
-            converted_value: "Many-shot prompt",
-            prompt_metadata: {
-              prompt_composition: {
-                strategy: "many_shot",
-                example_count: 100,
-                objective_placement: "appended",
-                character_count: 139_988,
-              },
-            },
-            scores: [],
-            response_error: "none",
-          },
-        ],
-        created_at: "2026-02-15T00:00:00Z",
-      };
-
-      expect(backendMessageToFrontend(msg).promptComposition).toEqual({
-        strategy: "many_shot",
-        example_count: 100,
-        objective_placement: "appended",
-        character_count: 139_988,
-      });
-    });
-
-    it("should ignore malformed generated-prompt composition metadata", () => {
-      const msg: BackendMessage = {
-        turn_number: 1,
-        role: "user",
-        message_pieces: [
-          {
-            id: "p1",
-            original_value_data_type: "text",
-            converted_value_data_type: "text",
-            converted_value: "Prompt",
-            prompt_metadata: {
-              prompt_composition: {
-                strategy: "many_shot",
-                example_count: "100",
-                objective_placement: "appended",
-                character_count: 6,
-              },
-            },
-            scores: [],
-            response_error: "none",
-          },
-        ],
-        created_at: "2026-02-15T00:00:00Z",
-      };
-
-      expect(backendMessageToFrontend(msg).promptComposition).toBeUndefined();
-    });
-
     it("should convert an image response", () => {
       const msg: BackendMessage = {
         turn_number: 1,

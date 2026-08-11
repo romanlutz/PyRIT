@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING
 
-from pyrit.models.identifiers.seed_identifier import SeedIdentifier, logical_seed_group_fingerprint
+from pyrit.models.identifiers import SeedIdentifier, logical_seed_group_fingerprint
 from pyrit.models.seeds.seed_group import SeedGroup
 from pyrit.models.seeds.seed_objective import SeedObjective
 from pyrit.models.seeds.seed_prompt import SeedPrompt

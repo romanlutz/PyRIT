@@ -14,7 +14,7 @@ from time import monotonic
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
-from pyrit.models.catalog.scenario import (
+from pyrit.models.catalog import (
     RegisteredScenario,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeEstimateRequest,

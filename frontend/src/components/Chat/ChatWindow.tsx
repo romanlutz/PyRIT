@@ -833,8 +833,7 @@ export default function ChatWindow({
           isCrossTarget={isCrossTargetLocked}
           noTargetSelected={!activeTarget}
           globalMarkdown={globalMarkdown}
-          attackType={attackSummary?.attack_type}
-          attackObjective={attackSummary?.objective}
+          collapseLongPrompts={Boolean(attackSummary)}
         />
         <ChatInputArea
           ref={inputBoxRef}

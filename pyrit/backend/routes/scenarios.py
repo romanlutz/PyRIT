@@ -22,15 +22,14 @@ from pyrit.backend.models.scenarios import (
 )
 from pyrit.backend.services.scenario_run_service import get_scenario_run_service
 from pyrit.backend.services.scenario_service import get_scenario_service
-from pyrit.models import ScenarioResult, ScenarioRunState
-from pyrit.models.catalog.scenario import (
+from pyrit.models import ScenarioQueueSnapshot, ScenarioResult, ScenarioRunProgress, ScenarioRunState
+from pyrit.models.catalog import (
     RegisteredScenario,
     RunScenarioRequest,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSummary,
 )
-from pyrit.models.scenario_progress import ScenarioQueueSnapshot, ScenarioRunProgress
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 

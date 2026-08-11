@@ -47,10 +47,8 @@ interface MessageListProps {
   noTargetSelected?: boolean
   /** Conversation-wide default: render message text as Markdown. */
   globalMarkdown?: boolean
-  /** Attack identity for explaining known generated-prompt strategies on historical runs. */
-  attackType?: string
-  /** Canonical objective for a generated prompt; shown outside collapsed scaffolding. */
-  attackObjective?: string
+  /** Collapse long user prompts when rendering persisted attack history. */
+  collapseLongPrompts?: boolean
 }
 
 const LONG_PROMPT_CHARACTER_THRESHOLD = 4_000
@@ -102,20 +100,12 @@ function MediaWithFallback({ type, src, className }: { type: 'video' | 'audio'; 
 
 interface CollapsedPromptProps {
   readonly content: string
-  readonly exampleCount?: number
-  readonly characterCount?: number
-  readonly objective?: string
-  readonly isManyShot: boolean
   readonly globalMarkdown: boolean
   readonly index: number
 }
 
 function CollapsedPrompt({
   content,
-  exampleCount,
-  characterCount,
-  objective,
-  isManyShot,
   globalMarkdown,
   index,
 }: CollapsedPromptProps) {
@@ -131,31 +121,11 @@ function CollapsedPrompt({
     }
   }, [content])
 
-  const characterSummary = `${(characterCount ?? content.length).toLocaleString()} characters`
-  const compositionSummary = isManyShot
-    ? `${exampleCount === undefined ? 'Example count unavailable' : `${exampleCount} examples`} · ${characterSummary}`
-    : `Long prompt · ${characterSummary}`
+  const characterSummary = `Long prompt · ${content.length.toLocaleString()} characters`
 
   return (
     <div className={styles.collapsedPrompt} data-testid={`collapsed-prompt-${index}`}>
-      {isManyShot && (
-        <MessageBar intent="info">
-          <MessageBarBody>
-            {exampleCount === undefined
-              ? 'This is one generated user prompt containing demonstration exchanges followed by the objective. The embedded User/Assistant labels are examples, not conversation turns. The stored result does not record the example count.'
-              : `This is one generated user prompt containing ${exampleCount} demonstration exchanges followed by the objective. The embedded User/Assistant labels are examples, not conversation turns.`}
-          </MessageBarBody>
-        </MessageBar>
-      )}
-      <div className={styles.promptSummary}>
-        <Text weight="semibold">{compositionSummary}</Text>
-        {isManyShot && objective && (
-          <div className={styles.promptObjective}>
-            <Text size={200} className={styles.promptObjectiveLabel}>Final objective</Text>
-            <Text>{objective}</Text>
-          </div>
-        )}
-      </div>
+      <Text weight="semibold">{characterSummary}</Text>
       <div className={styles.promptActions}>
         <Button
           appearance="subtle"
@@ -172,7 +142,7 @@ function CollapsedPrompt({
         </MessageBar>
       )}
       <details className={styles.promptDetails}>
-        <summary>{isManyShot ? 'Show full generated prompt' : 'Show full prompt'}</summary>
+        <summary>Show full prompt</summary>
         <div className={styles.fullPrompt}>
           {globalMarkdown
             ? <MarkdownContent content={content} testId={`message-markdown-${index}`} />
@@ -219,8 +189,7 @@ export default function MessageList({
   isCrossTarget,
   noTargetSelected,
   globalMarkdown = false,
-  attackType,
-  attackObjective,
+  collapseLongPrompts = false,
 }: MessageListProps) {
   const styles = useMessageListStyles()
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -320,22 +289,12 @@ export default function MessageList({
                 <div className={styles.originalSection} data-testid="original-section">
                   <div className={styles.sectionLabel}>Original</div>
                   {message.originalContent && (() => {
-                    const isManyShot = isUser && (
-                      message.promptComposition?.strategy === 'many_shot'
-                      || attackType === 'ManyShotJailbreakAttack'
-                    )
-                    const shouldCollapse = isUser && (
-                      isManyShot
-                      || message.originalContent.length >= LONG_PROMPT_CHARACTER_THRESHOLD
-                    )
+                    const shouldCollapse = isUser
+                      && message.originalContent.length >= LONG_PROMPT_CHARACTER_THRESHOLD
                     return shouldCollapse
                       ? (
                           <CollapsedPrompt
                             content={message.originalContent}
-                            exampleCount={message.promptComposition?.example_count}
-                            characterCount={message.promptComposition?.character_count}
-                            objective={isManyShot ? attackObjective : undefined}
-                            isManyShot={isManyShot}
                             globalMarkdown={false}
                             index={index}
                           />
@@ -376,22 +335,13 @@ export default function MessageList({
                     </Text>
                   )
                 }
-                const isManyShot = !message.originalContent && (
-                  message.promptComposition?.strategy === 'many_shot'
-                  || attackType === 'ManyShotJailbreakAttack'
-                )
-                const shouldCollapse = isUser && (
-                  isManyShot
-                  || (Boolean(attackType) && message.content.length >= LONG_PROMPT_CHARACTER_THRESHOLD)
-                )
+                const shouldCollapse = isUser
+                  && collapseLongPrompts
+                  && message.content.length >= LONG_PROMPT_CHARACTER_THRESHOLD
                 if (shouldCollapse) {
                   return (
                     <CollapsedPrompt
                       content={message.content}
-                      exampleCount={message.promptComposition?.example_count}
-                      characterCount={message.promptComposition?.character_count}
-                      objective={isManyShot ? attackObjective : undefined}
-                      isManyShot={isManyShot}
                       globalMarkdown={globalMarkdown}
                       index={index}
                     />

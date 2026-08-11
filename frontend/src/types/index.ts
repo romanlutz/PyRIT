@@ -38,20 +38,11 @@ export interface Message {
   originalContent?: string
   /** Original media attachments before conversion (when different from converted). */
   originalAttachments?: MessageAttachment[]
-  /** Structured provenance for a generated prompt, when the producer recorded it. */
-  promptComposition?: PromptComposition
 }
 
 export interface MessageError {
   type: string // e.g. 'blocked', 'processing', 'empty', 'unknown'
   description?: string
-}
-
-export interface PromptComposition {
-  strategy: 'many_shot'
-  example_count: number
-  objective_placement: 'appended'
-  character_count: number
 }
 
 // ============================================================================
@@ -650,36 +641,41 @@ export interface ScenarioOverloadSummary {
   latest_timestamp: string
 }
 
-export interface ScenarioRunSummary {
+export interface ScenarioRunHeader {
   scenario_result_id: string
   scenario_name: string
   scenario_registry_name?: string | null
   scenario_version: number
   status: ScenarioRunState
   created_at: string
+  techniques_used?: string[]
+  labels?: Record<string, string>
+  completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
+}
+
+export interface ScenarioRunSummary extends ScenarioRunHeader {
+  techniques_used: string[]
+  labels: Record<string, string>
   updated_at: string
   error?: string | null
   error_type?: string | null
-  techniques_used: string[]
   total_attacks: number
   completed_attacks: number
   objective_achieved_rate: number
   failed_attacks: AttackErrorSummary[]
   attack_retries: AttackRetrySummary[]
   total_retries: number
-  labels: Record<string, string>
-  completed_at?: string | null
-  pyrit_version?: string | null
-  target?: ScenarioTargetSummary | null
-  datasets_used?: string[]
-  scenario_parameters?: Record<string, unknown>
   planned_total_available?: boolean
   successful_attacks?: number
   error_attacks?: number
   attack_details_available?: boolean
-  queue_position?: number | null
-  active_scenario_result_id?: string | null
-  overload_summaries?: ScenarioOverloadSummary[]
 }
 
 export interface ScenarioTargetSummary {
@@ -695,24 +691,7 @@ export interface ScenarioRunListResponse {
 }
 
 /** Compact persisted run header returned by the progress endpoint. */
-export interface ScenarioProgressHeader {
-  scenario_result_id: string
-  scenario_name: string
-  scenario_registry_name?: string | null
-  scenario_version: number
-  status: ScenarioRunState
-  created_at: string
-  completed_at?: string | null
-  pyrit_version?: string | null
-  target?: ScenarioTargetSummary | null
-  techniques_used?: string[]
-  datasets_used?: string[]
-  scenario_parameters?: Record<string, unknown>
-  labels?: Record<string, string>
-  queue_position?: number | null
-  active_scenario_result_id?: string | null
-  overload_summaries?: ScenarioOverloadSummary[]
-}
+export type ScenarioProgressHeader = ScenarioRunHeader
 
 export interface ScenarioQueueEntry {
   scenario_result_id: string

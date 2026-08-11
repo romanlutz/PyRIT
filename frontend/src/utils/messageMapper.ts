@@ -5,7 +5,6 @@ import type {
   MessageAttachment,
   MessageError,
   MessagePieceRequest,
-  PromptComposition,
 } from '../types'
 
 /**
@@ -184,34 +183,6 @@ function pieceToError(piece: BackendMessagePiece): MessageError | undefined {
   return undefined
 }
 
-function promptCompositionFromMetadata(
-  metadata: Record<string, unknown> | null | undefined,
-): PromptComposition | undefined {
-  const value = metadata?.prompt_composition
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return undefined
-  }
-  const candidate = value as Record<string, unknown>
-  if (
-    candidate.strategy !== 'many_shot'
-    || candidate.objective_placement !== 'appended'
-    || typeof candidate.example_count !== 'number'
-    || !Number.isInteger(candidate.example_count)
-    || candidate.example_count < 0
-    || typeof candidate.character_count !== 'number'
-    || !Number.isInteger(candidate.character_count)
-    || candidate.character_count < 0
-  ) {
-    return undefined
-  }
-  return {
-    strategy: candidate.strategy,
-    example_count: candidate.example_count,
-    objective_placement: candidate.objective_placement,
-    character_count: candidate.character_count,
-  }
-}
-
 /**
  * Convert a single backend Message DTO to a frontend Message for rendering.
  */
@@ -222,7 +193,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
   const originalAttachments: MessageAttachment[] = []
   const reasoningSummaries: string[] = []
   let error: MessageError | undefined
-  let promptComposition: PromptComposition | undefined
 
   for (const piece of msg.message_pieces) {
     // Check for errors
@@ -230,8 +200,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     if (pieceError && !error) {
       error = pieceError
     }
-    promptComposition ??= promptCompositionFromMetadata(piece.prompt_metadata)
-
     // Extract reasoning summaries from reasoning-type pieces
     if (isReasoningDataType(piece.converted_value_data_type)) {
       const summaries = extractReasoningSummaries(piece.converted_value)
@@ -285,7 +253,6 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     reasoningSummaries: reasoningSummaries.length > 0 ? reasoningSummaries : undefined,
     originalContent: hasTextDiff ? originalContent : undefined,
     originalAttachments: hasMediaDiff ? originalAttachments : undefined,
-    promptComposition,
   }
 }
 

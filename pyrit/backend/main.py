@@ -35,8 +35,7 @@ from pyrit.backend.routes import (
     targets,
     version,
 )
-from pyrit.backend.services.initializer_service import get_initializer_service
-from pyrit.backend.services.scenario_run_service import get_scenario_run_service
+from pyrit.backend.services import get_initializer_service, get_scenario_run_service
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 # Check for development mode from environment variable

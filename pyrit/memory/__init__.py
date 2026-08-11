@@ -16,6 +16,7 @@ from pyrit.memory.memory_interface import (
     ScenarioHistoryKeysetCursor,
     ScenarioHistoryRunRecord,
     ScenarioHistoryUnitRecord,
+    ScenarioProgressKeysetCursor,
 )
 from pyrit.memory.memory_models import AttackResultEntry, EmbeddingDataEntry, PromptMemoryEntry, SeedEntry
 from pyrit.memory.sqlite_memory import SQLiteMemory
@@ -58,6 +59,7 @@ __all__ = [
     "ScenarioHistoryKeysetCursor",
     "ScenarioHistoryRunRecord",
     "ScenarioHistoryUnitRecord",
+    "ScenarioProgressKeysetCursor",
     "PromptMemoryEntry",
     "SeedEntry",
     "set_message_piece_sha256_async",

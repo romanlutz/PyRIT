@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
 from pyrit.analytics.result_analysis import AttackStats, _compute_stats
@@ -12,9 +13,31 @@ from pyrit.memory import CentralMemory
 from pyrit.models import AttackOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from pyrit.memory.memory_interface import MemoryInterface
+
+
+def _compute_grouped_outcome_stats(grouped_outcomes: Iterable[tuple[str, AttackOutcome]]) -> dict[str, AttackStats]:
+    """
+    Aggregate keyed outcomes into attack statistics.
+
+    Returns:
+        dict[str, AttackStats]: Statistics keyed by the caller's grouping value.
+    """
+    counts: dict[str, Counter[AttackOutcome]] = defaultdict(Counter)
+    for key, outcome in grouped_outcomes:
+        counts[key][outcome] += 1
+
+    return {
+        key: _compute_stats(
+            successes=outcomes[AttackOutcome.SUCCESS],
+            failures=outcomes[AttackOutcome.FAILURE],
+            undetermined=outcomes[AttackOutcome.UNDETERMINED],
+            errors=outcomes[AttackOutcome.ERROR],
+        )
+        for key, outcomes in counts.items()
+    }
 
 
 def compute_technique_stats(
@@ -61,27 +84,15 @@ def compute_technique_stats(
     )
 
     requested = set(technique_eval_hashes)
-    counts: dict[str, tuple[int, int, int, int]] = {}
+    grouped_outcomes: list[tuple[str, AttackOutcome]] = []
     for result in results:
         identifier = result.atomic_attack_identifier
         eval_hash = identifier.eval_hash if identifier is not None else None
         if eval_hash is None or eval_hash not in requested:
             continue
+        grouped_outcomes.append((eval_hash, result.outcome))
 
-        s, f, u, e = counts.get(eval_hash, (0, 0, 0, 0))
-        if result.outcome == AttackOutcome.SUCCESS:
-            counts[eval_hash] = (s + 1, f, u, e)
-        elif result.outcome == AttackOutcome.FAILURE:
-            counts[eval_hash] = (s, f + 1, u, e)
-        elif result.outcome == AttackOutcome.ERROR:
-            counts[eval_hash] = (s, f, u, e + 1)
-        else:
-            counts[eval_hash] = (s, f, u + 1, e)
-
-    return {
-        eval_hash: _compute_stats(successes=s, failures=f, undetermined=u, errors=e)
-        for eval_hash, (s, f, u, e) in counts.items()
-    }
+    return _compute_grouped_outcome_stats(grouped_outcomes)
 
 
 def compute_labeled_technique_stats(
@@ -143,7 +154,7 @@ def compute_labeled_technique_stats(
             identifiers_by_eval_hash.setdefault(eval_hash, []).append(technique_identifier)
 
     unique_results = {result.attack_result_id: result for result in [*labeled_results, *eval_results]}
-    counts: dict[str, tuple[int, int, int, int]] = {}
+    grouped_outcomes: list[tuple[str, AttackOutcome]] = []
     for result in unique_results.values():
         labeled_identifier = result.labels.get(label_name)
         if labeled_identifier in requested:
@@ -155,18 +166,6 @@ def compute_labeled_technique_stats(
         if not matching_identifiers:
             continue
 
-        for technique_identifier in matching_identifiers:
-            s, f, u, e = counts.get(technique_identifier, (0, 0, 0, 0))
-            if result.outcome == AttackOutcome.SUCCESS:
-                counts[technique_identifier] = (s + 1, f, u, e)
-            elif result.outcome == AttackOutcome.FAILURE:
-                counts[technique_identifier] = (s, f + 1, u, e)
-            elif result.outcome == AttackOutcome.ERROR:
-                counts[technique_identifier] = (s, f, u, e + 1)
-            else:
-                counts[technique_identifier] = (s, f, u + 1, e)
+        grouped_outcomes.extend((technique_identifier, result.outcome) for technique_identifier in matching_identifiers)
 
-    return {
-        technique_identifier: _compute_stats(successes=s, failures=f, undetermined=u, errors=e)
-        for technique_identifier, (s, f, u, e) in counts.items()
-    }
+    return _compute_grouped_outcome_stats(grouped_outcomes)

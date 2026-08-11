@@ -10,8 +10,7 @@ from unittest.mock import MagicMock
 
 from unit.mocks import make_scenario_result
 
-from pyrit.memory import MemoryInterface
-from pyrit.memory.memory_interface import ScenarioHistoryKeysetCursor
+from pyrit.memory import MemoryInterface, ScenarioHistoryKeysetCursor
 from pyrit.memory.memory_models import ScenarioResultEntry
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
@@ -53,7 +52,7 @@ def _make_scenario(
                     objective="objective",
                 )
             ],
-        ).model_dump(mode="json")
+        ).model_dump(mode="json", exclude_none=True)
     return make_scenario_result(
         id=result_id,
         scenario_name=name,

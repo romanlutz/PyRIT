@@ -26,6 +26,8 @@ from pyrit.models.catalog.scenario import (
     ScenarioDatasetSizeLimit,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
+    ScenarioOverloadSummary,
+    ScenarioRunHeader,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
     ScenarioRunSizeEstimateCondition,
@@ -33,6 +35,7 @@ from pyrit.models.catalog.scenario import (
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
     ScenarioRunSummary,
+    ScenarioTargetSummary,
 )
 from pyrit.models.catalog.target import (
     TargetInstance,
@@ -49,12 +52,15 @@ __all__ = [
     "ScenarioDatasetSizeLimit",
     "ScenarioDatasetSummary",
     "ScenarioDefaultRunSizeEstimate",
+    "ScenarioOverloadSummary",
     "ScenarioRunSizeEstimate",
     "ScenarioRunSizeComponent",
     "ScenarioRunSizeEstimateCondition",
     "ScenarioRunSizeEstimateRequest",
     "ScenarioRunSizeEstimateStatus",
     "ScenarioRunSizeFactor",
+    "ScenarioRunHeader",
     "ScenarioRunSummary",
+    "ScenarioTargetSummary",
     "TargetInstance",
 ]

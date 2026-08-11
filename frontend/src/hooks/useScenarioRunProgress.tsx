@@ -32,7 +32,6 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
 
   useEffect(() => {
     let active = true
-    let requestInFlight = false
     pollingStoppedRef.current = false
 
     const clearPollTimer = (): void => {
@@ -43,10 +42,9 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
     }
 
     const fetchPage = async (since: string | null): Promise<void> => {
-      if (!active || pollingStoppedRef.current || requestInFlight) {
+      if (!active || pollingStoppedRef.current) {
         return
       }
-      requestInFlight = true
       const controller = new AbortController()
       abortControllerRef.current = controller
       try {
@@ -62,7 +60,6 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
         const appliedCursor = page.next_cursor ?? since
         cursorRef.current = appliedCursor
         dispatch({ type: 'apply-page', page, fresh: since === null })
-        requestInFlight = false
 
         if (page.has_more) {
           await fetchPage(appliedCursor)
@@ -78,7 +75,6 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
           void fetchPage(cursorRef.current)
         }, SCENARIO_RUN_POLL_INTERVAL_MS)
       } catch (error: unknown) {
-        requestInFlight = false
         if (!active || controller.signal.aborted) {
           return
         }
