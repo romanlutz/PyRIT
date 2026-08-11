@@ -413,7 +413,7 @@ class ConversationManager:
         self,
         *,
         messages: list[Message],
-        request_converters: list[ConverterConfiguration] | None,
+        request_converters: list[ConverterConfiguration],
         apply_to_roles: list[ChatMessageRole],
     ) -> list[Message]:
         """
