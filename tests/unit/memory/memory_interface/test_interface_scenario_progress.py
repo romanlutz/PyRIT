@@ -6,7 +6,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from unit.mocks import make_scenario_result
+from unit.mocks import get_mock_target_identifier, make_scenario_result
 
 from pyrit.memory import MemoryInterface, ScenarioProgressKeysetCursor
 from pyrit.models import (
@@ -49,8 +49,14 @@ def _make_delta_result(
 def test_scenario_progress_deltas_page_equal_timestamps_by_id(
     sqlite_instance: MemoryInterface,
 ) -> None:
-    scenario = make_scenario_result(attack_results={})
-    unrelated = make_scenario_result(attack_results={})
+    scenario = make_scenario_result(
+        attack_results={},
+        objective_target_identifier=get_mock_target_identifier(),
+    )
+    unrelated = make_scenario_result(
+        attack_results={},
+        objective_target_identifier=get_mock_target_identifier(),
+    )
     sqlite_instance.add_scenario_results_to_memory(scenario_results=[scenario, unrelated])
     timestamp = datetime(2026, 8, 6, tzinfo=timezone.utc)
     first_id = uuid.UUID(int=1)
@@ -108,7 +114,10 @@ def test_scenario_progress_deltas_page_equal_timestamps_by_id(
 def test_scenario_result_header_does_not_hydrate_attack_results(
     sqlite_instance: MemoryInterface,
 ) -> None:
-    scenario = make_scenario_result(attack_results={})
+    scenario = make_scenario_result(
+        attack_results={},
+        objective_target_identifier=get_mock_target_identifier(),
+    )
     sqlite_instance.add_scenario_results_to_memory(scenario_results=[scenario])
     sqlite_instance.add_attack_results_to_memory(
         attack_results=[

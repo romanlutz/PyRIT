@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
-from unit.mocks import make_scenario_result
+from unit.mocks import get_mock_target_identifier, make_scenario_result
 
 from pyrit.memory import MemoryInterface, ScenarioHistoryKeysetCursor
 from pyrit.memory.memory_models import ScenarioResultEntry
@@ -62,6 +62,7 @@ def _make_scenario(
         completion_time=timestamp + timedelta(minutes=1),
         metadata=metadata,
         attack_results={},
+        objective_target_identifier=get_mock_target_identifier(),
     )
 
 
