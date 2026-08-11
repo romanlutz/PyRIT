@@ -14,7 +14,7 @@ import pytest
 
 from pyrit.executor.capability import CapabilityOutcome, ToolExecutionPolicy
 from pyrit.memory import CentralMemory
-from pyrit.models import Message, TargetResponseMetadata
+from pyrit.models import Message, Score, TargetResponseMetadata
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, TargetRequestOptions
 from pyrit.sandbox import LocalSandboxProvider, LocalSandboxProviderConfig, SandboxProvider, SandboxSessionSpec
 from pyrit.sandbox.contracts import SandboxEnvironment, SandboxSession
@@ -22,6 +22,7 @@ from pyrit.scenario.capability_suite.manifest import (
     CapabilityCaseManifest,
     CapabilitySuiteManifest,
     CaseAssetManifest,
+    CaseMessageContentManifest,
     CaseMessageManifest,
     CaseScorerManifest,
     LocalSandboxProviderManifestConfig,
@@ -249,6 +250,21 @@ class ProbeScorer:
         return []
 
 
+class MetadataScorer:
+    async def score_async(self, *, result, objective, session, cancellation_event=None):
+        del result, session, cancellation_event
+        return [
+            Score(
+                score_value="True",
+                score_type="true_false",
+                score_category=[],
+                score_metadata={"score_key": "trusted"},
+                message_piece_id="piece",
+                objective=objective,
+            )
+        ]
+
+
 class CancellingScorer:
     def __init__(self, *, started: asyncio.Event, events: list[tuple[str, str]]) -> None:
         self._started = started
@@ -316,6 +332,20 @@ def _provider_registry(provider: SandboxProvider) -> SandboxProviderFactoryRegis
     [
         (
             _case(messages=(CaseMessageManifest(role="user", content="image.png", data_type="image_path"),)),
+            "image_path",
+        ),
+        (
+            _case(
+                messages=(
+                    CaseMessageManifest(
+                        role="user",
+                        parts=(
+                            CaseMessageContentManifest(content="describe", data_type="text"),
+                            CaseMessageContentManifest(content="image.png", data_type="image_path"),
+                        ),
+                    ),
+                )
+            ),
             "image_path",
         ),
         (_case(modalities=("audio_path",)), "audio_path"),
@@ -577,6 +607,35 @@ async def test_runner_scorer_runs_before_cleanup_while_session_still_open() -> N
 
     assert result.attempts[0].outcome_kind is AttemptOutcomeKind.SUCCESS
     assert events == [("initialize", "s1"), ("score", "s1"), ("close", "s1")]
+
+
+async def test_runner_sample_metadata_cannot_overwrite_score_identity() -> None:
+    provider = FakeSandboxProvider(session_factory=lambda spec: FakeSandboxSession(spec=spec, events=[], label="s1"))
+    scorer_registry = CapabilitySuiteScorerFactoryRegistry()
+    scorer_registry.register(kind="metadata_scorer", factory=lambda config: MetadataScorer())
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(
+            cases=(
+                _case(
+                    scorers=(CaseScorerManifest(kind="metadata_scorer", scorer_id="primary"),),
+                    metadata={"sample_metadata": {"score_key": "untrusted", "subject": "science"}},
+                ),
+            )
+        ),
+        target=FakeCapabilityTarget(responses=[_text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+        scorer_registry=scorer_registry,
+    )
+
+    result = await runner.run_async()
+
+    metadata = result.attempts[0].task_result.scores[0].score_metadata
+    assert metadata == {
+        "score_key": "trusted",
+        "subject": "science",
+        "capability_scorer_id": "primary",
+    }
 
 
 async def test_runner_cancellation_during_scoring_closes_session() -> None:

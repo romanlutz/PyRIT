@@ -108,9 +108,9 @@ Inspect installation, and disappear with the worker on success or failure. A con
 source finder validates every imported `inspect_evals.*` Python module before executing
 it. Static API inventory runs before execution and unknown symbols raise
 `UnsupportedInspectFeatureError` with the symbol, profile, and remediation.
-Pinned Hugging Face and local JSON dataset helpers are bound directly to offline-first
-facade loaders. GDM InterCode requires a pre-populated `inspect_evals_cache_dir`; the
-compatibility worker never downloads its corpus.
+Pinned Hugging Face and source-contained JSON/JSONL/CSV dataset helpers are bound directly
+to offline-first facade loaders. GDM InterCode requires a pre-populated
+`inspect_evals_cache_dir`; the compatibility worker never downloads its corpus.
 
 This is **source containment, not a security sandbox**. The selected module path and
 `inspect_evals.*` imports must resolve beneath the supplied checkout, but the worker is
@@ -158,11 +158,46 @@ epochs, and scorer-only live flag reads before sandbox cleanup. Tool implementat
 the in-house scorer are selected through explicit registries; the scorer proxy allows one
 bounded command in its declared service and exposes no credentials or host-file access.
 
+The compatibility layer also provides reusable declarative foundations for later adapters.
+These foundations do **not** make another task family supported by themselves:
+
+- `Task.setup` and `Task.solver` preserve ordered lists and nested `chain()` nodes.
+  `system_message()`, `prompt_template()`, `user_message()`, `assistant_message()`, and a
+  terminal `generate()` compile to native initial messages and target generation. Template
+  parameters can use the current prompt and scalar sample metadata. Unsupported generation
+  controls, unknown solver nodes, misplaced generation, and setup/files that cannot be
+  represented fail during compilation with a graph path.
+- `FieldSpec` maps IDs, input, targets, choices, metadata, setup, and files from records.
+  Local JSON/JSONL and CSV sources remain confined to the supplied source root. Hugging Face
+  sources require an explicit revision and split, reject remote code, and are offline unless
+  callers inject records or opt in to network access. Dataset selection records deterministic
+  shuffle, choice-shuffle, auto-ID, and limit settings in stable provenance, separate from
+  per-run and per-attempt identities.
+- String inputs and existing Inspect chat-message sequences retain role and order, including
+  few-shot user/assistant turns. Text and image content parts compile to ordered native PyRIT
+  `MessagePiece` objects rather than flattened strings. HTTP(S) and data-URI images remain URLs;
+  source-contained local images are validated under trusted roots and embedded as deterministic,
+  content-addressed data URIs so manifests do not retain machine-specific paths. Runner preflight
+  checks the target's exact combined input modality and conversation-shape declarations before
+  sandbox creation or model execution.
+- Multiple scorers retain stable scorer IDs. Scalar boolean, integer, float, and string values,
+  plus dictionary-valued scores, normalize to native PyRIT scores with explanations and
+  metadata. Typed accuracy, mean, standard-error, grouped, clustered, mean-reducer,
+  `at_least`, `pass_at`, and `pass_k` specifications aggregate deterministically. Unknown
+  scorer, metric, reducer, or option nodes fail at compile time.
+
+Manifest schema version 3 carries ordered multipart messages and typed metric/reducer
+specifications; version 2 manifests migrate by retaining their legacy single-content shape.
+ARC and CTF manifests and result aggregates retain their prior score counts, mean, and
+distribution fields while optionally exposing the named metric and reducer maps.
+
 Model calls only use the injected PyRIT `PromptTarget`, and Docker remains an external
 runtime prerequisite. Stores, hooks, checkpoints, EvalLog parity, model providers, and
 non-pinned callbacks remain unsupported. AWS/Bedrock/SageMaker/EC2, GCP, Modal, Daytona,
 Kubernetes, and other cloud providers are not implemented. Every native case uses the
 explicit `case_timeout_seconds` execution bound (300 seconds by default).
+Static `Task.message_limit` is rejected because the native `max_turns` limit does not have
+equivalent Inspect semantics.
 
 ### CLI setup and unchanged-task workflow
 

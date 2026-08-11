@@ -11,10 +11,12 @@ from pyrit.scenario.capability_suite.manifest import (
     CapabilityCaseManifest,
     CapabilitySuiteManifest,
     CaseAssetManifest,
+    CaseMessageContentManifest,
     CaseMessageManifest,
     CaseSetupStepManifest,
     CaseToolManifest,
     LocalSandboxProviderManifestConfig,
+    ScoreReducerManifest,
     SuiteProvenance,
     ToolDeclaration,
     ToolImplementationManifest,
@@ -50,6 +52,29 @@ def _manifest(**overrides: object) -> CapabilitySuiteManifest:
 
 def test_validate_safe_relative_path_accepts_plain_relative_path() -> None:
     assert validate_safe_relative_path("assets/data.json") == "assets/data.json"
+
+
+def test_case_message_manifest_preserves_ordered_multimodal_parts() -> None:
+    message = CaseMessageManifest(
+        role="user",
+        parts=(
+            CaseMessageContentManifest(content="describe this", data_type="text"),
+            CaseMessageContentManifest(content="image.png", data_type="image_path"),
+        ),
+    )
+
+    assert [part.data_type for part in message.content_parts] == ["text", "image_path"]
+
+
+def test_case_message_manifest_rejects_ambiguous_or_empty_content() -> None:
+    with pytest.raises(ValidationError, match="requires either"):
+        CaseMessageManifest(role="user")
+    with pytest.raises(ValidationError, match="cannot declare both"):
+        CaseMessageManifest(
+            role="user",
+            content="legacy",
+            parts=(CaseMessageContentManifest(content="new"),),
+        )
 
 
 @pytest.mark.parametrize(
@@ -162,3 +187,14 @@ def test_case_limits_default_to_shared_capability_limits() -> None:
     case = _case()
     assert isinstance(case.limits, CapabilityLimits)
     assert case.limits.max_model_generations == CapabilityLimits().max_model_generations
+
+
+def test_score_reducer_accepts_any_finite_threshold() -> None:
+    reducer = ScoreReducerManifest(name="threshold", kind="mean", threshold=2.5)
+
+    assert reducer.threshold == 2.5
+
+
+def test_score_reducer_rejects_non_finite_threshold() -> None:
+    with pytest.raises(ValidationError, match="finite"):
+        ScoreReducerManifest(name="threshold", kind="mean", threshold=float("inf"))

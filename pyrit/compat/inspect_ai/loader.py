@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib
 import importlib.abc
 import importlib.machinery
 import inspect
 import json
+import math
+import mimetypes
 import os
 import re
 import shutil
@@ -24,8 +27,10 @@ from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from string import Formatter
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import urlparse
 
 import yaml
 
@@ -53,6 +58,8 @@ from pyrit.compat.inspect_ai.types import (
     ContentText,
     Dataset,
     Epochs,
+    MetricSpec,
+    ReducerSpec,
     Sample,
     SandboxSpec,
     ScorerSpec,
@@ -69,6 +76,7 @@ from pyrit.scenario.capability_suite.manifest import (
     CapabilityCaseManifest,
     CapabilitySuiteManifest,
     CaseAssetManifest,
+    CaseMessageContentManifest,
     CaseMessageManifest,
     CaseScorerManifest,
     CaseSetupStepManifest,
@@ -76,6 +84,8 @@ from pyrit.scenario.capability_suite.manifest import (
     DockerSandboxProviderManifestConfig,
     LocalSandboxProviderManifestConfig,
     RunPolicyManifest,
+    ScoreMetricManifest,
+    ScoreReducerManifest,
     SuiteProvenance,
     ToolImplementationManifest,
 )
@@ -571,7 +581,7 @@ async def run_loaded_inspect_eval_async(
         CapabilitySuiteRunResult: The complete native suite execution result.
     """
     from pyrit.compat.inspect_ai.runtime import build_inspect_tool_registry
-    from pyrit.compat.inspect_ai.scorer import InspectCheckFlagScorer, InspectChoiceScorer
+    from pyrit.compat.inspect_ai.scorer import InspectCheckFlagScorer, InspectChoiceScorer, InspectTextScorer
     from pyrit.executor.capability import build_capability_request_options_factory, validate_capability_target
     from pyrit.scenario.capability_suite import (
         CapabilitySuiteRunner,
@@ -590,6 +600,10 @@ async def run_loaded_inspect_eval_async(
     scorer_registry.register(
         kind="inspect_check_flag",
         factory=InspectCheckFlagScorer.from_config,
+    )
+    scorer_registry.register(
+        kind="inspect_text",
+        factory=lambda config: ResultOnlyScorerAdapter(scorer=InspectTextScorer.from_config(config)),
     )
     asset_resolver = (
         LocalAssetSourceResolver(root=inspect_evals_cache_dir)
@@ -948,15 +962,28 @@ def _serialize_task(task: Task) -> dict[str, Any]:
             "samples": [_serialize_sample(sample) for sample in dataset],
             "name": dataset.name,
             "location": dataset.location,
+            "shuffled": dataset.shuffled,
             "metadata": dataset.metadata,
+            "provenance": dataset.provenance,
         },
+        "setup": (
+            [_serialize_spec(spec) for spec in _spec_sequence(task.setup, expected_type=SolverSpec)]
+            if task.setup is not None
+            else None
+        ),
         "solver": [_serialize_spec(spec) for spec in _spec_sequence(task.solver, expected_type=SolverSpec)],
         "scorer": [_serialize_spec(spec) for spec in _spec_sequence(task.scorer, expected_type=ScorerSpec)],
+        "metrics": _serialize_task_metrics(task.metrics),
         "config": vars(task.config) if task.config else None,
         "epochs": (
             {"epochs": task.epochs.epochs, "reducer": task.epochs.reducer}
             if isinstance(task.epochs, Epochs)
             else task.epochs
+        ),
+        "epochs_reducer": (
+            [_serialize_reducer(spec) for spec in _spec_sequence(task.epochs_reducer, expected_type=ReducerSpec)]
+            if task.epochs_reducer is not None
+            else None
         ),
         "sandbox": _serialize_sandbox(task.sandbox),
         "fail_on_error": task.fail_on_error,
@@ -977,16 +1004,23 @@ def _deserialize_task(data: dict[str, Any]) -> Task:
         (_deserialize_sample(sample) for sample in dataset_data["samples"]),
         name=dataset_data["name"],
         location=dataset_data["location"],
+        shuffled=dataset_data.get("shuffled", False),
         metadata=dataset_data["metadata"],
+        provenance=dataset_data.get("provenance", {}),
     )
-    solvers = tuple(SolverSpec(**spec) for spec in data["solver"])
-    scorers = tuple(ScorerSpec(**spec) for spec in data["scorer"])
+    setup = tuple(_deserialize_solver_spec(spec) for spec in data.get("setup") or ())
+    solvers = tuple(_deserialize_solver_spec(spec) for spec in data["solver"])
+    scorers = tuple(_deserialize_scorer_spec(spec) for spec in data["scorer"])
+    epoch_reducers = tuple(ReducerSpec(**spec) for spec in data.get("epochs_reducer") or ())
     return Task(
         dataset=dataset,
+        setup=setup[0] if len(setup) == 1 else setup or None,
         solver=solvers[0] if len(solvers) == 1 else solvers,
         scorer=scorers[0] if len(scorers) == 1 else scorers,
+        metrics=_deserialize_task_metrics(data.get("metrics")),
         config=GenerateConfig(**data["config"]) if data["config"] else None,
         epochs=Epochs(**data["epochs"]) if isinstance(data["epochs"], dict) else data["epochs"],
+        epochs_reducer=epoch_reducers[0] if len(epoch_reducers) == 1 else epoch_reducers or None,
         sandbox=_deserialize_sandbox(data.get("sandbox")),
         fail_on_error=data["fail_on_error"],
         message_limit=data["message_limit"],
@@ -1005,7 +1039,7 @@ def _serialize_sample(sample: Sample) -> dict[str, Any]:
         else [
             {
                 "role": message.role,
-                "content": _message_content(message),
+                "content": _serialize_message_content(message),
                 "name": message.name,
                 "source": message.source,
                 "metadata": message.metadata,
@@ -1028,7 +1062,16 @@ def _serialize_sample(sample: Sample) -> dict[str, Any]:
 def _deserialize_sample(data: dict[str, Any]) -> Sample:
     input_data = data["input"]
     if isinstance(input_data, list):
-        input_data = [ChatMessage(**message) for message in input_data]
+        input_data = [
+            ChatMessage(
+                role=message["role"],
+                content=_deserialize_message_content(message["content"]),
+                name=message["name"],
+                source=message["source"],
+                metadata=message["metadata"],
+            )
+            for message in input_data
+        ]
     return Sample(
         input=input_data,
         target=data["target"],
@@ -1042,7 +1085,93 @@ def _deserialize_sample(data: dict[str, Any]) -> Sample:
 
 
 def _serialize_spec(spec: SolverSpec | ScorerSpec) -> dict[str, Any]:
+    value: dict[str, Any] = {"name": spec.name, "config": spec.config}
+    if isinstance(spec, SolverSpec):
+        value["steps"] = [_serialize_spec(step) for step in spec.steps]
+    else:
+        value["metrics"] = [{"name": metric.name, "config": metric.config} for metric in spec.metrics]
+        value["reducers"] = [_serialize_reducer(reducer) for reducer in spec.reducers]
+    return value
+
+
+def _serialize_reducer(spec: ReducerSpec) -> dict[str, Any]:
     return {"name": spec.name, "config": spec.config}
+
+
+def _deserialize_solver_spec(value: dict[str, Any]) -> SolverSpec:
+    return SolverSpec(
+        name=value["name"],
+        config=value["config"],
+        steps=tuple(_deserialize_solver_spec(step) for step in value.get("steps", ())),
+    )
+
+
+def _deserialize_scorer_spec(value: dict[str, Any]) -> ScorerSpec:
+    return ScorerSpec(
+        name=value["name"],
+        config=value["config"],
+        metrics=tuple(MetricSpec(**metric) for metric in value.get("metrics", ())),
+        reducers=tuple(ReducerSpec(**reducer) for reducer in value.get("reducers", ())),
+    )
+
+
+def _deserialize_task_metrics(value: object) -> tuple[MetricSpec, ...] | dict[str, tuple[MetricSpec, ...]] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not all(isinstance(item, dict) for item in value):
+            raise TypeError("Serialized Inspect task metric list is malformed.")
+        return tuple(MetricSpec(**cast("dict[str, Any]", item)) for item in value)
+    if isinstance(value, dict):
+        deserialized = {}
+        for key, items in value.items():
+            if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+                raise TypeError("Serialized Inspect task metric mapping is malformed.")
+            deserialized[str(key)] = tuple(MetricSpec(**cast("dict[str, Any]", item)) for item in items)
+        return deserialized
+    raise TypeError("Serialized Inspect task metrics are malformed.")
+
+
+def _serialize_task_metrics(
+    value: tuple[MetricSpec, ...] | dict[str, tuple[MetricSpec, ...]] | None,
+) -> object:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {
+            key: [{"name": metric.name, "config": metric.config} for metric in metrics]
+            for key, metrics in value.items()
+        }
+    return [{"name": metric.name, "config": metric.config} for metric in value]
+
+
+def _serialize_message_content(message: ChatMessage) -> object:
+    if isinstance(message.content, str):
+        return message.content
+    return [vars(part) for part in message.content]
+
+
+def _deserialize_message_content(value: object) -> str | list[ContentText | ContentImage]:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise TypeError("Serialized Inspect message content is malformed.")
+    parts: list[ContentText | ContentImage] = []
+    for part in value:
+        if not isinstance(part, dict):
+            raise TypeError("Serialized Inspect message content part is malformed.")
+        if part.get("type") == "text":
+            parts.append(ContentText(text=cast("str", part.get("text"))))
+        elif part.get("type") == "image":
+            parts.append(
+                ContentImage(
+                    image=cast("str", part.get("image")),
+                    detail=cast("str | None", part.get("detail")),
+                )
+            )
+        else:
+            raise TypeError(f"Serialized Inspect message content part type '{part.get('type')}' is unsupported.")
+    return parts
 
 
 def _serialize_sandbox(value: object) -> object:
@@ -1308,7 +1437,21 @@ def _compile_task_suite(
             case_timeout_seconds=case_timeout_seconds,
             package_root=package_root,
         )
-    return _compile_arc_suite(
+    solvers, solver_paths = _solver_steps(task)
+    scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
+    if len(solvers) == 1 and solvers[0].name == "multiple_choice":
+        return _compile_arc_suite(
+            task=task,
+            task_name=task_name,
+            parameters=parameters,
+            profile=profile,
+            checked_revision=checked_revision,
+            revision_verified=revision_verified,
+            case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
+        )
+    return _compile_static_suite(
         task=task,
         task_name=task_name,
         parameters=parameters,
@@ -1316,6 +1459,11 @@ def _compile_task_suite(
         checked_revision=checked_revision,
         revision_verified=revision_verified,
         case_timeout_seconds=case_timeout_seconds,
+        package_root=package_root,
+        data_root=data_root,
+        solvers=solvers,
+        solver_paths=solver_paths,
+        scorers=scorers,
     )
 
 
@@ -1830,6 +1978,849 @@ def _ctf_source(*, sample: Sample, family: str) -> CapabilitySource:
     )
 
 
+def _compile_static_suite(
+    *,
+    task: Task,
+    task_name: str,
+    parameters: dict[str, object],
+    profile: InspectCompatibilityProfile,
+    checked_revision: str | None,
+    revision_verified: bool,
+    case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    scorers: tuple[ScorerSpec, ...],
+) -> CapabilitySuiteManifest:
+    _reject_static_task_options(task=task, profile=profile)
+    _validate_static_solver_steps(solvers=solvers, solver_paths=solver_paths, profile=profile)
+    if not scorers:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.scorer=<empty>",
+            source_profile=profile.profile_id,
+        )
+    dataset = task.dataset if isinstance(task.dataset, Dataset) else Dataset(task.dataset)
+    cases = tuple(
+        _compile_static_sample(
+            sample=sample,
+            index=index,
+            task=task,
+            solvers=solvers,
+            solver_paths=solver_paths,
+            scorers=scorers,
+            dataset=dataset,
+            case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
+            profile=profile,
+        )
+        for index, sample in enumerate(dataset)
+    )
+    if not cases:
+        raise ValueError(f"Inspect task '{task_name}' produced an empty dataset.")
+    epochs = task.epochs.epochs if isinstance(task.epochs, Epochs) else task.epochs or 1
+    return CapabilitySuiteManifest(
+        suite_id=_safe_identifier(f"inspect-compat-{task_name}"),
+        name=f"Inspect compatibility: {task_name}",
+        description="Pinned Inspect static task graph compiled to native PyRIT capability execution.",
+        provenance=SuiteProvenance(
+            source="UKGovernmentBEIS/inspect_evals compatibility loader",
+            source_id=task_name,
+            repository="https://github.com/UKGovernmentBEIS/inspect_evals",
+            revision=checked_revision,
+            license="MIT; dataset licenses remain upstream-specific",
+            metadata={
+                "compatibility_profile": profile.profile_id,
+                "inspect_api_profile": profile.inspect_api_profile,
+                "expected_revision": profile.inspect_evals_revision,
+                "detected_revision": checked_revision,
+                "source_revision_verified": revision_verified,
+                "case_timeout_seconds": case_timeout_seconds,
+                "task_parameters": _json_mapping(parameters),
+                "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
+            },
+        ),
+        sandbox_provider=LocalSandboxProviderManifestConfig(),
+        run_policy=RunPolicyManifest(epochs=epochs),
+        cases=cases,
+        tags=("inspect-evals", "compatibility", "static", "native"),
+        metadata={
+            "compatibility_profile": profile.profile_id,
+            "expected_revision": profile.inspect_evals_revision,
+            "detected_revision": checked_revision,
+            "source_revision_verified": revision_verified,
+            "case_timeout_seconds": case_timeout_seconds,
+            "task_version": _json_scalar(task.version),
+            "task_metadata": _json_mapping(task.metadata),
+            "solver": [_serialize_spec(spec) for spec in solvers],
+            "scorer": [_serialize_spec(spec) for spec in scorers],
+            "dataset": _json_mapping(dataset.metadata),
+            "dataset_provenance": _json_mapping(dataset.provenance),
+        },
+    )
+
+
+def _compile_static_sample(
+    *,
+    sample: Sample,
+    index: int,
+    task: Task,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    scorers: tuple[ScorerSpec, ...],
+    dataset: Dataset,
+    case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
+    profile: InspectCompatibilityProfile,
+) -> CapabilityCaseManifest:
+    for field_name, value in (
+        ("sandbox", sample.sandbox),
+        ("setup", sample.setup),
+        ("files", sample.files),
+    ):
+        if value not in (None, {}, []):
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.dataset.Sample.{field_name}",
+                source_profile=profile.profile_id,
+                remediation="Static compatibility cases cannot execute sample-level sandbox behavior.",
+            )
+    messages = list(
+        _sample_input_messages(
+            sample=sample,
+            dataset=dataset,
+            package_root=package_root,
+            data_root=data_root,
+            profile=profile,
+        )
+    )
+    generation_config: dict[str, Any] = {}
+    for solver_index, solver in enumerate(solvers):
+        path = solver_paths[solver_index]
+        if solver.name == "system_message":
+            message = _render_solver_template(
+                solver=solver,
+                sample=sample,
+                prompt=None,
+                path=path,
+            )
+            insert_at = max(
+                (index + 1 for index, existing in enumerate(messages) if existing.role == "system"),
+                default=0,
+            )
+            messages.insert(insert_at, CaseMessageManifest(role="system", content=message))
+        elif solver.name == "prompt_template":
+            user_index = _last_user_message_index(messages=messages, path=path)
+            prompt = _case_message_text(message=messages[user_index], path=path)
+            rendered = _render_solver_template(
+                solver=solver,
+                sample=sample,
+                prompt=prompt,
+                path=path,
+            )
+            messages[user_index] = _replace_case_message_text(
+                message=messages[user_index],
+                text=rendered,
+                path=path,
+            )
+        elif solver.name in {"user_message", "assistant_message"}:
+            rendered = _render_solver_template(
+                solver=solver,
+                sample=sample,
+                prompt=None,
+                path=path,
+            )
+            role: Literal["user", "assistant"] = "user" if solver.name == "user_message" else "assistant"
+            messages.append(CaseMessageManifest(role=role, content=rendered))
+        elif solver.name == "generate":
+            generation_config = solver.config
+        else:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"{path}.{solver.name}",
+                source_profile=profile.profile_id,
+            )
+    if task.config and task.config.system_message:
+        messages.insert(0, CaseMessageManifest(role="system", content=task.config.system_message))
+    objective = _case_message_text(
+        message=messages[_last_user_message_index(messages=messages, path="inspect_ai.dataset.Sample.input")],
+        path="inspect_ai.dataset.Sample.input",
+    )
+    scorer_manifests = _compile_static_scorers(
+        sample=sample,
+        scorers=scorers,
+        task=task,
+        profile=profile,
+    )
+    sample_payload = json.dumps(
+        _serialize_sample(sample),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    sample_hash = hashlib.sha256(sample_payload).hexdigest()
+    source_id = str(sample.id) if sample.id is not None else sample_hash
+    max_output_tokens = _generation_limit(task=task, generation_config=generation_config, field_name="max_tokens")
+    timeout = _generation_limit(task=task, generation_config=generation_config, field_name="timeout")
+    time_limits = [float(value) for value in (timeout, task.time_limit, case_timeout_seconds) if value is not None]
+    wall_clock = min(time_limits)
+    token_limit = task.token_limit if isinstance(task.token_limit, int) else None
+    limits = CapabilityLimits(
+        max_wall_clock_seconds=wall_clock,
+        max_output_tokens=max_output_tokens,
+        max_total_tokens=token_limit,
+    )
+    return CapabilityCaseManifest(
+        case_id=_safe_identifier(str(sample.id) if sample.id is not None else f"sample-{sample_hash[:16]}"),
+        objective=objective,
+        messages=tuple(messages),
+        scorers=scorer_manifests,
+        limits=limits,
+        source=CapabilitySource(
+            source_type="inspect_evals",
+            source_id=source_id,
+            metadata={
+                "sample_sha256": sample_hash,
+                "sample_metadata": _json_mapping(sample.metadata),
+                "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
+            },
+        ),
+        tags=("inspect-evals", "static", "native"),
+        metadata={
+            "target": _json_value(sample.target),
+            "choices": _json_value(sample.choices),
+            "sample_metadata": _json_mapping(sample.metadata),
+            "sample_sha256": sample_hash,
+        },
+    )
+
+
+def _solver_steps(task: Task) -> tuple[tuple[SolverSpec, ...], tuple[str, ...]]:
+    values: list[tuple[SolverSpec, str]] = []
+    for field_name, source in (("setup", task.setup), ("solver", task.solver)):
+        if source is None:
+            continue
+        for index, value in enumerate(_spec_sequence(source, expected_type=SolverSpec)):
+            values.extend(_flatten_solver(value, path=f"inspect_ai.Task.{field_name}[{index}]"))
+    return tuple(step for step, _ in values), tuple(path for _, path in values)
+
+
+def _flatten_solver(solver: SolverSpec, *, path: str) -> tuple[tuple[SolverSpec, str], ...]:
+    if solver.name != "chain":
+        if solver.steps:
+            raise ValueError(f"{path}.{solver.name} cannot declare nested steps.")
+        return ((solver, path),)
+    if solver.config:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path}.chain(config=...)",
+            source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
+        )
+    if not solver.steps:
+        raise ValueError(f"{path}.chain must contain at least one step.")
+    return tuple(
+        step
+        for index, nested in enumerate(solver.steps)
+        for step in _flatten_solver(nested, path=f"{path}.chain[{index}]")
+    )
+
+
+def _validate_static_solver_steps(
+    *,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    profile: InspectCompatibilityProfile,
+) -> None:
+    supported = {"system_message", "prompt_template", "user_message", "assistant_message", "generate"}
+    generate_indexes = []
+    for index, solver in enumerate(solvers):
+        path = solver_paths[index]
+        if solver.name not in supported:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"{path}.{solver.name}",
+                source_profile=profile.profile_id,
+            )
+        if solver.name == "generate":
+            generate_indexes.append(index)
+            _validate_generate_config(config=solver.config, path=path, profile=profile)
+        else:
+            _validate_template_solver(solver=solver, path=path, profile=profile)
+    if generate_indexes != [len(solvers) - 1]:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.solver generation ordering",
+            source_profile=profile.profile_id,
+            remediation="Static solver composition requires exactly one final generate() node.",
+        )
+
+
+def _validate_generate_config(
+    *,
+    config: Mapping[str, Any],
+    path: str,
+    profile: InspectCompatibilityProfile,
+) -> None:
+    supported = {"tool_calls", "max_tokens", "timeout", "cache"}
+    unknown = next((name for name, value in config.items() if name not in supported and value is not None), None)
+    if unknown is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path}.generate({unknown}=...)",
+            source_profile=profile.profile_id,
+        )
+    tool_calls = config.get("tool_calls", "loop")
+    if tool_calls not in {"loop", "single", "none"}:
+        raise ValueError(f"{path}.generate(tool_calls=...) has unknown value '{tool_calls}'.")
+    if config.get("cache") not in (None, False):
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path}.generate(cache=...)",
+            source_profile=profile.profile_id,
+        )
+    for name in ("max_tokens", "timeout"):
+        value = config.get(name)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+            raise ValueError(f"{path}.generate({name}=...) must be a positive integer or None.")
+
+
+def _validate_template_solver(
+    *,
+    solver: SolverSpec,
+    path: str,
+    profile: InspectCompatibilityProfile,
+) -> None:
+    unknown = next((name for name in solver.config if name not in {"template", "params"}), None)
+    if unknown is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path}.{solver.name}({unknown}=...)",
+            source_profile=profile.profile_id,
+        )
+    if not isinstance(solver.config.get("template"), str):
+        raise TypeError(f"{path}.{solver.name} requires a string template.")
+    params = solver.config.get("params", {})
+    if not isinstance(params, Mapping):
+        raise TypeError(f"{path}.{solver.name} params must be a mapping.")
+
+
+def _render_solver_template(
+    *,
+    solver: SolverSpec,
+    sample: Sample,
+    prompt: str | None,
+    path: str,
+) -> str:
+    template = cast("str", solver.config["template"])
+    params = solver.config.get("params", {})
+    values = {**sample.metadata, **cast("Mapping[str, Any]", params)}
+    if prompt is not None:
+        values["prompt"] = prompt
+    for _, field_name, format_spec, conversion in Formatter().parse(template):
+        if field_name is None:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field_name) or format_spec or conversion:
+            raise ValueError(f"{path} template field '{field_name}' is not a simple declarative placeholder.")
+        if field_name not in values:
+            raise ValueError(f"{path} template references missing field '{field_name}'.")
+    return template.format_map(values)
+
+
+def _sample_input_messages(
+    *,
+    sample: Sample,
+    dataset: Dataset,
+    package_root: Path,
+    data_root: Path | None,
+    profile: InspectCompatibilityProfile,
+) -> tuple[CaseMessageManifest, ...]:
+    if isinstance(sample.input, str):
+        return (CaseMessageManifest(role="user", content=sample.input),)
+    if not sample.input:
+        raise ValueError("Inspect sample input messages must not be empty.")
+    messages = []
+    for index, message in enumerate(sample.input):
+        if message.name is not None:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.dataset.Sample.input[{index}].name",
+                source_profile=profile.profile_id,
+            )
+        metadata = _json_mapping(message.metadata)
+        if message.source is not None:
+            metadata["inspect_source"] = message.source
+        if isinstance(message.content, str):
+            messages.append(
+                CaseMessageManifest(role=cast("Any", message.role), content=message.content, metadata=metadata)
+            )
+            continue
+        parts = []
+        for part_index, part in enumerate(message.content):
+            if isinstance(part, ContentText):
+                parts.append(CaseMessageContentManifest(content=part.text, data_type="text"))
+            elif isinstance(part, ContentImage):
+                image, data_type, image_metadata = _compile_image_content(
+                    image=part.image,
+                    dataset=dataset,
+                    package_root=package_root,
+                    data_root=data_root,
+                    path=f"inspect_ai.dataset.Sample.input[{index}].content[{part_index}]",
+                    profile=profile,
+                )
+                parts.append(
+                    CaseMessageContentManifest(
+                        content=image,
+                        data_type=data_type,
+                        metadata={
+                            **image_metadata,
+                            **({"detail": part.detail} if part.detail is not None else {}),
+                        },
+                    )
+                )
+            else:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"inspect_ai.dataset.Sample.input[{index}].content[{part_index}]",
+                    source_profile=profile.profile_id,
+                )
+        messages.append(CaseMessageManifest(role=cast("Any", message.role), parts=tuple(parts), metadata=metadata))
+    return tuple(messages)
+
+
+def _compile_image_content(
+    *,
+    image: str,
+    dataset: Dataset,
+    package_root: Path,
+    data_root: Path | None,
+    path: str,
+    profile: InspectCompatibilityProfile,
+) -> tuple[str, Literal["image_path", "url"], dict[str, Any]]:
+    parsed = urlparse(image)
+    if image.startswith("data:") or parsed.scheme in {"http", "https"}:
+        return image, "url", {"inspect_content_type": "image"}
+    if parsed.scheme:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path}.ContentImage({parsed.scheme}://...)",
+            source_profile=profile.profile_id,
+            remediation="Only HTTP(S), data URIs, and source-contained local images are supported.",
+        )
+    base = package_root
+    if dataset.location:
+        location = Path(dataset.location)
+        if not location.is_absolute():
+            location = package_root / location
+        try:
+            resolved_location = location.resolve()
+        except OSError:
+            resolved_location = location
+        if resolved_location.suffix:
+            base = resolved_location.parent
+    candidate = Path(image)
+    candidate = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+    allowed_roots = tuple(root.resolve() for root in (package_root, data_root) if root is not None)
+    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+        raise ValueError(f"{path} local image escapes the trusted source/data roots: '{image}'.")
+    if not candidate.is_file():
+        raise ValueError(f"{path} local image does not exist: '{image}'.")
+    source = candidate.read_bytes()
+    mime_type = mimetypes.guess_type(candidate.name, strict=False)[0]
+    if mime_type is None or not mime_type.startswith("image/"):
+        raise ValueError(f"{path} local image must have a recognized image media type: '{image}'.")
+    return (
+        f"data:{mime_type};base64,{base64.b64encode(source).decode('ascii')}",
+        "url",
+        {
+            "inspect_content_type": "image",
+            "source": image,
+            "sha256": hashlib.sha256(source).hexdigest(),
+            "media_type": mime_type,
+        },
+    )
+
+
+def _last_user_message_index(*, messages: list[CaseMessageManifest], path: str) -> int:
+    indexes = [index for index, message in enumerate(messages) if message.role == "user"]
+    if not indexes:
+        raise ValueError(f"{path} requires at least one user message.")
+    return indexes[-1]
+
+
+def _case_message_text(*, message: CaseMessageManifest, path: str) -> str:
+    text_parts = [part.content for part in message.content_parts if part.data_type == "text"]
+    if not text_parts:
+        raise ValueError(f"{path} requires a text content part.")
+    return "\n".join(text_parts)
+
+
+def _replace_case_message_text(
+    *,
+    message: CaseMessageManifest,
+    text: str,
+    path: str,
+) -> CaseMessageManifest:
+    if message.content is not None:
+        return message.model_copy(update={"content": text})
+    text_indexes = [index for index, part in enumerate(message.parts) if part.data_type == "text"]
+    if len(text_indexes) != 1:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{path} multipart text rewrite",
+            source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
+            remediation="Prompt templating currently requires exactly one text part in the active user message.",
+        )
+    parts = list(message.parts)
+    parts[text_indexes[0]] = parts[text_indexes[0]].model_copy(update={"content": text})
+    return message.model_copy(update={"parts": tuple(parts)})
+
+
+def _compile_static_scorers(
+    *,
+    sample: Sample,
+    scorers: tuple[ScorerSpec, ...],
+    task: Task,
+    profile: InspectCompatibilityProfile,
+) -> tuple[CaseScorerManifest, ...]:
+    targets = tuple(sample.target) if isinstance(sample.target, list) else (sample.target,)
+    manifests = []
+    for index, scorer in enumerate(scorers):
+        scorer_id = _safe_identifier(f"{scorer.name}-{index + 1}")
+        if scorer.name not in {"match", "includes"}:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.Task.scorer[{index}].{scorer.name}",
+                source_profile=profile.profile_id,
+            )
+        if scorer.name == "match":
+            allowed = {"location", "ignore_case", "numeric"}
+            unknown = next((name for name in scorer.config if name not in allowed), None)
+            if unknown is not None or scorer.config.get("numeric") not in (None, False):
+                option = unknown or "numeric"
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"inspect_ai.Task.scorer[{index}].match({option}=...)",
+                    source_profile=profile.profile_id,
+                )
+            location = scorer.config.get("location", "end")
+            if location not in {"begin", "end", "any", "exact"}:
+                raise ValueError(f"inspect_ai.Task.scorer[{index}].match(location=...) has unknown value '{location}'.")
+        else:
+            unknown = next((name for name in scorer.config if name != "ignore_case"), None)
+            if unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"inspect_ai.Task.scorer[{index}].includes({unknown}=...)",
+                    source_profile=profile.profile_id,
+                )
+            location = "any"
+        ignore_case = scorer.config.get("ignore_case", True)
+        if not isinstance(ignore_case, bool):
+            raise TypeError(f"inspect_ai.Task.scorer[{index}].{scorer.name}(ignore_case=...) must be boolean.")
+        reducers = _compile_reducer_specs(
+            scorer_id=scorer_id,
+            reducers=_reducers_for_task(task=task),
+            profile=profile,
+        )
+        metrics = _metrics_with_reducers(
+            metrics=_compile_metric_specs(
+                scorer_id=scorer_id,
+                metrics=_metrics_for_scorer(
+                    task=task,
+                    scorer=scorer,
+                    scorer_index=index,
+                    profile=profile,
+                ),
+                sample_metadata=sample.metadata,
+                profile=profile,
+            ),
+            reducers=reducers,
+        )
+        manifests.append(
+            CaseScorerManifest(
+                kind="inspect_text",
+                scorer_id=scorer_id,
+                config={
+                    "expected_values": list(targets),
+                    "mode": scorer.name,
+                    "location": location,
+                    "ignore_case": ignore_case,
+                },
+                metrics=metrics,
+                reducers=reducers,
+            )
+        )
+    return tuple(manifests)
+
+
+def _metrics_with_reducers(
+    *,
+    metrics: tuple[ScoreMetricManifest, ...],
+    reducers: tuple[ScoreReducerManifest, ...],
+) -> tuple[ScoreMetricManifest, ...]:
+    if not reducers:
+        return metrics
+    return tuple(
+        metric.model_copy(
+            update={
+                "name": _safe_identifier(f"{metric.name}.{reducer.name}"),
+                "reducer_name": reducer.name,
+            }
+        )
+        for metric in metrics
+        for reducer in reducers
+    )
+
+
+def _metrics_for_scorer(
+    *,
+    task: Task,
+    scorer: ScorerSpec,
+    scorer_index: int,
+    profile: InspectCompatibilityProfile,
+) -> tuple[MetricSpec, ...]:
+    if task.metrics is None:
+        return scorer.metrics
+    if isinstance(task.metrics, dict):
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.Task.metrics dict routing for scorer[{scorer_index}]",
+            source_profile=profile.profile_id,
+            remediation=(
+                "Dict-form Task.metrics is keyed by dict-valued score names and requires an explicitly supported "
+                "dict-valued scorer mapping."
+            ),
+        )
+    return tuple(task.metrics)
+
+
+def _reducers_for_task(*, task: Task) -> tuple[ReducerSpec, ...]:
+    if task.epochs_reducer is not None:
+        return tuple(_spec_sequence(task.epochs_reducer, expected_type=ReducerSpec))
+    if isinstance(task.epochs, Epochs) and task.epochs.reducer is not None:
+        values = task.epochs.reducer if isinstance(task.epochs.reducer, list) else [task.epochs.reducer]
+        return tuple(ReducerSpec(name=value) for value in values)
+    return ()
+
+
+def _compile_metric_specs(
+    *,
+    scorer_id: str,
+    metrics: tuple[MetricSpec, ...],
+    sample_metadata: Mapping[str, Any],
+    profile: InspectCompatibilityProfile,
+) -> tuple[ScoreMetricManifest, ...]:
+    compiled = []
+    for index, metric in enumerate(metrics):
+        path = f"inspect_ai.scorer.metrics[{index}]"
+        if metric.name in {"accuracy", "mean"}:
+            if metric.config:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.{metric.name}(config=...)",
+                    source_profile=profile.profile_id,
+                )
+            compiled.append(
+                ScoreMetricManifest(
+                    name=_safe_identifier(f"{scorer_id}.{metric.name}"),
+                    kind=cast("Any", metric.name),
+                    scorer_id=scorer_id,
+                )
+            )
+        elif metric.name == "stderr":
+            unknown = next((name for name in metric.config if name != "cluster"), None)
+            if unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.stderr({unknown}=...)",
+                    source_profile=profile.profile_id,
+                )
+            cluster = metric.config.get("cluster")
+            _validate_metric_metadata_key(
+                key=cluster,
+                sample_metadata=sample_metadata,
+                path=f"{path}.stderr(cluster=...)",
+            )
+            compiled.append(
+                ScoreMetricManifest(
+                    name=_safe_identifier(f"{scorer_id}.stderr"),
+                    kind="stderr",
+                    scorer_id=scorer_id,
+                    cluster_by=cast("str | None", cluster),
+                )
+            )
+        elif metric.name == "grouped":
+            allowed = {"metric", "group_key", "all", "all_label", "name_template"}
+            unknown = next((name for name in metric.config if name not in allowed), None)
+            if unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.grouped({unknown}=...)",
+                    source_profile=profile.profile_id,
+                )
+            group_key = metric.config.get("group_key")
+            nested = metric.config.get("metric")
+            if not isinstance(group_key, str) or not isinstance(nested, Mapping):
+                raise TypeError(f"{path}.grouped requires a group key and nested metric.")
+            _validate_metric_metadata_key(
+                key=group_key,
+                sample_metadata=sample_metadata,
+                path=f"{path}.grouped(group_key=...)",
+            )
+            nested_name = nested.get("name")
+            if not isinstance(nested_name, str) or nested_name not in {"accuracy", "mean", "stderr"}:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.grouped(metric={nested_name!r})",
+                    source_profile=profile.profile_id,
+                )
+            nested_config = nested.get("config", {})
+            if not isinstance(nested_config, Mapping):
+                raise TypeError(f"{path}.grouped nested metric config must be a mapping.")
+            nested_allowed = {"cluster"} if nested_name == "stderr" else set()
+            nested_unknown = next((name for name in nested_config if name not in nested_allowed), None)
+            if nested_unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.grouped(metric={nested_name}({nested_unknown}=...))",
+                    source_profile=profile.profile_id,
+                )
+            cluster = nested_config.get("cluster")
+            _validate_metric_metadata_key(
+                key=cluster,
+                sample_metadata=sample_metadata,
+                path=f"{path}.grouped(metric=stderr(cluster=...))",
+            )
+            aggregate = metric.config.get("all", "samples")
+            if aggregate not in {"samples", "groups", False}:
+                raise ValueError(f"{path}.grouped(all=...) has an unknown value.")
+            if metric.config.get("all_label", "all") != "all":
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.grouped(all_label=...)",
+                    source_profile=profile.profile_id,
+                )
+            if metric.config.get("name_template", "{group_name}") != "{group_name}":
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.grouped(name_template=...)",
+                    source_profile=profile.profile_id,
+                )
+            compiled.append(
+                ScoreMetricManifest(
+                    name=_safe_identifier(f"{scorer_id}.grouped.{nested_name}"),
+                    kind=cast("Literal['accuracy', 'mean', 'stderr']", nested_name),
+                    scorer_id=scorer_id,
+                    group_by=(f"metadata.{group_key}",),
+                    cluster_by=cast("str | None", cluster),
+                    group_aggregate=cast("Literal['samples', 'groups'] | None", aggregate or None),
+                )
+            )
+        else:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"{path}.{metric.name}",
+                source_profile=profile.profile_id,
+            )
+    return tuple(compiled)
+
+
+def _validate_metric_metadata_key(
+    *,
+    key: object,
+    sample_metadata: Mapping[str, Any],
+    path: str,
+) -> None:
+    if key is None:
+        return
+    if not isinstance(key, str):
+        raise TypeError(f"{path} must name a string sample-metadata field.")
+    if key not in sample_metadata:
+        raise ValueError(f"{path} references missing sample metadata field '{key}'.")
+    if not isinstance(sample_metadata[key], (str, int, float)):
+        raise TypeError(f"{path} requires scalar sample metadata field '{key}'.")
+
+
+def _compile_reducer_specs(
+    *,
+    scorer_id: str,
+    reducers: tuple[ReducerSpec, ...],
+    profile: InspectCompatibilityProfile,
+) -> tuple[ScoreReducerManifest, ...]:
+    compiled = []
+    for index, reducer in enumerate(reducers):
+        path = f"inspect_ai.Task.epochs_reducer[{index}]"
+        if reducer.name == "mean":
+            if reducer.config:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.mean(config=...)",
+                    source_profile=profile.profile_id,
+                )
+            compiled.append(
+                ScoreReducerManifest(
+                    name=_safe_identifier(f"{scorer_id}.mean"),
+                    kind="mean",
+                    scorer_id=scorer_id,
+                )
+            )
+        elif reducer.name in {"at_least", "pass_at", "pass_k"}:
+            unknown = next((name for name in reducer.config if name not in {"k", "value"}), None)
+            k = reducer.config.get("k")
+            threshold = reducer.config.get("value", 1.0)
+            if unknown is not None:
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"{path}.{reducer.name}({unknown}=...)",
+                    source_profile=profile.profile_id,
+                )
+            if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+                raise ValueError(f"{path}.{reducer.name}(k=...) must be a positive integer.")
+            if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not math.isfinite(threshold):
+                raise TypeError(f"{path}.{reducer.name}(value=...) must be a finite number.")
+            compiled.append(
+                ScoreReducerManifest(
+                    name=_safe_identifier(f"{scorer_id}.{reducer.name}-{k}"),
+                    kind=cast("Any", reducer.name),
+                    scorer_id=scorer_id,
+                    k=k,
+                    threshold=float(threshold),
+                )
+            )
+        else:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"{path}.{reducer.name}",
+                source_profile=profile.profile_id,
+            )
+    return tuple(compiled)
+
+
+def _generation_limit(
+    *,
+    task: Task,
+    generation_config: Mapping[str, Any],
+    field_name: str,
+) -> int | None:
+    solver_value = generation_config.get(field_name)
+    task_value = getattr(task.config, field_name, None) if task.config is not None else None
+    if solver_value is not None and task_value is not None and solver_value != task_value:
+        raise ValueError(f"Conflicting task and generate() values for '{field_name}'.")
+    value = solver_value if solver_value is not None else task_value
+    return cast("int | None", value)
+
+
+def _reject_static_task_options(*, task: Task, profile: InspectCompatibilityProfile) -> None:
+    if task.sandbox is not None:
+        raise UnsupportedInspectFeatureError(symbol="inspect_ai.Task.sandbox", source_profile=profile.profile_id)
+    if task.fail_on_error is not None:
+        raise UnsupportedInspectFeatureError(symbol="inspect_ai.Task.fail_on_error", source_profile=profile.profile_id)
+    if task.working_limit is not None:
+        raise UnsupportedInspectFeatureError(symbol="inspect_ai.Task.working_limit", source_profile=profile.profile_id)
+    if task.message_limit is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.message_limit",
+            source_profile=profile.profile_id,
+            remediation="Native static execution cannot enforce Inspect's total-conversation-message limit exactly.",
+        )
+    if task.token_limit is not None and (
+        not isinstance(task.token_limit, int) or isinstance(task.token_limit, bool) or task.token_limit <= 0
+    ):
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.token_limit",
+            source_profile=profile.profile_id,
+            remediation="Native compatibility currently accepts only positive integer total-token limits.",
+        )
+    if task.config is not None:
+        supported = {"max_tokens", "system_message"}
+        configured = next(
+            (name for name, value in vars(task.config).items() if value is not None and name not in supported),
+            None,
+        )
+        if configured is not None:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.Task.config.{configured}",
+                source_profile=profile.profile_id,
+            )
+
+
 def _compile_arc_suite(
     *,
     task: Task,
@@ -1839,6 +2830,8 @@ def _compile_arc_suite(
     checked_revision: str | None,
     revision_verified: bool,
     case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
 ) -> CapabilitySuiteManifest:
     _reject_unsupported_task_options(task=task, profile=profile)
     solvers = _spec_sequence(task.solver, expected_type=SolverSpec)
@@ -1858,8 +2851,10 @@ def _compile_arc_suite(
             index=index,
             task=task,
             solver=solvers[0],
-            dataset_metadata=dataset.metadata,
+            dataset=dataset,
             case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
         )
         for index, sample in enumerate(dataset)
     )
@@ -1884,6 +2879,7 @@ def _compile_arc_suite(
                 "case_timeout_seconds": case_timeout_seconds,
                 "task_parameters": _json_mapping(parameters),
                 "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
             },
         ),
         sandbox_provider=LocalSandboxProviderManifestConfig(),
@@ -1901,6 +2897,7 @@ def _compile_arc_suite(
             "solver": {"name": solvers[0].name, "config": _json_mapping(solvers[0].config)},
             "scorer": {"name": scorers[0].name, "config": _json_mapping(scorers[0].config)},
             "dataset": _json_mapping(dataset.metadata),
+            "dataset_provenance": _json_mapping(dataset.provenance),
         },
     )
 
@@ -1927,8 +2924,10 @@ def _compile_arc_sample(
     index: int,
     task: Task,
     solver: SolverSpec,
-    dataset_metadata: Mapping[str, object],
+    dataset: Dataset,
     case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
 ) -> CapabilityCaseManifest:
     for field_name, value in (
         ("sandbox", sample.sandbox),
@@ -1952,7 +2951,14 @@ def _compile_arc_sample(
     else:
         target = sample.target
     labels = [_answer_character(offset) for offset in range(len(sample.choices))]
-    messages, objective = _sample_messages(sample=sample, labels=labels, solver=solver)
+    messages, objective = _sample_messages(
+        sample=sample,
+        labels=labels,
+        solver=solver,
+        dataset=dataset,
+        package_root=package_root,
+        data_root=data_root,
+    )
     max_tokens = solver.config.get("max_tokens")
     if max_tokens is not None:
         raise UnsupportedInspectFeatureError(
@@ -1982,7 +2988,8 @@ def _compile_arc_sample(
             source_id=str(sample.id) if sample.id is not None else None,
             metadata={
                 "sample_metadata": _json_mapping(sample.metadata),
-                "dataset": _json_mapping(dataset_metadata),
+                "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
             },
         ),
         tags=("reasoning", "multiple-choice", "native"),
@@ -2003,6 +3010,9 @@ def _sample_messages(
     sample: Sample,
     labels: list[str],
     solver: SolverSpec,
+    dataset: Dataset,
+    package_root: Path,
+    data_root: Path | None,
 ) -> tuple[tuple[CaseMessageManifest, ...], str]:
     if solver.config.get("multiple_correct", False):
         raise UnsupportedInspectFeatureError(
@@ -2040,30 +3050,28 @@ def _sample_messages(
 
     if isinstance(sample.input, str):
         return (CaseMessageManifest(role="user", content=render(sample.input)),), sample.input
-    if not sample.input:
-        raise ValueError("Inspect sample input messages must not be empty.")
-    user_indexes = [index for index, message in enumerate(sample.input) if message.role == "user"]
-    if not user_indexes:
-        raise ValueError("Inspect multiple_choice requires at least one user message.")
-    user_prompt_index = user_indexes[-1]
-    objective = _message_content(sample.input[user_prompt_index])
-    messages = []
-    for index, message in enumerate(sample.input):
-        if message.name is not None:
-            raise UnsupportedInspectFeatureError(
-                symbol="inspect_ai.model.ChatMessage.name",
-                source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
-            )
-        if message.source is not None:
-            raise UnsupportedInspectFeatureError(
-                symbol="inspect_ai.model.ChatMessage.source",
-                source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
-            )
-        content = _message_content(message)
-        if index == user_prompt_index:
-            content = render(content)
-        role = cast("Any", message.role)
-        messages.append(CaseMessageManifest(role=role, content=content, metadata=_json_mapping(message.metadata)))
+    messages = list(
+        _sample_input_messages(
+            sample=sample,
+            dataset=dataset,
+            package_root=package_root,
+            data_root=data_root,
+            profile=PINNED_INSPECT_EVALS_PROFILE,
+        )
+    )
+    user_prompt_index = _last_user_message_index(
+        messages=messages,
+        path="inspect_ai.solver.multiple_choice",
+    )
+    objective = _case_message_text(
+        message=messages[user_prompt_index],
+        path="inspect_ai.solver.multiple_choice",
+    )
+    messages[user_prompt_index] = _replace_case_message_text(
+        message=messages[user_prompt_index],
+        text=render(objective),
+        path="inspect_ai.solver.multiple_choice",
+    )
     return tuple(messages), objective
 
 

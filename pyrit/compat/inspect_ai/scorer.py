@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+import string
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pyrit.compat.inspect_ai.types import Score as InspectScore
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.models import JSONValue, Score
 from pyrit.sandbox import SandboxExecRequest, SandboxOperationStatus
@@ -98,7 +100,7 @@ class InspectChoiceScorer:
         )
         answer = parse_inspect_choice_answer(text, allowed_options=self._allowed_options)
         matched = answer == self._expected_value
-        piece_id = result.final_message_piece_ids[-1] if result.final_message_piece_ids else str(result.case_id)
+        piece_id = str(result.final_message_piece_ids[-1]) if result.final_message_piece_ids else str(result.case_id)
         return [
             Score(
                 score_value=str(matched),
@@ -109,6 +111,160 @@ class InspectChoiceScorer:
                 objective=objective,
             )
         ]
+
+
+class InspectTextScorerConfig(BaseModel):
+    """Strict configuration for native Inspect text matching."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    expected_values: tuple[str, ...]
+    mode: Literal["includes", "match"]
+    location: Literal["begin", "end", "any", "exact"] = "end"
+    ignore_case: bool = True
+
+
+class InspectTextScorer:
+    """Native execution of Inspect ``match`` and ``includes`` scorer semantics."""
+
+    def __init__(
+        self,
+        *,
+        config: InspectTextScorerConfig,
+        memory: MemoryInterface | None = None,
+    ) -> None:
+        """Initialize the scorer."""
+        self._config = config
+        self._memory = memory or CentralMemory.get_memory_instance()
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, JSONValue]) -> InspectTextScorer:
+        """
+        Build the scorer from a strict declarative configuration.
+
+        Returns:
+            InspectTextScorer: The configured scorer.
+
+        Raises:
+            ValueError: If the scorer mode or match location is unsupported.
+        """
+        parsed = InspectTextScorerConfig.model_validate(dict(config))
+        if parsed.mode not in {"includes", "match"}:
+            raise ValueError(f"Unsupported Inspect text scorer mode '{parsed.mode}'.")
+        if parsed.location not in {"begin", "end", "any", "exact"}:
+            raise ValueError(f"Unsupported Inspect match location '{parsed.location}'.")
+        return cls(config=parsed)
+
+    async def score_result_async(self, *, result: CapabilityTaskResult, objective: str) -> list[Score]:
+        """
+        Score the final completion against one or more accepted targets.
+
+        Returns:
+            list[Score]: One normalized native score.
+        """
+        pieces = self._memory.get_message_pieces(prompt_ids=list(result.final_message_piece_ids))
+        by_id = {piece.id: piece for piece in pieces}
+        completion = "\n".join(
+            by_id[piece_id].converted_value
+            for piece_id in result.final_message_piece_ids
+            if piece_id in by_id and by_id[piece_id].converted_value
+        )
+        matched = any(
+            self._matches(completion=completion, expected=expected) for expected in self._config.expected_values
+        )
+        piece_id = str(result.final_message_piece_ids[-1]) if result.final_message_piece_ids else str(result.case_id)
+        return normalize_inspect_score(
+            score=InspectScore(
+                value=matched,
+                answer=completion,
+                explanation=f"Inspect {self._config.mode} scorer.",
+            ),
+            message_piece_id=piece_id,
+            objective=objective,
+        )
+
+    def _matches(self, *, completion: str, expected: str) -> bool:
+        left, right = completion, expected
+        if self._config.mode == "match":
+            left = left.strip()
+            right = right.strip()
+        if self._config.ignore_case:
+            left, right = left.casefold(), right.casefold()
+        if self._config.mode == "includes":
+            return right in left
+        left = left.strip(string.whitespace + string.punctuation)
+        right = right.strip(string.whitespace + string.punctuation)
+        if self._config.location == "begin":
+            return left.startswith(right)
+        if self._config.location == "any":
+            return right in left
+        if self._config.location == "exact":
+            return left == right
+        return left.endswith(right)
+
+
+def normalize_inspect_score(
+    *,
+    score: InspectScore,
+    message_piece_id: str,
+    objective: str,
+) -> list[Score]:
+    """
+    Normalize scalar or dict-valued Inspect scores into canonical PyRIT scores.
+
+    Returns:
+        list[Score]: One canonical score per scalar or dictionary entry.
+
+    Raises:
+        ValueError: If a list-valued score cannot be executed by native aggregation.
+    """
+    values = score.value if isinstance(score.value, dict) else {None: score.value}
+    normalized = []
+    metadata: dict[str, str | int | float] = {}
+    for metadata_key, metadata_value in score.metadata.items():
+        if not isinstance(metadata_value, (str, int, float)):
+            raise ValueError(
+                "Inspect score metadata values must be strings or numbers for canonical PyRIT score transport."
+            )
+        metadata[str(metadata_key)] = metadata_value
+    for key, value in values.items():
+        if isinstance(value, list):
+            raise ValueError("List-valued Inspect scores are represented but not executable in native aggregation.")
+        score_type, score_value = _normalized_value(value)
+        score_metadata = {
+            **metadata,
+            **({"score_key": key} if key is not None else {}),
+            **({"answer": score.answer} if score.answer is not None else {}),
+        }
+        normalized.append(
+            Score(
+                score_value=score_value,
+                score_type=score_type,
+                score_category=[],
+                score_rationale=score.explanation,
+                score_metadata=score_metadata,
+                message_piece_id=message_piece_id,
+                objective=objective,
+            )
+        )
+    return normalized
+
+
+def _normalized_value(
+    value: bool | int | float | str,
+) -> tuple[Literal["true_false", "float_scale", "unknown"], str]:
+    if isinstance(value, bool):
+        return "true_false", str(value)
+    if isinstance(value, (int, float)) and 0 <= value <= 1:
+        return "float_scale", str(float(value))
+    if isinstance(value, (int, float)):
+        return "unknown", str(value)
+    inspect_labels = {"C": "True", "I": "False", "P": "0.5", "N": "False"}
+    if value in {"C", "I", "N"}:
+        return "true_false", inspect_labels[value]
+    if value == "P":
+        return "float_scale", inspect_labels[value]
+    return "unknown", value
 
 
 class InspectCheckFlagConfig(BaseModel):

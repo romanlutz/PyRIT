@@ -61,7 +61,16 @@ def _migrate_v1_to_v2(raw: JSONDict) -> JSONDict:
     return migrated
 
 
-_BUILTIN_MIGRATIONS: dict[int, ManifestMigration] = {1: _migrate_v1_to_v2}
+def _migrate_v2_to_v3(raw: JSONDict) -> JSONDict:
+    migrated = deepcopy(raw)
+    migrated["schema_version"] = 3
+    return migrated
+
+
+_BUILTIN_MIGRATIONS: dict[int, ManifestMigration] = {
+    1: _migrate_v1_to_v2,
+    2: _migrate_v2_to_v3,
+}
 
 
 def register_migration(*, from_version: int, migrate: ManifestMigration) -> None:

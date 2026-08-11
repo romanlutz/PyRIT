@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pyrit.executor.capability import CapabilityOutcome, CapabilityTaskResult, CapabilityTerminationReason
 from pyrit.models import Score, TargetIdentifier
 from pyrit.scenario.capability_suite.aggregation import aggregate_attempts
+from pyrit.scenario.capability_suite.manifest import ScoreMetricManifest, ScoreReducerManifest
 from pyrit.scenario.capability_suite.results import AttemptOutcomeKind, CapabilitySuiteAttemptRecord
 
 
@@ -20,10 +21,16 @@ def _target_identifier() -> TargetIdentifier:
     return TargetIdentifier(class_name="FakeTarget", class_module="tests.unit.scenario.capability_suite")
 
 
-def _score(*, value: str, score_type: str = "true_false") -> Score:
+def _score(
+    *,
+    value: str,
+    score_type: str = "true_false",
+    metadata: dict[str, str | int | float] | None = None,
+) -> Score:
     return Score(
         score_value=value,
         score_type=score_type,
+        score_metadata=metadata,
         message_piece_id=uuid.uuid4(),
         objective="finish",
     )
@@ -175,3 +182,267 @@ def test_aggregate_attempts_at_least_one_reduces_epochs_per_case() -> None:
     assert aggregate.score_count == 1
     assert aggregate.score_mean == 1.0
     assert aggregate.score_distribution == {"true": 1}
+
+
+def test_aggregate_attempts_computes_named_grouped_metrics() -> None:
+    attempts = (
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value="True",
+                        metadata={"capability_scorer_id": "primary", "subject": "science"},
+                    ),
+                ),
+            ),
+            case_id="case-1",
+        ),
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value="False",
+                        metadata={"capability_scorer_id": "primary", "subject": "history"},
+                    ),
+                ),
+            ),
+            case_id="case-2",
+        ),
+    )
+
+    aggregate = aggregate_attempts(
+        attempts,
+        metrics=(
+            ScoreMetricManifest(
+                name="subject-accuracy",
+                kind="accuracy",
+                scorer_id="primary",
+                group_by=("metadata.subject",),
+            ),
+        ),
+    )
+
+    assert aggregate.metric_values == {"subject-accuracy": 0.5}
+    assert aggregate.grouped_metric_values == {
+        "subject-accuracy": {
+            "metadata.subject=history": 0.0,
+            "metadata.subject=science": 1.0,
+        }
+    }
+
+
+def test_aggregate_attempts_grouped_metric_can_aggregate_samples_instead_of_groups() -> None:
+    attempts = tuple(
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value=value,
+                        metadata={"capability_scorer_id": "primary", "subject": subject},
+                    ),
+                ),
+            ),
+            case_id=f"case-{index}",
+        )
+        for index, (subject, value) in enumerate(
+            (("science", "True"), ("science", "True"), ("science", "False"), ("history", "False")),
+            start=1,
+        )
+    )
+
+    aggregate = aggregate_attempts(
+        attempts,
+        metrics=(
+            ScoreMetricManifest(
+                name="subject-accuracy",
+                kind="accuracy",
+                scorer_id="primary",
+                group_by=("metadata.subject",),
+                group_aggregate="samples",
+            ),
+        ),
+    )
+
+    assert aggregate.metric_values == {"subject-accuracy": 0.5}
+    assert aggregate.grouped_metric_values["subject-accuracy"] == {
+        "metadata.subject=history": 0.0,
+        "metadata.subject=science": 2 / 3,
+    }
+
+
+def test_aggregate_attempts_computes_pass_at_and_reliability_reducers() -> None:
+    attempts = tuple(
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value=value,
+                        metadata={"capability_scorer_id": "primary"},
+                    ),
+                ),
+            ),
+            epoch=epoch,
+        )
+        for epoch, value in enumerate(("True", "False", "True"), start=1)
+    )
+
+    aggregate = aggregate_attempts(
+        attempts,
+        reducers=(
+            ScoreReducerManifest(name="pass-at-2", kind="pass_at", scorer_id="primary", k=2),
+            ScoreReducerManifest(name="pass-2", kind="pass_k", scorer_id="primary", k=2),
+            ScoreReducerManifest(name="reliable", kind="reliability", scorer_id="primary"),
+        ),
+    )
+
+    assert aggregate.reducer_values == {
+        "pass-at-2": 1.0,
+        "pass-2": 1 / 3,
+        "reliable": 0.0,
+    }
+
+
+def test_aggregate_attempts_applies_reducer_before_metric() -> None:
+    attempts = tuple(
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value=value,
+                        metadata={"capability_scorer_id": "primary"},
+                    ),
+                ),
+            ),
+            case_id=case_id,
+            epoch=epoch,
+        )
+        for case_id, epoch, value in (
+            ("case-1", 1, "True"),
+            ("case-1", 2, "False"),
+            ("case-2", 1, "False"),
+            ("case-2", 2, "False"),
+        )
+    )
+    reducer = ScoreReducerManifest(name="primary-pass-at-2", kind="pass_at", scorer_id="primary", k=2)
+
+    aggregate = aggregate_attempts(
+        attempts,
+        metrics=(
+            ScoreMetricManifest(
+                name="accuracy-after-pass-at-2",
+                kind="accuracy",
+                scorer_id="primary",
+                reducer_name=reducer.name,
+            ),
+        ),
+        reducers=(reducer,),
+    )
+
+    assert aggregate.metric_values == {"accuracy-after-pass-at-2": 0.5}
+
+
+def test_aggregate_attempts_excludes_superseded_retry_scores() -> None:
+    attempts = (
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.RETRY,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(_score(value="True", metadata={"capability_scorer_id": "primary"}),),
+            ),
+        ),
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(_score(value="False", metadata={"capability_scorer_id": "primary"}),),
+            ),
+        ),
+    )
+
+    aggregate = aggregate_attempts(
+        attempts,
+        metrics=(ScoreMetricManifest(name="accuracy", kind="accuracy", scorer_id="primary"),),
+    )
+
+    assert aggregate.score_count == 1
+    assert aggregate.score_mean == 0.0
+    assert aggregate.metric_values == {"accuracy": 0.0}
+
+
+def test_aggregate_attempts_reduces_dict_score_keys_independently() -> None:
+    attempts = tuple(
+        _attempt(
+            outcome_kind=AttemptOutcomeKind.SUCCESS,
+            task_result=_task_result(
+                outcome=CapabilityOutcome.COMPLETED,
+                scores=(
+                    _score(
+                        value="True",
+                        metadata={"capability_scorer_id": "primary", "score_key": "accuracy"},
+                    ),
+                    _score(
+                        value="False",
+                        metadata={"capability_scorer_id": "primary", "score_key": "fluency"},
+                    ),
+                ),
+            ),
+            epoch=epoch,
+        )
+        for epoch in (1, 2)
+    )
+
+    aggregate = aggregate_attempts(
+        attempts,
+        reducers=(
+            ScoreReducerManifest(
+                name="reliability",
+                kind="reliability",
+                scorer_id="primary",
+            ),
+        ),
+    )
+
+    assert aggregate.reducer_values == {"reliability": 0.5}
+
+
+def test_aggregate_attempts_excludes_unscored_non_finite_values() -> None:
+    unscored = _attempt(
+        outcome_kind=AttemptOutcomeKind.SUCCESS,
+        task_result=_task_result(
+            outcome=CapabilityOutcome.COMPLETED,
+            scores=(_score(value="nan", score_type="unknown"),),
+        ),
+        epoch=1,
+    )
+    scored = _attempt(
+        outcome_kind=AttemptOutcomeKind.SUCCESS,
+        task_result=_task_result(
+            outcome=CapabilityOutcome.COMPLETED,
+            scores=(_score(value="0.5", score_type="float_scale"),),
+        ),
+        epoch=2,
+    )
+    metric = ScoreMetricManifest(name="mean", kind="mean")
+    reducer = ScoreReducerManifest(name="mean-reducer", kind="mean")
+
+    mixed = aggregate_attempts((unscored, scored), metrics=(metric,), reducers=(reducer,))
+    all_unscored = aggregate_attempts((unscored,), metrics=(metric,), reducers=(reducer,))
+
+    assert mixed.score_count == 1
+    assert mixed.score_mean == 0.5
+    assert mixed.metric_values == {"mean": 0.5}
+    assert mixed.reducer_values == {"mean-reducer": 0.5}
+    assert all_unscored.score_count == 0
+    assert all_unscored.score_mean is None
+    assert all_unscored.metric_values == {}
+    assert all_unscored.reducer_values == {}

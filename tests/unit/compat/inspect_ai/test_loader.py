@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+import pyrit.compat.inspect_ai.facade as inspect_facade
 import pyrit.compat.inspect_ai.loader as inspect_loader
 from pyrit.compat.inspect_ai import (
     PINNED_INSPECT_EVALS_PROFILE,
@@ -25,7 +26,14 @@ from pyrit.compat.inspect_ai import (
     load_inspect_eval,
     run_inspect_eval_async,
 )
-from pyrit.compat.inspect_ai.scorer import parse_inspect_choice_answer
+from pyrit.compat.inspect_ai.scorer import (
+    InspectTextScorer,
+    InspectTextScorerConfig,
+    normalize_inspect_score,
+    parse_inspect_choice_answer,
+)
+from pyrit.compat.inspect_ai.types import Dataset, Sample
+from pyrit.compat.inspect_ai.types import Score as InspectScore
 from pyrit.models import Message, TargetResponseMetadata
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 
@@ -688,14 +696,8 @@ def test_loader_rejects_unsupported_sample_execution_fields(
         )
 
 
-@pytest.mark.parametrize(
-    ("message_field", "symbol"),
-    [("name='named'", "ChatMessage.name"), ("source='source'", "ChatMessage.source")],
-)
-def test_loader_rejects_unsupported_message_execution_fields(
+def test_loader_rejects_unsupported_message_name(
     tmp_path: Path,
-    message_field: str,
-    symbol: str,
 ) -> None:
     root = tmp_path / "source"
     package = root / "src" / "inspect_evals"
@@ -709,13 +711,13 @@ def test_loader_rejects_unsupported_message_execution_fields(
         "from inspect_ai.solver import multiple_choice\n"
         "@task\n"
         "def unsupported():\n"
-        f"    message = ChatMessageUser(content='Question?', {message_field})\n"
+        "    message = ChatMessageUser(content='Question?', name='named')\n"
         "    sample = Sample(input=[message], choices=['one', 'two'], target='A')\n"
         "    return Task(dataset=MemoryDataset([sample]), solver=multiple_choice(), scorer=choice())\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(UnsupportedInspectFeatureError, match=symbol):
+    with pytest.raises(UnsupportedInspectFeatureError, match=r"Sample\.input\[0\]\.name"):
         load_inspect_eval(
             source_root=root,
             task_spec="unsupported.py@unsupported",
@@ -872,4 +874,444 @@ def test_revision_verification_rejects_ignored_source_files(
             source_root=arc_source_root,
             task_spec="arc/arc.py@arc_challenge",
             dataset_loader=lambda *args, **kwargs: arc_records,
+        )
+
+
+def test_static_solver_composition_compiles_and_runs_through_public_seam(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "prompts").mkdir()
+    (package / "prompts" / "system.txt").write_text("Rules for {topic}", encoding="utf-8")
+    (package / "static.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.model import ChatMessageAssistant, ChatMessageUser\n"
+        "from inspect_ai.scorer import accuracy, grouped, includes, match, pass_at\n"
+        "from inspect_ai.solver import chain, generate, prompt_template, system_message\n"
+        "@task\n"
+        "def static():\n"
+        "    sample = Sample(input=[ChatMessageUser(content='Example'), "
+        "ChatMessageAssistant(content='Demonstration'), ChatMessageUser(content='finish')], "
+        "target='done', metadata={'topic': 'science'})\n"
+        "    other = Sample(input='finish', target='wrong', metadata={'topic': 'history'})\n"
+        "    return Task(dataset=MemoryDataset([sample, other]), setup=system_message('prompts/system.txt'), "
+        "solver=chain(prompt_template('Question: {prompt}'), generate('none', max_tokens=32)), "
+        "scorer=[includes(), match(location='exact')], metrics=[grouped(accuracy(), 'topic')], "
+        "epochs=2, epochs_reducer=pass_at(1))\n",
+        encoding="utf-8",
+    )
+    target = _ScriptedTarget(response="done")
+
+    run = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="static.py@static",
+            verify_source_revision=False,
+            target=target,
+        )
+    )
+
+    case = run.loaded.suite.cases[0]
+    assert [message.role for message in case.messages] == ["system", "user", "assistant", "user"]
+    assert [message.content for message in case.messages] == [
+        "Rules for science",
+        "Example",
+        "Demonstration",
+        "Question: finish",
+    ]
+    assert [scorer.kind for scorer in case.scorers] == ["inspect_text", "inspect_text"]
+    assert all(scorer.metrics for scorer in case.scorers)
+    assert all(scorer.metrics[0].group_aggregate == "samples" for scorer in case.scorers)
+    assert all(scorer.reducers for scorer in case.scorers)
+    assert len(target.received) == 4
+    assert set(run.result.aggregate.reducer_values.values()) == {0.5}
+    grouped = next(iter(run.result.aggregate.grouped_metric_values.values()))
+    assert grouped == {
+        "metadata.topic=history": 0.0,
+        "metadata.topic=science": 1.0,
+    }
+
+
+def test_static_solver_compile_rejects_unknown_generate_option_before_model_execution(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "unsupported.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def unsupported():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='x', target='y')]), "
+        "solver=generate('none', logprobs=True), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        UnsupportedInspectFeatureError,
+        match=r"Task\.solver\[0\]\.generate\(logprobs=\.\.\.\)",
+    ):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="unsupported.py@unsupported",
+            verify_source_revision=False,
+        )
+
+
+def test_static_solver_compile_reports_unsupported_setup_path(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "unsupported.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate, multiple_choice\n"
+        "@task\n"
+        "def unsupported():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='x', target='y')]), "
+        "setup=multiple_choice(), solver=generate('none'), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        UnsupportedInspectFeatureError,
+        match=r"Task\.setup\[0\]\.multiple_choice",
+    ):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="unsupported.py@unsupported",
+            verify_source_revision=False,
+        )
+
+
+def test_static_scorer_compile_rejects_unknown_match_location(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "unsupported.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import match\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def unsupported():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='x', target='y')]), "
+        "solver=generate('none'), scorer=match(location='middle'))\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Task\.scorer\[0\]\.match\(location=\.\.\.\) has unknown value 'middle'",
+    ):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="unsupported.py@unsupported",
+            verify_source_revision=False,
+        )
+
+
+def test_static_scorer_compile_rejects_dict_task_metrics_until_score_key_mapping_is_supported(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "unsupported.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import match, mean\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def unsupported():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='x', target='y')]), "
+        "solver=generate('none'), scorer=match(), metrics={'accuracy': [mean()]})\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        UnsupportedInspectFeatureError,
+        match=r"Task\.metrics dict routing for scorer\[0\]",
+    ):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="unsupported.py@unsupported",
+            verify_source_revision=False,
+        )
+
+
+def test_static_multimodal_messages_preserve_parts_and_fail_text_only_preflight(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (package / "vision.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.model import ChatMessageUser, ContentImage, ContentText\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def vision():\n"
+        "    local = ChatMessageUser(content=[ContentText(text='describe'), "
+        "ContentImage(image='image.png', detail='low')])\n"
+        "    remote = ChatMessageUser(content=[ContentText(text='describe'), "
+        "ContentImage(image='https://example.test/image.png')])\n"
+        "    inline = ChatMessageUser(content=[ContentText(text='describe'), "
+        "ContentImage(image='data:image/png;base64,iVBORw0KGgo=')])\n"
+        "    return Task(dataset=MemoryDataset([Sample(input=[local], target='cat'), "
+        "Sample(input=[remote], target='cat'), Sample(input=[inline], target='cat')]), "
+        "solver=generate('none'), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_inspect_eval(
+        source_root=root,
+        task_spec="vision.py@vision",
+        verify_source_revision=False,
+    )
+
+    message = loaded.suite.cases[0].messages[0]
+    assert message.parts[0].content == "describe"
+    assert message.parts[1].data_type == "url"
+    assert message.parts[1].content == "data:image/png;base64,iVBORw0KGgo="
+    assert message.parts[1].metadata["source"] == "image.png"
+    assert message.parts[1].metadata["media_type"] == "image/png"
+    assert loaded.suite.cases[1].messages[0].parts[1].data_type == "url"
+    assert loaded.suite.cases[2].messages[0].parts[1].data_type == "url"
+    target = _ScriptedTarget(response="cat")
+    with pytest.raises(ValueError, match=r"(?s)url.*text|text.*url"):
+        asyncio.run(
+            run_inspect_eval_async(
+                source_root=root,
+                task_spec="vision.py@vision",
+                verify_source_revision=False,
+                target=target,
+            )
+        )
+    assert target.received == []
+
+
+def test_json_field_mapping_shuffle_limit_has_deterministic_provenance(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "records.json").write_text(
+        json.dumps(
+            [
+                {"qid": "a", "question": "A?", "answer": "A", "subject": "one"},
+                {"qid": "b", "question": "B?", "answer": "B", "subject": "two"},
+                {"qid": "c", "question": "C?", "answer": "C", "subject": "three"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (package / "records.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import FieldSpec, json_dataset\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def records():\n"
+        "    dataset = json_dataset('records.json', "
+        "sample_fields=FieldSpec(input='question', target='answer', id='qid', metadata=['subject']), "
+        "shuffle=True, seed=9, limit=2)\n"
+        "    return Task(dataset=dataset, solver=generate('none'), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    first = load_inspect_eval(
+        source_root=root,
+        task_spec="records.py@records",
+        verify_source_revision=False,
+    )
+    second = load_inspect_eval(
+        source_root=root,
+        task_spec="records.py@records",
+        verify_source_revision=False,
+    )
+
+    assert first.task.dataset.provenance == second.task.dataset.provenance
+    assert first.task.dataset.provenance["record_count"] == 2
+    assert first.task.dataset.provenance["selection"] == {
+        "auto_id": False,
+        "shuffle": True,
+        "seed": 9,
+        "shuffle_choices": None,
+        "limit": 2,
+    }
+    assert [case.case_id for case in first.suite.cases] == [case.case_id for case in second.suite.cases]
+
+
+def test_csv_field_mapping_and_auto_ids_compile_through_public_seam(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "records.csv").write_text("qid,question,target\nold-a,A?,1\nold-b,B?,2\n", encoding="utf-8")
+    (package / "records.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import FieldSpec, csv_dataset\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def records():\n"
+        "    dataset = csv_dataset('records.csv', "
+        "sample_fields=FieldSpec(input='question', target='target', choices=None, id='qid'), auto_id=True)\n"
+        "    return Task(dataset=dataset, solver=generate('none'), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_inspect_eval(
+        source_root=root,
+        task_spec="records.py@records",
+        verify_source_revision=False,
+    )
+
+    assert [sample.id for sample in loaded.task.dataset] == [1, 2]
+    assert [case.case_id for case in loaded.suite.cases] == ["1", "2"]
+    assert loaded.task.dataset.metadata["source_type"] == "csv"
+    assert loaded.task.dataset.provenance["selection"]["auto_id"] is True
+
+
+def test_field_spec_normalizes_messages_numeric_targets_and_serialized_choices(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (package / "records.json").write_text(
+        json.dumps(
+            [
+                {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "choose"},
+                                {"type": "image", "image": "image.png", "detail": "low"},
+                            ],
+                        }
+                    ],
+                    "target": 2,
+                    "choices": "one, two, three",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (package / "records.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import FieldSpec, json_dataset\n"
+        "from inspect_ai.scorer import includes\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def records():\n"
+        "    return Task(dataset=json_dataset('records.json', sample_fields=FieldSpec()), "
+        "solver=generate('none'), scorer=includes())\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_inspect_eval(
+        source_root=root,
+        task_spec="records.py@records",
+        verify_source_revision=False,
+    )
+
+    sample = loaded.task.dataset[0]
+    assert sample.target == "2"
+    assert sample.choices == ["one", "two", "three"]
+    assert not isinstance(sample.input, str)
+    assert sample.input[0].role == "user"
+    assert [part.type for part in sample.input[0].content] == ["text", "image"]
+
+
+@pytest.mark.parametrize(
+    ("location", "completion", "expected"),
+    [
+        ("begin", "  Cat, because it fits.  ", "cat"),
+        ("end", "Answer: cat.", "cat"),
+        ("exact", "  [Cat]!  ", "cat"),
+    ],
+)
+def test_inspect_match_normalizes_surrounding_punctuation(
+    location: str,
+    completion: str,
+    expected: str,
+) -> None:
+    scorer = InspectTextScorer(
+        config=InspectTextScorerConfig(
+            expected_values=(expected,),
+            mode="match",
+            location=location,
+        )
+    )
+
+    assert scorer._matches(completion=completion, expected=expected)
+
+
+def test_dataset_filter_recomputes_content_provenance() -> None:
+    dataset = Dataset(
+        (Sample(input="one", id=1), Sample(input="two", id=2)),
+        provenance={"record_count": 2, "records_sha256": "before"},
+    )
+
+    filtered = dataset.filter(lambda sample: sample.id == 1)
+
+    assert filtered.provenance["record_count"] == 1
+    assert filtered.provenance["records_sha256"] != "before"
+    assert filtered.provenance["filter_applied"] is True
+
+
+def test_dataset_options_replace_existing_ids_and_honor_zero_choice_seed() -> None:
+    selected = inspect_facade._apply_dataset_options(
+        dataset=Dataset((Sample(input="choose", target="A", choices=["one", "two", "three"], id="old"),)),
+        auto_id=True,
+        shuffle=False,
+        seed=None,
+        shuffle_choices=0,
+        limit=None,
+    )
+
+    assert selected[0].id == 1
+    assert selected[0].choices == ["one", "three", "two"]
+    assert selected[0].target == "A"
+    assert selected.provenance["selection"]["seed"] == 0
+    assert selected.provenance["selection"]["choice_seed"] == 0
+
+
+def test_normalize_inspect_score_expands_dict_values_with_metadata() -> None:
+    scores = normalize_inspect_score(
+        score=InspectScore(
+            value={"accuracy": True, "fluency": 0.75},
+            answer="answer",
+            explanation="two dimensions",
+            metadata={"subject": "science"},
+        ),
+        message_piece_id="piece-1",
+        objective="respond",
+    )
+
+    assert [(score.score_type, score.score_value) for score in scores] == [
+        ("true_false", "True"),
+        ("float_scale", "0.75"),
+    ]
+    assert [score.score_metadata["score_key"] for score in scores] == ["accuracy", "fluency"]
+    assert all(score.score_metadata["subject"] == "science" for score in scores)
+
+
+def test_normalize_inspect_score_rejects_unrepresentable_metadata() -> None:
+    with pytest.raises(ValueError, match="metadata values"):
+        normalize_inspect_score(
+            score=InspectScore(value=True, metadata={"nested": {"not": "representable"}}),
+            message_piece_id="piece-1",
+            objective="respond",
         )

@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol
@@ -67,6 +68,8 @@ if TYPE_CHECKING:
         CapabilityCaseManifest,
         CapabilitySuiteManifest,
         CaseAssetManifest,
+        ScoreMetricManifest,
+        ScoreReducerManifest,
     )
     from pyrit.scenario.capability_suite.registries import (
         CapabilitySuiteScorerFactoryRegistry,
@@ -143,7 +146,9 @@ def get_capability_suite_target_requirements(
     required_inputs: set[frozenset[PromptDataType]] = set()
     for case in manifest.cases:
         if case.messages:
-            required_inputs.update(frozenset({message.data_type}) for message in case.messages)
+            required_inputs.update(
+                frozenset(part.data_type for part in message.content_parts) for message in case.messages
+            )
         else:
             required_inputs.add(frozenset({"text"}))
         required_inputs.update(frozenset({modality}) for modality in case.modalities)
@@ -228,6 +233,7 @@ class CapabilitySuiteRunner:
         provenance_id = f"capability-suite-{content_hash[:32]}"
         run_id = resume_id or f"capability-suite-{uuid.uuid4()}"
         target_requirements = get_capability_suite_target_requirements(manifest=self._manifest)
+        metrics, reducers = self._aggregation_specs()
         validate_capability_target(
             target=self._target,
             request_options_factory=self._request_options_factory,
@@ -329,9 +335,26 @@ class CapabilitySuiteRunner:
             aggregate=aggregate_attempts(
                 attempts,
                 epoch_reducer=self._manifest.run_policy.epoch_reducer,
+                metrics=metrics,
+                reducers=reducers,
             ),
             provider_cleanup_error=provider_cleanup_error,
         )
+
+    def _aggregation_specs(self) -> tuple[tuple[ScoreMetricManifest, ...], tuple[ScoreReducerManifest, ...]]:
+        metrics: dict[str, ScoreMetricManifest] = {}
+        reducers: dict[str, ScoreReducerManifest] = {}
+        for case in self._manifest.cases:
+            for scorer in case.scorers:
+                for metric in scorer.metrics:
+                    existing = metrics.setdefault(metric.name, metric)
+                    if existing != metric:
+                        raise ValueError(f"Metric '{metric.name}' has conflicting declarations across cases.")
+                for reducer in scorer.reducers:
+                    existing = reducers.setdefault(reducer.name, reducer)
+                    if existing != reducer:
+                        raise ValueError(f"Reducer '{reducer.name}' has conflicting declarations across cases.")
+        return tuple(metrics.values()), tuple(reducers.values())
 
     @staticmethod
     async def _cleanup_prepared_resources_async(
@@ -710,10 +733,12 @@ class CapabilitySuiteRunner:
             Message(
                 message_pieces=[
                     MessagePiece(
-                        original_value=message.content,
+                        original_value=part.content,
                         role=message.role,
-                        original_value_data_type=message.data_type,
+                        original_value_data_type=part.data_type,
+                        prompt_metadata={**message.metadata, **part.metadata},
                     )
+                    for part in message.content_parts
                 ]
             )
             for message in case.messages
@@ -767,16 +792,33 @@ class CapabilitySuiteRunner:
             raise ValueError(f"Case '{case.case_id}' declares scorers but no scorer_registry was provided.")
         scores = list(result.scores)
         errors: list[ErrorEvidence] = []
+        raw_sample_metadata = case.metadata.get("sample_metadata")
+        sample_metadata = (
+            {str(key): value for key, value in raw_sample_metadata.items() if isinstance(value, (str, int, float))}
+            if isinstance(raw_sample_metadata, Mapping)
+            else {}
+        )
         for scorer_manifest in case.scorers:
             try:
                 scorer = self._scorer_registry.build(kind=scorer_manifest.kind, config=scorer_manifest.config)
+                produced_scores = await scorer.score_async(
+                    result=result,
+                    objective=case.objective,
+                    session=session,
+                    cancellation_event=cancellation_event,
+                )
+                scorer_id = scorer_manifest.scorer_id or scorer_manifest.kind
                 scores.extend(
-                    await scorer.score_async(
-                        result=result,
-                        objective=case.objective,
-                        session=session,
-                        cancellation_event=cancellation_event,
+                    score.model_copy(
+                        update={
+                            "score_metadata": {
+                                **sample_metadata,
+                                **(score.score_metadata or {}),
+                                "capability_scorer_id": scorer_id,
+                            }
+                        }
                     )
+                    for score in produced_scores
                 )
             except Exception as error:
                 errors.append(

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Literal, overload
 
 
@@ -83,6 +85,20 @@ class Sample:
     files: dict[str, str] | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class FieldSpec:
+    """A declarative mapping from record fields to ``Sample`` fields."""
+
+    input: str = "input"
+    target: str | None = "target"
+    choices: str | None = "choices"
+    id: str | None = "id"
+    metadata: list[str] | None = None
+    sandbox: str | None = None
+    files: str | None = None
+    setup: str | None = None
+
+
 class Dataset(Sequence[Sample]):
     """A materialized, deterministic Inspect-shaped dataset."""
 
@@ -92,13 +108,17 @@ class Dataset(Sequence[Sample]):
         *,
         name: str | None = None,
         location: str | None = None,
+        shuffled: bool = False,
         metadata: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> None:
         """Initialize a materialized dataset."""
         self._samples = tuple(samples)
         self.name = name
         self.location = location
+        self.shuffled = shuffled
         self.metadata = metadata or {}
+        self.provenance = provenance or {}
 
     @overload
     def __getitem__(self, index: int) -> Sample: ...
@@ -125,11 +145,18 @@ class Dataset(Sequence[Sample]):
 
     def filter(self, predicate: Callable[[Sample], bool]) -> Dataset:
         """Return a dataset containing samples accepted by ``predicate``."""
+        samples = tuple(sample for sample in self._samples if predicate(sample))
         return Dataset(
-            (sample for sample in self._samples if predicate(sample)),
+            samples,
             name=self.name,
             location=self.location,
+            shuffled=self.shuffled,
             metadata=dict(self.metadata),
+            provenance={
+                **self.provenance,
+                **dataset_records_provenance(samples),
+                "filter_applied": True,
+            },
         )
 
 
@@ -143,6 +170,23 @@ class SolverSpec:
 
     name: str
     config: dict[str, Any] = field(default_factory=dict)
+    steps: tuple[SolverSpec, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class MetricSpec:
+    """A declarative Inspect metric graph node."""
+
+    name: str
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReducerSpec:
+    """A declarative Inspect reducer graph node."""
+
+    name: str
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,6 +195,8 @@ class ScorerSpec:
 
     name: str
     config: dict[str, Any] = field(default_factory=dict)
+    metrics: tuple[MetricSpec, ...] = ()
+    reducers: tuple[ReducerSpec, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -241,10 +287,25 @@ class Model:
 class Score:
     """An Inspect-shaped score primitive."""
 
-    value: bool | int | float | str
+    value: (
+        bool
+        | int
+        | float
+        | str
+        | list[bool | int | float | str]
+        | dict[str, bool | int | float | str | list[bool | int | float | str]]
+    )
     answer: str | None = None
     explanation: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SampleScore:
+    """One sample's scalar or named Inspect score outputs."""
+
+    sample_id: str | int | None
+    scores: Score | dict[str, Score]
 
 
 class Target(list[str]):
@@ -267,9 +328,12 @@ class Task:
     dataset: Dataset | Sequence[Sample]
     solver: SolverSpec | Sequence[SolverSpec]
     scorer: ScorerSpec | Sequence[ScorerSpec]
+    setup: SolverSpec | Sequence[SolverSpec] | None = None
+    metrics: tuple[MetricSpec, ...] | dict[str, tuple[MetricSpec, ...]] | None = None
     sandbox: SandboxSpec | tuple[str, str] | str | None = None
     config: GenerateConfig | None = None
     epochs: int | Epochs | None = None
+    epochs_reducer: ReducerSpec | Sequence[ReducerSpec] | None = None
     fail_on_error: bool | float | None = None
     message_limit: int | None = None
     token_limit: int | None = None
@@ -284,6 +348,38 @@ Scorer = ScorerSpec
 Tool = ToolSpec
 Agent = SolverSpec
 Generate = Callable[..., object]
+
+
+def dataset_records_provenance(samples: Iterable[Sample]) -> dict[str, int | str]:
+    """
+    Compute deterministic content provenance for materialized samples.
+
+    Returns:
+        dict[str, int | str]: The record count and canonical content hash.
+    """
+    materialized = tuple(samples)
+    payload = json.dumps(
+        [_dataset_json_value(sample) for sample in materialized],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return {
+        "record_count": len(materialized),
+        "records_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _dataset_json_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _dataset_json_value(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _dataset_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_dataset_json_value(item) for item in value]
+    raise TypeError(f"Dataset provenance value '{type(value).__name__}' is not JSON serializable.")
 
 
 class TaskState:

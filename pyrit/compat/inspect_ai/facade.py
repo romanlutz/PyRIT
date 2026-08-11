@@ -12,14 +12,16 @@ from __future__ import annotations
 import csv
 import inspect
 import json
+import math
 import random
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, TypeVar, cast
+from urllib.parse import urlparse
 
 from pyrit.compat.inspect_ai.profile import InspectCompatibilityProfile, UnsupportedInspectFeatureError
 from pyrit.compat.inspect_ai.types import (
@@ -34,10 +36,13 @@ from pyrit.compat.inspect_ai.types import (
     ContentText,
     Dataset,
     Epochs,
+    FieldSpec,
     GenerateConfig,
     MemoryDataset,
+    MetricSpec,
     Model,
     ModelName,
+    ReducerSpec,
     Sample,
     SandboxSpec,
     Score,
@@ -50,9 +55,11 @@ from pyrit.compat.inspect_ai.types import (
     TaskState,
     Tool,
     ToolSpec,
+    dataset_records_provenance,
 )
 
 DatasetLoader = Callable[..., object]
+RecordMapper = Callable[[dict[str, Any]], Sample | list[Sample]]
 TaskFactory = Callable[..., Task]
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -223,9 +230,10 @@ def _component_decorator(
                 "factory_arguments": _json_compatible(dict(bound.arguments)),
                 "source_identity": f"{source_module}.{source_qualname}",
             }
-            if metrics is not None:
-                config["metrics"] = _json_compatible(metrics)
-            spec_type = {"solver": SolverSpec, "scorer": ScorerSpec, "tool": ToolSpec}[kind]
+            if kind == "scorer":
+                metric_specs = _metric_sequence(metrics)
+                return ScorerSpec(name=component_name, config=config, metrics=metric_specs)
+            spec_type = {"solver": SolverSpec, "tool": ToolSpec}[kind]
             return spec_type(name=component_name, config=config)
 
         _capture.__name__ = _factory_name(factory)
@@ -264,9 +272,82 @@ def multiple_choice(
     )
 
 
-def generate(*, cache: bool = False, tool_calls: str = "loop") -> SolverSpec:
+def generate(
+    tool_calls: str = "loop",
+    *,
+    max_retries: int | None = None,
+    timeout: int | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    stop_seqs: list[str] | None = None,
+    seed: int | None = None,
+    cache: bool | None = False,
+    **kwargs: Any,
+) -> SolverSpec:
     """Construct a generate solver graph node."""
-    return SolverSpec(name="generate", config={"cache": cache, "tool_calls": tool_calls})
+    return SolverSpec(
+        name="generate",
+        config={
+            "tool_calls": tool_calls,
+            "max_retries": max_retries,
+            "timeout": timeout,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop_seqs": stop_seqs,
+            "seed": seed,
+            "cache": cache,
+            **kwargs,
+        },
+    )
+
+
+def chain(*solvers: SolverSpec | Iterable[SolverSpec]) -> SolverSpec:
+    """Construct an ordered declarative solver chain."""
+    steps: list[SolverSpec] = []
+    for value in solvers:
+        if isinstance(value, SolverSpec):
+            steps.append(value)
+        else:
+            steps.extend(value)
+    if not steps:
+        raise ValueError("chain requires at least one solver.")
+    if not all(isinstance(step, SolverSpec) for step in steps):
+        raise TypeError("chain accepts only SolverSpec nodes.")
+    return SolverSpec(name="chain", steps=tuple(steps))
+
+
+def system_message(template: str, **params: Any) -> SolverSpec:
+    """Construct a solver node that prepends or replaces the system message."""
+    return SolverSpec(
+        name="system_message",
+        config={"template": _resolve_template_resource(template), "params": _json_compatible(params)},
+    )
+
+
+def prompt_template(template: str, **params: Any) -> SolverSpec:
+    """Construct a solver node that templates the active user prompt."""
+    return SolverSpec(
+        name="prompt_template",
+        config={"template": _resolve_template_resource(template), "params": _json_compatible(params)},
+    )
+
+
+def user_message(template: str, **params: Any) -> SolverSpec:
+    """Construct a solver node that appends a user message."""
+    return SolverSpec(
+        name="user_message",
+        config={"template": _resolve_template_resource(template), "params": _json_compatible(params)},
+    )
+
+
+def assistant_message(template: str, **params: Any) -> SolverSpec:
+    """Construct a solver node that appends an assistant message."""
+    return SolverSpec(
+        name="assistant_message",
+        config={"template": _resolve_template_resource(template), "params": _json_compatible(params)},
+    )
 
 
 def chain_of_thought(*, template: str | None = None) -> SolverSpec:
@@ -386,27 +467,108 @@ def sandbox(name: str | None = None) -> object:
 
 def choice() -> ScorerSpec:
     """Construct the supported choice scorer specification."""
-    return ScorerSpec(name="choice", config={})
+    return ScorerSpec(
+        name="choice",
+        config={},
+        metrics=(MetricSpec(name="accuracy"), MetricSpec(name="stderr", config={"cluster": None})),
+    )
 
 
-def match(*, location: str = "end", ignore_case: bool = True) -> ScorerSpec:
+def match(*, location: str = "end", ignore_case: bool = True, numeric: bool = False) -> ScorerSpec:
     """Construct an exact-match scorer graph node."""
-    return ScorerSpec(name="match", config={"location": location, "ignore_case": ignore_case})
+    return ScorerSpec(
+        name="match",
+        config={"location": location, "ignore_case": ignore_case, "numeric": numeric},
+        metrics=(MetricSpec(name="accuracy"), MetricSpec(name="stderr", config={"cluster": None})),
+    )
 
 
 def includes(*, ignore_case: bool = True) -> ScorerSpec:
     """Construct an includes scorer graph node."""
-    return ScorerSpec(name="includes", config={"ignore_case": ignore_case})
+    return ScorerSpec(
+        name="includes",
+        config={"ignore_case": ignore_case},
+        metrics=(MetricSpec(name="accuracy"), MetricSpec(name="stderr", config={"cluster": None})),
+    )
 
 
-def accuracy() -> str:
+def accuracy(to_float: object = None) -> MetricSpec:
     """Construct an accuracy metric reference."""
-    return "accuracy"
+    if to_float is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.scorer.accuracy(to_float=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    return MetricSpec(name="accuracy")
 
 
-def stderr() -> str:
+def mean(to_float: object = None) -> MetricSpec:
+    """Construct an arithmetic-mean metric reference."""
+    if to_float is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.scorer.mean(to_float=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    return MetricSpec(name="mean")
+
+
+def stderr(to_float: object = None, cluster: str | None = None) -> MetricSpec:
     """Construct a standard-error metric reference."""
-    return "stderr"
+    if to_float is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.scorer.stderr(to_float=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    return MetricSpec(name="stderr", config={"cluster": cluster})
+
+
+def grouped(
+    metric: MetricSpec,
+    group_key: str,
+    *,
+    all: str | bool = "samples",  # noqa: A002 - Mirrors the pinned Inspect API.
+    all_label: str = "all",
+    name_template: str = "{group_name}",
+    value_to_float: object = None,
+) -> MetricSpec:
+    """Construct a grouped metric over one sample metadata key."""
+    if value_to_float is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.scorer.grouped(value_to_float=...)",
+            source_profile=_active_profile().profile_id,
+        )
+    if all not in ("samples", "groups", False):
+        raise ValueError("grouped(all=...) must be 'samples', 'groups', or False.")
+    return MetricSpec(
+        name="grouped",
+        config={
+            "metric": _json_compatible(metric),
+            "group_key": group_key,
+            "all": all,
+            "all_label": all_label,
+            "name_template": name_template,
+        },
+    )
+
+
+def mean_score() -> ReducerSpec:
+    """Construct the default arithmetic-mean score reducer."""
+    return ReducerSpec(name="mean")
+
+
+def at_least(k: int, value: float = 1.0) -> ReducerSpec:
+    """Construct a threshold-count score reducer."""
+    return ReducerSpec(name="at_least", config={"k": k, "value": value})
+
+
+def pass_at(k: int, value: float = 1.0) -> ReducerSpec:
+    """Construct the Chen pass-at-k estimator."""
+    return ReducerSpec(name="pass_at", config={"k": k, "value": value})
+
+
+def pass_k(k: int, value: float = 1.0) -> ReducerSpec:
+    """Construct the all-k-correct reliability estimator."""
+    return ReducerSpec(name="pass_k", config={"k": k, "value": value})
 
 
 def get_model(
@@ -423,13 +585,34 @@ def hf_dataset(
     path: str,
     name: str | None = None,
     split: str | None = None,
-    sample_fields: Callable[[dict[str, Any]], Sample] | None = None,
+    sample_fields: RecordMapper | FieldSpec | None = None,
     revision: str | None = None,
+    data_dir: str | None = None,
+    auto_id: bool = False,
+    shuffle: bool = False,
+    seed: int | None = None,
+    shuffle_choices: bool | int | None = None,
+    limit: int | None = None,
+    trust: bool = False,
+    cached: bool = True,
+    retry: bool = True,
     **kwargs: Any,
 ) -> Dataset:
     """Materialize a pinned Hugging Face dataset through the injected loader."""
     if not revision:
         raise TypeError("hf_dataset() requires a pinned 'revision'.")
+    if trust:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.dataset.hf_dataset(trust=True)",
+            source_profile=_active_profile().profile_id,
+            remediation="Remote dataset code is never executed by the compatibility loader.",
+        )
+    if not cached or not retry:
+        option = "cached" if not cached else "retry"
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.dataset.hf_dataset({option}=...)",
+            source_profile=_active_profile().profile_id,
+        )
     if kwargs:
         option = sorted(kwargs)[0]
         raise UnsupportedInspectFeatureError(
@@ -447,8 +630,15 @@ def hf_dataset(
         from datasets import load_dataset
 
         loader = load_dataset
-    raw = loader(path, name, split=split, revision=revision, trust_remote_code=False)
-    return _map_records(
+    raw = loader(
+        path,
+        name,
+        split=split,
+        revision=revision,
+        data_dir=data_dir,
+        trust_remote_code=False,
+    )
+    dataset = _map_records(
         raw=raw,
         sample_fields=sample_fields,
         name=name,
@@ -460,19 +650,32 @@ def hf_dataset(
             "split": split,
             "revision": revision,
             "injected_records": _ACTIVE_DATASET_LOADER.get() is not None,
+            **({"data_dir": data_dir} if data_dir is not None else {}),
         },
+    )
+    return _apply_dataset_options(
+        dataset=dataset,
+        auto_id=auto_id,
+        shuffle=shuffle,
+        seed=seed,
+        shuffle_choices=shuffle_choices,
+        limit=limit,
     )
 
 
 def json_dataset(
-    *,
     json_file: str | None = None,
+    *,
     file_path: str | None = None,
-    sample_fields: Callable[[dict[str, Any]], Sample] | None = None,
+    sample_fields: RecordMapper | FieldSpec | None = None,
+    auto_id: bool = False,
     name: str | None = None,
     shuffle: bool = False,
     seed: int | None = None,
-    limit: int | bool | None = None,
+    shuffle_choices: bool | int | None = None,
+    limit: int | None = None,
+    encoding: str = "utf-8",
+    fs_options: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Dataset:
     """Materialize a source-contained JSON or JSONL dataset."""
@@ -485,11 +688,16 @@ def json_dataset(
     source = file_path or json_file
     if source is None:
         raise TypeError("json_dataset() requires 'json_file' or 'file_path'.")
+    if fs_options:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.dataset.json_dataset(fs_options=...)",
+            source_profile=_active_profile().profile_id,
+        )
     path = _resolve_source_path(source)
     if path.suffix.lower() == ".jsonl":
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        records = [json.loads(line) for line in path.read_text(encoding=encoding).splitlines() if line.strip()]
     else:
-        records = json.loads(path.read_text(encoding="utf-8"))
+        records = json.loads(path.read_text(encoding=encoding))
     dataset = _map_records(
         raw=records,
         sample_fields=sample_fields,
@@ -497,18 +705,20 @@ def json_dataset(
         location=source,
         metadata={"source_type": "json", "path": source},
     )
-    samples = list(dataset)
-    if shuffle:
-        random.Random(seed).shuffle(samples)
-    if isinstance(limit, int) and not isinstance(limit, bool):
-        samples = samples[:limit]
-    return Dataset(samples, name=dataset.name, location=dataset.location, metadata=dataset.metadata)
+    return _apply_dataset_options(
+        dataset=dataset,
+        auto_id=auto_id,
+        shuffle=shuffle,
+        seed=seed,
+        shuffle_choices=shuffle_choices,
+        limit=limit,
+    )
 
 
 def load_json_dataset(
     file_path: str,
     eval_name: str,
-    sample_fields: Callable[[dict[str, Any]], Sample],
+    sample_fields: RecordMapper,
     *,
     shuffle: bool = False,
     **kwargs: Any,
@@ -539,28 +749,58 @@ def download_and_verify(*args: Any, **kwargs: Any) -> None:
 
 
 def csv_dataset(
-    *,
     csv_file: str,
-    sample_fields: Callable[[dict[str, Any]], Sample] | None = None,
+    *,
+    sample_fields: RecordMapper | FieldSpec | None = None,
+    auto_id: bool = False,
+    shuffle: bool = False,
+    seed: int | None = None,
+    shuffle_choices: bool | int | None = None,
+    limit: int | None = None,
+    dialect: str = "unix",
+    encoding: str = "utf-8",
     name: str | None = None,
+    fs_options: dict[str, Any] | None = None,
+    fieldnames: list[str] | None = None,
+    delimiter: str = ",",
 ) -> Dataset:
     """Materialize a source-contained CSV dataset."""
+    if fs_options:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.dataset.csv_dataset(fs_options=...)",
+            source_profile=_active_profile().profile_id,
+        )
     path = _resolve_source_path(csv_file)
-    with path.open(encoding="utf-8", newline="") as handle:
-        records = list(csv.DictReader(handle))
-    return _map_records(
+    with path.open(encoding=encoding, newline="") as handle:
+        records = list(
+            csv.DictReader(
+                handle,
+                fieldnames=fieldnames,
+                dialect=dialect,
+                delimiter=delimiter,
+            )
+        )
+    dataset = _map_records(
         raw=records,
         sample_fields=sample_fields,
         name=name,
         location=csv_file,
         metadata={"source_type": "csv", "path": csv_file},
     )
+    return _apply_dataset_options(
+        dataset=dataset,
+        auto_id=auto_id,
+        shuffle=shuffle,
+        seed=seed,
+        shuffle_choices=shuffle_choices,
+        limit=limit,
+    )
 
 
 def _map_records(
     *,
     raw: object,
-    sample_fields: Callable[[dict[str, Any]], Sample] | None,
+    sample_fields: RecordMapper | FieldSpec | None,
     name: str | None,
     location: str,
     metadata: dict[str, Any],
@@ -569,19 +809,295 @@ def _map_records(
         raise TypeError("Dataset loader returned a mapping; pass a concrete split or iterable of records.")
     if not isinstance(raw, Iterable):
         raise TypeError(f"Dataset loader returned unsupported type '{type(raw).__name__}'.")
-    samples = []
+    samples: list[Sample] = []
     for record in raw:
         if isinstance(record, Sample):
-            sample = record
+            mapped: Sample | list[Sample] = record
         elif isinstance(record, Mapping):
             item = dict(record)
-            sample = sample_fields(item) if sample_fields else Sample(**item)
+            mapped = _map_record(item=item, sample_fields=sample_fields)
         else:
             raise TypeError(f"Dataset record has unsupported type '{type(record).__name__}'.")
-        if not isinstance(sample, Sample):
-            raise TypeError("Dataset record mapper must return inspect_ai.dataset.Sample.")
-        samples.append(sample)
-    return Dataset(samples, name=name, location=location, metadata=metadata)
+        record_samples = cast("list[Sample]", mapped) if isinstance(mapped, list) else [mapped]
+        if not all(isinstance(sample, Sample) for sample in record_samples):
+            raise TypeError("Dataset record mapper must return inspect_ai.dataset.Sample or a list of samples.")
+        samples.extend(record_samples)
+    return _dataset_with_provenance(samples=samples, name=name, location=location, metadata=metadata)
+
+
+def _map_record(
+    *,
+    item: dict[str, Any],
+    sample_fields: RecordMapper | FieldSpec | None,
+) -> Sample | list[Sample]:
+    if sample_fields is None:
+        sample_fields = FieldSpec()
+    if not isinstance(sample_fields, FieldSpec):
+        sample = sample_fields(item)
+        if not isinstance(sample, Sample) and (
+            not isinstance(sample, list) or not all(isinstance(item, Sample) for item in sample)
+        ):
+            raise TypeError("Dataset record mapper must return inspect_ai.dataset.Sample or a list of samples.")
+        return sample
+    if sample_fields.metadata:
+        metadata = {field_name: item.get(field_name) for field_name in sample_fields.metadata}
+    else:
+        metadata_value = item.get("metadata")
+        if isinstance(metadata_value, str):
+            metadata_value = json.loads(metadata_value)
+        if metadata_value is not None and not isinstance(metadata_value, dict):
+            raise ValueError(f"Unexpected type for 'metadata' field: {type(metadata_value).__name__}.")
+        metadata = dict(metadata_value or {})
+    values: dict[str, Any] = {
+        "input": _read_record_input(item.get(sample_fields.input)),
+        "target": _read_record_target(item.get(sample_fields.target)) if sample_fields.target is not None else "",
+        "choices": _read_record_choices(item.get(sample_fields.choices)) if sample_fields.choices is not None else None,
+        "id": item.get(sample_fields.id) if sample_fields.id is not None else None,
+        "metadata": metadata,
+    }
+    if sample_fields.sandbox is not None:
+        values["sandbox"] = _read_record_sandbox(item.get(sample_fields.sandbox))
+    if sample_fields.files is not None:
+        values["files"] = _read_record_files(item.get(sample_fields.files))
+    if sample_fields.setup is not None:
+        setup = item.get(sample_fields.setup)
+        values["setup"] = str(setup) if setup is not None else None
+    return Sample(**values)
+
+
+def _read_record_input(value: object) -> str | list[ChatMessage]:
+    if not value:
+        raise ValueError("No input in dataset.")
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        raise TypeError(f"Dataset input must be text or a message list, not '{type(value).__name__}'.")
+    messages = []
+    for index, item in enumerate(value):
+        if isinstance(item, ChatMessage):
+            messages.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            raise TypeError(f"Dataset input message {index} must be a mapping.")
+        role = item.get("role")
+        content = _read_record_content(item.get("content"), path=f"input[{index}].content")
+        message_type = {
+            "system": ChatMessageSystem,
+            "user": ChatMessageUser,
+            "assistant": ChatMessageAssistant,
+        }.get(role)
+        if message_type is None:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.dataset.FieldSpec.input[{index}].role={role!r}",
+                source_profile=_active_profile().profile_id,
+            )
+        unsupported = next(
+            (name for name in ("tool_calls", "tool_call_id", "function", "error") if item.get(name) is not None),
+            None,
+        )
+        if unsupported is not None:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.dataset.FieldSpec.input[{index}].{unsupported}",
+                source_profile=_active_profile().profile_id,
+            )
+        messages.append(message_type(content=content, source="input"))
+    return messages
+
+
+def _read_record_content(value: object, *, path: str) -> str | list[ContentText | ContentImage]:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{path} must contain text or a non-empty content-part list.")
+    parts = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            raise TypeError(f"{path}[{index}] must be a mapping.")
+        content_type = item.get("type")
+        text = item.get("text")
+        image = item.get("image")
+        if content_type == "text" and isinstance(text, str):
+            parts.append(ContentText(text=text))
+        elif content_type == "image" and isinstance(image, str):
+            detail = item.get("detail")
+            if detail is not None and not isinstance(detail, str):
+                raise TypeError(f"{path}[{index}].detail must be a string or None.")
+            parts.append(ContentImage(image=image, detail=detail))
+        else:
+            raise UnsupportedInspectFeatureError(
+                symbol=f"inspect_ai.dataset.FieldSpec.{path}[{index}].type={content_type!r}",
+                source_profile=_active_profile().profile_id,
+            )
+    return parts
+
+
+def _read_record_target(value: object) -> str | list[str]:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return str(value)
+
+
+def _read_record_choices(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        choices = value.split(",")
+        if len(choices) == 1:
+            choices = value.split()
+        return [choice.strip() for choice in choices]
+    return [str(value)]
+
+
+def _read_record_sandbox(value: object) -> SandboxSpec | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip().startswith("["):
+            return SandboxSpec(type=value)
+        value = json.loads(value)
+    if isinstance(value, list) and len(value) == 2:
+        return SandboxSpec(type=str(value[0]), config=str(value[1]))
+    raise ValueError("Dataset sandbox must be a string or two-item list.")
+
+
+def _read_record_files(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value)
+    if isinstance(value, dict) and all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
+        return cast("dict[str, str]", value)
+    raise ValueError("Dataset files must be a string-to-string mapping or its JSON representation.")
+
+
+def _apply_dataset_options(
+    *,
+    dataset: Dataset,
+    auto_id: bool,
+    shuffle: bool,
+    seed: int | None,
+    shuffle_choices: bool | int | None,
+    limit: int | None,
+) -> Dataset:
+    if limit is not None and limit < 0:
+        raise ValueError("Dataset limit must be non-negative.")
+    effective_seed = seed if seed is not None else 0
+    samples = [replace(sample, id=index + 1) if auto_id else sample for index, sample in enumerate(dataset)]
+    shuffle_choices_enabled = shuffle_choices is True or (
+        isinstance(shuffle_choices, int) and not isinstance(shuffle_choices, bool)
+    )
+    choice_seed = None
+    if shuffle_choices_enabled:
+        choice_seed = (
+            shuffle_choices if isinstance(shuffle_choices, int) and not isinstance(shuffle_choices, bool) else None
+        )
+        rng = random.Random(choice_seed if choice_seed is not None else effective_seed)
+        samples = [_shuffle_sample_choices(sample=sample, rng=rng) for sample in samples]
+    if shuffle:
+        random.Random(effective_seed).shuffle(samples)
+    if limit is not None:
+        samples = samples[:limit]
+    return _dataset_with_provenance(
+        samples=samples,
+        name=dataset.name,
+        location=dataset.location or "",
+        metadata={
+            **dataset.metadata,
+        },
+        shuffled=shuffle,
+        provenance={
+            **dataset.provenance,
+            "selection": {
+                "auto_id": auto_id,
+                "shuffle": shuffle,
+                "seed": effective_seed if shuffle or shuffle_choices_enabled else seed,
+                "shuffle_choices": shuffle_choices,
+                **(
+                    {"choice_seed": choice_seed if choice_seed is not None else effective_seed}
+                    if shuffle_choices_enabled
+                    else {}
+                ),
+                "limit": limit,
+            },
+        },
+    )
+
+
+def _shuffle_sample_choices(*, sample: Sample, rng: random.Random) -> Sample:
+    if not sample.choices:
+        return sample
+    indexes = list(range(len(sample.choices)))
+    rng.shuffle(indexes)
+    inverse = {original_index: new_index for new_index, original_index in enumerate(indexes)}
+    choices = [sample.choices[index] for index in indexes]
+
+    def _target(value: str) -> str:
+        normalized = value.strip().upper()
+        if len(normalized) != 1 or not normalized.isalpha():
+            raise UnsupportedInspectFeatureError(
+                symbol="inspect_ai.dataset.shuffle_choices(non-letter target)",
+                source_profile=_active_profile().profile_id,
+            )
+        original_index = ord(normalized) - ord("A")
+        if original_index not in inverse:
+            raise ValueError(f"Choice target '{value}' is outside the sample's choices.")
+        return chr(ord("A") + inverse[original_index])
+
+    target = [_target(value) for value in sample.target] if isinstance(sample.target, list) else _target(sample.target)
+    return replace(sample, choices=choices, target=target)
+
+
+def _dataset_with_provenance(
+    *,
+    samples: Iterable[Sample],
+    name: str | None,
+    location: str,
+    metadata: dict[str, Any],
+    shuffled: bool = False,
+    provenance: dict[str, Any] | None = None,
+) -> Dataset:
+    materialized = tuple(samples)
+    return Dataset(
+        materialized,
+        name=name,
+        location=location,
+        shuffled=shuffled,
+        metadata=metadata,
+        provenance={
+            **(provenance or {}),
+            **dataset_records_provenance(materialized),
+        },
+    )
+
+
+def _resolve_template_resource(template: str) -> str:
+    root = _ACTIVE_SOURCE_ROOT.get()
+    if root is None:
+        raise RuntimeError("Inspect template resources can only be resolved inside the compatibility loader.")
+    parsed = urlparse(template)
+    if parsed.scheme and "://" in template:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.util.resource(remote template)",
+            source_profile=_active_profile().profile_id,
+            remediation="Template resources must be source-contained local files or literal strings.",
+        )
+    try:
+        candidate = Path(template)
+        candidate = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        exists = candidate.exists()
+    except (OSError, ValueError):
+        return template
+    if not exists:
+        return template
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"Template resource path is outside the trusted source root: '{template}'.")
+    if not candidate.is_file():
+        raise ValueError(f"Template resource path is not a file: '{template}'.")
+    return candidate.read_text(encoding="utf-8")
 
 
 def _resolve_source_path(value: str) -> Path:
@@ -642,6 +1158,7 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
         modules["inspect_ai.dataset"],
         {
             "Dataset": Dataset,
+            "FieldSpec": FieldSpec,
             "MemoryDataset": MemoryDataset,
             "Sample": Sample,
             "csv_dataset": csv_dataset,
@@ -676,9 +1193,15 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "ScorerSpec": ScorerSpec,
             "Target": Target,
             "accuracy": accuracy,
+            "at_least": at_least,
             "choice": choice,
+            "grouped": grouped,
             "includes": includes,
             "match": match,
+            "mean": mean,
+            "mean_score": mean_score,
+            "pass_at": pass_at,
+            "pass_k": pass_k,
             "scorer": scorer,
             "stderr": stderr,
         },
@@ -690,10 +1213,15 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "Solver": Solver,
             "SolverSpec": SolverSpec,
             "TaskState": TaskState,
+            "assistant_message": assistant_message,
+            "chain": chain,
             "chain_of_thought": chain_of_thought,
             "generate": generate,
             "multiple_choice": multiple_choice,
+            "prompt_template": prompt_template,
             "solver": solver,
+            "system_message": system_message,
+            "user_message": user_message,
         },
     )
     _export(
@@ -732,3 +1260,12 @@ def _json_compatible(value: object) -> Any:
         field_names = cast("Mapping[str, object]", value.__dataclass_fields__)
         return {name: _json_compatible(getattr(value, name)) for name in field_names}
     raise TypeError(f"Inspect compatibility value '{type(value).__name__}' is not JSON serializable.")
+
+
+def _metric_sequence(value: object) -> tuple[MetricSpec, ...]:
+    if value is None:
+        return ()
+    values = value if isinstance(value, (list, tuple)) else (value,)
+    if not all(isinstance(item, MetricSpec) for item in values):
+        raise TypeError("Inspect scorer metrics must contain only declarative MetricSpec nodes.")
+    return tuple(cast("Iterable[MetricSpec]", values))

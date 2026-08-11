@@ -19,6 +19,7 @@ and malformed/unexpected JSON is rejected rather than silently ignored.
 
 from __future__ import annotations
 
+import math
 import re
 from enum import Enum
 from pathlib import PurePosixPath
@@ -43,7 +44,7 @@ from pyrit.sandbox import (
 #: The schema version this build of PyRIT natively understands. Raw JSON at an older
 #: version is migrated forward (see ``serialization.load_manifest_json``); raw JSON at
 #: a newer version is rejected.
-CURRENT_MANIFEST_SCHEMA_VERSION = 2
+CURRENT_MANIFEST_SCHEMA_VERSION = 3
 
 _SYMBOL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -95,6 +96,16 @@ class SuiteProvenance(BaseModel):
     metadata: dict[str, JSONValue] = Field(default_factory=dict)
 
 
+class CaseMessageContentManifest(BaseModel):
+    """One deterministic content part within a capability-suite message."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content: str
+    data_type: PromptDataType = "text"
+    metadata: dict[str, JSONValue] = Field(default_factory=dict)
+
+
 class CaseMessageManifest(BaseModel):
     """
     A deterministic, JSON-serializable stand-in for one initial ``Message``.
@@ -108,9 +119,31 @@ class CaseMessageManifest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: ChatMessageRole
-    content: str
+    content: str | None = None
     data_type: PromptDataType = "text"
+    parts: tuple[CaseMessageContentManifest, ...] = ()
     metadata: dict[str, JSONValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_content_shape(self) -> CaseMessageManifest:
+        if self.content is None and not self.parts:
+            raise ValueError("A case message requires either 'content' or non-empty 'parts'.")
+        if self.content is not None and self.parts:
+            raise ValueError("A case message cannot declare both legacy 'content' and multipart 'parts'.")
+        return self
+
+    @property
+    def content_parts(self) -> tuple[CaseMessageContentManifest, ...]:
+        """The message content as an ordered tuple of deterministic parts."""
+        if self.parts:
+            return self.parts
+        return (
+            CaseMessageContentManifest(
+                content=self.content or "",
+                data_type=self.data_type,
+                metadata=self.metadata,
+            ),
+        )
 
 
 class AssetMode(str, Enum):
@@ -207,14 +240,55 @@ class CaseSetupStepManifest(BaseModel):
         return self
 
 
+class ScoreMetricManifest(BaseModel):
+    """A deterministic aggregate computed from one scorer's normalized values."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1, pattern=_SYMBOL_PATTERN)
+    kind: Literal["mean", "accuracy", "stderr"]
+    scorer_id: str | None = Field(default=None, pattern=_SYMBOL_PATTERN)
+    score_key: str | None = None
+    group_by: tuple[str, ...] = ()
+    cluster_by: str | None = None
+    group_aggregate: Literal["samples", "groups"] | None = "groups"
+    reducer_name: str | None = Field(default=None, pattern=_SYMBOL_PATTERN)
+
+
+class ScoreReducerManifest(BaseModel):
+    """A deterministic reduction applied across repeated or epoch sample scores."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1, pattern=_SYMBOL_PATTERN)
+    kind: Literal["mean", "at_least_1", "at_least", "pass_at", "pass_at_k", "pass_k", "reliability"]
+    scorer_id: str | None = Field(default=None, pattern=_SYMBOL_PATTERN)
+    score_key: str | None = None
+    group_by: tuple[str, ...] = ("case_id",)
+    k: int | None = Field(default=None, gt=0)
+    threshold: float = 0.5
+
+    @model_validator(mode="after")
+    def _validate_options(self) -> ScoreReducerManifest:
+        requires_k = self.kind in {"at_least", "pass_at", "pass_at_k", "pass_k"}
+        if requires_k != (self.k is not None):
+            raise ValueError("Reducers 'at_least', 'pass_at', 'pass_at_k', and 'pass_k' require 'k'.")
+        if not math.isfinite(self.threshold):
+            raise ValueError("Reducer thresholds must be finite.")
+        return self
+
+
 class CaseScorerManifest(BaseModel):
     """A symbolic reference to a suite scorer, resolved through a registry."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: str = Field(min_length=1, pattern=_SYMBOL_PATTERN)
+    scorer_id: str | None = Field(default=None, pattern=_SYMBOL_PATTERN)
     config: dict[str, JSONValue] = Field(default_factory=dict)
     required_environments: tuple[str, ...] = ()
+    metrics: tuple[ScoreMetricManifest, ...] = ()
+    reducers: tuple[ScoreReducerManifest, ...] = ()
 
     @model_validator(mode="after")
     def _validate_unique_required_environments(self) -> CaseScorerManifest:
