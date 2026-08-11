@@ -78,7 +78,7 @@ from pyrit.registry import (
     ScenarioRegistry,
     TargetRegistry,
 )
-from pyrit.scenario import CompoundDatasetAttackConfiguration, Scenario
+from pyrit.scenario import CompoundDatasetAttackConfiguration, DatasetAttackConfiguration, Scenario
 
 if TYPE_CHECKING:
     from pyrit.converter import Converter
@@ -499,36 +499,8 @@ class ScenarioRunService:
             if queued:
                 self._queue_revision += 1
             for run in queued:
-                try:
-                    await asyncio.to_thread(
-                        self._memory.update_scenario_run_state,
-                        scenario_result_id=run.scenario_result_id,
-                        scenario_run_state=ScenarioRunState.FAILED,
-                        error_message=_SHUTDOWN_INTERRUPTION_REASON,
-                        error_type=_INTERRUPTED_ERROR_TYPE,
-                    )
-                except Exception as exc:
-                    errors.append(exc)
-            if self._active_scenario_result_id is not None:
-                active = self._active_tasks[self._active_scenario_result_id]
-                active.cancellation_state = ScenarioRunState.FAILED
-                active.cancellation_reason = _SHUTDOWN_INTERRUPTION_REASON
-                active.cancellation_error_type = _INTERRUPTED_ERROR_TYPE
-                task = active.task
-                if task is None or task.done():
-                    try:
-                        await asyncio.to_thread(
-                            self._memory.update_scenario_run_state,
-                            scenario_result_id=active.scenario_result_id,
-                            scenario_run_state=ScenarioRunState.FAILED,
-                            error_message=_SHUTDOWN_INTERRUPTION_REASON,
-                            error_type=_INTERRUPTED_ERROR_TYPE,
-                        )
-                    except Exception as exc:
-                        errors.append(exc)
-                    self._active_scenario_result_id = None
-                    self._release_completed_task(scenario_result_id=active.scenario_result_id)
-                    self._queue_revision += 1
+                await self._persist_shutdown_failure_async(run=run, errors=errors)
+            task = await self._prepare_active_shutdown_locked_async(errors=errors)
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -543,6 +515,42 @@ class ScenarioRunService:
             await asyncio.gather(*retry_tasks, return_exceptions=True)
         if errors:
             raise ExceptionGroup("Failed to persist one or more scenario shutdown transitions.", errors)
+
+    async def _prepare_active_shutdown_locked_async(self, *, errors: list[Exception]) -> asyncio.Task[None] | None:
+        """
+        Mark the active run for shutdown.
+
+        Returns:
+            The active run task when it is still running; otherwise, None.
+        """
+        if self._active_scenario_result_id is None:
+            return None
+
+        active = self._active_tasks[self._active_scenario_result_id]
+        active.cancellation_state = ScenarioRunState.FAILED
+        active.cancellation_reason = _SHUTDOWN_INTERRUPTION_REASON
+        active.cancellation_error_type = _INTERRUPTED_ERROR_TYPE
+        if active.task is not None and not active.task.done():
+            return active.task
+
+        await self._persist_shutdown_failure_async(run=active, errors=errors)
+        self._active_scenario_result_id = None
+        self._release_completed_task(scenario_result_id=active.scenario_result_id)
+        self._queue_revision += 1
+        return None
+
+    async def _persist_shutdown_failure_async(self, *, run: _ActiveTask, errors: list[Exception]) -> None:
+        """Persist one interrupted run while retaining failures for an ExceptionGroup."""
+        try:
+            await asyncio.to_thread(
+                self._memory.update_scenario_run_state,
+                scenario_result_id=run.scenario_result_id,
+                scenario_run_state=ScenarioRunState.FAILED,
+                error_message=_SHUTDOWN_INTERRUPTION_REASON,
+                error_type=_INTERRUPTED_ERROR_TYPE,
+            )
+        except Exception as exc:
+            errors.append(exc)
 
     async def _enqueue_run_async(self, *, scheduled: _ActiveTask) -> None:
         """Atomically enqueue a persisted initialized run or start it immediately."""
@@ -891,15 +899,16 @@ class ScenarioRunService:
         Raises:
             ValueError: If techniques or dataset overrides are invalid.
         """
-        resolved: dict[str, Any] = {}
-        if objective_target is not None:
-            resolved["objective_target"] = objective_target
-        if max_concurrency is not None:
-            resolved["max_concurrency"] = max_concurrency
-        if max_retries is not None:
-            resolved["max_retries"] = max_retries
-        if include_baseline is not None:
-            resolved["include_baseline"] = include_baseline
+        resolved = {
+            key: value
+            for key, value in (
+                ("objective_target", objective_target),
+                ("max_concurrency", max_concurrency),
+                ("max_retries", max_retries),
+                ("include_baseline", include_baseline),
+            )
+            if value is not None
+        }
         if memory_labels:
             resolved["memory_labels"] = memory_labels
 
@@ -908,19 +917,15 @@ class ScenarioRunService:
         if not needs_introspection:
             return resolved
 
-        try:
-            introspection_instance = scenario_class()  # type: ignore[ty:missing-argument]
-        except Exception as exc:
-            raise ValueError(
-                f"Cannot resolve runtime configuration for scenario '{scenario_name}': "
-                f"scenario class is not instantiable without arguments ({exc})."
-            ) from exc
+        introspection_instance = cls._create_introspection_instance(
+            scenario_name=scenario_name,
+            scenario_class=scenario_class,
+        )
 
         if techniques:
-            technique_class = introspection_instance._technique_class
             technique_enums, technique_converters = cls._resolve_techniques_and_converters(
                 tokens=techniques,
-                technique_class=technique_class,
+                technique_class=introspection_instance._technique_class,
                 scenario_name=scenario_name,
             )
             resolved["scenario_techniques"] = technique_enums
@@ -928,55 +933,86 @@ class ScenarioRunService:
                 resolved["technique_converters"] = technique_converters
 
         if dataset_names or max_dataset_size is not None or filters:
-            default_config = introspection_instance._default_dataset_config
+            resolved["dataset_config"] = cls._resolve_dataset_configuration(
+                scenario_name=scenario_name,
+                default_config=introspection_instance._default_dataset_config,
+                dataset_names=dataset_names,
+                max_dataset_size=max_dataset_size,
+                filters=filters,
+            )
 
-            if isinstance(default_config, CompoundDatasetAttackConfiguration):
-                names_changed = dataset_names is not None and dataset_names != default_config.dataset_names
-                if names_changed:
-                    try:
-                        resolved["dataset_config"] = default_config.with_dataset_names(
-                            dataset_names=dataset_names,
-                            max_dataset_size=max_dataset_size,
-                            filters=filters or None,
-                        )
-                    except TypeError as exc:
-                        raise ValueError(
-                            f"Scenario '{scenario_name}' does not support overriding datasets through "
-                            f"its {type(default_config).__name__} configuration: {exc}"
-                        ) from exc
-                else:
-                    if max_dataset_size is not None:
-                        default_config.update_child_max_dataset_size(max_dataset_size=max_dataset_size)
-                    if filters:
-                        default_config.update_filters(filters=filters)
-                    resolved["dataset_config"] = default_config
-            elif dataset_names:
-                # Construct a fresh instance of the scenario's own dataset-config
-                # class so subclass-specific behavior is preserved.
-                default_config_class = type(default_config)
+        return resolved
+
+    @staticmethod
+    def _create_introspection_instance(*, scenario_name: str, scenario_class: type[Scenario]) -> Scenario:
+        """
+        Construct the throwaway scenario instance used to resolve configuration.
+
+        Returns:
+            The scenario instance used for configuration introspection.
+        """
+        try:
+            return scenario_class()  # type: ignore[ty:missing-argument]
+        except Exception as exc:
+            raise ValueError(
+                f"Cannot resolve runtime configuration for scenario '{scenario_name}': "
+                f"scenario class is not instantiable without arguments ({exc})."
+            ) from exc
+
+    @staticmethod
+    def _resolve_dataset_configuration(
+        *,
+        scenario_name: str,
+        default_config: DatasetAttackConfiguration,
+        dataset_names: list[str] | None,
+        max_dataset_size: int | None,
+        filters: dict[str, list[str]],
+    ) -> DatasetAttackConfiguration:
+        """
+        Apply dataset launch overrides while preserving scenario-specific configuration types.
+
+        Returns:
+            The scenario-specific dataset configuration with requested overrides.
+        """
+        if isinstance(default_config, CompoundDatasetAttackConfiguration):
+            names_changed = dataset_names is not None and dataset_names != default_config.dataset_names
+            if names_changed:
                 try:
-                    resolved["dataset_config"] = default_config_class(
+                    return default_config.with_dataset_names(
                         dataset_names=dataset_names,
                         max_dataset_size=max_dataset_size,
                         filters=filters or None,
                     )
                 except TypeError as exc:
                     raise ValueError(
-                        f"Scenario '{scenario_name}' does not support overriding dataset names through "
-                        f"its {default_config_class.__name__} configuration: {exc}"
+                        f"Scenario '{scenario_name}' does not support overriding datasets through "
+                        f"its {type(default_config).__name__} configuration: {exc}"
                     ) from exc
-            else:
-                # Reuse the scenario's default dataset config (preserves subtype +
-                # the scenario's own default dataset names) and override only the
-                # sample cap and/or filters. Safe because the introspection instance
-                # is throwaway.
-                if max_dataset_size is not None:
-                    default_config.max_dataset_size = max_dataset_size
-                if filters:
-                    default_config.update_filters(filters=filters)
-                resolved["dataset_config"] = default_config
+            if max_dataset_size is not None:
+                default_config.update_child_max_dataset_size(max_dataset_size=max_dataset_size)
+            if filters:
+                default_config.update_filters(filters=filters)
+            return default_config
 
-        return resolved
+        if dataset_names:
+            default_config_class = type(default_config)
+            try:
+                return default_config_class(
+                    dataset_names=dataset_names,
+                    max_dataset_size=max_dataset_size,
+                    filters=filters or None,
+                )
+            except TypeError as exc:
+                raise ValueError(
+                    f"Scenario '{scenario_name}' does not support overriding dataset names through "
+                    f"its {default_config_class.__name__} configuration: {exc}"
+                ) from exc
+
+        if max_dataset_size is not None:
+            default_config.max_dataset_size = max_dataset_size
+        if filters:
+            default_config.update_filters(filters=filters)
+        return default_config
 
     @classmethod
     def _resolve_techniques_and_converters(
