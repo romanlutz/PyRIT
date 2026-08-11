@@ -37,4 +37,8 @@ describe('scenario history URL filters', () => {
       operator: ['alice'],
     })
   })
+
+  it('omits empty filters from the URL', () => {
+    expect(scenarioHistoryFiltersToSearchParams(DEFAULT_SCENARIO_HISTORY_FILTERS).toString()).toBe('')
+  })
 })

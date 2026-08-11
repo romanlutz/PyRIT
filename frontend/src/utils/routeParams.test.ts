@@ -9,6 +9,10 @@ import {
 const SCENARIO_RESULT_ID = '123e4567-e89b-12d3-a456-426614174000'
 
 describe('routerPathParamValue', () => {
+  it('returns an empty value for a missing route parameter', () => {
+    expect(routerPathParamValue(undefined)).toBe('')
+  })
+
   it('restores slashes re-escaped by React Router', () => {
     expect(routerPathParamValue('foundry%2Fred_team_agent')).toBe('foundry/red_team_agent')
   })

@@ -1648,17 +1648,41 @@ class MemoryInterface(abc.ABC):
             Database-specific SQLAlchemy condition.
         """
 
-    @abc.abstractmethod
     def _get_scenario_registry_name_condition(self, *, scenario_names: Sequence[str]) -> Any:
-        """Return a backend-specific condition matching persisted run-plan registry names."""
+        """
+        Return a backend-specific condition matching persisted run-plan registry names.
 
-    @abc.abstractmethod
+        Raises:
+            NotImplementedError: If the memory backend does not support Scenario history filtering.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _get_scenario_registry_name_condition "
+            "to support Scenario history filtering."
+        )
+
     def _get_scenario_history_plan_expressions(self) -> tuple[Any, Any, Any]:
-        """Return registry-name and compact atomic-group expressions for history rows."""
+        """
+        Return registry-name and compact atomic-group expressions for history rows.
 
-    @abc.abstractmethod
+        Raises:
+            NotImplementedError: If the memory backend does not support Scenario history queries.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _get_scenario_history_plan_expressions "
+            "to support Scenario history queries."
+        )
+
     def _get_scenario_attempt_unit_expressions(self) -> tuple[Any, Any, Any]:
-        """Return backend-specific JSON expressions for scenario attempt unit attribution."""
+        """
+        Return backend-specific JSON expressions for scenario attempt unit attribution.
+
+        Raises:
+            NotImplementedError: If the memory backend does not support Scenario history queries.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement _get_scenario_attempt_unit_expressions "
+            "to support Scenario history queries."
+        )
 
     def add_scores_to_memory(self, *, scores: Sequence[Score]) -> None:
         """

@@ -174,9 +174,25 @@ describe('scenarioRunProgressReducer', () => {
       }),
       fresh: false,
     })
+    const olderDelta = scenarioRunProgressReducer(caughtUp, {
+      type: 'apply-page',
+      page: makePage({
+        plan: null,
+        run: {
+          ...makePage().run,
+          status: 'CANCELLED',
+          overload_summaries: [{
+            ...overload,
+            latest_timestamp: '2026-01-01T00:00:30Z',
+          }],
+        },
+      }),
+      fresh: false,
+    })
 
     expect(cancelled.overloadSummaries[0].count).toBe(1)
     expect(caughtUp.overloadSummaries[0].count).toBe(2)
+    expect(olderDelta.overloadSummaries[0].latest_timestamp).toBe('2026-01-01T00:02:00Z')
   })
 
   it('retains last-good data and marks it stale after a transient failure', () => {
@@ -191,6 +207,37 @@ describe('scenarioRunProgressReducer', () => {
     expect(failed.loadStatus).toBe('ready')
     expect(failed.stale).toBe(true)
     expect(failed.error).toBe('Network unavailable')
+  })
+
+  it('reports an initial failure and returns to loading when retried', () => {
+    const failed = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'request-failed',
+      message: 'Backend unavailable',
+      notFound: false,
+    })
+    const retried = scenarioRunProgressReducer(failed, { type: 'retry' })
+
+    expect(failed.loadStatus).toBe('error')
+    expect(failed.stale).toBe(false)
+    expect(retried.loadStatus).toBe('loading')
+    expect(retried.error).toBeNull()
+  })
+
+  it('drops a cached plan when the server resets without a replacement', () => {
+    const reset = scenarioRunProgressReducer(readyState([
+      makeResult('attempt-1', 'group-a', 'seed-1', 'success', 1),
+    ]), {
+      type: 'apply-page',
+      page: makePage({
+        plan: null,
+        reset: true,
+        results: [],
+      }),
+      fresh: false,
+    })
+
+    expect(reset.plan).toBeNull()
+    expect(reset.results).toEqual([])
   })
 })
 
@@ -290,6 +337,88 @@ describe('scenario run progress calculations', () => {
       persistedAttempts: 2,
       attackAttempts: 2,
     })
+  })
+
+  it('sorts legacy seed groups by ID when objective text is unavailable', () => {
+    const state = {
+      ...readyState([
+        makeResult('z-attempt', 'group-a', 'seed-z', 'success', 1),
+        makeResult('a-attempt', 'group-b', 'seed-a', 'failure', 2),
+      ]),
+      plan: null,
+      planComplete: false,
+    }
+
+    expect(getSeedGroupRollups(state).map(({ id, objective }) => ({ id, objective }))).toEqual([
+      { id: 'seed-a', objective: null },
+      { id: 'seed-z', objective: null },
+    ])
+  })
+
+  it('presents inferred and explicit attempt roles with safe fallback labels', () => {
+    const state = {
+      ...readyState([
+        makeResult('orchestration', 'group-a', 'seed-1', 'failure', 1),
+        makeResult('adaptive-child', 'group-a', 'seed-2', 'success', 2, {
+          result_kind: 'adaptive_technique',
+        }),
+        makeResult('adaptive-parent', 'group-a', 'seed-2', 'failure', 3, {
+          result_kind: 'aggregate_parent',
+        }),
+        makeResult('aggregate-parent', 'group-b', 'seed-1', 'failure', 4, {
+          result_kind: 'aggregate_parent',
+        }),
+        makeResult('fallback-attack', 'group-b', 'seed-2', 'error', 5, {
+          atomic_attack_name: '',
+        }),
+      ]),
+      plan: {
+        ...PLAN,
+        atomic_groups: [
+          { ...PLAN.atomic_groups[0], group_kind: 'adaptive' as const },
+          {
+            ...PLAN.atomic_groups[1],
+            atomic_attack_name: '',
+            display_group: '',
+            group_kind: 'attack' as const,
+          },
+        ],
+      },
+    }
+    const presentations = getAttemptPresentations(state)
+
+    expect(presentations.get('orchestration')).toMatchObject({
+      role: 'adaptive_orchestration',
+      label: 'Adaptive orchestration',
+    })
+    expect(presentations.get('adaptive-child')).toMatchObject({
+      role: 'adaptive_technique',
+      label: 'Adaptive technique',
+    })
+    expect(presentations.get('adaptive-parent')?.label).toBe('Adaptive aggregate parent')
+    expect(presentations.get('aggregate-parent')?.label).toBe('Aggregate parent')
+    expect(presentations.get('fallback-attack')).toMatchObject({
+      role: 'attack',
+      label: 'Attack',
+    })
+    expect(getAttemptRollups(state)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'attack', succeeded: 0, errors: 1 }),
+    ]))
+  })
+
+  it('extends plan metadata for persisted seeds and groups absent from the plan', () => {
+    const state = readyState([
+      makeResult('new-seed', 'group-a', 'seed-extra', 'success', 1),
+      makeResult('new-group', 'group-new', 'seed-1', 'failure', 2, {
+        atomic_attack_name: '',
+      }),
+    ])
+    const rollups = getAtomicGroupRollups(state)
+
+    expect(rollups.find((group) => group.id === 'group-a')?.planned).toBe(3)
+    expect(rollups.find((group) => group.id === 'group-new')?.displayGroup).toBe(
+      'Persisted attack group',
+    )
   })
 
   it('separates eight progress units, twelve persisted results, and zero retries', () => {
@@ -454,11 +583,17 @@ describe('scenario run progress calculations', () => {
       completed_at: '2026-01-01T00:03:00Z',
     }
     expect(getElapsedMilliseconds(terminal, Date.parse('2026-01-01T00:05:00Z'))).toBe(180_000)
+    expect(getElapsedMilliseconds(
+      { ...active, created_at: 'not-a-timestamp' },
+      Date.parse('2026-01-01T00:05:00Z'),
+    )).toBe(0)
   })
 
   it('calculates ETA from observed wall-clock completion rate and hides unsafe estimates', () => {
     const state = readyState([makeResult('a-1', 'group-a', 'seed-1', 'success', 1)])
     expect(getEtaMilliseconds(state, Date.parse('2026-01-01T00:02:00Z'))).toBe(240_000)
+    expect(getEtaMilliseconds(state, Date.parse(makePage().run.created_at))).toBeNull()
+    expect(getEtaMilliseconds(state, Number.MAX_VALUE)).toBeNull()
 
     expect(getEtaMilliseconds(
       { ...state, results: [] },

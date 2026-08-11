@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import pytest
 from unit.mocks import get_mock_target_identifier, make_scenario_result
 
 from pyrit.memory import MemoryInterface, ScenarioHistoryKeysetCursor
@@ -21,6 +22,24 @@ from pyrit.models import (
     ScenarioRunPlanSeedGroup,
     ScenarioRunState,
 )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "kwargs"),
+    [
+        ("_get_scenario_registry_name_condition", {"scenario_names": ["test.scenario"]}),
+        ("_get_scenario_history_plan_expressions", {}),
+        ("_get_scenario_attempt_unit_expressions", {}),
+    ],
+)
+def test_scenario_history_dialect_hooks_are_optional_until_used(
+    method_name: str,
+    kwargs: dict[str, object],
+) -> None:
+    assert method_name not in MemoryInterface.__abstractmethods__
+
+    with pytest.raises(NotImplementedError, match=method_name):
+        getattr(MemoryInterface, method_name)(MagicMock(), **kwargs)
 
 
 def _make_scenario(

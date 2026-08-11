@@ -90,6 +90,10 @@ describe('ScenarioHistory', () => {
     })
   })
 
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
   it('renders safe run metadata and opens rows by click or keyboard', async () => {
     const user = userEvent.setup()
     const onOpenRun = jest.fn()
@@ -137,6 +141,50 @@ describe('ScenarioHistory', () => {
     expect(await screen.findByText('1 known / total unknown')).toBeInTheDocument()
     expect(screen.getByText('1/1 known results')).toBeInTheDocument()
     expect(screen.queryByText('1/1 (100%)')).not.toBeInTheDocument()
+  })
+
+  it('renders safe fallbacks when optional run metadata is unavailable', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:30Z'))
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        scenario_name: 'LegacyScenario',
+        scenario_registry_name: null,
+        scenario_version: 1,
+        status: 'IN_PROGRESS',
+        completed_at: null,
+        total_attacks: 0,
+        completed_attacks: 0,
+        successful_attacks: undefined,
+        objective_achieved_rate: 0,
+        failed_attacks: [{
+          atomic_attack_name: 'legacy-attack',
+          objective: 'Legacy objective',
+          total_retries: 0,
+        }],
+        error_attacks: undefined,
+        total_retries: 0,
+        labels: {},
+        target: {
+          target_type: 'TextTarget',
+          endpoint: null,
+          model_name: null,
+        },
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    expect(await screen.findByRole('link', {
+      name: 'Open LegacyScenario scenario run',
+    })).toBeInTheDocument()
+    expect(screen.getByText('v1')).toBeInTheDocument()
+    expect(screen.getAllByText('TextTarget')).toHaveLength(2)
+    expect(screen.getByText('Not yet')).toBeInTheDocument()
+    expect(screen.getByText('30s elapsed')).toBeInTheDocument()
+    expect(screen.getAllByText('0/0')).toHaveLength(2)
+    expect(screen.getByText('1 / 0')).toBeInTheDocument()
   })
 
   it('isolates option-loading failures from the primary history request', async () => {

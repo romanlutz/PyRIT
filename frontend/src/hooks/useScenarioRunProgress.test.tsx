@@ -1,7 +1,11 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 
 import { scenariosApi } from '@/services/api'
-import type { ScenarioProgressResult, ScenarioRunProgress } from '@/types'
+import type {
+  ScenarioProgressResult,
+  ScenarioRunProgress,
+  ScenarioRunSummary,
+} from '@/types'
 
 import {
   SCENARIO_RUN_POLL_INTERVAL_MS,
@@ -52,6 +56,26 @@ function makePage(overrides: Partial<ScenarioRunProgress> = {}): ScenarioRunProg
     next_cursor: null,
     has_more: false,
     plan_complete: true,
+    ...overrides,
+  }
+}
+
+function makeSummary(overrides: Partial<ScenarioRunSummary> = {}): ScenarioRunSummary {
+  return {
+    scenario_result_id: 'run-1',
+    scenario_name: 'TestScenario',
+    scenario_version: 1,
+    status: 'IN_PROGRESS',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:01Z',
+    techniques_used: [],
+    total_attacks: 1,
+    completed_attacks: 0,
+    objective_achieved_rate: 0,
+    failed_attacks: [],
+    attack_retries: [],
+    total_retries: 0,
+    labels: {},
     ...overrides,
   }
 }
@@ -203,6 +227,90 @@ describe('useScenarioRunProgress', () => {
     expect(signals[1].aborted).toBe(true)
   })
 
+  it('treats a blank run ID as not found without issuing a request', async () => {
+    const { result } = renderHook(() => useScenarioRunProgress('   '))
+
+    await waitFor(() => expect(result.current.state.loadStatus).toBe('not-found'))
+    expect(mockGetRunProgress).not.toHaveBeenCalled()
+  })
+
+  it('treats an HTTP 404 as not found', async () => {
+    mockGetRunProgress.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: {
+        status: 404,
+        data: { detail: 'Scenario run not found.' },
+      },
+    })
+
+    const { result } = renderHook(() => useScenarioRunProgress('missing-run'))
+
+    await waitFor(() => expect(result.current.state.loadStatus).toBe('not-found'))
+    expect(result.current.state.error).toBe('Scenario run not found.')
+  })
+
+  it('ignores a stale page that resolves after the run ID changes', async () => {
+    let resolveOldRequest: ((page: ScenarioRunProgress) => void) | undefined
+    mockGetRunProgress.mockImplementation((runId: string) => {
+      if (runId === 'run-1') {
+        return new Promise((resolve) => {
+          resolveOldRequest = resolve
+        })
+      }
+      return Promise.resolve(makePage({
+        run: {
+          ...makePage().run,
+          scenario_result_id: 'run-2',
+        },
+      }))
+    })
+
+    const { result, rerender, unmount } = renderHook(
+      ({ runId }) => useScenarioRunProgress(runId),
+      { initialProps: { runId: 'run-1' } },
+    )
+    await waitFor(() => expect(mockGetRunProgress).toHaveBeenCalledTimes(1))
+    rerender({ runId: 'run-2' })
+    await waitFor(() => expect(result.current.state.run?.scenario_result_id).toBe('run-2'))
+
+    await act(async () => {
+      resolveOldRequest?.(makePage())
+    })
+    expect(result.current.state.run?.scenario_result_id).toBe('run-2')
+    unmount()
+  })
+
+  it('ignores a stale failure after the run ID changes', async () => {
+    let rejectOldRequest: ((reason?: unknown) => void) | undefined
+    mockGetRunProgress.mockImplementation((runId: string) => {
+      if (runId === 'run-1') {
+        return new Promise((_resolve, reject) => {
+          rejectOldRequest = reject
+        })
+      }
+      return Promise.resolve(makePage({
+        run: {
+          ...makePage().run,
+          scenario_result_id: 'run-2',
+        },
+      }))
+    })
+
+    const { result, rerender, unmount } = renderHook(
+      ({ runId }) => useScenarioRunProgress(runId),
+      { initialProps: { runId: 'run-1' } },
+    )
+    await waitFor(() => expect(mockGetRunProgress).toHaveBeenCalledTimes(1))
+    rerender({ runId: 'run-2' })
+    await waitFor(() => expect(result.current.state.run?.scenario_result_id).toBe('run-2'))
+
+    await act(async () => {
+      rejectOldRequest?.(new Error('late failure'))
+    })
+    expect(result.current.state.error).toBeNull()
+    unmount()
+  })
+
   it('retries from the last good cursor after a transient failure', async () => {
     jest.useFakeTimers()
     mockGetRunProgress
@@ -247,22 +355,12 @@ describe('useScenarioRunProgress', () => {
     await waitFor(() => expect(mockGetRunProgress).toHaveBeenCalledTimes(1))
 
     act(() => {
-      result.current.applyRunSummary({
-        scenario_result_id: 'run-1',
-        scenario_name: 'TestScenario',
-        scenario_version: 1,
+      result.current.applyRunSummary(makeSummary({
         status: 'CANCELLED',
-        created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:02Z',
-        techniques_used: [],
-        total_attacks: 1,
         completed_attacks: 1,
         objective_achieved_rate: 100,
-        failed_attacks: [],
-        attack_retries: [],
-        total_retries: 0,
-        labels: {},
-      })
+      }))
     })
 
     await waitFor(() => expect(result.current.state.results).toEqual([makeResult('final-attempt')]))
@@ -271,6 +369,24 @@ describe('useScenarioRunProgress', () => {
       { since: 'cursor-1', limit: 500 },
       expect.any(AbortSignal),
     )
+    unmount()
+  })
+
+  it('applies a nonterminal run summary without forcing a catch-up request', async () => {
+    mockGetRunProgress.mockResolvedValueOnce(makePage({ next_cursor: 'cursor-1' }))
+    const { result, unmount } = renderHook(() => useScenarioRunProgress('run-1'))
+    await waitFor(() => expect(result.current.state.cursor).toBe('cursor-1'))
+    mockGetRunProgress.mockClear()
+
+    act(() => {
+      result.current.applyRunSummary(makeSummary({
+        status: 'IN_PROGRESS',
+        updated_at: '2026-01-01T00:00:02Z',
+      }))
+    })
+
+    expect(result.current.state.run?.status).toBe('IN_PROGRESS')
+    expect(mockGetRunProgress).not.toHaveBeenCalled()
     unmount()
   })
 })

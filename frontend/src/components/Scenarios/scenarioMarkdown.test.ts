@@ -40,4 +40,14 @@ describe('normalizeScenarioMarkdown', () => {
   it('leaves unmatched delimiters unchanged', () => {
     expect(normalizeScenarioMarkdown('Keep ``open intact.')).toBe('Keep ``open intact.')
   })
+
+  it('preserves content inside an unclosed tilde fence', () => {
+    const source = [
+      '~~~text',
+      'Keep ``literal fence text`` unchanged.',
+      '```',
+    ].join('\n')
+
+    expect(normalizeScenarioMarkdown(source)).toBe(source)
+  })
 })

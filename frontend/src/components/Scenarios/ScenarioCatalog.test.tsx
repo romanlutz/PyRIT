@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { MemoryRouter, useLocation } from 'react-router'
@@ -105,6 +105,40 @@ describe('ScenarioCatalog', () => {
     expect(await screen.findByText('foundry.red_team_agent')).toBeInTheDocument()
     expect(screen.getByText('encoding.base64')).toBeInTheDocument()
     expect(mockListCatalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a catalog response that resolves after unmount', async () => {
+    let resolveRequest: ((value: {
+      items: RegisteredScenario[]
+      pagination: { limit: number; has_more: boolean }
+    }) => void) | undefined
+    mockListCatalog.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveRequest = resolve
+    }))
+
+    const { unmount } = render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    await waitFor(() => expect(mockListCatalog).toHaveBeenCalledTimes(1))
+    unmount()
+    await act(async () => {
+      resolveRequest?.({
+        items: [makeScenario({ scenario_name: 'late.scenario' })],
+        pagination: { limit: 200, has_more: false },
+      })
+    })
+  })
+
+  it('ignores a catalog failure that arrives after unmount', async () => {
+    let rejectRequest: ((reason?: unknown) => void) | undefined
+    mockListCatalog.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectRequest = reject
+    }))
+
+    const { unmount } = render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    await waitFor(() => expect(mockListCatalog).toHaveBeenCalledTimes(1))
+    unmount()
+    await act(async () => {
+      rejectRequest?.(new Error('late failure'))
+    })
   })
 
   it('renders the exact launch-index column order and applies spacing to every cell', async () => {
@@ -232,6 +266,50 @@ describe('ScenarioCatalog', () => {
 
     expect(screen.queryByText('foundry.red_team_agent')).not.toBeInTheDocument()
     expect(screen.getByText('encoding.base64')).toBeInTheDocument()
+  })
+
+  it('searches dataset metadata and renders singular counts with no default techniques', async () => {
+    const user = userEvent.setup()
+    mockListCatalog.mockResolvedValueOnce({
+      items: [
+        makeScenario({
+          scenario_name: 'scenario.one',
+          default_techniques: [],
+          default_datasets: ['dataset-one'],
+          default_dataset_summaries: [{
+            name: 'dataset-one',
+            kind: 'dataset',
+            logical_seed_group_count: 1,
+            selected_seed_group_count: 1,
+            configured_caps: [],
+            selection_note: null,
+          }],
+        }),
+        makeScenario({
+          scenario_name: 'scenario.two',
+          default_datasets: ['dataset-two'],
+          default_dataset_summaries: [{
+            name: 'dataset-two',
+            kind: 'dataset',
+            logical_seed_group_count: 2,
+            selected_seed_group_count: 2,
+            configured_caps: [],
+            selection_note: 'Dataset metadata is searchable.',
+          }],
+        }),
+      ],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+    await screen.findByText('scenario.one')
+    await user.type(screen.getByLabelText('Search scenarios'), 'dataset')
+
+    const firstRow = screen.getByTestId('scenario-card-scenario.one')
+    expect(within(firstRow).getByText('1 objective')).toBeInTheDocument()
+    expect(within(firstRow).getByText(/dataset-one/)).toBeInTheDocument()
+    expect(within(firstRow).getByText('No default techniques')).toBeInTheDocument()
+    expect(screen.getByText('scenario.two')).toBeInTheDocument()
   })
 
   it('shows a no-results state when the search matches nothing', async () => {
