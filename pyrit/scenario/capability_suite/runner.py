@@ -20,7 +20,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol
 
@@ -33,8 +33,9 @@ from pyrit.executor.capability import (
     CapabilityTaskExecutor,
     ErrorEvidence,
     ToolRegistry,
+    validate_capability_target,
 )
-from pyrit.models import Message, MessagePiece
+from pyrit.models import Message, MessagePiece, PromptDataType
 from pyrit.sandbox import (
     SandboxEnvironmentSpec,
     SandboxExecRequest,
@@ -113,6 +114,48 @@ class CapabilitySuiteProgressSink(Protocol):
         """Report progress after one logical run unit completes."""
 
 
+@dataclass(frozen=True)
+class CapabilitySuiteTargetRequirements:
+    """Target behavior and modalities required by one compiled suite."""
+
+    requires_multi_turn: bool
+    requires_tools: bool
+    requires_system_prompt: bool
+    required_input_modalities: frozenset[frozenset[PromptDataType]]
+    required_output_modalities: frozenset[frozenset[PromptDataType]]
+
+
+def get_capability_suite_target_requirements(
+    *,
+    manifest: CapabilitySuiteManifest,
+) -> CapabilitySuiteTargetRequirements:
+    """
+    Resolve target requirements from the exact cases that will execute.
+
+    Returns:
+        CapabilitySuiteTargetRequirements: The suite's required behavior and modalities.
+    """
+    requires_tools = any(case.tools or case.sandbox_tools_prefix for case in manifest.cases)
+    requires_multi_turn = requires_tools or any(
+        (case.limits.max_turns or 1) > 1 or len(case.messages) > 1 for case in manifest.cases
+    )
+    requires_system_prompt = any(message.role == "system" for case in manifest.cases for message in case.messages)
+    required_inputs: set[frozenset[PromptDataType]] = set()
+    for case in manifest.cases:
+        if case.messages:
+            required_inputs.update(frozenset({message.data_type}) for message in case.messages)
+        else:
+            required_inputs.add(frozenset({"text"}))
+        required_inputs.update(frozenset({modality}) for modality in case.modalities)
+    return CapabilitySuiteTargetRequirements(
+        requires_multi_turn=requires_multi_turn,
+        requires_tools=requires_tools,
+        requires_system_prompt=requires_system_prompt,
+        required_input_modalities=frozenset(required_inputs),
+        required_output_modalities=frozenset({frozenset({"text"})}),
+    )
+
+
 class CapabilitySuiteRunner:
     """Drive a capability suite's cases through bounded-concurrency sandboxed attempts."""
 
@@ -163,7 +206,7 @@ class CapabilitySuiteRunner:
     async def run_async(
         self,
         *,
-        run_id: str | None = None,
+        resume_id: str | None = None,
         cancellation_event: asyncio.Event | None = None,
     ) -> CapabilitySuiteRunResult:
         """
@@ -175,13 +218,25 @@ class CapabilitySuiteRunner:
 
         Raises:
             ValueError: If any case is explicitly marked non-runnable.
+            RuntimeError: If provider cleanup fails while execution is already unwinding.
         """
         unsupported = tuple(case for case in self._manifest.cases if not case.runnable)
         if unsupported:
             details = "; ".join(f"{case.case_id}: {case.unsupported_reason}" for case in unsupported)
             raise ValueError(f"Capability suite contains non-runnable cases: {details}")
         content_hash = manifest_hash(self._manifest)
-        run_id = run_id or f"capability-suite-{content_hash[:32]}"
+        provenance_id = f"capability-suite-{content_hash[:32]}"
+        run_id = resume_id or f"capability-suite-{uuid.uuid4()}"
+        target_requirements = get_capability_suite_target_requirements(manifest=self._manifest)
+        validate_capability_target(
+            target=self._target,
+            request_options_factory=self._request_options_factory,
+            requires_multi_turn=target_requirements.requires_multi_turn,
+            requires_tools=target_requirements.requires_tools,
+            requires_system_prompt=target_requirements.requires_system_prompt,
+            required_input_modalities=target_requirements.required_input_modalities,
+            required_output_modalities=target_requirements.required_output_modalities,
+        )
         provider_configs = {
             case.case_id: case.sandbox_provider or self._manifest.sandbox_provider for case in self._manifest.cases
         }
@@ -200,6 +255,8 @@ class CapabilitySuiteRunner:
         prepared_tasks: list[tuple[SandboxProvider, SandboxTaskSpec]] = []
         prepared_providers: list[SandboxProvider] = []
         provider_cleanup_error: str | None = None
+        unit_results: list[list[CapabilitySuiteAttemptRecord]] = []
+        execution_error: BaseException | None = None
         try:
             for provider in providers_by_key.values():
                 await provider.prepare_async()
@@ -237,24 +294,36 @@ class CapabilitySuiteRunner:
                 return records
 
             unit_results = await asyncio.gather(*(_run_unit_bounded_async(unit) for unit in units))
-        finally:
-            cleanup_errors: list[str] = []
-            for provider, task_spec in reversed(prepared_tasks):
-                try:
-                    await provider.cleanup_task_async(task_spec)
-                except Exception as error:
-                    cleanup_errors.append(f"{type(error).__name__}: {error}")
-            for provider in reversed(prepared_providers):
-                try:
-                    await provider.cleanup_async()
-                except Exception as error:
-                    cleanup_errors.append(f"{type(error).__name__}: {error}")
-            if cleanup_errors:
-                provider_cleanup_error = "; ".join(cleanup_errors)
+        except BaseException as error:
+            execution_error = error
+
+        cleanup_task = asyncio.create_task(
+            self._cleanup_prepared_resources_async(
+                prepared_tasks=prepared_tasks,
+                prepared_providers=prepared_providers,
+            )
+        )
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as error:
+                cleanup_cancellation = cleanup_cancellation or error
+        provider_cleanup_error = cleanup_task.result()
+        if provider_cleanup_error is not None and execution_error is not None:
+            raise RuntimeError(f"Sandbox provider cleanup failed: {provider_cleanup_error}") from execution_error
+        if provider_cleanup_error is not None and cleanup_cancellation is not None:
+            raise RuntimeError(f"Sandbox provider cleanup failed: {provider_cleanup_error}") from cleanup_cancellation
+        if execution_error is not None:
+            raise execution_error
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
 
         attempts = tuple(record for records in unit_results for record in records)
         return CapabilitySuiteRunResult(
             run_id=run_id,
+            suite_id=self._manifest.suite_id,
+            provenance_id=provenance_id,
             manifest_hash=content_hash,
             attempts=attempts,
             aggregate=aggregate_attempts(
@@ -263,6 +332,31 @@ class CapabilitySuiteRunner:
             ),
             provider_cleanup_error=provider_cleanup_error,
         )
+
+    @staticmethod
+    async def _cleanup_prepared_resources_async(
+        *,
+        prepared_tasks: list[tuple[SandboxProvider, SandboxTaskSpec]],
+        prepared_providers: list[SandboxProvider],
+    ) -> str | None:
+        """
+        Clean every prepared task and provider, aggregating all failures.
+
+        Returns:
+            str | None: The combined cleanup failures, if any.
+        """
+        cleanup_errors: list[str] = []
+        for provider, task_spec in reversed(prepared_tasks):
+            try:
+                await provider.cleanup_task_async(task_spec)
+            except BaseException as error:
+                cleanup_errors.append(f"{type(error).__name__}: {error}")
+        for provider in reversed(prepared_providers):
+            try:
+                await provider.cleanup_async()
+            except BaseException as error:
+                cleanup_errors.append(f"{type(error).__name__}: {error}")
+        return "; ".join(cleanup_errors) or None
 
     async def _run_unit_async(
         self,
@@ -425,9 +519,13 @@ class CapabilitySuiteRunner:
                     session=session,
                     cancellation_event=cancellation_event,
                 )
-        except asyncio.CancelledError:
-            with suppress(Exception):
+        except asyncio.CancelledError as cancellation:
+            try:
                 await session.close_async()
+            except asyncio.CancelledError:
+                raise cancellation from None
+            except Exception as cleanup_error:
+                raise cleanup_error from cancellation
             raise
         except Exception as error:
             run_error = error

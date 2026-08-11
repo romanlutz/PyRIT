@@ -169,6 +169,7 @@ async def _run_execute_command_async(*, args: argparse.Namespace, loaded: Loaded
             target=target,
             inspect_evals_cache_dir=args.inspect_evals_cache_dir,
             request_options_factory=request_options_factory,
+            resume_id=args.resume_id,
             cancellation_event=cancellation_event,
         )
     finally:
@@ -400,23 +401,38 @@ async def _resolve_target_async(*, target_name: str | None, target_role: str, co
 
 
 def _validate_target_and_request_options(*, target: Any, manifest: CapabilitySuiteManifest) -> Any:
-    from pyrit.executor.capability import OpenAIResponsesCapabilityRequestOptionsFactory
-    from pyrit.prompt_target import OpenAIResponseTarget
+    from pyrit.compat.inspect_ai.loader import _NoToolRequestOptionsFactory
+    from pyrit.executor.capability import (
+        build_capability_request_options_factory,
+        validate_capability_target,
+    )
+    from pyrit.scenario.capability_suite import get_capability_suite_target_requirements
 
-    has_tools = any(case.tools or case.sandbox_tools_prefix for case in manifest.cases)
-    requires_multi_turn = has_tools or any((case.limits.max_turns or 1) > 1 for case in manifest.cases)
-    if requires_multi_turn and not target.capabilities.supports_multi_turn:
-        raise ValueError("The selected target does not support the multi-turn conversation required by this task.")
-    if requires_multi_turn and not target.capabilities.supports_editable_history:
-        raise ValueError("The selected target does not support editable history required for capability tool results.")
-    if not has_tools:
-        return None
-    if not isinstance(target, OpenAIResponseTarget):
-        raise ValueError(
-            "The selected target cannot receive capability tool declarations. Select a registered "
-            "OpenAIResponseTarget/model role for GDM CTF tasks."
-        )
-    return OpenAIResponsesCapabilityRequestOptionsFactory()
+    target_requirements = get_capability_suite_target_requirements(manifest=manifest)
+    validate_capability_target(
+        target=target,
+        request_options_factory=None,
+        requires_multi_turn=target_requirements.requires_multi_turn,
+        requires_tools=target_requirements.requires_tools,
+        requires_system_prompt=target_requirements.requires_system_prompt,
+        required_input_modalities=target_requirements.required_input_modalities,
+        required_output_modalities=target_requirements.required_output_modalities,
+    )
+    factory = (
+        build_capability_request_options_factory(target=target)
+        if target_requirements.requires_tools
+        else _NoToolRequestOptionsFactory(request_options_type=target.request_options_type)
+    )
+    validate_capability_target(
+        target=target,
+        request_options_factory=factory,
+        requires_multi_turn=target_requirements.requires_multi_turn,
+        requires_tools=target_requirements.requires_tools,
+        requires_system_prompt=target_requirements.requires_system_prompt,
+        required_input_modalities=target_requirements.required_input_modalities,
+        required_output_modalities=target_requirements.required_output_modalities,
+    )
+    return factory
 
 
 def _write_loaded_outputs(

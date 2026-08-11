@@ -106,6 +106,18 @@ class _CountingProvider(SandboxProvider):
         return 0
 
 
+class _BlockingCleanupProvider(_CountingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_started = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+
+    async def _cleanup_async(self) -> None:
+        self.cleanup_count += 1
+        self.cleanup_started.set()
+        await self.release_cleanup.wait()
+
+
 class _RetryEvidenceTool:
     def __init__(self) -> None:
         self.call_count = 0
@@ -176,6 +188,25 @@ async def test_concurrent_provider_and_task_lifecycle_runs_once() -> None:
     assert provider.prepare_count == 1
     assert provider.task_prepare_count == 1
     assert provider.task_cleanup_count == 1
+    assert provider.cleanup_count == 1
+
+
+async def test_repeated_cancellation_does_not_interrupt_provider_cleanup() -> None:
+    provider = _BlockingCleanupProvider()
+    await provider.prepare_async()
+    cleanup = asyncio.create_task(provider.cleanup_async())
+    await provider.cleanup_started.wait()
+
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup.done()
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup.done()
+    provider.release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
     assert provider.cleanup_count == 1
 
 

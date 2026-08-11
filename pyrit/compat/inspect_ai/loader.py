@@ -212,6 +212,14 @@ class _ContainedSourceFinder(importlib.abc.MetaPathFinder):
 
 
 class _NoToolRequestOptionsFactory:
+    def __init__(
+        self,
+        *,
+        request_options_type: type[TargetRequestOptions] = TargetRequestOptions,
+    ) -> None:
+        """Initialize a no-tool factory for the resolved target transport."""
+        self._request_options_type = request_options_type
+
     def build_request_options(
         self,
         *,
@@ -224,7 +232,7 @@ class _NoToolRequestOptionsFactory:
                 symbol="inspect_ai.tool runtime",
                 source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
             )
-        return TargetRequestOptions()
+        return self._request_options_type()
 
 
 def load_inspect_eval(
@@ -444,6 +452,7 @@ async def run_inspect_eval_async(
     allow_network: bool = False,
     verify_source_revision: bool = True,
     request_options_factory: CapabilityRequestOptionsFactory | None = None,
+    resume_id: str | None = None,
     sandbox_provider_registry: SandboxProviderFactoryRegistry | None = None,
     cancellation_event: asyncio.Event | None = None,
     worker_timeout_seconds: float = 300.0,
@@ -475,6 +484,7 @@ async def run_inspect_eval_async(
         target=target,
         inspect_evals_cache_dir=inspect_evals_cache_dir,
         request_options_factory=request_options_factory,
+        resume_id=resume_id,
         sandbox_provider_registry=sandbox_provider_registry,
         cancellation_event=cancellation_event,
     )
@@ -547,6 +557,7 @@ async def run_loaded_inspect_eval_async(
     target: PromptTarget,
     inspect_evals_cache_dir: Path | None = None,
     request_options_factory: CapabilityRequestOptionsFactory | None = None,
+    resume_id: str | None = None,
     sandbox_provider_registry: SandboxProviderFactoryRegistry | None = None,
     cancellation_event: asyncio.Event | None = None,
 ) -> CapabilitySuiteRunResult:
@@ -561,12 +572,14 @@ async def run_loaded_inspect_eval_async(
     """
     from pyrit.compat.inspect_ai.runtime import build_inspect_tool_registry
     from pyrit.compat.inspect_ai.scorer import InspectCheckFlagScorer, InspectChoiceScorer
+    from pyrit.executor.capability import build_capability_request_options_factory, validate_capability_target
     from pyrit.scenario.capability_suite import (
         CapabilitySuiteRunner,
         LocalAssetSourceResolver,
         ResultOnlyScorerAdapter,
         build_default_sandbox_provider_registry,
         build_default_scorer_registry,
+        get_capability_suite_target_requirements,
     )
 
     scorer_registry = build_default_scorer_registry()
@@ -583,15 +596,32 @@ async def run_loaded_inspect_eval_async(
         if inspect_evals_cache_dir is not None and any(case.assets for case in loaded.suite.cases)
         else None
     )
+    target_requirements = get_capability_suite_target_requirements(manifest=loaded.suite)
+    validate_capability_target(
+        target=target,
+        request_options_factory=None,
+        requires_multi_turn=target_requirements.requires_multi_turn,
+        requires_tools=target_requirements.requires_tools,
+        requires_system_prompt=target_requirements.requires_system_prompt,
+        required_input_modalities=target_requirements.required_input_modalities,
+        required_output_modalities=target_requirements.required_output_modalities,
+    )
+    resolved_request_options_factory = request_options_factory
+    if resolved_request_options_factory is None:
+        resolved_request_options_factory = (
+            build_capability_request_options_factory(target=target)
+            if target_requirements.requires_tools
+            else _NoToolRequestOptionsFactory(request_options_type=target.request_options_type)
+        )
     return await CapabilitySuiteRunner(
         manifest=loaded.suite,
         target=target,
-        request_options_factory=request_options_factory or _NoToolRequestOptionsFactory(),
+        request_options_factory=resolved_request_options_factory,
         sandbox_provider_registry=sandbox_provider_registry or build_default_sandbox_provider_registry(),
         tool_implementation_registry=build_inspect_tool_registry(),
         scorer_registry=scorer_registry,
         asset_resolver=asset_resolver,
-    ).run_async(cancellation_event=cancellation_event)
+    ).run_async(resume_id=resume_id, cancellation_event=cancellation_event)
 
 
 def _resolve_source_layout(source_root: Path) -> tuple[Path, Path, Path]:

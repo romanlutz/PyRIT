@@ -55,6 +55,8 @@ class CapabilitySuiteRunResult:
     """The complete, preserved output of one capability-suite run."""
 
     run_id: str
+    suite_id: str
+    provenance_id: str
     manifest_hash: str
     attempts: tuple[CapabilitySuiteAttemptRecord, ...]
     aggregate: CapabilitySuiteAggregate

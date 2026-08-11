@@ -9,14 +9,57 @@ import pytest
 from pyrit.cli import pyrit_capability_suite
 from pyrit.compat.inspect_ai import cli as inspect_cli
 from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
+from pyrit.executor.capability import ToolExecutionPolicy
 from pyrit.models import Message, TargetResponseMetadata
-from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
+from pyrit.prompt_target import (
+    OpenAIResponsesRequestOptions,
+    PromptTarget,
+    TargetCapabilities,
+    TargetConfiguration,
+)
+from pyrit.scenario.capability_suite.manifest import (
+    CapabilityCaseManifest,
+    CapabilitySuiteManifest,
+    CaseMessageManifest,
+    LocalSandboxProviderManifestConfig,
+    SuiteProvenance,
+)
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
 
 
 def test_default_profile_matches_pinned_compatibility_contract() -> None:
     assert PINNED_INSPECT_EVALS_PROFILE.profile_id == pyrit_capability_suite._DEFAULT_INSPECT_PROFILE_ID
+
+
+def test_tool_target_preflight_reports_exact_missing_result_modality() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "(?s)Target '_MissingToolResultTarget'.*input modality \\{function_call_output\\}.*"
+            "Select a target whose declared capabilities and modalities"
+        ),
+    ):
+        inspect_cli._validate_target_and_request_options(
+            target=_MissingToolResultTarget(),
+            manifest=_tool_manifest(),
+        )
+
+
+def test_non_tool_preflight_uses_resolved_target_request_options_transport() -> None:
+    manifest = _tool_manifest().model_copy(
+        update={"cases": (_tool_manifest().cases[0].model_copy(update={"sandbox_tools_prefix": None}),)}
+    )
+
+    factory = inspect_cli._validate_target_and_request_options(
+        target=_MissingToolResultTarget(),
+        manifest=manifest,
+    )
+
+    assert isinstance(
+        factory.build_request_options(declarations=(), execution_policy=ToolExecutionPolicy.SEQUENTIAL),
+        OpenAIResponsesRequestOptions,
+    )
 
 
 class _ArcTarget(PromptTarget):
@@ -45,6 +88,45 @@ class _ArcTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         del normalized_conversation
+
+
+class _MissingToolResultTarget(_ArcTarget):
+    _DEFAULT_CONFIGURATION = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+            supports_editable_history=True,
+            supports_external_tool_execution=True,
+            input_modalities=frozenset({frozenset({"text"})}),
+            output_modalities=frozenset({frozenset({"text"}), frozenset({"function_call"})}),
+        )
+    )
+
+    def _get_default_request_options(self) -> OpenAIResponsesRequestOptions:
+        return OpenAIResponsesRequestOptions(
+            tools=None,
+            tool_choice=None,
+            parallel_tool_calls=None,
+            tool_execution_mode="single_generation",
+        )
+
+
+def _tool_manifest() -> CapabilitySuiteManifest:
+    return CapabilitySuiteManifest(
+        suite_id="tool-suite",
+        name="Tool suite",
+        provenance=SuiteProvenance(source="unit-test"),
+        sandbox_provider=LocalSandboxProviderManifestConfig(),
+        cases=(
+            CapabilityCaseManifest(
+                case_id="case-1",
+                objective="use a tool",
+                messages=(CaseMessageManifest(role="user", content="start"),),
+                sandbox_tools_prefix="sandbox",
+            ),
+        ),
+    )
 
 
 def test_inspect_evals_command_analyzes_and_compiles_without_server(tmp_path):

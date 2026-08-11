@@ -189,7 +189,9 @@ class _ScriptedToolTarget(PromptTarget):
             supports_multi_message_pieces=True,
             supports_system_prompt=True,
             supports_editable_history=True,
+            supports_external_tool_execution=True,
             input_modalities=frozenset({frozenset({"text"}), frozenset({"function_call_output"})}),
+            output_modalities=frozenset({frozenset({"text"}), frozenset({"function_call"})}),
         )
     )
 
@@ -479,12 +481,12 @@ def test_cli_rejects_unsupported_hyperv_and_target_capabilities(
         inspect_evals_cache_dir=intercode_cache,
         verify_source_revision=False,
     )
-    with pytest.raises(ValueError, match="does not support the multi-turn conversation"):
+    with pytest.raises(ValueError, match="(?s)Target '_SingleTurnTarget'.*supports_multi_turn"):
         inspect_cli._validate_target_and_request_options(
             target=_SingleTurnTarget(calls=[]),
             manifest=loaded.suite,
         )
-    with pytest.raises(ValueError, match="cannot receive capability tool declarations"):
+    with pytest.raises(ValueError, match="Target '_ScriptedToolTarget'.*no registered capability tool adapter"):
         inspect_cli._validate_target_and_request_options(
             target=_ScriptedToolTarget(calls=[]),
             manifest=loaded.suite,

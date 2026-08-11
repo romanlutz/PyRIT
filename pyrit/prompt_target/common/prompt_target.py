@@ -257,6 +257,11 @@ class PromptTarget(Identifiable):
         """Return immutable constructor-backed defaults for per-call options."""
         return TargetRequestOptions()
 
+    @property
+    def request_options_type(self) -> type[TargetRequestOptions]:
+        """The immutable request-options transport accepted by this target."""
+        return type(self._get_default_request_options())
+
     def _get_request_options(self, option_type: type[RequestOptionsT]) -> RequestOptionsT:
         """
         Return the resolved options for the current coroutine.

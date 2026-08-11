@@ -47,6 +47,7 @@ class CapabilityName(str, Enum):
     JSON_SCHEMA = "supports_json_schema"
     JSON_OUTPUT = "supports_json_output"
     EDITABLE_HISTORY = "supports_editable_history"
+    EXTERNAL_TOOL_EXECUTION = "supports_external_tool_execution"
     SYSTEM_PROMPT = "supports_system_prompt"
     STREAMING_AUDIO = "supports_streaming_audio"
 
@@ -92,6 +93,10 @@ class TargetCapabilities(BaseModel):
     #: target supports multi-turn interactions and that the attack history is not
     #: immutable once set.
     supports_editable_history: bool = False
+
+    #: Whether the target can return tool requests from exactly one generation
+    #: while leaving execution and result persistence to the caller.
+    supports_external_tool_execution: bool = False
 
     #: Whether the target natively supports system prompts.
     supports_system_prompt: bool = False

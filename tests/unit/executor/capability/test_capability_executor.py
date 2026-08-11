@@ -34,6 +34,7 @@ from pyrit.executor.capability import (
     ToolExecutionPolicy,
     ToolExecutionStatus,
     ToolRegistry,
+    validate_capability_target,
 )
 from pyrit.executor.capability.executor import _root_exception_name
 from pyrit.models import (
@@ -135,6 +136,32 @@ class FakeCapabilityTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         return
+
+
+class _ResponsesTransportTarget(FakeCapabilityTarget):
+    _DEFAULT_CONFIGURATION = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_editable_history=True,
+            supports_external_tool_execution=True,
+            input_modalities=frozenset({frozenset({"text"}), frozenset({"function_call_output"})}),
+            output_modalities=frozenset({frozenset({"text"}), frozenset({"function_call"})}),
+        )
+    )
+
+    def _get_default_request_options(self) -> OpenAIResponsesRequestOptions:
+        return OpenAIResponsesRequestOptions(tool_execution_mode="single_generation")
+
+
+class _LegacyResponsesFactory:
+    def build_request_options(
+        self,
+        *,
+        declarations: tuple[ToolDeclaration, ...],
+        execution_policy: ToolExecutionPolicy,
+    ) -> TargetRequestOptions:
+        del declarations, execution_policy
+        return OpenAIResponsesRequestOptions(tool_execution_mode="legacy_auto")
 
 
 @dataclass
@@ -279,6 +306,42 @@ def test_openai_options_adapter_forces_single_generation() -> None:
     assert options.parallel_tool_calls is True
     assert options.tools is not None
     assert options.tools[0].name == "lookup"
+
+
+def test_preflight_rejects_responses_adapter_without_single_generation_ownership() -> None:
+    target = _ResponsesTransportTarget(responses=[])
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Target '_ResponsesTransportTarget' requires OpenAI Responses single-generation external-tool "
+            r"ownership.*tool_execution_mode='legacy_auto'.*tool_execution_mode='single_generation'"
+        ),
+    ):
+        validate_capability_target(
+            target=target,
+            request_options_factory=_LegacyResponsesFactory(),
+            requires_multi_turn=True,
+            requires_tools=True,
+        )
+
+
+def test_preflight_rejects_non_tool_adapter_with_wrong_transport() -> None:
+    target = _ResponsesTransportTarget(responses=[])
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Target '_ResponsesTransportTarget' requires request-options transport "
+            r"'OpenAIResponsesRequestOptions'.*produces 'TargetRequestOptions'"
+        ),
+    ):
+        validate_capability_target(
+            target=target,
+            request_options_factory=FakeRequestOptionsFactory(),
+            requires_multi_turn=False,
+            requires_tools=False,
+        )
 
 
 async def test_simple_completion_and_usage_accounting() -> None:

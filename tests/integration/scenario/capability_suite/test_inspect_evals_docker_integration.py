@@ -54,7 +54,11 @@ class _FlagTarget(PromptTarget):
         capabilities=TargetCapabilities(
             supports_multi_turn=True,
             supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+            supports_editable_history=True,
+            supports_external_tool_execution=True,
             input_modalities=frozenset({frozenset({"text"}), frozenset({"function_call_output"})}),
+            output_modalities=frozenset({frozenset({"text"}), frozenset({"function_call"})}),
         )
     )
 

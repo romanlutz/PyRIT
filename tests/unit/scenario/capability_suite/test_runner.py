@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from pyrit.executor.capability import CapabilityOutcome, ToolExecutionPolicy
+from pyrit.memory import CentralMemory
 from pyrit.models import Message, TargetResponseMetadata
 from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, TargetRequestOptions
 from pyrit.sandbox import LocalSandboxProvider, LocalSandboxProviderConfig, SandboxProvider, SandboxSessionSpec
@@ -31,7 +32,11 @@ from pyrit.scenario.capability_suite.registries import (
     CapabilitySuiteScorerFactoryRegistry,
     SandboxProviderFactoryRegistry,
 )
-from pyrit.scenario.capability_suite.results import AttemptOutcomeKind, CapabilitySuiteProgress
+from pyrit.scenario.capability_suite.results import (
+    AttemptOutcomeKind,
+    CapabilitySuiteProgress,
+    CapabilitySuiteRunResult,
+)
 from pyrit.scenario.capability_suite.runner import CapabilitySuiteRunner
 from pyrit.scenario.capability_suite.serialization import manifest_hash
 
@@ -70,10 +75,17 @@ class FakeCapabilityTarget(PromptTarget):
             supports_multi_message_pieces=True,
             supports_system_prompt=True,
             supports_editable_history=True,
+            supports_external_tool_execution=True,
             input_modalities=frozenset(
                 {
                     frozenset({"text"}),
                     frozenset({"function_call_output"}),
+                }
+            ),
+            output_modalities=frozenset(
+                {
+                    frozenset({"text"}),
+                    frozenset({"function_call"}),
                 }
             ),
         )
@@ -85,8 +97,9 @@ class FakeCapabilityTarget(PromptTarget):
         responses: list[Message | BaseException],
         probe: ConcurrencyProbe | None = None,
         delay_seconds: float = 0,
+        custom_configuration: TargetConfiguration | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(custom_configuration=custom_configuration)
         self._responses = list(responses)
         self._probe = probe
         self._delay_seconds = delay_seconds
@@ -116,6 +129,10 @@ class FakeCapabilityTarget(PromptTarget):
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         return
+
+
+class AlternateFakeCapabilityTarget(FakeCapabilityTarget):
+    """A distinct target identity for persistent rerun coverage."""
 
 
 def _text_message(text: str = "done") -> Message:
@@ -180,10 +197,21 @@ class FakeSandboxSession(SandboxSession):
 class FakeSandboxProvider(SandboxProvider):
     """A real ``SandboxProvider`` subclass whose session creation is fully injected."""
 
-    def __init__(self, *, session_factory) -> None:
+    def __init__(
+        self,
+        *,
+        session_factory,
+        cleanup_error: Exception | None = None,
+        cleanup_started: asyncio.Event | None = None,
+        release_cleanup: asyncio.Event | None = None,
+    ) -> None:
         super().__init__()
         self._session_factory = session_factory
+        self._cleanup_error = cleanup_error
+        self._cleanup_started = cleanup_started
+        self._release_cleanup = release_cleanup
         self.created_session_count = 0
+        self.cleanup_count = 0
 
     @property
     def name(self) -> str:
@@ -193,7 +221,13 @@ class FakeSandboxProvider(SandboxProvider):
         return None
 
     async def _cleanup_async(self) -> None:
-        return None
+        self.cleanup_count += 1
+        if self._cleanup_started is not None:
+            self._cleanup_started.set()
+        if self._release_cleanup is not None:
+            await self._release_cleanup.wait()
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
 
     async def _cleanup_orphans_async(self) -> int:
         return 0
@@ -275,6 +309,86 @@ def _provider_registry(provider: SandboxProvider) -> SandboxProviderFactoryRegis
     registry = SandboxProviderFactoryRegistry()
     registry.register(provider_type="local", factory=lambda config: provider)
     return registry
+
+
+@pytest.mark.parametrize(
+    ("case", "missing_modality"),
+    [
+        (
+            _case(messages=(CaseMessageManifest(role="user", content="image.png", data_type="image_path"),)),
+            "image_path",
+        ),
+        (_case(modalities=("audio_path",)), "audio_path"),
+    ],
+)
+async def test_runner_preflight_uses_exact_case_modalities(
+    case: CapabilityCaseManifest,
+    missing_modality: str,
+) -> None:
+    provider = FakeSandboxProvider(session_factory=lambda spec: FakeSandboxSession(spec=spec, events=[], label="s1"))
+    text_only = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_editable_history=True,
+            input_modalities=frozenset({frozenset({"text"})}),
+            output_modalities=frozenset({frozenset({"text"})}),
+        )
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(case,)),
+        target=FakeCapabilityTarget(responses=[], custom_configuration=text_only),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+    )
+
+    with pytest.raises(ValueError, match=rf"(?s)Target 'FakeCapabilityTarget'.*{missing_modality}"):
+        await runner.run_async()
+    assert provider.created_session_count == 0
+
+
+@pytest.mark.parametrize(
+    ("messages", "missing_capability"),
+    [
+        (
+            (
+                CaseMessageManifest(role="user", content="first"),
+                CaseMessageManifest(role="user", content="second"),
+            ),
+            "supports_multi_turn",
+        ),
+        (
+            (
+                CaseMessageManifest(role="system", content="system"),
+                CaseMessageManifest(role="user", content="user"),
+            ),
+            "supports_system_prompt",
+        ),
+    ],
+)
+async def test_runner_preflight_uses_exact_conversation_shape(
+    messages: tuple[CaseMessageManifest, ...],
+    missing_capability: str,
+) -> None:
+    provider = FakeSandboxProvider(session_factory=lambda spec: FakeSandboxSession(spec=spec, events=[], label="s1"))
+    supports_history = missing_capability == "supports_system_prompt"
+    target_configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=supports_history,
+            supports_editable_history=supports_history,
+            input_modalities=frozenset({frozenset({"text"})}),
+            output_modalities=frozenset({frozenset({"text"})}),
+        )
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(_case(messages=messages),)),
+        target=FakeCapabilityTarget(responses=[], custom_configuration=target_configuration),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+    )
+
+    with pytest.raises(ValueError, match=rf"(?s)Target 'FakeCapabilityTarget'.*{missing_capability}"):
+        await runner.run_async()
+    assert provider.created_session_count == 0
 
 
 async def test_runner_happy_path_single_case_success() -> None:
@@ -494,6 +608,112 @@ async def test_runner_cancellation_during_scoring_closes_session() -> None:
     assert events == [("initialize", "s1"), ("score", "s1"), ("close", "s1")]
 
 
+async def test_runner_cancellation_surfaces_session_cleanup_failure() -> None:
+    events: list[tuple[str, str]] = []
+    scorer_started = asyncio.Event()
+    cancellation_event = asyncio.Event()
+    provider = FakeSandboxProvider(
+        session_factory=lambda spec: FakeSandboxSession(
+            spec=spec,
+            events=events,
+            label="s1",
+            close_error=RuntimeError("close boom"),
+        )
+    )
+    scorer_registry = CapabilitySuiteScorerFactoryRegistry()
+    scorer_registry.register(
+        kind="cancelling_scorer",
+        factory=lambda config: CancellingScorer(started=scorer_started, events=events),
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(_case(scorers=(CaseScorerManifest(kind="cancelling_scorer"),)),)),
+        target=FakeCapabilityTarget(responses=[_text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+        scorer_registry=scorer_registry,
+    )
+
+    run_task = asyncio.create_task(runner.run_async(cancellation_event=cancellation_event))
+    await scorer_started.wait()
+    cancellation_event.set()
+
+    with pytest.raises(RuntimeError, match="close boom"):
+        await run_task
+    assert events == [("initialize", "s1"), ("score", "s1"), ("close", "s1")]
+
+
+async def test_runner_cancellation_surfaces_provider_cleanup_failure() -> None:
+    events: list[tuple[str, str]] = []
+    scorer_started = asyncio.Event()
+    cancellation_event = asyncio.Event()
+    provider = FakeSandboxProvider(
+        session_factory=lambda spec: FakeSandboxSession(spec=spec, events=events, label="s1"),
+        cleanup_error=RuntimeError("provider cleanup boom"),
+    )
+    scorer_registry = CapabilitySuiteScorerFactoryRegistry()
+    scorer_registry.register(
+        kind="cancelling_scorer",
+        factory=lambda config: CancellingScorer(started=scorer_started, events=events),
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(_case(scorers=(CaseScorerManifest(kind="cancelling_scorer"),)),)),
+        target=FakeCapabilityTarget(responses=[_text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+        scorer_registry=scorer_registry,
+    )
+
+    run_task = asyncio.create_task(runner.run_async(cancellation_event=cancellation_event))
+    await scorer_started.wait()
+    cancellation_event.set()
+
+    with pytest.raises(RuntimeError, match="provider cleanup boom") as exc_info:
+        await run_task
+    assert isinstance(exc_info.value.__cause__, asyncio.CancelledError)
+    assert provider.cleanup_count == 1
+
+
+async def test_repeated_cancellation_does_not_interrupt_runner_provider_cleanup() -> None:
+    events: list[tuple[str, str]] = []
+    scorer_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cancellation_event = asyncio.Event()
+    provider = FakeSandboxProvider(
+        session_factory=lambda spec: FakeSandboxSession(spec=spec, events=events, label="s1"),
+        cleanup_started=cleanup_started,
+        release_cleanup=release_cleanup,
+    )
+    scorer_registry = CapabilitySuiteScorerFactoryRegistry()
+    scorer_registry.register(
+        kind="cancelling_scorer",
+        factory=lambda config: CancellingScorer(started=scorer_started, events=events),
+    )
+    runner = CapabilitySuiteRunner(
+        manifest=_manifest(cases=(_case(scorers=(CaseScorerManifest(kind="cancelling_scorer"),)),)),
+        target=FakeCapabilityTarget(responses=[_text_message()]),
+        request_options_factory=FakeRequestOptionsFactory(),
+        sandbox_provider_registry=_provider_registry(provider),
+        scorer_registry=scorer_registry,
+    )
+
+    run_task = asyncio.create_task(runner.run_async(cancellation_event=cancellation_event))
+    await scorer_started.wait()
+    cancellation_event.set()
+    await cleanup_started.wait()
+    run_task.cancel()
+    await asyncio.sleep(0)
+    assert not run_task.done()
+    run_task.cancel()
+    await asyncio.sleep(0)
+    assert not run_task.done()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert provider.cleanup_count == 1
+
+
 async def test_runner_cleanup_failure_distinguished_from_run_failure() -> None:
     events: list[tuple[str, str]] = []
     provider = FakeSandboxProvider(
@@ -667,10 +887,10 @@ async def test_runner_rejects_asset_content_hash_mismatch_before_session_creatio
     assert provider.created_session_count == 0
 
 
-async def test_runner_ids_are_stable_for_same_manifest() -> None:
+async def test_runner_default_execution_ids_are_unique_for_same_manifest() -> None:
     manifest = _manifest(cases=(_case(),))
 
-    async def _run_once_async() -> object:
+    async def _run_once_async() -> CapabilitySuiteRunResult:
         provider = FakeSandboxProvider(
             session_factory=lambda spec: FakeSandboxSession(spec=spec, events=[], label="stable")
         )
@@ -683,9 +903,60 @@ async def test_runner_ids_are_stable_for_same_manifest() -> None:
 
     first = await _run_once_async()
     second = await _run_once_async()
-    assert first.run_id == second.run_id
+    assert first.run_id != second.run_id
+    assert first.attempts[0].attempt_id != second.attempts[0].attempt_id
+    assert first.attempts[0].task_result.case_id != second.attempts[0].task_result.case_id
+    assert first.provenance_id == second.provenance_id
+    assert first.manifest_hash == second.manifest_hash
+
+
+async def test_runner_explicit_resume_id_reuses_attempt_identity_without_execution() -> None:
+    manifest = _manifest(cases=(_case(),))
+    cancellation_event = asyncio.Event()
+    cancellation_event.set()
+
+    async def _run_once_async() -> CapabilitySuiteRunResult:
+        provider = FakeSandboxProvider(session_factory=lambda spec: pytest.fail("cancelled run creates no session"))
+        return await CapabilitySuiteRunner(
+            manifest=manifest,
+            target=FakeCapabilityTarget(responses=[]),
+            request_options_factory=FakeRequestOptionsFactory(),
+            sandbox_provider_registry=_provider_registry(provider),
+        ).run_async(resume_id="resume-1", cancellation_event=cancellation_event)
+
+    first = await _run_once_async()
+    second = await _run_once_async()
+    assert first.run_id == second.run_id == "resume-1"
     assert first.attempts[0].attempt_id == second.attempts[0].attempt_id
-    assert first.attempts[0].task_result.case_id == second.attempts[0].task_result.case_id
+
+
+async def test_runner_persistent_reruns_keep_distinct_queryable_transcripts() -> None:
+    manifest = _manifest(cases=(_case(),))
+
+    async def _run_once_async(*, target: PromptTarget) -> CapabilitySuiteRunResult:
+        provider = FakeSandboxProvider(
+            session_factory=lambda spec: FakeSandboxSession(spec=spec, events=[], label=str(spec.session_id))
+        )
+        return await CapabilitySuiteRunner(
+            manifest=manifest,
+            target=target,
+            request_options_factory=FakeRequestOptionsFactory(),
+            sandbox_provider_registry=_provider_registry(provider),
+        ).run_async()
+
+    first = await _run_once_async(target=FakeCapabilityTarget(responses=[_text_message("first")]))
+    second = await _run_once_async(target=AlternateFakeCapabilityTarget(responses=[_text_message("second")]))
+
+    first_result = first.attempts[0].task_result
+    second_result = second.attempts[0].task_result
+    assert first_result is not None
+    assert second_result is not None
+    assert first_result.conversation_id != second_result.conversation_id
+    memory = CentralMemory.get_memory_instance()
+    first_messages = memory.get_conversation_messages(conversation_id=first_result.conversation_id)
+    second_messages = memory.get_conversation_messages(conversation_id=second_result.conversation_id)
+    assert [message.get_piece().original_value for message in first_messages] == ["hello", "first"]
+    assert [message.get_piece().original_value for message in second_messages] == ["hello", "second"]
 
 
 async def test_runner_end_to_end_with_fake_target_and_local_provider(tmp_path: Path) -> None:

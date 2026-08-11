@@ -151,6 +151,7 @@ class OpenAIResponseTarget(OpenAITarget):
         capabilities=TargetCapabilities(
             supports_multi_turn=True,
             supports_editable_history=True,
+            supports_external_tool_execution=True,
             supports_json_output=True,
             supports_multi_message_pieces=True,
             supports_system_prompt=True,
@@ -161,6 +162,14 @@ class OpenAIResponseTarget(OpenAITarget):
                     frozenset(["function_call"]),
                     frozenset(["tool_call"]),
                     frozenset(["function_call_output"]),
+                    frozenset(["reasoning"]),
+                }
+            ),
+            output_modalities=frozenset(
+                {
+                    frozenset(["text"]),
+                    frozenset(["function_call"]),
+                    frozenset(["tool_call"]),
                     frozenset(["reasoning"]),
                 }
             ),

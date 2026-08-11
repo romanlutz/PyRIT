@@ -91,7 +91,9 @@ from pyrit.scenario.capability_suite.runner import (
     AssetSourceResolver,
     CapabilitySuiteProgressSink,
     CapabilitySuiteRunner,
+    CapabilitySuiteTargetRequirements,
     LocalAssetSourceResolver,
+    get_capability_suite_target_requirements,
 )
 from pyrit.scenario.capability_suite.scorers import (
     CapabilitySuiteScorer,
@@ -133,6 +135,7 @@ __all__ = [
     "CapabilitySuiteManifest",
     "CapabilitySuiteRunResult",
     "CapabilitySuiteRunner",
+    "CapabilitySuiteTargetRequirements",
     "CapabilitySuiteScorer",
     "CapabilitySuiteScorerFactoryRegistry",
     "CaseAssetManifest",
@@ -189,6 +192,7 @@ __all__ = [
     "analyze_inspect_evals_source_tree",
     "build_default_sandbox_provider_registry",
     "build_default_scorer_registry",
+    "get_capability_suite_target_requirements",
     "canonical_bytes",
     "compile_build_context_assets",
     "compile_inspect_eval_family",

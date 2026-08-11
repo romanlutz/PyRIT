@@ -113,6 +113,10 @@ def _add_run_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
         help="Registry tag selecting exactly one target (default: default_objective_target).",
     )
     parser.add_argument("--result", type=Path)
+    parser.add_argument(
+        "--resume-id",
+        help="Explicit execution identity to resume/reuse; omitted runs always receive a fresh identity.",
+    )
 
 
 def _add_task_args(parser: argparse.ArgumentParser) -> None:

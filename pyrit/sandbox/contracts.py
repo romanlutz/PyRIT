@@ -28,6 +28,24 @@ if TYPE_CHECKING:
     )
 
 
+async def _await_cleanup_task_async(*, cleanup_task: asyncio.Task[None]) -> None:
+    """Finish one cleanup task despite repeated caller cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as error:
+            cancellation = cancellation or error
+    try:
+        cleanup_task.result()
+    except BaseException as cleanup_error:
+        if cancellation is not None:
+            raise cleanup_error from cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+
+
 class SandboxProcess(ABC):
     """A future-compatible seam for streaming and buffered process execution."""
 
@@ -165,7 +183,7 @@ class SandboxSession(ABC):
             except BaseException as error:
                 self._close_task = asyncio.create_task(self._close_async())
                 try:
-                    await asyncio.shield(self._close_task)
+                    await _await_cleanup_task_async(cleanup_task=self._close_task)
                 except BaseException as cleanup_error:
                     raise cleanup_error from error
                 raise
@@ -177,7 +195,7 @@ class SandboxSession(ABC):
             if self._close_task is None:
                 self._close_task = asyncio.create_task(self._close_async())
             cleanup_task = self._close_task
-        await asyncio.shield(cleanup_task)
+        await _await_cleanup_task_async(cleanup_task=cleanup_task)
 
     @abstractmethod
     async def _initialize_async(self) -> None:
@@ -248,7 +266,7 @@ class SandboxProvider(Identifiable, ABC):
             except BaseException as error:
                 self._cleanup_task = asyncio.create_task(self._cleanup_async())
                 try:
-                    await asyncio.shield(self._cleanup_task)
+                    await _await_cleanup_task_async(cleanup_task=self._cleanup_task)
                 except BaseException as cleanup_error:
                     raise cleanup_error from error
                 raise
@@ -261,7 +279,7 @@ class SandboxProvider(Identifiable, ABC):
                 self._prepared = False
                 self._cleanup_task = asyncio.create_task(self._cleanup_async())
             cleanup_task = self._cleanup_task
-        await asyncio.shield(cleanup_task)
+        await _await_cleanup_task_async(cleanup_task=cleanup_task)
 
     async def prepare_task_async(self, task: SandboxTaskSpec) -> None:
         """
@@ -293,7 +311,7 @@ class SandboxProvider(Identifiable, ABC):
             if cleanup_task is None:
                 cleanup_task = asyncio.create_task(self._cleanup_task_async(task))
                 self._task_cleanup_tasks[task.task_id] = cleanup_task
-        await asyncio.shield(cleanup_task)
+        await _await_cleanup_task_async(cleanup_task=cleanup_task)
 
     async def create_session_async(
         self,

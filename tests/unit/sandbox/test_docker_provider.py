@@ -115,10 +115,27 @@ def test_policy_overlay_preserves_topology_and_marks_owned_networks_internal() -
     assert overlay["volumes"]["evidence"] == {"labels": {"com.pyrit.sandbox.owner": "owner-token"}}
 
 
-def test_project_names_are_bounded_and_attempt_unique() -> None:
-    first = _project_name_for_session(prefix="pyrit", session_id="S" * 200, attempt_id="attempt-one")
-    second = _project_name_for_session(prefix="pyrit", session_id="S" * 200, attempt_id="attempt-two")
+def test_project_names_are_bounded_and_execution_owner_unique() -> None:
+    first = _project_name_for_session(
+        prefix="pyrit",
+        session_id="S" * 200,
+        attempt_id="attempt-one",
+        ownership_id="owner-one",
+    )
+    second = _project_name_for_session(
+        prefix="pyrit",
+        session_id="S" * 200,
+        attempt_id="attempt-two",
+        ownership_id="owner-two",
+    )
+    same_attempt_new_owner = _project_name_for_session(
+        prefix="pyrit",
+        session_id="S" * 200,
+        attempt_id="attempt-one",
+        ownership_id="owner-two",
+    )
     assert first != second
+    assert first != same_attempt_new_owner
     assert len(first) <= 63
     assert len(second) <= 63
 
@@ -467,13 +484,32 @@ async def test_orphan_cleanup_retains_state_when_removal_fails(tmp_path: Path) -
     assert project_name in json.loads(provider._state_path.read_text(encoding="utf-8"))
 
 
+async def test_orphan_cleanup_skips_explicitly_retained_projects(tmp_path: Path) -> None:
+    provider = DockerSandboxProvider(
+        config=_provider_config(tmp_path).model_copy(update={"retain_resources_on_close": True})
+    )
+    project_name = "pyrit-sbx-retained"
+    await provider._register_session_state_async(project_name=project_name, session_id="session", task_id=None)
+    with (
+        patch("pyrit.sandbox.docker_provider._process_is_alive", return_value=False),
+        patch.object(provider, "_force_remove_project_resources_async", new_callable=AsyncMock) as remove,
+    ):
+        assert await provider.cleanup_orphans_async() == 0
+    remove.assert_not_awaited()
+    assert project_name in json.loads(provider._state_path.read_text(encoding="utf-8"))
+
+
 async def test_orphan_cleanup_skips_live_and_unowned_state_records(tmp_path: Path) -> None:
     provider = DockerSandboxProvider(config=_provider_config(tmp_path))
     live_project = "pyrit-sbx-live"
     legacy_project = "pyrit-sbx-legacy"
     await provider._register_session_state_async(project_name=live_project, session_id="live", task_id=None)
     state = json.loads(provider._state_path.read_text(encoding="utf-8"))
-    state[legacy_project] = {"session_id": "legacy"}
+    state[legacy_project] = {
+        "session_id": "legacy",
+        "owner_process_id": 0,
+        "ownership_id": provider._ownership_id,
+    }
     provider._state_path.write_text(json.dumps(state), encoding="utf-8")
     with patch.object(provider, "_force_remove_project_resources_async", new_callable=AsyncMock) as remove:
         assert await provider.cleanup_orphans_async() == 0
@@ -511,7 +547,8 @@ async def test_container_discovery_requires_resource_ownership_label(tmp_path: P
     assert "label=com.pyrit.sandbox.owner=owner-token" in run.await_args.kwargs["argv"]
 
 
-async def test_session_down_failure_preserves_state_for_orphan_recovery(tmp_path: Path) -> None:
+@pytest.mark.parametrize("detail", ["failed", "timed out after 0.1 seconds"])
+async def test_session_cleanup_failure_preserves_durable_state(tmp_path: Path, detail: str) -> None:
     provider = DockerSandboxProvider(config=_provider_config(tmp_path))
     spec = SandboxSessionSpec(session_id="stateful")
     session = DockerSandboxSession(
@@ -525,16 +562,133 @@ async def test_session_down_failure_preserves_state_for_orphan_recovery(tmp_path
         session_id=spec.session_id,
         task_id=None,
     )
-    with (
-        patch.object(
-            session,
-            "_down_async",
-            new=AsyncMock(side_effect=DockerLifecycleError(operation="down", detail="failed")),
-        ),
-        pytest.raises(DockerLifecycleError, match="failed"),
-    ):
-        await session.close_async()
+    cleanup_failure = DockerLifecycleError(operation="rm", detail=detail)
+    with patch.object(
+        provider,
+        "_force_remove_project_resources_async",
+        new=AsyncMock(side_effect=cleanup_failure),
+    ) as force_remove:
+        with pytest.raises(DockerLifecycleError, match=detail):
+            await session.close_async()
+    force_remove.assert_awaited_once_with(
+        project_name=session.project_name,
+        ownership_id=provider._ownership_id,
+    )
     assert session.project_name in json.loads(provider._state_path.read_text(encoding="utf-8"))
+
+
+async def test_session_success_sweeps_only_owned_project_resources(tmp_path: Path) -> None:
+    provider = DockerSandboxProvider(config=_provider_config(tmp_path))
+    session = DockerSandboxSession(
+        provider=provider,
+        spec=SandboxSessionSpec(session_id="successful"),
+        project_name="pyrit-successful",
+        evidence_sink=None,
+    )
+    with patch.object(
+        provider,
+        "_force_remove_project_resources_async",
+        new_callable=AsyncMock,
+    ) as force_remove:
+        await session.close_async()
+    force_remove.assert_awaited_once_with(
+        project_name=session.project_name,
+        ownership_id=provider._ownership_id,
+    )
+
+
+async def test_session_cleanup_failure_preserves_state_for_provider_retry(tmp_path: Path) -> None:
+    provider = DockerSandboxProvider(config=_provider_config(tmp_path))
+    spec = SandboxSessionSpec(session_id="stateful")
+    session = DockerSandboxSession(
+        provider=provider,
+        spec=spec,
+        project_name="pyrit-stateful",
+        evidence_sink=None,
+    )
+    provider._sessions[spec.session_id] = session
+    await provider._register_session_state_async(
+        project_name=session.project_name,
+        session_id=spec.session_id,
+        task_id=None,
+    )
+    cleanup_failure = DockerLifecycleError(operation="rm", detail="daemon unavailable")
+    with patch.object(
+        provider,
+        "_force_remove_project_resources_async",
+        new=AsyncMock(side_effect=[cleanup_failure, None]),
+    ) as force_remove:
+        with pytest.raises(DockerLifecycleError, match="daemon unavailable"):
+            await session.close_async()
+        await provider._cleanup_async()
+    assert force_remove.await_count == 2
+    assert session.project_name not in json.loads(provider._state_path.read_text(encoding="utf-8"))
+    assert spec.session_id not in provider._sessions
+
+
+async def test_session_close_cancellation_waits_for_owned_cleanup(tmp_path: Path) -> None:
+    provider = DockerSandboxProvider(config=_provider_config(tmp_path))
+    session = DockerSandboxSession(
+        provider=provider,
+        spec=SandboxSessionSpec(session_id="cancelled"),
+        project_name="pyrit-cancelled",
+        evidence_sink=None,
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def cleanup_owned_resources(*, project_name: str, ownership_id: str) -> None:
+        del project_name, ownership_id
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    with patch.object(
+        provider,
+        "_force_remove_project_resources_async",
+        new=AsyncMock(side_effect=cleanup_owned_resources),
+    ) as force_remove:
+        close = asyncio.create_task(session.close_async())
+        await cleanup_started.wait()
+        close.cancel()
+        await asyncio.sleep(0)
+        assert not close.done()
+        close.cancel()
+        await asyncio.sleep(0)
+        assert not close.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+    force_remove.assert_awaited_once_with(
+        project_name=session.project_name,
+        ownership_id=provider._ownership_id,
+    )
+
+
+async def test_provider_recovery_preserves_explicitly_retained_resources(tmp_path: Path) -> None:
+    provider = DockerSandboxProvider(
+        config=_provider_config(tmp_path).model_copy(update={"retain_resources_on_close": True})
+    )
+    session = DockerSandboxSession(
+        provider=provider,
+        spec=SandboxSessionSpec(session_id="retained"),
+        project_name="pyrit-retained",
+        evidence_sink=None,
+    )
+    provider._sessions[session.session_id] = session
+    await provider._register_session_state_async(
+        project_name=session.project_name,
+        session_id=session.session_id,
+        task_id=None,
+    )
+    with (
+        patch.object(session, "close_async", new=AsyncMock(side_effect=RuntimeError("bookkeeping failed"))),
+        patch.object(provider, "_force_remove_project_resources_async", new_callable=AsyncMock) as force_remove,
+        pytest.raises(RuntimeError, match="1 Docker sandbox session cleanup"),
+    ):
+        await provider._cleanup_async()
+    force_remove.assert_not_awaited()
+    assert session.project_name not in json.loads(provider._state_path.read_text(encoding="utf-8"))
+    assert session.session_id not in provider._sessions
 
 
 async def test_readiness_fails_fast_for_unhealthy_service(tmp_path: Path) -> None:

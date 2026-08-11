@@ -253,8 +253,10 @@ uv run pyrit_capability_suite inspect-evals dry-run \
   --manifest ./intercode-manifest.json
 ```
 
-Then use a registered `OpenAIResponseTarget`, which is currently required for
-the Responses-shaped tool declaration transport:
+Then use a registered target whose declared capabilities include multiturn/editable
+history, caller-owned external tool execution, `function_call` output, and
+`function_call_output` input. The CLI currently supplies the tool declaration adapter
+for targets using `OpenAIResponsesRequestOptions`:
 
 ```console
 docker compose version
@@ -303,13 +305,19 @@ rejected for these Compose-backed tasks because Compose-compatible Hyper-V
 semantics are not implemented.
 
 The `--result` JSON contains every native attempt, model/tool transcript evidence,
-scores, aggregate counts, manifest hash, compatibility report, and cleanup error.
+scores, aggregate counts, the unique run identity, stable suite/provenance and manifest
+hashes, compatibility report, and cleanup error. A new run identity is generated on
+every invocation so persistent-memory transcripts never collide. Pass `--resume-id`
+only when intentionally reusing an existing execution identity.
 `--manifest`, `--report`, and `--output` place compile and catalog evidence at the
 specified paths. Common failures are actionable: use the exact clean pinned
 checkout for revision errors, populate the licensed InterCode cache for missing
-assets, start Docker/Compose for preflight failures, select a multiturn/editable
-history target, and select `OpenAIResponseTarget` for tool tasks. The worker is
-trusted arbitrary Python under the user's OS identity, not a security sandbox.
+assets, start Docker/Compose for preflight failures, or select a target/adapter pair
+whose declared behavior, request-options transport, and input/output modalities satisfy every
+reported requirement. Preflight derives input and conversation-shape requirements (including
+system prompts and editable multi-message history) from each case's actual messages and declared
+modalities before preparing a sandbox or generating model output. The worker is trusted arbitrary
+Python under the user's OS identity, not a security sandbox.
 AWS/Bedrock/SageMaker/EC2, GCP, Modal, Daytona, Kubernetes, all other non-Azure
 cloud runtimes, EvalLog/control-plane/TUI/checkpoint parity, and unreviewed task
 families remain unsupported.
@@ -340,7 +348,10 @@ families remain unsupported.
 1. Builds a fresh sandbox session (`provider.create_session_async`) and stages the case's
    assets/setup commands into it.
 2. Binds the case's tools (sandbox-command tools plus any registry-resolved custom tools).
-3. Runs a deterministically identified case through `CapabilityTaskExecutor.execute_case_async`.
+3. Runs the case through `CapabilityTaskExecutor.execute_case_async` with a unique
+   execution/attempt/conversation identity. Stable suite, manifest, and source case
+   identifiers remain available as provenance; identities are reused only when an
+   explicit resume identity is supplied.
 4. Scores the result **while the sandbox session is still alive** (session-aware scorers
    can inspect sandbox file/command state), via the case's configured scorers.
 5. Always closes the session (`finally`-equivalent cleanup), distinguishing a cleanup

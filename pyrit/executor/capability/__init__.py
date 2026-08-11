@@ -34,6 +34,8 @@ from pyrit.executor.capability.scoring import CapabilityResultScorer, MessageSco
 from pyrit.executor.capability.target_adapter import (
     CapabilityRequestOptionsFactory,
     OpenAIResponsesCapabilityRequestOptionsFactory,
+    build_capability_request_options_factory,
+    validate_capability_target,
 )
 from pyrit.executor.capability.tools import (
     AllowAllToolApprovalPolicy,
@@ -78,6 +80,8 @@ __all__ = [
     "SandboxOperationEvidence",
     "MessageScorerAdapter",
     "OpenAIResponsesCapabilityRequestOptionsFactory",
+    "build_capability_request_options_factory",
+    "validate_capability_target",
     "TimingEvidence",
     "ToolApprovalDecision",
     "ToolApprovalPolicy",

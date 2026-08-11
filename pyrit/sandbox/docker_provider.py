@@ -399,7 +399,7 @@ def _stderr_excerpt(stderr: bytes) -> str:
     return stderr.decode("utf-8", errors="replace").strip()[:2000]
 
 
-def _project_name_for_session(*, prefix: str, session_id: str, attempt_id: str) -> str:
+def _project_name_for_session(*, prefix: str, session_id: str, attempt_id: str, ownership_id: str) -> str:
     """
     Build a collision-resistant, Compose-legal project name for one attempt.
 
@@ -407,7 +407,7 @@ def _project_name_for_session(*, prefix: str, session_id: str, attempt_id: str) 
         str: A project name matching Compose's ``^[a-z0-9][a-z0-9_-]*$`` requirement.
     """
     sanitized = _PROJECT_NAME_INVALID_CHARS.sub("-", session_id.lower()).strip("-_") or "session"
-    collision_suffix = _hash_bytes(f"{session_id}\0{attempt_id}".encode())[:12]
+    collision_suffix = _hash_bytes(f"{session_id}\0{attempt_id}\0{ownership_id}".encode())[:12]
     available_session_length = max(1, 63 - len(prefix) - len(collision_suffix) - 2)
     return f"{prefix}-{sanitized[:available_session_length]}-{collision_suffix}"
 
@@ -2147,7 +2147,10 @@ class DockerSandboxSession(SandboxSession):
         )
         await self._up_async()
         await self._wait_ready_async()
-        containers = await self._provider._list_containers_by_project_async(project_name=self.project_name)
+        containers = await self._provider._list_containers_by_project_async(
+            project_name=self.project_name,
+            ownership_id=self._provider._ownership_id,
+        )
         container_by_service: dict[str, str] = {}
         for record in containers:
             service_name = _parse_docker_labels(record.get("Labels", "")).get(_COMPOSE_SERVICE_LABEL)
@@ -2195,7 +2198,10 @@ class DockerSandboxSession(SandboxSession):
         deadline = asyncio.get_running_loop().time() + self._provider._config.readiness_timeout_seconds
         expected = set(self._provider._service_names)
         while True:
-            containers = await self._provider._list_containers_by_project_async(project_name=self.project_name)
+            containers = await self._provider._list_containers_by_project_async(
+                project_name=self.project_name,
+                ownership_id=self._provider._ownership_id,
+            )
             unhealthy_services: set[str] = set()
             for record in containers:
                 service_name = _parse_docker_labels(record.get("Labels", "")).get(_COMPOSE_SERVICE_LABEL)
@@ -2226,37 +2232,27 @@ class DockerSandboxSession(SandboxSession):
     async def _close_async(self) -> None:
         started_at = _now()
         await asyncio.gather(*(environment.close_async() for environment in self._environments), return_exceptions=True)
-        down_error: DockerSandboxError | None = None
+        cleanup_error: DockerSandboxError | None = None
         if not self._provider._config.retain_resources_on_close:
             try:
-                await self._down_async()
+                await self._provider._force_remove_project_resources_async(
+                    project_name=self.project_name,
+                    ownership_id=self._provider._ownership_id,
+                )
             except DockerSandboxError as error:
-                down_error = error
-        if down_error is None or self._provider._config.retain_resources_on_close:
+                cleanup_error = error
+        if cleanup_error is None:
             await self._provider._unregister_session_state_async(project_name=self.project_name)
-        await self._provider._remove_session_async(self.session_id)
-        outcome = SandboxOperationStatus.FAILED if down_error is not None else SandboxOperationStatus.SUCCEEDED
+            await self._provider._remove_session_async(self.session_id)
+        outcome = SandboxOperationStatus.FAILED if cleanup_error is not None else SandboxOperationStatus.SUCCEEDED
         await self.emit_lifecycle_evidence_async(
             operation="session_cleanup",
             started_at=started_at,
             outcome=outcome,
-            error_code="docker_down_failed" if down_error is not None else None,
+            error_code="docker_resource_cleanup_failed" if cleanup_error is not None else None,
         )
-        if down_error is not None:
-            raise down_error
-
-    async def _down_async(self) -> None:
-        argv = [
-            *self._provider._compose_base_argv(project_name=self.project_name),
-            "down",
-            "--volumes",
-            "--remove-orphans",
-        ]
-        await self._provider._run_lifecycle_cli_async(
-            operation="down",
-            argv=argv,
-            cwd=self._provider._project_context,
-        )
+        if cleanup_error is not None:
+            raise cleanup_error
 
     async def emit_lifecycle_evidence_async(
         self,
@@ -2602,6 +2598,7 @@ class DockerSandboxProvider(SandboxProvider):
             prefix=self._config.project_name_prefix,
             session_id=spec.session_id,
             attempt_id=str(spec.attempt_id),
+            ownership_id=self._ownership_id,
         )
         session = DockerSandboxSession(
             provider=self,
@@ -2623,7 +2620,27 @@ class DockerSandboxProvider(SandboxProvider):
         async with self._sessions_lock:
             sessions = tuple(self._sessions.values())
         results = await asyncio.gather(*(session.close_async() for session in sessions), return_exceptions=True)
-        failures = [result for result in results if isinstance(result, BaseException)]
+        failures: list[BaseException] = []
+        for session, result in zip(sessions, results, strict=True):
+            if not isinstance(result, BaseException):
+                continue
+            if self._config.retain_resources_on_close:
+                try:
+                    await self._unregister_session_state_async(project_name=session.project_name)
+                    await self._remove_session_async(session.session_id)
+                except BaseException as recovery_error:
+                    failures.append(recovery_error)
+                failures.append(result)
+                continue
+            try:
+                await self._force_remove_project_resources_async(
+                    project_name=session.project_name,
+                    ownership_id=self._ownership_id,
+                )
+                await self._unregister_session_state_async(project_name=session.project_name)
+                await self._remove_session_async(session.session_id)
+            except BaseException as recovery_error:
+                failures.append(recovery_error)
         if self._synthesized_temp_dir is not None:
             await asyncio.to_thread(shutil.rmtree, self._synthesized_temp_dir, True)
         outcome = SandboxOperationStatus.FAILED if failures else SandboxOperationStatus.SUCCEEDED
@@ -2651,6 +2668,7 @@ class DockerSandboxProvider(SandboxProvider):
                 "created_at": _now().isoformat(),
                 "owner_process_id": os.getpid(),
                 "ownership_id": self._ownership_id,
+                "retain_resources": self._config.retain_resources_on_close,
             }
             return state
 
@@ -2778,6 +2796,8 @@ class DockerSandboxProvider(SandboxProvider):
         orphan_projects: list[tuple[str, str]] = []
         for project_name, record in state.items():
             if project_name in active_projects or not isinstance(record, dict):
+                continue
+            if record.get("retain_resources") is not False:
                 continue
             owner_process_id = record.get("owner_process_id")
             ownership_id = record.get("ownership_id")
