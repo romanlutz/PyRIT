@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -58,7 +59,8 @@ def test_worker_process_uses_isolated_python_and_minimal_environment(
     monkeypatch.setenv("PYTHONPATH", "untrusted-import-root")
     monkeypatch.setenv("PATH", "worker-path")
 
-    environment = inspect_loader._worker_environment()
+    environment = inspect_loader._worker_environment(allow_network=False)
+    network_environment = inspect_loader._worker_environment(allow_network=True)
     command = inspect_loader._worker_command(
         request_path=tmp_path / "request.json",
         response_path=tmp_path / "response.json",
@@ -67,7 +69,42 @@ def test_worker_process_uses_isolated_python_and_minimal_environment(
     assert environment["PATH"] == "worker-path"
     assert "OPENAI_API_KEY" not in environment
     assert "PYTHONPATH" not in environment
+    assert environment["HF_DATASETS_OFFLINE"] == "1"
+    assert environment["HF_HUB_OFFLINE"] == "1"
+    assert "HF_DATASETS_OFFLINE" not in network_environment
+    assert "HF_HUB_OFFLINE" not in network_environment
     assert command[1:4] == ("-I", "-B", "-m")
+
+
+def test_offline_worker_sets_huggingface_offline_before_source_import(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "offline.py").write_text(
+        "import datasets.config\n"
+        "import huggingface_hub.constants\n"
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import match\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def offline():\n"
+        "    assert datasets.config.HF_DATASETS_OFFLINE is True\n"
+        "    assert huggingface_hub.constants.HF_HUB_OFFLINE is True\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='Q', target='A')]), "
+        "solver=generate(), scorer=match())\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_inspect_eval(
+        source_root=root,
+        task_spec="offline.py@offline",
+        verify_source_revision=False,
+        allow_network=False,
+    )
+
+    assert len(loaded.suite.cases) == 1
 
 
 _ARC_SOURCE = """
@@ -759,7 +796,7 @@ def test_loader_rejects_unsupported_message_name(
         )
 
 
-def test_loader_rejects_unsupported_task_generation_config(tmp_path: Path) -> None:
+def test_loader_preserves_multiple_choice_task_max_tokens(tmp_path: Path) -> None:
     root = tmp_path / "source"
     package = root / "src" / "inspect_evals"
     package.mkdir(parents=True)
@@ -778,12 +815,13 @@ def test_loader_rejects_unsupported_task_generation_config(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    with pytest.raises(UnsupportedInspectFeatureError, match=r"Task\.config\.max_tokens"):
-        load_inspect_eval(
-            source_root=root,
-            task_spec="unsupported.py@unsupported",
-            verify_source_revision=False,
-        )
+    loaded = load_inspect_eval(
+        source_root=root,
+        task_spec="unsupported.py@unsupported",
+        verify_source_revision=False,
+    )
+
+    assert loaded.suite.cases[0].limits.max_output_tokens == 8
 
 
 def test_loader_templates_last_user_message_not_trailing_assistant(tmp_path: Path) -> None:
@@ -1624,4 +1662,252 @@ def test_normalize_inspect_score_rejects_unrepresentable_metadata() -> None:
             score=InspectScore(value=True, metadata={"nested": {"not": "representable"}}),
             message_piece_id="piece-1",
             objective="respond",
+        )
+
+
+_MIXED_MAPPING_SOURCE = """
+from enum import Enum, auto
+
+from inspect_ai import Task, task
+from inspect_ai.dataset import MemoryDataset, Sample
+from inspect_ai.model import GenerateConfig
+from inspect_ai.scorer import Score, Scorer, Target, accuracy, answer, choice, grouped, match, scorer, stderr
+from inspect_ai.solver import Generate, Solver, TaskState, generate, multiple_choice, solver
+
+class DatasetType(Enum):
+    MULTIPLE_CHOICE = auto()
+    BINARY_CHOICE = auto()
+    EXACT_MATCH = auto()
+
+@solver
+def dispatch_solver() -> Solver:
+    multiple_choice_solve = multiple_choice()
+    generate_solve = generate()
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        dataset_type = state.metadata["dataset_type"]
+        if dataset_type == DatasetType.MULTIPLE_CHOICE:
+            return await multiple_choice_solve(state, generate)
+        else:
+            return await generate_solve(state, generate)
+    return solve
+
+@scorer(metrics=[grouped(accuracy(), "dataset_name"), stderr()])
+def dispatch_scorer() -> Scorer:
+    choice_score = choice()
+    answer_score = answer(pattern="word")
+    match_score = match(location="end")
+
+    async def score(state: TaskState, target: Target) -> Score | None:
+        dataset_type = state.metadata["dataset_type"]
+        if dataset_type == DatasetType.MULTIPLE_CHOICE:
+            return await choice_score(state, target)
+        elif dataset_type == DatasetType.BINARY_CHOICE:
+            return await answer_score(state, target)
+        else:
+            return await match_score(state, target)
+    return score
+
+@task
+def mixed_mapping() -> Task:
+    return Task(
+        dataset=MemoryDataset([
+            Sample(
+                id="mc",
+                input="Pick the first.",
+                choices=["first", "second"],
+                target="A",
+                metadata={"dataset_type": DatasetType.MULTIPLE_CHOICE, "dataset_name": "mc"},
+            ),
+            Sample(
+                id="binary",
+                input="Return true.",
+                target="True",
+                metadata={"dataset_type": DatasetType.BINARY_CHOICE, "dataset_name": "binary"},
+            ),
+            Sample(
+                id="exact",
+                input="Return final.",
+                target="final",
+                metadata={"dataset_type": DatasetType.EXACT_MATCH, "dataset_name": "exact"},
+            ),
+        ]),
+        solver=dispatch_solver(),
+        scorer=dispatch_scorer(),
+        config=GenerateConfig(temperature=0),
+    )
+"""
+
+
+def test_metadata_dispatched_mixed_mapping_compiles_and_runs_natively(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "mixed_mapping.py").write_text(_MIXED_MAPPING_SOURCE, encoding="utf-8")
+    target = _ConfigurableScriptedTarget(response="ANSWER: True")
+
+    execution = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="mixed_mapping.py@mixed_mapping",
+            verify_source_revision=False,
+            target=target,
+        )
+    )
+
+    assert [case.scorers[0].kind for case in execution.loaded.suite.cases] == [
+        "inspect_choice",
+        "inspect_pattern",
+        "inspect_text",
+    ]
+    assert [attempt.task_result.scores[0].score_value for attempt in execution.result.attempts] == [
+        "False",
+        "True",
+        "False",
+    ]
+    assert all(
+        case.scorers[0].metrics[0].group_by == ("metadata.dataset_name",) for case in execution.loaded.suite.cases
+    )
+    grouped_values = {
+        key: value
+        for groups in execution.result.aggregate.grouped_metric_values.values()
+        for key, value in groups.items()
+    }
+    assert grouped_values == {
+        "metadata.dataset_name=binary": 1.0,
+        "metadata.dataset_name=exact": 0.0,
+        "metadata.dataset_name=mc": 0.0,
+    }
+    assert target.temperatures == [0.0, 0.0, 0.0]
+
+
+def test_metadata_dispatch_rejects_nonliteral_component_options_without_executing_them(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    source = _MIXED_MAPPING_SOURCE.replace(
+        "class DatasetType(Enum):",
+        "def opaque_pattern():\n    raise RuntimeError('opaque callback executed')\n\nclass DatasetType(Enum):",
+    ).replace('answer_score = answer(pattern="word")', "answer_score = answer(pattern=opaque_pattern())")
+    (package / "mixed_mapping.py").write_text(source, encoding="utf-8")
+
+    with pytest.raises(UnsupportedInspectFeatureError, match="metadata dispatch component literal"):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="mixed_mapping.py@mixed_mapping",
+            verify_source_revision=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("completion", "expected"),
+    [
+        ("ANSWER: false\nANSWER: True", "True"),
+        ("reasoning\nANSWER: True.", "True"),
+        ("ANSWER: Truth", "False"),
+        ("True", "False"),
+    ],
+)
+def test_answer_word_uses_last_pinned_answer_token(
+    completion: str,
+    expected: str,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "answer_eval.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import answer\n"
+        "from inspect_ai.solver import generate\n"
+        "@task\n"
+        "def answer_eval():\n"
+        "    return Task(dataset=MemoryDataset([Sample(input='answer', target='True')]), "
+        "solver=generate(), scorer=answer(pattern='word'))\n",
+        encoding="utf-8",
+    )
+
+    execution = asyncio.run(
+        run_inspect_eval_async(
+            source_root=root,
+            task_spec="answer_eval.py@answer_eval",
+            verify_source_revision=False,
+            target=_ScriptedTarget(response=completion),
+        )
+    )
+
+    assert execution.result.attempts[0].task_result.scores[0].score_value == expected
+
+
+def test_verified_derived_json_cache_is_offline_safe_and_tamper_evident(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    cache_root = tmp_path / "cache"
+    source_asset = cache_root / "fixture" / "records.json"
+    source_asset.parent.mkdir(parents=True)
+    source_bytes = b'{"questions":[{"question":"Q?","answers":{"A":"one","B":"two"},"solution":"A"}]}'
+    source_asset.write_bytes(source_bytes)
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    (package / "derived.py").write_text(
+        "import json\n"
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import Sample\n"
+        "from inspect_ai.scorer import match\n"
+        "from inspect_ai.solver import generate\n"
+        "from inspect_evals.constants import INSPECT_EVALS_CACHE_PATH\n"
+        "from inspect_evals.utils import load_json_dataset\n"
+        "from inspect_evals.utils.download import download_and_verify\n"
+        f"EXPECTED = '{digest}'\n"
+        "def record_to_sample(record):\n"
+        "    return Sample(input=record['question'], target=record['solution'])\n"
+        "@task\n"
+        "def derived():\n"
+        "    source = INSPECT_EVALS_CACHE_PATH / 'fixture' / 'records.json'\n"
+        "    derived = source.with_suffix('.jsonl')\n"
+        "    download_and_verify('https://example.test/records.json', EXPECTED, source)\n"
+        "    if not derived.exists():\n"
+        "        data = json.loads(source.read_text(encoding='utf-8'))\n"
+        "        derived.write_text(''.join(json.dumps(row) + '\\n' for row in data['questions']), encoding='utf-8')\n"
+        "    return Task(dataset=load_json_dataset(str(derived), 'fixture', record_to_sample, auto_id=True), "
+        "solver=generate(), scorer=match())\n",
+        encoding="utf-8",
+    )
+
+    first = load_inspect_eval(
+        source_root=root,
+        task_spec="derived.py@derived",
+        verify_source_revision=False,
+        inspect_evals_cache_dir=cache_root,
+    )
+    second = load_inspect_eval(
+        source_root=root,
+        task_spec="derived.py@derived",
+        verify_source_revision=False,
+        inspect_evals_cache_dir=cache_root,
+    )
+
+    assert first.task.dataset.provenance == second.task.dataset.provenance
+    assert (cache_root / "fixture" / "records.jsonl.sha256").is_file()
+
+    derived_path = cache_root / "fixture" / "records.jsonl"
+    derived_path.write_text(
+        '{"question":"Q?","answers":{"B":"two","A":"one"},"solution":"A"}\n',
+        encoding="utf-8",
+    )
+    derived_path.with_name(f"{derived_path.name}.sha256").write_text(
+        f"{hashlib.sha256(derived_path.read_bytes()).hexdigest()}\n",
+        encoding="ascii",
+    )
+    with pytest.raises(ValueError, match="rows do not match"):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="derived.py@derived",
+            verify_source_revision=False,
+            inspect_evals_cache_dir=cache_root,
         )

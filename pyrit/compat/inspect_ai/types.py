@@ -10,6 +10,7 @@ import json
 import random
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from enum import Enum
 from typing import Any, Literal, overload
 
 
@@ -72,7 +73,7 @@ class ChatMessageTool(ChatMessage):
     role: str = "tool"
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(kw_only=True)
 class Sample:
     """One Inspect-shaped dataset sample."""
 
@@ -423,6 +424,8 @@ def dataset_records_provenance(samples: Iterable[Sample]) -> dict[str, int | str
 def _dataset_json_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, Enum):
+        return value.name
     if isinstance(value, Sample):
         return {
             "input": _dataset_json_value(value.input),

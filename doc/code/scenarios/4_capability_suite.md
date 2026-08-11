@@ -160,6 +160,7 @@ bounded command in its declared service and exposes no credentials or host-file 
 
 | Static family | Supported unchanged factories | Pinned dataset requirement |
 |---|---|---|
+| BBH | `bbh` | `Joschka/big_bench_hard@76eaa8c29ad448752cd44201a1246618e2454cac`; MIT; all 27 subsets plus `few_shot_prompts` are revision-pinned. |
 | BBQ | `bbq` | `heegyu/bbq@5d6faae52070aa5eb71b46d1c0723d3ba7930209`; CC-BY-4.0; script-backed rows must be cached and passed with `--data`. |
 | BoolQ | `boolq` | `google/boolq@35b264d03638db9f4ce671b711558bf7ff0f80d5`. |
 | CommonsenseQA | `commonsense_qa` | `tau/commonsense_qa@94630fe30dad47192a8546eb75f094926d47e155`. |
@@ -173,12 +174,25 @@ bounded command in its declared service and exposes no credentials or host-file 
 | SecQA | `sec_qa_v1`, `sec_qa_v1_5_shot`, `sec_qa_v2`, `sec_qa_v2_5_shot` | `zefang-liu/secqa@d00a07484283be5602e2bae36dbefdaaf555a9fb`; five-shot tasks require both `dev` and `test`. |
 | WMDP | `wmdp_bio`, `wmdp_chem`, `wmdp_cyber` | `cais/wmdp@7125571f22f032c56415e7980f48d877dd830ff8`. |
 
-`medqa@medqa` is partial because the pinned `bigbio/med_qa` source declares its
-license as `UNKNOWN`. `piqa@piqa` is partial because its pinned builder resolves
-floating external assets without source-declared content hashes. Both unchanged factories
-compile and run with locally authorized/content-verified `--data` records, but the catalog
-does not claim full acquisition support. The other static factories preserve declared
-splits/configs, mapping, IDs, metadata, solver/setup order, scorer options, and metrics.
+The catalog deliberately retains partial status for factories whose native mechanics compile
+but whose source trust is insufficient:
+
+- `medqa@medqa`: `bigbio/med_qa` declares its license as `UNKNOWN`.
+- `piqa@piqa`: the builder resolves floating external assets without source-declared hashes.
+- `cybermetric@cybermetric_80`, `_500`, `_2000`, and `_10000`: exact Git and file hashes are
+  pinned, but the upstream data declares no license.
+- `gpqa@gpqa_diamond`: the CSV is SHA-256-pinned, but license coverage for the exact mirror is
+  unproven and the unchanged factory's choice shuffle is unseeded.
+- Both `vstar_bench` factories: the exact revision declares no annotation/image license or
+  image provenance.
+- `winogrande@winogrande`: the exact revision reports `More Information Needed` for licensing;
+  optional evaluation `shuffle=True` is also unseeded.
+
+Partial factories accept only locally authorized, content-verified records/assets. Synthetic
+mechanics coverage does not promote their catalog status. The generated catalog's
+`reviewed_static_mapping_audit` field records every factory separately, including parameter
+domains, source identity, mapping, solver/scorer graph, few-shot and content behavior, staging,
+metrics/reducers, and remaining external requirements.
 
 The compatibility layer also provides reusable declarative foundations for later adapters.
 These foundations do **not** make another task family supported by themselves:
@@ -209,7 +223,9 @@ These foundations do **not** make another task family supported by themselves:
   scorer, metric, reducer, or option nodes fail at compile time.
 - Static multiple-choice chains preserve preceding system/prompt/message setup, custom templates,
   chain-of-thought formatting, task-level accuracy/clustered-standard-error metrics, and
-  deterministic generation controls. `pattern()` executes with Inspect 0.3.233 capture-group
+  deterministic generation controls. Typed metadata dispatch selects declarative solver/scorer
+  nodes per sample without executing callbacks at runtime; unknown conditions or targets fail
+  construction. `answer()`, `match()`, and `pattern()` execute with Inspect 0.3.233 extraction
   semantics. Target request-option compatibility is preflighted before any model call.
 
 Manifest schema version 3 carries ordered multipart messages and typed metric/reducer
@@ -278,6 +294,51 @@ uv run pyrit_capability_suite inspect-evals tasks --source <source> --family boo
 uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task boolq/boolq.py@boolq --data .\boolq-records.json --manifest .\boolq-manifest.json
 uv run pyrit_capability_suite inspect-evals run --config .\.pyrit_conf --source <source> --task boolq/boolq.py@boolq --data .\boolq-records.json --target openai_chat --result .\results\boolq.json
 ```
+
+BBH data must be a keyed JSON object because construction requests the selected subset and the
+`few_shot_prompts` config separately. For `subset_name=null`, include keys for all 27 subsets.
+The following commands compile and run one subset without Inspect installed:
+
+```powershell
+$env:HF_HUB_OFFLINE = "1"
+uv run pyrit_capability_suite inspect-evals tasks --source <source> --family bbh
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task bbh/bbh.py@bbh --task-param subset_name=date_understanding --task-param prompt_type=answer_only --data .\bbh-records.json --manifest .\bbh.json --report .\bbh-report.json
+uv run pyrit_capability_suite inspect-evals run --config .\.pyrit_conf --source <source> --task bbh/bbh.py@bbh --task-param subset_name=date_understanding --task-param prompt_type=answer_only --data .\bbh-records.json --target openai_chat --result .\results\bbh.json
+```
+
+The four partial advanced families use the same public CLI seams but require authorized caches:
+
+```powershell
+# CyberMetric: the pinned JSON is SHA-256 verified and the exact normalized rows are compared with
+# that verified source in the same construction. Delete a pre-existing JSONL before an offline rerun
+# so the pinned factory revalidates and regenerates it from the adjacent authorized JSON cache.
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task cybermetric/cybermetric.py@cybermetric_80 --inspect-evals-cache-dir .\inspect-cache --manifest .\cybermetric-80.json
+
+# GPQA: place the authorized gpqa_diamond.csv at .\inspect-cache\gpqa\gpqa_diamond.csv.
+# Its SHA-256 must be 41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305.
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task gpqa/gpqa.py@gpqa_diamond --inspect-evals-cache-dir .\inspect-cache --task-param cot=false --manifest .\gpqa.json
+
+# WinoGrande: validation and train are distinct request keys when fewshot is nonzero.
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task winogrande/winogrande.py@winogrande --task-param dataset_name=winogrande_xl --task-param fewshot=5 --data .\winogrande-records.json --manifest .\winogrande.json
+uv run pyrit_capability_suite inspect-evals run --config .\.pyrit_conf --source <source> --task winogrande/winogrande.py@winogrande --task-param dataset_name=winogrande_xl --task-param fewshot=5 --data .\winogrande-records.json --target openai_chat --result .\results\winogrande.json
+```
+
+V* Bench additionally requires a staged snapshot at
+`<cache>\.pyrit\inspect-compat\staged-snapshots\craigwu--vstar_bench\d9ae62c903da0c98336e85c5ee89cd863b04b4da`.
+Its `manifest.json` must identify the repository, dataset type, exact revision, and SHA-256 of
+every file. Image paths must stay inside that root and use a supported image MIME type. PyRIT
+embeds them as content-hashed data URIs while preserving text-before-image order. The selected
+target must declare the exact combined text/image input modality; this is checked before any
+model call:
+
+```powershell
+uv run pyrit_capability_suite inspect-evals dry-run --source <source> --task vstar_bench/vstar_bench.py@vstar_bench_attribute_recognition --data .\vstar-records.json --inspect-evals-cache-dir .\inspect-cache --manifest .\vstar.json
+uv run pyrit_capability_suite inspect-evals run --config .\.pyrit_conf --source <source> --task vstar_bench/vstar_bench.py@vstar_bench_attribute_recognition --data .\vstar-records.json --inspect-evals-cache-dir .\inspect-cache --target image_chat --result .\results\vstar.json
+```
+
+Do not use `--allow-network` for a partial family until its dataset terms are confirmed. For
+BBH, an initial exact-revision acquisition may use `--allow-network`; subsequent runs omit it
+and reuse the validated Hugging Face cache or pass request-keyed records with `--data`.
 
 `--data` accepts either one JSON array for a task that makes exactly one unique dataset
 request or a JSON object whose values are record arrays. Multi-subset/config/split tasks

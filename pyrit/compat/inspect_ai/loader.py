@@ -26,6 +26,7 @@ import time
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from string import Formatter
 from types import ModuleType
@@ -44,8 +45,12 @@ from pyrit.compat.inspect_ai.facade import (
     download_and_verify,
     filter_duplicate_ids,
     hf_dataset,
+    load_csv_dataset,
+    load_dataset,
     load_hf_dataset_with_script,
     load_json_dataset,
+    snapshot_download,
+    validate_staged_snapshot_file,
 )
 from pyrit.compat.inspect_ai.inventory import InspectApiInventory, inventory_inspect_api_usage
 from pyrit.compat.inspect_ai.profile import (
@@ -904,7 +909,7 @@ def _run_worker(
         request_path = Path(directory) / "request.json"
         response_path = Path(directory) / "response.json"
         request_path.write_text(json.dumps(request), encoding="utf-8")
-        process_environment = _worker_environment()
+        process_environment = _worker_environment(allow_network=allow_network)
         completed = _run_worker_process(
             argv=_worker_command(request_path=request_path, response_path=response_path),
             environment=process_environment,
@@ -935,8 +940,16 @@ def _run_worker(
     return LoadedInspectEval(task=loaded.task, suite=loaded.suite, report=report)
 
 
-def _worker_environment() -> dict[str, str]:
-    return {name: value for name in _WORKER_ENVIRONMENT_ALLOWLIST if (value := os.environ.get(name)) is not None}
+def _worker_environment(*, allow_network: bool) -> dict[str, str]:
+    environment = {name: value for name in _WORKER_ENVIRONMENT_ALLOWLIST if (value := os.environ.get(name)) is not None}
+    if not allow_network:
+        environment.update(
+            {
+                "HF_DATASETS_OFFLINE": "1",
+                "HF_HUB_OFFLINE": "1",
+            }
+        )
+    return environment
 
 
 def _worker_command(*, request_path: Path, response_path: Path) -> tuple[str, ...]:
@@ -1165,7 +1178,7 @@ def _serialize_sample(sample: Sample) -> dict[str, Any]:
                 "content": _serialize_message_content(message),
                 "name": message.name,
                 "source": message.source,
-                "metadata": message.metadata,
+                "metadata": _json_mapping(message.metadata),
             }
             for message in sample.input
         ]
@@ -1175,7 +1188,7 @@ def _serialize_sample(sample: Sample) -> dict[str, Any]:
         "target": sample.target,
         "choices": sample.choices,
         "id": sample.id,
-        "metadata": sample.metadata,
+        "metadata": _json_mapping(sample.metadata),
         "sandbox": _serialize_sandbox(sample.sandbox),
         "setup": sample.setup,
         "files": sample.files,
@@ -1378,18 +1391,25 @@ def _build_pinned_source_shims(*, data_root: Path | None) -> dict[str, ModuleTyp
     utils = ModuleType("inspect_evals.utils")
     utils.__path__ = []
     utils.__dict__["load_json_dataset"] = load_json_dataset
+    utils.__dict__["load_csv_dataset"] = load_csv_dataset
     utils.__dict__["download_and_verify"] = download_and_verify
     utils.__dict__["create_stable_id"] = create_stable_id
     utils.__dict__["filter_duplicate_ids"] = filter_duplicate_ids
+    download = ModuleType("inspect_evals.utils.download")
+    download.__dict__["download_and_verify"] = download_and_verify
     huggingface = ModuleType("inspect_evals.utils.huggingface")
     huggingface.__dict__["hf_dataset"] = hf_dataset
+    huggingface.__dict__["load_dataset"] = load_dataset
+    huggingface.__dict__["snapshot_download"] = snapshot_download
     utils.__dict__["huggingface"] = huggingface
     constants = ModuleType("inspect_evals.constants")
     constants.__dict__["INSPECT_EVALS_CACHE_PATH"] = data_root or Path.home() / ".cache" / "inspect_evals"
+    constants.__dict__["DEFAULT_FEWSHOT_SEED"] = 42
     script_helper = ModuleType("inspect_evals.hf_dataset_script_helper")
     script_helper.__dict__["load_hf_dataset_with_script"] = load_hf_dataset_with_script
     return {
         "inspect_evals.utils": utils,
+        "inspect_evals.utils.download": download,
         "inspect_evals.utils.huggingface": huggingface,
         "inspect_evals.constants": constants,
         "inspect_evals.hf_dataset_script_helper": script_helper,
@@ -1567,6 +1587,21 @@ def _compile_task_suite(
         )
     solvers, solver_paths = _solver_steps(task)
     scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
+    if any(spec.name == "metadata_dispatch" for spec in (*solvers, *scorers)):
+        return _compile_metadata_dispatch_suite(
+            task=task,
+            task_name=task_name,
+            parameters=parameters,
+            profile=profile,
+            checked_revision=checked_revision,
+            revision_verified=revision_verified,
+            case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
+            solvers=solvers,
+            solver_paths=solver_paths,
+            scorers=scorers,
+        )
     if solvers and solvers[-1].name == "multiple_choice":
         return _compile_arc_suite(
             task=task,
@@ -1595,6 +1630,189 @@ def _compile_task_suite(
         solver_paths=solver_paths,
         scorers=scorers,
     )
+
+
+def _compile_metadata_dispatch_suite(
+    *,
+    task: Task,
+    task_name: str,
+    parameters: dict[str, object],
+    profile: InspectCompatibilityProfile,
+    checked_revision: str | None,
+    revision_verified: bool,
+    case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    scorers: tuple[ScorerSpec, ...],
+) -> CapabilitySuiteManifest:
+    _reject_static_task_options(task=task, profile=profile)
+    if not scorers:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.scorer=<empty>",
+            source_profile=profile.profile_id,
+        )
+    dataset = task.dataset if isinstance(task.dataset, Dataset) else Dataset(task.dataset)
+    cases = []
+    for index, sample in enumerate(dataset):
+        resolved_solvers = tuple(_resolve_metadata_solver(spec=spec, sample=sample) for spec in solvers)
+        resolved_scorers = tuple(_resolve_metadata_scorer(spec=spec, sample=sample) for spec in scorers)
+        resolved_paths = tuple(
+            f"{path}.metadata_dispatch[{_metadata_dispatch_value(spec=spec, sample=sample)}]"
+            if spec.name == "metadata_dispatch"
+            else path
+            for spec, path in zip(solvers, solver_paths, strict=True)
+        )
+        if resolved_solvers and resolved_solvers[-1].name == "multiple_choice":
+            _validate_multiple_choice_graph(
+                solvers=resolved_solvers,
+                scorers=resolved_scorers,
+                profile=profile,
+            )
+            cases.append(
+                _compile_arc_sample(
+                    sample=sample,
+                    index=index,
+                    task=task,
+                    solver=resolved_solvers[-1],
+                    solvers=resolved_solvers,
+                    solver_paths=resolved_paths,
+                    scorer=resolved_scorers[0],
+                    dataset=dataset,
+                    case_timeout_seconds=case_timeout_seconds,
+                    package_root=package_root,
+                    data_root=data_root,
+                )
+            )
+        else:
+            _validate_static_solver_steps(
+                solvers=resolved_solvers,
+                solver_paths=resolved_paths,
+                profile=profile,
+            )
+            cases.append(
+                _compile_static_sample(
+                    sample=sample,
+                    index=index,
+                    task=task,
+                    solvers=resolved_solvers,
+                    solver_paths=resolved_paths,
+                    scorers=resolved_scorers,
+                    dataset=dataset,
+                    case_timeout_seconds=case_timeout_seconds,
+                    package_root=package_root,
+                    data_root=data_root,
+                    profile=profile,
+                )
+            )
+    if not cases:
+        raise ValueError(f"Inspect task '{task_name}' produced an empty dataset.")
+    epochs = task.epochs.epochs if isinstance(task.epochs, Epochs) else task.epochs or 1
+    return CapabilitySuiteManifest(
+        suite_id=_safe_identifier(f"inspect-compat-{task_name}"),
+        name=f"Inspect compatibility: {task_name}",
+        description="Pinned metadata-dispatched Inspect task graph compiled to native PyRIT execution.",
+        provenance=SuiteProvenance(
+            source="UKGovernmentBEIS/inspect_evals compatibility loader",
+            source_id=task_name,
+            repository="https://github.com/UKGovernmentBEIS/inspect_evals",
+            revision=checked_revision,
+            license="MIT; dataset licenses remain upstream-specific",
+            metadata={
+                "compatibility_profile": profile.profile_id,
+                "inspect_api_profile": profile.inspect_api_profile,
+                "expected_revision": profile.inspect_evals_revision,
+                "detected_revision": checked_revision,
+                "source_revision_verified": revision_verified,
+                "case_timeout_seconds": case_timeout_seconds,
+                "task_parameters": _json_mapping(parameters),
+                "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
+            },
+        ),
+        sandbox_provider=LocalSandboxProviderManifestConfig(),
+        run_policy=RunPolicyManifest(epochs=epochs),
+        cases=tuple(cases),
+        tags=("inspect-evals", "compatibility", "static", "native"),
+        metadata={
+            "compatibility_profile": profile.profile_id,
+            "expected_revision": profile.inspect_evals_revision,
+            "detected_revision": checked_revision,
+            "source_revision_verified": revision_verified,
+            "case_timeout_seconds": case_timeout_seconds,
+            "task_version": _json_scalar(task.version),
+            "task_metadata": _json_mapping(task.metadata),
+            "solver": [_serialize_spec(spec) for spec in solvers],
+            "scorer": [_serialize_spec(spec) for spec in scorers],
+            "dataset": _json_mapping(dataset.metadata),
+            "dataset_provenance": _json_mapping(dataset.provenance),
+        },
+    )
+
+
+def _metadata_dispatch_value(*, spec: SolverSpec | ScorerSpec, sample: Sample) -> str:
+    key = spec.config.get("metadata_key")
+    if not isinstance(key, str):
+        raise TypeError("metadata_dispatch requires a string 'metadata_key'.")
+    if key not in sample.metadata:
+        raise ValueError(f"Sample '{sample.id}' is missing metadata dispatch key '{key}'.")
+    value = sample.metadata[key]
+    if isinstance(value, Enum):
+        return value.name
+    if not isinstance(value, (str, int)):
+        raise TypeError(f"Sample metadata dispatch value '{key}' must be a string or integer.")
+    return str(value)
+
+
+def _metadata_dispatch_component(
+    *,
+    spec: SolverSpec | ScorerSpec,
+    sample: Sample,
+) -> dict[str, Any]:
+    value = _metadata_dispatch_value(spec=spec, sample=sample)
+    cases = spec.config.get("cases")
+    if not isinstance(cases, dict):
+        raise TypeError("metadata_dispatch requires a 'cases' mapping.")
+    component = cases.get(value, spec.config.get("default"))
+    if not isinstance(component, dict):
+        raise ValueError(f"metadata_dispatch has no case for '{value}'.")
+    return cast("dict[str, Any]", component)
+
+
+def _resolve_metadata_solver(*, spec: SolverSpec, sample: Sample) -> SolverSpec:
+    if spec.name != "metadata_dispatch":
+        return spec
+    return _deserialize_solver_spec(_metadata_dispatch_component(spec=spec, sample=sample))
+
+
+def _resolve_metadata_scorer(*, spec: ScorerSpec, sample: Sample) -> ScorerSpec:
+    if spec.name != "metadata_dispatch":
+        return spec
+    selected = _deserialize_scorer_spec(_metadata_dispatch_component(spec=spec, sample=sample))
+    return replace(
+        selected,
+        metrics=spec.metrics or selected.metrics,
+        reducers=spec.reducers or selected.reducers,
+    )
+
+
+def _validate_multiple_choice_graph(
+    *,
+    solvers: tuple[SolverSpec, ...],
+    scorers: tuple[ScorerSpec, ...],
+    profile: InspectCompatibilityProfile,
+) -> None:
+    supported_prefixes = {"system_message", "prompt_template", "user_message", "assistant_message"}
+    unsupported_solver = next((solver for solver in solvers[:-1] if solver.name not in supported_prefixes), None)
+    if unsupported_solver is not None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.solver.{unsupported_solver.name}",
+            source_profile=profile.profile_id,
+        )
+    if len(scorers) != 1 or scorers[0].name != "choice":
+        symbol = f"inspect_ai.scorer.{scorers[0].name}" if scorers else "inspect_ai.scorer.<empty>"
+        raise UnsupportedInspectFeatureError(symbol=symbol, source_profile=profile.profile_id)
 
 
 def _compile_intercode_suite(
@@ -2523,9 +2741,10 @@ def _compile_image_content(
     profile: InspectCompatibilityProfile,
 ) -> tuple[str, Literal["image_path", "url"], dict[str, Any]]:
     parsed = urlparse(image)
+    candidate_path = Path(image)
     if image.startswith("data:") or parsed.scheme in {"http", "https"}:
         return image, "url", {"inspect_content_type": "image"}
-    if parsed.scheme:
+    if parsed.scheme and not candidate_path.is_absolute():
         raise UnsupportedInspectFeatureError(
             symbol=f"{path}.ContentImage({parsed.scheme}://...)",
             source_profile=profile.profile_id,
@@ -2542,25 +2761,35 @@ def _compile_image_content(
             resolved_location = location
         if resolved_location.suffix:
             base = resolved_location.parent
-    candidate = Path(image)
+    candidate = candidate_path
     candidate = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
-    allowed_roots = tuple(root.resolve() for root in (package_root, data_root) if root is not None)
-    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
-        raise ValueError(f"{path} local image escapes the trusted source/data roots: '{image}'.")
+    package_root = package_root.resolve()
+    staged_digest: str | None = None
+    if candidate != package_root and package_root not in candidate.parents:
+        if data_root is None:
+            raise ValueError(f"{path} local image escapes the trusted source root: '{image}'.")
+        data_root = data_root.resolve()
+        if candidate != data_root and data_root not in candidate.parents:
+            raise ValueError(f"{path} local image escapes the trusted source/data roots: '{image}'.")
+        staged_digest = validate_staged_snapshot_file(path=candidate, data_root=data_root)
     if not candidate.is_file():
         raise ValueError(f"{path} local image does not exist: '{image}'.")
-    source = candidate.read_bytes()
     mime_type = mimetypes.guess_type(candidate.name, strict=False)[0]
-    if mime_type is None or not mime_type.startswith("image/"):
-        raise ValueError(f"{path} local image must have a recognized image media type: '{image}'.")
+    if mime_type not in {"image/gif", "image/jpeg", "image/png", "image/webp"}:
+        raise ValueError(f"{path} local image has unsupported media type '{mime_type}': '{image}'.")
+    source = candidate.read_bytes()
+    source_digest = hashlib.sha256(source).hexdigest()
+    if staged_digest is not None and source_digest != staged_digest:
+        raise ValueError(f"{path} staged image changed after manifest validation: '{image}'.")
     return (
         f"data:{mime_type};base64,{base64.b64encode(source).decode('ascii')}",
         "url",
         {
             "inspect_content_type": "image",
             "source": image,
-            "sha256": hashlib.sha256(source).hexdigest(),
+            "sha256": source_digest,
             "media_type": mime_type,
+            **({"staged_sha256": staged_digest} if staged_digest is not None else {}),
         },
     )
 
@@ -2609,13 +2838,29 @@ def _compile_static_scorers(
     targets = tuple(sample.target) if isinstance(sample.target, list) else (sample.target,)
     manifests = []
     for index, scorer in enumerate(scorers):
+        expression = ""
         scorer_id = _safe_identifier(f"{scorer.name}-{index + 1}")
-        if scorer.name not in {"match", "includes", "pattern"}:
+        if scorer.name not in {"answer", "match", "includes", "pattern"}:
             raise UnsupportedInspectFeatureError(
                 symbol=f"inspect_ai.Task.scorer[{index}].{scorer.name}",
                 source_profile=profile.profile_id,
             )
-        if scorer.name == "pattern":
+        if scorer.name == "answer":
+            unknown = next((name for name in scorer.config if name != "pattern"), None)
+            answer_pattern = scorer.config.get("pattern")
+            if unknown is not None or answer_pattern not in {"letter", "word", "line"}:
+                option = unknown or f"pattern={answer_pattern!r}"
+                raise UnsupportedInspectFeatureError(
+                    symbol=f"inspect_ai.Task.scorer[{index}].answer({option})",
+                    source_profile=profile.profile_id,
+                )
+            expression = {
+                "letter": r"(?is)ANSWER\s*:\s*([A-Za-z])(?:[^\w]|\n|$)(?!.*ANSWER\s*:)",
+                "word": r"(?is)ANSWER\s*:\s*(\S+?)(?=[.,;:!?]?\s*(?:\n|$))(?!.*ANSWER\s*:)",
+                "line": r"(?i)ANSWER\s*:\s*([^\n]+)\s*\Z",
+            }[cast("str", answer_pattern)]
+            location = "any"
+        elif scorer.name == "pattern":
             allowed = {"pattern", "ignore_case", "match_all"}
             unknown = next((name for name in scorer.config if name not in allowed), None)
             if unknown is not None:
@@ -2678,11 +2923,11 @@ def _compile_static_scorers(
         scorer_config = (
             {
                 "expected_values": list(targets),
-                "pattern": scorer.config["pattern"],
+                "pattern": expression,
                 "ignore_case": ignore_case,
                 "match_all": scorer.config.get("match_all", False),
             }
-            if scorer.name == "pattern"
+            if scorer.name in {"answer", "pattern"}
             else {
                 "expected_values": list(targets),
                 "mode": scorer.name,
@@ -2692,7 +2937,7 @@ def _compile_static_scorers(
         )
         manifests.append(
             CaseScorerManifest(
-                kind="inspect_pattern" if scorer.name == "pattern" else "inspect_text",
+                kind="inspect_pattern" if scorer.name in {"answer", "pattern"} else "inspect_text",
                 scorer_id=scorer_id,
                 config=scorer_config,
                 metrics=metrics,
@@ -2995,21 +3240,12 @@ def _compile_arc_suite(
     solvers: tuple[SolverSpec, ...],
     solver_paths: tuple[str, ...],
 ) -> CapabilitySuiteManifest:
-    _reject_unsupported_task_options(task=task, profile=profile)
+    _reject_static_task_options(task=task, profile=profile)
     scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
     if not solvers or solvers[-1].name != "multiple_choice":
         symbol = f"inspect_ai.solver.{solvers[-1].name}" if solvers else "inspect_ai.solver.<empty>"
         raise UnsupportedInspectFeatureError(symbol=symbol, source_profile=profile.profile_id)
-    supported_prefixes = {"system_message", "prompt_template", "user_message", "assistant_message"}
-    unsupported_solver = next((solver for solver in solvers[:-1] if solver.name not in supported_prefixes), None)
-    if unsupported_solver is not None:
-        raise UnsupportedInspectFeatureError(
-            symbol=f"inspect_ai.solver.{unsupported_solver.name}",
-            source_profile=profile.profile_id,
-        )
-    if len(scorers) != 1 or scorers[0].name != "choice":
-        symbol = f"inspect_ai.scorer.{scorers[0].name}" if scorers else "inspect_ai.scorer.<empty>"
-        raise UnsupportedInspectFeatureError(symbol=symbol, source_profile=profile.profile_id)
+    _validate_multiple_choice_graph(solvers=solvers, scorers=scorers, profile=profile)
     if task.sandbox is not None:
         raise UnsupportedInspectFeatureError(symbol="inspect_ai.sandbox runtime", source_profile=profile.profile_id)
     dataset = task.dataset if isinstance(task.dataset, Dataset) else Dataset(task.dataset)
@@ -3151,14 +3387,13 @@ def _compile_arc_sample(
     )
     if task.config is not None and task.config.system_message:
         messages = (CaseMessageManifest(role="system", content=task.config.system_message), *messages)
-    max_tokens = solver.config.get("max_tokens")
-    if max_tokens is not None:
-        raise UnsupportedInspectFeatureError(
-            symbol="inspect_ai.solver.multiple_choice(max_tokens=...)",
-            source_profile=PINNED_INSPECT_EVALS_PROFILE.profile_id,
-        )
+    max_tokens = _generation_limit(task=task, generation_config=solver.config, field_name="max_tokens")
+    timeout = task.time_limit if isinstance(task.time_limit, int) else None
+    time_limits = [float(value) for value in (timeout, case_timeout_seconds) if value is not None]
     limits = CapabilityLimits(
-        max_wall_clock_seconds=case_timeout_seconds,
+        max_wall_clock_seconds=min(time_limits),
+        max_output_tokens=max_tokens,
+        max_total_tokens=task.token_limit if isinstance(task.token_limit, int) else None,
     )
     case_id = _safe_identifier(str(sample.id if sample.id is not None else f"sample-{index + 1}"))
     scorer_id = _safe_identifier(f"{scorer.name}-1")
@@ -3364,6 +3599,8 @@ def _json_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
 def _json_value(value: object) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, Enum):
+        return value.name
     if isinstance(value, Mapping):
         return _json_mapping(value)
     if isinstance(value, (list, tuple)):

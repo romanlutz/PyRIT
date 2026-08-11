@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from pyrit.compat.inspect_ai.inventory import inventory_inspect_api_usage
 from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
 from pyrit.compat.inspect_ai.source import validate_inspect_source
+from pyrit.compat.inspect_ai.static_mapping_audit import reviewed_static_mapping_audit
 from pyrit.scenario.capability_suite.inspect_evals import (
     FidelityClassification,
     InspectEvalFamilyReport,
@@ -30,6 +31,7 @@ _GOLDEN_FAMILY_COUNT = 129
 _GOLDEN_TASK_COUNT = 249
 _SUPPORTED_TASKS = {
     "arc": ("arc_challenge", "arc_easy"),
+    "bbh": ("bbh",),
     "bbq": ("bbq",),
     "boolq": ("boolq",),
     "commonsense_qa": ("commonsense_qa",),
@@ -45,7 +47,27 @@ _SUPPORTED_TASKS = {
     "sec_qa": ("sec_qa_v1", "sec_qa_v1_5_shot", "sec_qa_v2", "sec_qa_v2_5_shot"),
     "wmdp": ("wmdp_bio", "wmdp_chem", "wmdp_cyber"),
 }
+_CYBERMETRIC_BLOCKER = (
+    "The exact commit and SHA256 are pinned, but the upstream dataset declares no license. Supply only locally "
+    "authorized exact bytes; the native factory remains partial until dataset reuse terms are established."
+)
+_VSTAR_BLOCKER = (
+    "The exact Hugging Face revision has no dataset or image license/provenance statement. Native ordered "
+    "text/image compilation requires an authorized per-file-checksummed staged snapshot and an image-capable "
+    "target."
+)
 _FACTORY_BLOCKERS = {
+    ("cybermetric", "cybermetric_80"): (_CYBERMETRIC_BLOCKER,),
+    ("cybermetric", "cybermetric_500"): (_CYBERMETRIC_BLOCKER,),
+    ("cybermetric", "cybermetric_2000"): (_CYBERMETRIC_BLOCKER,),
+    ("cybermetric", "cybermetric_10000"): (_CYBERMETRIC_BLOCKER,),
+    ("gpqa", "gpqa_diamond"): (
+        (
+            "The CSV is SHA256-pinned, but license coverage for the exact OpenAI mirror is not established and the "
+            "pinned factory shuffles choices without a seed. Use an authorized verified cache; full reproducibility "
+            "and source trust remain blocked."
+        ),
+    ),
     ("medqa", "medqa"): (
         (
             "The pinned bigbio/med_qa source declares its dataset license as UNKNOWN. The unchanged factory compiles "
@@ -60,12 +82,23 @@ _FACTORY_BLOCKERS = {
             "remains unsupported."
         ),
     ),
+    ("vstar_bench", "vstar_bench_attribute_recognition"): (_VSTAR_BLOCKER,),
+    ("vstar_bench", "vstar_bench_spatial_relationship_reasoning"): (_VSTAR_BLOCKER,),
+    ("winogrande", "winogrande"): (
+        (
+            "The exact Hugging Face revision labels licensing as 'More Information Needed', and optional evaluation "
+            "shuffle=True is unseeded. Supply authorized exact-revision records; full source trust remains blocked."
+        ),
+    ),
 }
 _STATIC_MAPPING_FAMILIES = frozenset(
     {
+        "bbh",
         "bbq",
         "boolq",
         "commonsense_qa",
+        "cybermetric",
+        "gpqa",
         "hellaswag",
         "medqa",
         "musr",
@@ -76,6 +109,8 @@ _STATIC_MAPPING_FAMILIES = frozenset(
         "pubmedqa",
         "race_h",
         "sec_qa",
+        "vstar_bench",
+        "winogrande",
         "wmdp",
     }
 )
@@ -344,6 +379,7 @@ def _compatibility_status(
 def _task_factory_record(*, report: InspectEvalFamilyReport, task: InspectEvalTaskFactory) -> dict[str, object]:
     record = asdict(task)
     name = str(record["name"])
+    audit = reviewed_static_mapping_audit(family=report.family, factory=name)
     blockers = _FACTORY_BLOCKERS.get((report.family, name), ())
     if name in _SUPPORTED_TASKS.get(report.family, ()):
         status = "supported"
@@ -364,6 +400,7 @@ def _task_factory_record(*, report: InspectEvalFamilyReport, task: InspectEvalTa
                 if status == "supported"
                 else None
             ),
+            **({"reviewed_static_mapping_audit": audit} if audit is not None else {}),
         }
     )
     return record

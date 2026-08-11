@@ -19,6 +19,7 @@ from pyrit.compat.inspect_ai.catalog import (
 )
 from pyrit.compat.inspect_ai.profile import PINNED_INSPECT_EVALS_PROFILE
 from pyrit.compat.inspect_ai.source import InspectSourceVerification
+from pyrit.compat.inspect_ai.static_mapping_audit import reviewed_static_mapping_audit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,6 +71,39 @@ def test_cloud_classification_uses_term_boundaries() -> None:
     assert _contains_classification_term(text="provider: modal", term="modal")
     assert not _contains_classification_term(text="supported modalities", term="modal")
     assert _contains_classification_term(text="google_cloud provider", term="google_cloud")
+
+
+@pytest.mark.parametrize(
+    ("family", "factory"),
+    [
+        ("bbh", "bbh"),
+        ("cybermetric", "cybermetric_80"),
+        ("cybermetric", "cybermetric_500"),
+        ("cybermetric", "cybermetric_2000"),
+        ("cybermetric", "cybermetric_10000"),
+        ("gpqa", "gpqa_diamond"),
+        ("vstar_bench", "vstar_bench_attribute_recognition"),
+        ("vstar_bench", "vstar_bench_spatial_relationship_reasoning"),
+        ("winogrande", "winogrande"),
+    ],
+)
+def test_advanced_static_mapping_audit_is_factory_complete(family: str, factory: str) -> None:
+    audit = reviewed_static_mapping_audit(family=family, factory=factory)
+
+    assert audit is not None
+    assert set(audit) >= {
+        "audit_version",
+        "factory_arguments",
+        "dataset_sources",
+        "record_mapping",
+        "solver_graph",
+        "few_shot",
+        "messages_and_content",
+        "staging",
+        "scorers",
+        "metrics_and_reducers",
+        "external_requirements",
+    }
 
 
 def test_catalog_regression_rejects_unreviewed_api_inventory() -> None:

@@ -9,20 +9,26 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import inspect
 import json
 import math
+import os
 import random
+import textwrap
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
+from enum import Enum
+from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, TypeVar, cast
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from pyrit.compat.inspect_ai.profile import InspectCompatibilityProfile, UnsupportedInspectFeatureError
 from pyrit.compat.inspect_ai.types import (
@@ -75,6 +81,10 @@ _ACTIVE_DATASET_LOADER: ContextVar[DatasetLoader | None] = ContextVar(
 _ACTIVE_ALLOW_NETWORK: ContextVar[bool] = ContextVar("inspect_compat_allow_network", default=False)
 _ACTIVE_SOURCE_ROOT: ContextVar[Path | None] = ContextVar("inspect_compat_source_root", default=None)
 _ACTIVE_DATA_ROOT: ContextVar[Path | None] = ContextVar("inspect_compat_data_root", default=None)
+_ACTIVE_VERIFIED_ASSETS: ContextVar[dict[Path, str] | None] = ContextVar(
+    "inspect_compat_verified_assets",
+    default=None,
+)
 _ACTIVE_PROFILE: ContextVar[InspectCompatibilityProfile | None] = ContextVar(
     "inspect_compat_profile",
     default=None,
@@ -90,6 +100,7 @@ class FacadeContextTokens:
     allow_network: Token[bool]
     source_root: Token[Path | None]
     data_root: Token[Path | None]
+    verified_assets: Token[dict[Path, str] | None]
     profile: Token[InspectCompatibilityProfile | None]
 
 
@@ -128,6 +139,7 @@ def activate_facade_context(
         allow_network=_ACTIVE_ALLOW_NETWORK.set(allow_network),
         source_root=_ACTIVE_SOURCE_ROOT.set(source_root),
         data_root=_ACTIVE_DATA_ROOT.set(data_root),
+        verified_assets=_ACTIVE_VERIFIED_ASSETS.set({}),
         profile=_ACTIVE_PROFILE.set(profile),
     )
 
@@ -139,6 +151,7 @@ def deactivate_facade_context(tokens: FacadeContextTokens) -> None:
     _ACTIVE_ALLOW_NETWORK.reset(tokens.allow_network)
     _ACTIVE_SOURCE_ROOT.reset(tokens.source_root)
     _ACTIVE_DATA_ROOT.reset(tokens.data_root)
+    _ACTIVE_VERIFIED_ASSETS.reset(tokens.verified_assets)
     _ACTIVE_PROFILE.reset(tokens.profile)
 
 
@@ -227,6 +240,15 @@ def _component_decorator(
         def _capture(*args: Any, **kwargs: Any) -> SolverSpec | ScorerSpec | ToolSpec:
             bound = inspect.signature(factory).bind(*args, **kwargs)
             bound.apply_defaults()
+            dispatch = _capture_metadata_dispatch(
+                factory=factory,
+                kind=kind,
+                args=args,
+                kwargs=kwargs,
+                metrics=metrics,
+            )
+            if dispatch is not None:
+                return dispatch
             config = {
                 "factory_arguments": _json_compatible(dict(bound.arguments)),
                 "source_identity": f"{source_module}.{source_qualname}",
@@ -243,6 +265,262 @@ def _component_decorator(
         return cast("F", _capture)
 
     return _decorate(func) if func is not None else _decorate
+
+
+def _capture_metadata_dispatch(
+    *,
+    factory: Callable[..., Any],
+    kind: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    metrics: object,
+) -> SolverSpec | ScorerSpec | None:
+    if kind not in {"solver", "scorer"}:
+        return None
+    source = textwrap.dedent(inspect.getsource(factory))
+    if ".metadata[" not in source:
+        return None
+    tree = ast.parse(source)
+    outer = next((node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
+    if not isinstance(outer, ast.FunctionDef):
+        return None
+    allowed_factories = (
+        {"multiple_choice", "generate"} if kind == "solver" else {"choice", "answer", "match", "includes", "pattern"}
+    )
+    component_assignment_nodes = [
+        node
+        for node in outer.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id in allowed_factories
+    ]
+    if not component_assignment_nodes:
+        return None
+    nested_callbacks = [node for node in outer.body if isinstance(node, ast.AsyncFunctionDef)]
+    if len(nested_callbacks) != 1:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch callbacks",
+            source_profile=_active_profile().profile_id,
+        )
+    nested = nested_callbacks[0]
+    component_assignments = {
+        cast("ast.Name", node.targets[0]).id: cast("ast.Call", node.value) for node in component_assignment_nodes
+    }
+    if len(component_assignments) != len(component_assignment_nodes):
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch duplicate component",
+            source_profile=_active_profile().profile_id,
+        )
+    returns = [
+        node
+        for node in outer.body
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id == nested.name
+    ]
+    if len(returns) != 1:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch factory return",
+            source_profile=_active_profile().profile_id,
+        )
+    for node in outer.body:
+        if node is nested:
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in component_assignments
+        ):
+            continue
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value.id == nested.name:
+            continue
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch construction",
+            source_profile=_active_profile().profile_id,
+            remediation="Metadata-dispatched callbacks may only construct reviewed declarative component nodes.",
+        )
+    if args or kwargs:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch factory arguments",
+            source_profile=_active_profile().profile_id,
+        )
+    metadata_key, local_name, lookup = _metadata_lookup(nested=nested)
+    branches = [node for node in nested.body if isinstance(node, ast.If)]
+    if len(branches) != 1 or any(
+        node is not lookup
+        and node is not branches[0]
+        and not (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        )
+        for node in nested.body
+    ):
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch callback body",
+            source_profile=_active_profile().profile_id,
+        )
+    parameter_names = tuple(argument.arg for argument in nested.args.args)
+    cases, default_name = _metadata_dispatch_cases(
+        nested=nested,
+        local_name=local_name,
+        parameter_names=parameter_names,
+    )
+    expected_type = SolverSpec if kind == "solver" else ScorerSpec
+    components = {name: _metadata_component_spec(call=call, kind=kind) for name, call in component_assignments.items()}
+
+    def _component(name: str) -> dict[str, Any]:
+        component = components.get(name)
+        if not isinstance(component, expected_type):
+            raise UnsupportedInspectFeatureError(
+                symbol=f"{kind} metadata dispatch target '{name}'",
+                source_profile=_active_profile().profile_id,
+            )
+        return cast("dict[str, Any]", _json_compatible(component))
+
+    config: dict[str, Any] = {
+        "metadata_key": metadata_key,
+        "cases": {name: _component(component) for name, component in cases.items()},
+    }
+    if default_name is not None:
+        config["default"] = _component(default_name)
+    if kind == "scorer":
+        return ScorerSpec(name="metadata_dispatch", config=config, metrics=_metric_sequence(metrics))
+    return SolverSpec(name="metadata_dispatch", config=config)
+
+
+def _metadata_component_spec(*, call: ast.Call, kind: str) -> SolverSpec | ScorerSpec:
+    if call.args or any(keyword.arg is None for keyword in call.keywords) or not isinstance(call.func, ast.Name):
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch component arguments",
+            source_profile=_active_profile().profile_id,
+        )
+    try:
+        arguments = {cast("str", keyword.arg): ast.literal_eval(keyword.value) for keyword in call.keywords}
+    except (TypeError, ValueError) as error:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch component literal",
+            source_profile=_active_profile().profile_id,
+        ) from error
+    constructors: dict[str, Callable[..., SolverSpec | ScorerSpec]]
+    if kind == "solver":
+        constructors = {"multiple_choice": multiple_choice, "generate": generate}
+    else:
+        constructors = {
+            "choice": choice,
+            "answer": answer,
+            "match": match,
+            "includes": includes,
+            "pattern": pattern,
+        }
+    constructor = constructors.get(call.func.id)
+    if constructor is None:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch component '{call.func.id}'",
+            source_profile=_active_profile().profile_id,
+        )
+    try:
+        return constructor(**arguments)
+    except (TypeError, ValueError) as error:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"{kind} metadata dispatch component '{call.func.id}' options",
+            source_profile=_active_profile().profile_id,
+        ) from error
+
+
+def _metadata_lookup(*, nested: ast.AsyncFunctionDef) -> tuple[str, str, ast.Assign]:
+    state_name = nested.args.args[0].arg if nested.args.args else None
+    for node in nested.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Attribute)
+            and value.value.attr == "metadata"
+            and isinstance(value.value.value, ast.Name)
+            and value.value.value.id == state_name
+            and isinstance(value.slice, ast.Constant)
+            and isinstance(value.slice.value, str)
+        ):
+            return value.slice.value, node.targets[0].id, node
+    raise UnsupportedInspectFeatureError(
+        symbol="metadata dispatch lookup",
+        source_profile=_active_profile().profile_id,
+    )
+
+
+def _metadata_dispatch_cases(
+    *,
+    nested: ast.AsyncFunctionDef,
+    local_name: str,
+    parameter_names: tuple[str, ...],
+) -> tuple[dict[str, str], str | None]:
+    current = next((node for node in nested.body if isinstance(node, ast.If)), None)
+    if current is None:
+        raise UnsupportedInspectFeatureError(
+            symbol="metadata dispatch branch",
+            source_profile=_active_profile().profile_id,
+        )
+    cases: dict[str, str] = {}
+    default_name: str | None = None
+    while current is not None:
+        test = current.test
+        if (
+            not isinstance(test, ast.Compare)
+            or not isinstance(test.left, ast.Name)
+            or test.left.id != local_name
+            or len(test.ops) != 1
+            or not isinstance(test.ops[0], ast.Eq)
+            or len(test.comparators) != 1
+        ):
+            raise UnsupportedInspectFeatureError(
+                symbol="metadata dispatch condition",
+                source_profile=_active_profile().profile_id,
+            )
+        comparator = test.comparators[0]
+        if isinstance(comparator, ast.Attribute) and isinstance(comparator.value, ast.Name):
+            case_name = comparator.attr
+        elif isinstance(comparator, ast.Constant) and isinstance(comparator.value, (str, int)):
+            case_name = str(comparator.value)
+        else:
+            raise UnsupportedInspectFeatureError(
+                symbol="metadata dispatch case value",
+                source_profile=_active_profile().profile_id,
+            )
+        if case_name in cases:
+            raise UnsupportedInspectFeatureError(
+                symbol="metadata dispatch duplicate case",
+                source_profile=_active_profile().profile_id,
+            )
+        cases[case_name] = _dispatch_return_name(current.body, parameter_names=parameter_names)
+        if len(current.orelse) == 1 and isinstance(current.orelse[0], ast.If):
+            current = current.orelse[0]
+            continue
+        if current.orelse:
+            default_name = _dispatch_return_name(current.orelse, parameter_names=parameter_names)
+        current = None
+    return cases, default_name
+
+
+def _dispatch_return_name(nodes: list[ast.stmt], *, parameter_names: tuple[str, ...]) -> str:
+    statement = nodes[0] if len(nodes) == 1 else None
+    value = statement.value if isinstance(statement, ast.Return) and isinstance(statement.value, ast.Await) else None
+    call = value.value if isinstance(value, ast.Await) else None
+    if (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and not call.keywords
+        and tuple(argument.id for argument in call.args if isinstance(argument, ast.Name)) == parameter_names
+        and len(call.args) == len(parameter_names)
+    ):
+        return call.func.id
+    raise UnsupportedInspectFeatureError(
+        symbol="metadata dispatch return",
+        source_profile=_active_profile().profile_id,
+    )
 
 
 def _factory_name(factory: Callable[..., object]) -> str:
@@ -475,6 +753,17 @@ def choice() -> ScorerSpec:
     )
 
 
+def answer(*, pattern: str) -> ScorerSpec:
+    """Construct the pinned ``ANSWER:`` extraction scorer."""
+    if pattern not in {"letter", "word", "line"}:
+        raise ValueError("answer(pattern=...) must be 'letter', 'word', or 'line'.")
+    return ScorerSpec(
+        name="answer",
+        config={"pattern": pattern},
+        metrics=(MetricSpec(name="accuracy"), MetricSpec(name="stderr", config={"cluster": None})),
+    )
+
+
 def match(*, location: str = "end", ignore_case: bool = True, numeric: bool = False) -> ScorerSpec:
     """Construct an exact-match scorer graph node."""
     return ScorerSpec(
@@ -636,14 +925,15 @@ def hf_dataset(
         )
     loader = _ACTIVE_DATASET_LOADER.get()
     if loader is None:
-        if not _ACTIVE_ALLOW_NETWORK.get():
-            raise ValueError(
-                "Inspect compatibility dataset loading is offline by default; inject dataset_loader or set "
-                "allow_network=True."
-            )
-        from datasets import load_dataset
+        from datasets import DownloadConfig, load_dataset
 
-        loader = load_dataset
+        def loader(*args: Any, **kwargs: Any) -> object:
+            return load_dataset(
+                *args,
+                **kwargs,
+                download_config=DownloadConfig(local_files_only=not _ACTIVE_ALLOW_NETWORK.get()),
+            )
+
     raw = loader(
         path,
         name,
@@ -708,10 +998,11 @@ def json_dataset(
             source_profile=_active_profile().profile_id,
         )
     path = _resolve_source_path(source)
+    payload = _read_validated_dataset_bytes(path=path, encoding=encoding)
     if path.suffix.lower() == ".jsonl":
-        records = [json.loads(line) for line in path.read_text(encoding=encoding).splitlines() if line.strip()]
+        records = [json.loads(line) for line in payload.decode(encoding).splitlines() if line.strip()]
     else:
-        records = json.loads(path.read_text(encoding=encoding))
+        records = json.loads(payload.decode(encoding))
     dataset = _map_records(
         raw=records,
         sample_fields=sample_fields,
@@ -729,27 +1020,297 @@ def json_dataset(
     )
 
 
+def _read_validated_dataset_bytes(*, path: Path, encoding: str) -> bytes:
+    data_root = _ACTIVE_DATA_ROOT.get()
+    source_root = _ACTIVE_SOURCE_ROOT.get()
+    resolved = path.resolve()
+    if data_root is None or source_root is None or source_root == resolved or source_root in resolved.parents:
+        return resolved.read_bytes()
+    root = data_root.resolve()
+    if resolved != root and root not in resolved.parents:
+        return resolved.read_bytes()
+    if resolved.suffix.casefold() != ".jsonl":
+        return resolved.read_bytes()
+    payload = resolved.read_bytes()
+    records = [json.loads(line) for line in payload.decode(encoding).splitlines() if line.strip()]
+    verified = _ACTIVE_VERIFIED_ASSETS.get() or {}
+    source_asset = next(
+        (
+            asset
+            for asset in verified
+            if asset.parent == resolved.parent and asset.stem == resolved.stem and asset.suffix != resolved.suffix
+        ),
+        None,
+    )
+    if source_asset is None:
+        raise ValueError(
+            f"Cached derived dataset '{resolved}' requires its pinned source asset to be verified during "
+            "this construction."
+        )
+    source_payload = source_asset.read_bytes()
+    expected_source_digest = verified[source_asset]
+    if hashlib.sha256(source_payload).hexdigest() != expected_source_digest:
+        raise ValueError(f"Verified source asset changed before derived dataset validation: '{source_asset}'.")
+    source_value = json.loads(source_payload.decode(encoding))
+    candidates = (
+        [source_value]
+        if isinstance(source_value, list)
+        else [value for value in source_value.values() if isinstance(value, list)]
+        if isinstance(source_value, dict)
+        else []
+    )
+    if not any(_json_values_identical(candidate, records) for candidate in candidates):
+        raise ValueError(f"Cached derived dataset rows do not match the verified source asset: '{resolved}'.")
+    sidecar = resolved.with_name(f"{resolved.name}.sha256")
+    digest = hashlib.sha256(payload).hexdigest()
+    if sidecar.is_file():
+        expected = sidecar.read_text(encoding="ascii").strip().casefold()
+        if digest != expected:
+            raise ValueError(f"Cached derived dataset checksum mismatch for '{resolved}'.")
+    else:
+        temporary = sidecar.with_name(f".{sidecar.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(f"{digest}\n", encoding="ascii")
+            temporary.replace(sidecar)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return payload
+
+
+def _json_values_identical(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        if not isinstance(right, dict) or list(left) != list(right):
+            return False
+        return all(_json_values_identical(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return (
+            isinstance(right, list)
+            and len(left) == len(right)
+            and all(
+                _json_values_identical(left_value, right_value)
+                for left_value, right_value in zip(left, right, strict=True)
+            )
+        )
+    return bool(left == right)
+
+
 def load_json_dataset(
     file_path: str,
     eval_name: str,
-    sample_fields: RecordMapper,
-    *,
+    sample_fields: RecordMapper | FieldSpec | None = None,
+    auto_id: bool = False,
     shuffle: bool = False,
-    **kwargs: Any,
+    seed: int | None = None,
+    limit: int | bool | None = None,
+    epoch: int | None = None,
+    name: str = "",
+    fs_options: dict[str, Any] | None = None,
+    *,
+    refresh: bool = False,
+    cache_tag: str | None = None,
+    encoding: str = "utf-8",
 ) -> Dataset:
     """Provide the pinned inspect-evals local JSON helper over the strict facade loader."""
-    unsupported = sorted(set(kwargs).difference({"cache_tag", "encoding", "fs_options", "refresh"}))
-    if unsupported:
-        raise UnsupportedInspectFeatureError(
-            symbol=f"inspect_evals.utils.load_json_dataset({unsupported[0]}=...)",
-            source_profile=_active_profile().profile_id,
-        )
+    del eval_name, epoch, refresh, cache_tag
+    if isinstance(limit, bool):
+        raise TypeError("load_json_dataset(limit=...) must be an integer or None.")
     return json_dataset(
         file_path=file_path,
         sample_fields=sample_fields,
-        name=eval_name,
+        auto_id=auto_id,
+        name=name or None,
         shuffle=shuffle,
+        seed=seed,
+        limit=limit,
+        encoding=encoding,
+        fs_options=fs_options,
     )
+
+
+def load_dataset(
+    path: str,
+    name: str | None = None,
+    *,
+    split: str | None = None,
+    revision: str | None = None,
+    data_dir: str | None = None,
+) -> object:
+    """Load exact-revision raw Hugging Face rows for construction-time metadata use."""
+    if not revision:
+        raise TypeError("load_dataset() requires a pinned 'revision'.")
+    loader = _ACTIVE_DATASET_LOADER.get()
+    if loader is None:
+        from datasets import DownloadConfig
+        from datasets import load_dataset as datasets_load_dataset
+
+        def loader(*args: Any, **kwargs: Any) -> object:
+            return datasets_load_dataset(
+                *args,
+                **kwargs,
+                download_config=DownloadConfig(local_files_only=not _ACTIVE_ALLOW_NETWORK.get()),
+            )
+
+    return loader(
+        path,
+        name,
+        split=split,
+        revision=revision,
+        data_dir=data_dir,
+        trust_remote_code=False,
+    )
+
+
+def snapshot_download(
+    *,
+    repo_id: str,
+    repo_type: str = "dataset",
+    revision: str,
+) -> str:
+    """Resolve an immutable Hugging Face snapshot inside the trusted cache root."""
+    if not revision:
+        raise TypeError("snapshot_download() requires a pinned 'revision'.")
+    data_root = _ACTIVE_DATA_ROOT.get()
+    if data_root is None:
+        raise ValueError("snapshot_download() requires INSPECT_EVALS_CACHE_DIR.")
+    staged = data_root / ".pyrit" / "inspect-compat" / "staged-snapshots" / repo_id.replace("/", "--") / revision
+    if staged.is_dir():
+        _validated_staged_snapshot_files(
+            root=staged,
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=revision,
+        )
+        return str(staged)
+    raise ValueError(
+        f"Staged snapshot '{staged}' is required with exact source identity and per-file SHA256 values. "
+        "Populate an authorized snapshot manifest before construction."
+    )
+
+
+def _validated_staged_snapshot_files(
+    *,
+    root: Path,
+    repo_id: str,
+    repo_type: str,
+    revision: str,
+) -> dict[str, str]:
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"Staged snapshot '{root}' requires manifest.json with per-file SHA256 values.")
+    manifest_digest = _file_sha256(manifest_path)
+    return dict(
+        _cached_staged_snapshot_files(
+            root=str(root.resolve()),
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=revision,
+            manifest_digest=manifest_digest,
+        )
+    )
+
+
+@cache
+def _cached_staged_snapshot_files(
+    *,
+    root: str,
+    repo_id: str,
+    repo_type: str,
+    revision: str,
+    manifest_digest: str,
+) -> tuple[tuple[str, str], ...]:
+    snapshot_root = Path(root)
+    if _file_sha256(snapshot_root / "manifest.json") != manifest_digest:
+        raise ValueError(f"Staged snapshot manifest changed during validation: '{snapshot_root}'.")
+    return tuple(
+        sorted(
+            _validate_staged_snapshot(
+                root=snapshot_root,
+                repo_id=repo_id,
+                repo_type=repo_type,
+                revision=revision,
+            ).items()
+        )
+    )
+
+
+def _validate_staged_snapshot(
+    *,
+    root: Path,
+    repo_id: str,
+    repo_type: str,
+    revision: str,
+) -> dict[str, str]:
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"Staged snapshot '{root}' requires manifest.json with per-file SHA256 values.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise TypeError("Staged snapshot manifest must be a JSON object.")
+    expected_identity = {"repo_id": repo_id, "repo_type": repo_type, "revision": revision}
+    for key, expected in expected_identity.items():
+        if manifest.get(key) != expected:
+            raise ValueError(f"Staged snapshot manifest '{key}' does not match the requested immutable source.")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        raise ValueError("Staged snapshot manifest requires a non-empty 'files' mapping.")
+    declared = set(files)
+    materialized = {
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path != manifest_path
+    }
+    if declared != materialized:
+        raise ValueError("Staged snapshot manifest must checksum every file and may not declare missing files.")
+    for relative_value, digest_value in files.items():
+        if not isinstance(relative_value, str) or not isinstance(digest_value, str):
+            raise TypeError("Staged snapshot manifest file entries must map strings to SHA256 strings.")
+        relative = Path(relative_value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Staged snapshot manifest path escapes its root: '{relative_value}'.")
+        path = (root / relative).resolve()
+        if root.resolve() not in path.parents or not path.is_file():
+            raise ValueError(f"Staged snapshot file is missing or outside its root: '{relative_value}'.")
+        if _file_sha256(path) != digest_value.casefold():
+            raise ValueError(f"Staged snapshot checksum mismatch for '{relative_value}'.")
+    return cast("dict[str, str]", files)
+
+
+def validate_staged_snapshot_file(*, path: Path, data_root: Path) -> str:
+    """Validate a staged snapshot member immediately before it is consumed."""
+    candidate = path.resolve()
+    staged_root = (data_root / ".pyrit" / "inspect-compat" / "staged-snapshots").resolve()
+    try:
+        relative_to_staging = candidate.relative_to(staged_root)
+    except ValueError as error:
+        raise ValueError(f"Staged snapshot file is outside the trusted staging root: '{candidate}'.") from error
+    if len(relative_to_staging.parts) < 3:
+        raise ValueError(f"Staged snapshot file does not identify a repository and revision: '{candidate}'.")
+    snapshot_root = staged_root / relative_to_staging.parts[0] / relative_to_staging.parts[1]
+    manifest_path = snapshot_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"Staged snapshot '{snapshot_root}' requires manifest.json with per-file SHA256 values.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise TypeError("Staged snapshot manifest must be a JSON object.")
+    repo_id = manifest.get("repo_id")
+    repo_type = manifest.get("repo_type")
+    revision = manifest.get("revision")
+    if not all(isinstance(value, str) for value in (repo_id, repo_type, revision)):
+        raise TypeError("Staged snapshot manifest identity fields must be strings.")
+    expected_root = staged_root / cast("str", repo_id).replace("/", "--") / cast("str", revision)
+    if snapshot_root.resolve() != expected_root.resolve():
+        raise ValueError("Staged snapshot path does not match its declared repository and revision.")
+    files = _validated_staged_snapshot_files(
+        root=snapshot_root,
+        repo_id=cast("str", repo_id),
+        repo_type=cast("str", repo_type),
+        revision=cast("str", revision),
+    )
+    relative_file = candidate.relative_to(snapshot_root.resolve()).as_posix()
+    digest = files.get(relative_file)
+    if digest is None:
+        raise ValueError(f"Staged snapshot manifest does not authorize '{relative_file}'.")
+    return digest.casefold()
 
 
 def load_hf_dataset_with_script(
@@ -818,14 +1379,62 @@ def filter_duplicate_ids(dataset: Dataset) -> Dataset:
     return dataset.filter(_unique)
 
 
-def download_and_verify(*args: Any, **kwargs: Any) -> None:
-    """Reject construction-time downloads; compatibility requires a pinned local cache."""
-    del args, kwargs
-    raise UnsupportedInspectFeatureError(
-        symbol="inspect_evals.utils.download_and_verify runtime",
-        source_profile=_active_profile().profile_id,
-        remediation="Provide a pre-populated pinned INSPECT_EVALS_CACHE_DIR.",
-    )
+def download_and_verify(
+    url: str,
+    sha256: str,
+    dest: Path,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Path:
+    """Acquire an explicitly hashed HTTPS asset or validate its offline cache."""
+    if urlparse(url).scheme != "https":
+        raise ValueError("Verified external assets require an HTTPS URL.")
+    if len(sha256) != 64 or any(character not in "0123456789abcdefABCDEF" for character in sha256):
+        raise ValueError("Verified external assets require a 64-character SHA256 digest.")
+    destination = _resolve_source_path(str(dest))
+    expected = sha256.casefold()
+    if destination.is_file() and _file_sha256(destination) == expected:
+        _record_verified_asset(path=destination, expected_digest=expected)
+        return destination
+    if not _ACTIVE_ALLOW_NETWORK.get():
+        raise ValueError(
+            f"Verified asset cache is missing or invalid at '{destination}'. "
+            "Populate the pinned cache or explicitly enable network acquisition."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    digest = hashlib.sha256()
+    try:
+        request = Request(url, headers=headers or {})
+        with urlopen(request, timeout=600) as response, temporary.open("wb") as handle:
+            while chunk := response.read(1024 * 1024):
+                handle.write(chunk)
+                digest.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        actual = digest.hexdigest()
+        if actual != expected:
+            raise ValueError(f"Checksum mismatch for '{url}': expected {expected}, got {actual}.")
+        temporary.replace(destination)
+        _record_verified_asset(path=destination, expected_digest=expected)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _record_verified_asset(*, path: Path, expected_digest: str) -> None:
+    verified = _ACTIVE_VERIFIED_ASSETS.get()
+    if verified is None:
+        raise RuntimeError("Verified assets may only be recorded inside the compatibility loader.")
+    verified[path.resolve()] = expected_digest
 
 
 def csv_dataset(
@@ -874,6 +1483,47 @@ def csv_dataset(
         seed=seed,
         shuffle_choices=shuffle_choices,
         limit=limit,
+    )
+
+
+def load_csv_dataset(
+    file_path: str,
+    eval_name: str,
+    sample_fields: RecordMapper | FieldSpec | None = None,
+    auto_id: bool = False,
+    shuffle: bool = False,
+    seed: int | None = None,
+    limit: int | bool | None = None,
+    epoch: int | None = None,
+    name: str = "",
+    fieldnames: list[str] | None = None,
+    dialect: str = "unix",
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
+    fs_options: dict[str, Any] | None = None,
+    shuffle_choices: bool = False,
+    *,
+    refresh: bool = False,
+    cache_tag: str | None = None,
+) -> Dataset:
+    """Provide the pinned inspect-evals local CSV helper over the strict facade loader."""
+    del eval_name, epoch, refresh, cache_tag
+    if isinstance(limit, bool):
+        raise TypeError("load_csv_dataset(limit=...) must be an integer or None.")
+    return csv_dataset(
+        csv_file=file_path,
+        sample_fields=sample_fields,
+        auto_id=auto_id,
+        shuffle=shuffle,
+        seed=seed,
+        shuffle_choices=shuffle_choices,
+        limit=limit,
+        dialect=dialect,
+        encoding=encoding,
+        name=name or None,
+        fs_options=fs_options,
+        fieldnames=fieldnames,
+        delimiter=delimiter or ",",
     )
 
 
@@ -1282,6 +1932,7 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
             "ScorerSpec": ScorerSpec,
             "Target": Target,
             "accuracy": accuracy,
+            "answer": answer,
             "at_least": at_least,
             "choice": choice,
             "grouped": grouped,
@@ -1342,6 +1993,8 @@ def _export(module: ModuleType, symbols: Mapping[str, object]) -> None:
 def _json_compatible(value: object) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, Enum):
+        return value.name
     if isinstance(value, Mapping):
         return {str(key): _json_compatible(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

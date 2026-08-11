@@ -105,6 +105,7 @@ _CORE_SYMBOLS = frozenset(
         "inspect_ai.scorer.ScorerSpec",
         "inspect_ai.scorer.Target",
         "inspect_ai.scorer.accuracy",
+        "inspect_ai.scorer.answer",
         "inspect_ai.scorer.at_least",
         "inspect_ai.scorer.choice",
         "inspect_ai.scorer.grouped",
