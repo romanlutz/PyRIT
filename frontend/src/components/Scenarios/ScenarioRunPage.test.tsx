@@ -7,7 +7,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
-} from 'react-router-dom'
+} from 'react-router'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
 import { useScenarioQueue } from '@/hooks/useScenarioQueue'

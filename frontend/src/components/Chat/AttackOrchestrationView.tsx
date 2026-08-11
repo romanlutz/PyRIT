@@ -10,7 +10,7 @@ import {
   Text,
   mergeClasses,
 } from '@fluentui/react-components'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { attacksApi } from '../../services/api'
 import type { AttackSummary } from '../../types'
 import { attackRoutePath, scenarioRunRoutePath } from '../../utils/routeParams'

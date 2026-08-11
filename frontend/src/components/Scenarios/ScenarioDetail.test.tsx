@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router'
 
 import { datasetsApi, scenariosApi, targetsApi } from '@/services/api'
 import type {
@@ -63,8 +63,8 @@ function adaptiveAttemptEquationName(
 const mockNavigate = jest.fn()
 const RAW_IMAGE_HTML = ['<', 'img src=x onerror="alert(1)">'].join('')
 
-jest.mock('react-router-dom', () => ({
-  ...jest.requireActual('react-router-dom'),
+jest.mock('react-router', () => ({
+  ...jest.requireActual('react-router'),
   useNavigate: () => mockNavigate,
 }))
 

@@ -33,7 +33,7 @@ import {
   EyeRegular,
   StopRegular,
 } from '@fluentui/react-icons'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
 
 import { useScenarioRunProgress } from '@/hooks/useScenarioRunProgress'
 import { useScenarioQueue } from '@/hooks/useScenarioQueue'

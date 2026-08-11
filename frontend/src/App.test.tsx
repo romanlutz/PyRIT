@@ -4,7 +4,7 @@
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import App from "./App";
 import { ThemeProvider } from "./hooks/useTheme";
 
@@ -119,7 +119,7 @@ jest.mock("./components/Layout/MainLayout", () => {
 });
 
 jest.mock("./components/Chat/ChatWindow", () => {
-  const { useLocation } = jest.requireActual("react-router-dom") as typeof import("react-router-dom");
+  const { useLocation } = jest.requireActual("react-router") as typeof import("react-router");
   const MockChatWindow = ({
     onNewAttack,
     activeTarget,

@@ -20,7 +20,7 @@ import {
   SearchRegular,
   SettingsRegular,
 } from '@fluentui/react-icons'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 
 import { scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'

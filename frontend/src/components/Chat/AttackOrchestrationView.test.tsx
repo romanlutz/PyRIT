@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { attacksApi } from '../../services/api'
 import type { AttackSummary } from '../../types'
 import AttackOrchestrationView from './AttackOrchestrationView'
