@@ -43,6 +43,7 @@ from pyrit.compat.inspect_ai.types import (
     ContentText,
     Dataset,
     Epochs,
+    ExecResult,
     FieldSpec,
     GenerateConfig,
     MemoryDataset,
@@ -1152,7 +1153,7 @@ def load_dataset(
                 download_config=DownloadConfig(local_files_only=not _ACTIVE_ALLOW_NETWORK.get()),
             )
 
-    return loader(
+    loaded = loader(
         path,
         name,
         split=split,
@@ -1160,6 +1161,24 @@ def load_dataset(
         data_dir=data_dir,
         trust_remote_code=False,
     )
+    if isinstance(loaded, list):
+        if not all(isinstance(record, Mapping) for record in loaded):
+            raise TypeError("Construction-time dataset records must be mappings.")
+        return _ConstructionRecordDataset(cast("list[Mapping[str, object]]", loaded))
+    return loaded
+
+
+class _ConstructionRecordDataset:
+    """Minimal immutable row sequence used by pinned construction-time dataset logic."""
+
+    def __init__(self, records: Iterable[Mapping[str, object]]) -> None:
+        self._records = tuple(dict(record) for record in records)
+
+    def __iter__(self) -> Iterator[dict[str, object]]:
+        return iter(self._records)
+
+    def filter(self, predicate: Callable[[dict[str, object]], bool]) -> _ConstructionRecordDataset:
+        return _ConstructionRecordDataset(record for record in self._records if predicate(record))
 
 
 def snapshot_download(
@@ -1972,6 +1991,7 @@ def build_compatibility_modules(*, profile: InspectCompatibilityProfile) -> dict
     _export(
         modules["inspect_ai.util"],
         {
+            "ExecResult": ExecResult,
             "SandboxEnvironmentSpec": SandboxSpec,
             "message_limit": message_limit,
             "sandbox": sandbox,

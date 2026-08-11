@@ -83,7 +83,10 @@ def run_tasks_command(args: argparse.Namespace) -> int:
         _emit_json({"profile_id": catalog.profile_id, "tasks": tasks}, output=args.output)
     else:
         lines = [
-            f"{task['task_spec']}\t{task['compatibility_status']}\tparameters={_task_parameters_text(task)}"
+            (
+                f"{task['task_spec']}\t{task['compatibility_status']}\t"
+                f"parameters={_task_parameters_text(task)}\truntime={_task_runtime_text(task)}"
+            )
             for task in tasks
         ]
         _emit_text("\n".join(lines), output=args.output)
@@ -469,6 +472,7 @@ def _loaded_summary(loaded: LoadedInspectEval) -> dict[str, object]:
         "sandbox_providers": sorted(
             {(case.sandbox_provider or loaded.suite.sandbox_provider).provider_type for case in loaded.suite.cases}
         ),
+        "runtime_requirements": loaded.suite.metadata.get("runtime_requirements", {}),
         "requires_model_credentials": False,
         "manifest": loaded.suite.model_dump(mode="json"),
         "compatibility_report": _loaded_report(loaded),
@@ -495,6 +499,7 @@ def _loaded_report(loaded: LoadedInspectEval) -> dict[str, object]:
             "solver": suite_metadata.get("solver"),
             "scorer": suite_metadata.get("scorer"),
             "task_config": suite_metadata.get("task_config", {}),
+            "runtime_requirements": suite_metadata.get("runtime_requirements", {}),
             "case_count": len(loaded.suite.cases),
             "case_ids": [case.case_id for case in loaded.suite.cases],
             "case_scorers": [scorer.model_dump(mode="json") for case in loaded.suite.cases for scorer in case.scorers],
@@ -516,6 +521,24 @@ def _task_parameters_text(task: dict[str, object]) -> str:
     if not isinstance(parameters, (list, tuple)):
         return "-"
     return ",".join(str(parameter) for parameter in parameters) or "-"
+
+
+def _task_runtime_text(task: dict[str, object]) -> str:
+    audit = task.get("reviewed_static_mapping_audit")
+    if not isinstance(audit, dict):
+        return "-"
+    runtime = audit.get("runtime")
+    if not isinstance(runtime, dict):
+        return "-"
+    language = runtime.get("language")
+    dependencies = runtime.get("dependencies")
+    parts = [str(language)] if language is not None else []
+    if isinstance(dependencies, list):
+        parts.append("+".join(str(dependency) for dependency in dependencies))
+    blocker = runtime.get("blocker")
+    if blocker is not None:
+        parts.append(f"blocked:{blocker}")
+    return ",".join(parts) or "-"
 
 
 def _emit_json(payload: object, *, output: Path | None) -> None:

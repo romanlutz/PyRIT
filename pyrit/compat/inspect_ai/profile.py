@@ -139,6 +139,7 @@ _CORE_SYMBOLS = frozenset(
         "inspect_ai.tool.python",
         "inspect_ai.tool.tool",
         "inspect_ai.util",
+        "inspect_ai.util.ExecResult",
         "inspect_ai.util.SandboxEnvironmentSpec",
         "inspect_ai.util.message_limit",
         "inspect_ai.util.sandbox",

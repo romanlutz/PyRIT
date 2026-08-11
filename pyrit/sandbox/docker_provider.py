@@ -10,8 +10,8 @@ Python SDK and performs no Docker calls at import time, so importing PyRIT never
 requires Docker to be installed or running.
 
 Compose service definitions may be supplied as explicit Compose files, synthesized from
-``DockerServiceBuildSpec`` entries (Dockerfile-based
-services, rendered as temporary Compose JSON using only the standard library ``json``
+typed Docker service entries (Dockerfile-based or immutable prebuilt-image services,
+rendered as temporary Compose JSON using only the standard library ``json``
 module), or both. Every resolved definition is validated with
 ``docker compose config --format json`` and scanned against
 ``DockerSecurityPolicy`` before any container is created.
@@ -48,6 +48,7 @@ from pyrit.sandbox.models import (
     DockerSandboxProviderConfig,
     DockerSecurityPolicy,
     DockerServiceBuildSpec,
+    DockerServiceImageSpec,
     SandboxArtifact,
     SandboxConnectionInfo,
     SandboxEnvironmentSpec,
@@ -442,7 +443,10 @@ def _resolve_build_context(*, build_context: Path, project_context: Path) -> Pat
 
 
 def _synthesize_service_document(
-    *, spec: DockerServiceBuildSpec, project_context: Path, policy: DockerSecurityPolicy
+    *,
+    spec: DockerServiceBuildSpec | DockerServiceImageSpec,
+    project_context: Path,
+    policy: DockerSecurityPolicy,
 ) -> dict[str, Any]:
     """
     Build one synthesized, secure-by-default Compose service definition.
@@ -450,26 +454,31 @@ def _synthesize_service_document(
     Returns:
         dict[str, Any]: The JSON-serializable service definition.
     """
-    build: dict[str, Any] = {
-        "context": str(_resolve_build_context(build_context=spec.build_context, project_context=project_context)),
-        "dockerfile": spec.dockerfile,
-    }
-    if spec.build_args:
-        build["args"] = dict(spec.build_args)
-    if spec.target is not None:
-        build["target"] = spec.target
     service: dict[str, Any] = {
-        "build": build,
-        "image": f"pyrit-sandbox/{spec.service_name}:synthesized",
         "init": True,
         "command": list(spec.command) if spec.command is not None else list(_DEFAULT_IDLE_COMMAND),
         "labels": {**spec.labels, _ENVIRONMENT_LABEL: spec.service_name},
         "security_opt": ["no-new-privileges:true"],
     }
+    if isinstance(spec, DockerServiceBuildSpec):
+        build: dict[str, Any] = {
+            "context": str(_resolve_build_context(build_context=spec.build_context, project_context=project_context)),
+            "dockerfile": spec.dockerfile,
+        }
+        if spec.build_args:
+            build["args"] = dict(spec.build_args)
+        if spec.target is not None:
+            build["target"] = spec.target
+        service["build"] = build
+        service["image"] = f"pyrit-sandbox/{spec.service_name}:synthesized"
+    else:
+        service["image"] = spec.image
     if policy.drop_all_capabilities:
         service["cap_drop"] = ["ALL"]
     if policy.read_only_root_filesystem:
         service["read_only"] = True
+    if policy.workspace_tmpfs_size_mb is not None:
+        service["tmpfs"] = [f"/workspace:rw,nosuid,nodev,size={policy.workspace_tmpfs_size_mb}m,mode=1777"]
     if policy.default_pids_limit is not None:
         service["pids_limit"] = policy.default_pids_limit
     if policy.default_memory_limit is not None:
@@ -489,7 +498,7 @@ def _synthesize_service_document(
 
 def _synthesize_compose_document(
     *,
-    services: Sequence[DockerServiceBuildSpec],
+    services: Sequence[DockerServiceBuildSpec | DockerServiceImageSpec],
     project_context: Path,
     security_policy: DockerSecurityPolicy,
 ) -> dict[str, Any]:
@@ -1428,6 +1437,13 @@ class DockerSandboxEnvironment(SandboxEnvironment):
         started_at = _now()
         self._timeout_available = await self._probe_timeout_available_async()
         await self._exec_container_command_async(("mkdir", "-p", self._container_root))
+        if self._session._provider._config.security_policy.require_secure_file_operations:
+            try:
+                await self._exec_container_command_async(("python", "-c", "import os, stat"))
+            except SandboxSetupError as error:
+                raise SandboxSetupError(
+                    "Secure Docker file operations require a Python runtime in the isolated service image."
+                ) from error
         for setup_file in self._spec.setup_files:
             result = await self.write_file_async(path=setup_file.path, data=setup_file.content)
             if result.status is not SandboxOperationStatus.SUCCEEDED:
@@ -1771,8 +1787,27 @@ class DockerSandboxEnvironment(SandboxEnvironment):
                 error_code="path_escape",
                 error_message="Requested path is outside the sandbox environment.",
             )
+        relative_path = posixpath.relpath(container_path, self._container_root)
+        policy = self._session._provider._config.security_policy
+        command = (
+            ("python", "-c", _SECURE_CONTAINER_READ_SCRIPT, self._container_root, relative_path)
+            if policy.require_secure_file_operations
+            else (
+                "sh",
+                "-c",
+                (
+                    'root=$(readlink -f -- "$1") || exit 1; '
+                    'target=$(readlink -f -- "$2") || exit 1; '
+                    'case "$target" in "$root"/*) exec cat -- "$target" ;; '
+                    '*) printf "pyrit_path_escape\\n" >&2; exit 1 ;; esac'
+                ),
+                "sh",
+                self._container_root,
+                container_path,
+            )
+        )
         raw, release_error = await self._run_container_read_write_async(
-            command=("sh", "-c", 'cat "$1"', "sh", container_path),
+            command=command,
             stdin=None,
             stdout_limit=limit,
         )
@@ -1878,8 +1913,34 @@ class DockerSandboxEnvironment(SandboxEnvironment):
                 error_message="Requested path is outside the sandbox environment.",
                 input_size_bytes=len(data),
             )
+        relative_path = posixpath.relpath(container_path, self._container_root)
+        policy = self._session._provider._config.security_policy
+        command = (
+            ("python", "-c", _SECURE_CONTAINER_WRITE_SCRIPT, self._container_root, relative_path)
+            if policy.require_secure_file_operations
+            else (
+                "sh",
+                "-c",
+                (
+                    'root=$(readlink -f -- "$1") || exit 1; target=$2; parent=${target%/*}; '
+                    'case "$parent" in "$1") relative="" ;; "$1"/*) relative=${parent#"$1"/} ;; '
+                    '*) printf "pyrit_path_escape\\n" >&2; exit 1 ;; esac; '
+                    "current=$root; old_ifs=$IFS; IFS=/; set -f; "
+                    "for part in $relative; do "
+                    '[ -n "$part" ] || continue; next=$current/$part; '
+                    'if [ -L "$next" ]; then printf "pyrit_path_escape\\n" >&2; exit 1; fi; '
+                    'if [ -e "$next" ]; then [ -d "$next" ] || exit 1; else mkdir -- "$next" || exit 1; fi; '
+                    "current=$next; done; IFS=$old_ifs; destination=$current/${target##*/}; "
+                    'if [ -L "$destination" ]; then printf "pyrit_path_escape\\n" >&2; exit 1; fi; '
+                    'cat > "$destination"'
+                ),
+                "sh",
+                self._container_root,
+                container_path,
+            )
+        )
         raw, release_error = await self._run_container_read_write_async(
-            command=("sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", container_path),
+            command=command,
             stdin=data,
             stdout_limit=0,
         )
@@ -2080,6 +2141,105 @@ class DockerSandboxEnvironment(SandboxEnvironment):
             self._processes.discard(process)
 
 
+_SECURE_CONTAINER_READ_SCRIPT = """
+import errno
+import os
+import stat
+import sys
+
+fds = []
+try:
+    parts = sys.argv[2].split("/")
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise OSError(errno.EXDEV, "path escape")
+    current = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fds.append(current)
+    for part in parts[:-1]:
+        current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+        fds.append(current)
+    file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+    fds.append(file_fd)
+    file_stat = os.fstat(file_fd)
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise OSError(errno.EXDEV, "path escape")
+    while chunk := os.read(file_fd, 65536):
+        os.write(1, chunk)
+except FileNotFoundError:
+    os.write(2, b"pyrit_file_not_found\\n")
+    sys.exit(1)
+except PermissionError:
+    os.write(2, b"pyrit_permission_denied\\n")
+    sys.exit(1)
+except OSError as error:
+    marker = (
+        b"pyrit_path_escape\\n"
+        if error.errno in {errno.ELOOP, errno.EXDEV, errno.ENOTDIR}
+        else b"pyrit_container_io_error\\n"
+    )
+    os.write(2, marker)
+    sys.exit(1)
+finally:
+    for descriptor in reversed(fds):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+"""
+
+_SECURE_CONTAINER_WRITE_SCRIPT = """
+import errno
+import os
+import stat
+import sys
+
+fds = []
+try:
+    parts = sys.argv[2].split("/")
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise OSError(errno.EXDEV, "path escape")
+    current = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fds.append(current)
+    for part in parts[:-1]:
+        try:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+        except FileNotFoundError:
+            os.mkdir(part, mode=0o755, dir_fd=current)
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+        current = next_fd
+        fds.append(current)
+    file_fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, mode=0o644, dir_fd=current)
+    fds.append(file_fd)
+    file_stat = os.fstat(file_fd)
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise OSError(errno.EXDEV, "path escape")
+    os.ftruncate(file_fd, 0)
+    while chunk := os.read(0, 65536):
+        view = memoryview(chunk)
+        while view:
+            view = view[os.write(file_fd, view):]
+except FileNotFoundError:
+    os.write(2, b"pyrit_file_not_found\\n")
+    sys.exit(1)
+except PermissionError:
+    os.write(2, b"pyrit_permission_denied\\n")
+    sys.exit(1)
+except OSError as error:
+    marker = (
+        b"pyrit_path_escape\\n"
+        if error.errno in {errno.ELOOP, errno.EXDEV, errno.ENOTDIR}
+        else b"pyrit_container_io_error\\n"
+    )
+    os.write(2, marker)
+    sys.exit(1)
+finally:
+    for descriptor in reversed(fds):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+"""
+
+
 def _classify_container_io_error(stderr: bytes) -> SandboxOperationStatus:
     """
     Heuristically classify a failed container read/write from its stderr text.
@@ -2091,6 +2251,12 @@ def _classify_container_io_error(stderr: bytes) -> SandboxOperationStatus:
         SandboxOperationStatus: The best-effort classified status.
     """
     text = stderr.decode("utf-8", errors="replace").lower()
+    if "pyrit_path_escape" in text:
+        return SandboxOperationStatus.PATH_ESCAPE
+    if "pyrit_file_not_found" in text:
+        return SandboxOperationStatus.NOT_FOUND
+    if "pyrit_permission_denied" in text:
+        return SandboxOperationStatus.PERMISSION_DENIED
     if "no such file" in text:
         return SandboxOperationStatus.NOT_FOUND
     if "permission denied" in text:
@@ -2107,6 +2273,7 @@ def _classify_container_io_error_code(stderr: bytes) -> str:
     """
     status = _classify_container_io_error(stderr)
     return {
+        SandboxOperationStatus.PATH_ESCAPE: "path_escape",
         SandboxOperationStatus.NOT_FOUND: "file_not_found",
         SandboxOperationStatus.PERMISSION_DENIED: "permission_denied",
     }.get(status, "container_io_error")
@@ -2569,7 +2736,9 @@ class DockerSandboxProvider(SandboxProvider):
 
     async def _ensure_images_ready_async(self) -> None:
         """Build configured services exactly once, deterministically tagged for reuse."""
-        if self._images_ready or not self._config.services:
+        if self._images_ready or not any(
+            isinstance(service, DockerServiceBuildSpec) for service in self._config.services
+        ):
             self._images_ready = True
             return
         async with self._images_lock:

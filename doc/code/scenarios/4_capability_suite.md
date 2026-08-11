@@ -158,6 +158,47 @@ epochs, and scorer-only live flag reads before sandbox cleanup. Tool implementat
 the in-house scorer are selected through explicit registries; the scorer proxy allows one
 bounded command in its declared service and exposes no credentials or host-file access.
 
+HumanEval, MBPP, and the supported APPS reducer variants use the native
+`CodeEvaluationSpec`/`CodeEvaluationScorer` substrate. The model generates once, unchanged
+from the pinned factory graph; scoring then extracts the declared code form, writes candidate
+and harness files through the existing sandbox session, and runs fixed argv commands. Generated
+code is never allowed under `LocalSandbox`. Preflight requires Docker with a content-addressed
+CPython image, pull policy `never`, no egress, an internal network, no host namespaces, mounts,
+devices, ports, Docker socket, privileged mode, or Linux capabilities, plus CPU, memory, and PID
+quotas. Candidate/harness file operations use descriptor-relative no-follow opens and reject
+symlinks and multiply-linked files. Retained containers are forbidden for code evaluation.
+The root filesystem is read-only and each service gets a size-limited writable workspace tmpfs;
+multi-test specifications require one service/container per test so files and descendant processes
+cannot cross test boundaries. Wall-clock and stdout/stderr/provider-file bounds use existing
+sandbox limits; truncation is reported without changing the pinned verifier's exit-code success
+semantics when no output comparison is requested. Docker provides a CPU quota but not hard
+cumulative CPU-time accounting; factories that require that stronger guarantee remain partial.
+
+```powershell
+$source = (uv run pyrit_capability_suite inspect-evals source prepare --offline |
+  ConvertFrom-Json).source_root
+
+uv run pyrit_capability_suite inspect-evals tasks --source $source |
+  Select-String 'humaneval|mbpp|apps|bigcodebench|class_eval|usaco|vimgolf'
+
+uv run pyrit_capability_suite inspect-evals dry-run --source $source `
+  --task 'humaneval/humaneval.py@humaneval' --data .\humaneval-row.json `
+  --epochs 5
+```
+
+The immutable runtime must already exist locally because scoring never pulls images or installs
+packages. Exact-revision rows may be acquired once with explicit network permission and then
+reused with `--data` offline. HumanEval is one epoch in the unchanged factory; MBPP is five
+epochs with mean and pass@1/pass@2/pass@5. APPS defaults and pass@k compile, while median/mode
+variants fail before model execution. Scores include `language`, `runtime`, test totals, passed
+test count, and deterministic JSON per-test diagnostics covering stage/compile/run status, exit
+code, timeout, cancellation, truncation, stdout, and stderr.
+
+BigCodeBench, ClassEval, USACO, and VimGolf Challenges remain partial. Their catalog records name
+the exact blockers: mutable or incompletely locked runtimes/dependencies, missing or restrictive
+dataset licensing, and stronger verifier/resource requirements. PyRIT does not weaken isolation,
+download arbitrary packages during scoring, or use synthetic fixtures to promote these claims.
+
 | Static family | Supported unchanged factories | Pinned dataset requirement |
 |---|---|---|
 | BBH | `bbh` | `Joschka/big_bench_hard@76eaa8c29ad448752cd44201a1246618e2454cac`; MIT; all 27 subsets plus `few_shot_prompts` are revision-pinned. |

@@ -38,6 +38,8 @@ _SUPPORTED_TASKS = {
     "gdm_in_house_ctf": ("gdm_in_house_ctf",),
     "gdm_intercode_ctf": ("gdm_intercode_ctf",),
     "hellaswag": ("hellaswag",),
+    "humaneval": ("humaneval",),
+    "mbpp": ("mbpp",),
     "musr": ("musr",),
     "onet": ("onet_m6",),
     "paws": ("paws",),
@@ -57,6 +59,26 @@ _VSTAR_BLOCKER = (
     "target."
 )
 _FACTORY_BLOCKERS = {
+    ("apps", "apps"): (
+        (
+            "The default and pass_at_k reducer variants compile to the native Python code-evaluation scorer, but the "
+            "unchanged factory also exposes median/mode epoch reducers that are not yet represented by the shared "
+            "typed reducer framework. Those variants fail during compilation before model or sandbox execution."
+        ),
+    ),
+    ("bigcodebench", "bigcodebench"): (
+        (
+            "The pinned factory selects a mutable :latest execution image with an incompletely pinned dependency "
+            "closure (including TensorFlow). Provide a content-addressed prebuilt image with a verified dependency "
+            "lock before native execution can be enabled."
+        ),
+    ),
+    ("class_eval", "class_eval"): (
+        (
+            "The exact dataset revision is CC-BY-NC-4.0 and the pinned factory selects a mutable :latest image with "
+            "unpinned dependencies. Supply authorized exact-revision records and a content-addressed locked runtime."
+        ),
+    ),
     ("cybermetric", "cybermetric_80"): (_CYBERMETRIC_BLOCKER,),
     ("cybermetric", "cybermetric_500"): (_CYBERMETRIC_BLOCKER,),
     ("cybermetric", "cybermetric_2000"): (_CYBERMETRIC_BLOCKER,),
@@ -82,8 +104,22 @@ _FACTORY_BLOCKERS = {
             "remains unsupported."
         ),
     ),
+    ("usaco", "usaco"): (
+        (
+            "The source pins the Google Drive ZIP SHA256 but declares no dataset license. Native file/stdin mechanics "
+            "also require an authorized exact-byte cache and a content-addressed runtime that enforces the requested "
+            "Linux resource limits."
+        ),
+    ),
     ("vstar_bench", "vstar_bench_attribute_recognition"): (_VSTAR_BLOCKER,),
     ("vstar_bench", "vstar_bench_spatial_relationship_reasoning"): (_VSTAR_BLOCKER,),
+    ("vimgolf_challenges", "vimgolf_single_turn"): (
+        (
+            "The exact Hugging Face revision declares no dataset license, and the verifier depends on Vim plus mutable "
+            "base/apt layers. Supply authorized content-verified rows and a content-addressed Vim runtime before "
+            "enabling native editor-state verification."
+        ),
+    ),
     ("winogrande", "winogrande"): (
         (
             "The exact Hugging Face revision labels licensing as 'More Information Needed', and optional evaluation "
@@ -95,11 +131,16 @@ _STATIC_MAPPING_FAMILIES = frozenset(
     {
         "bbh",
         "bbq",
+        "apps",
+        "bigcodebench",
         "boolq",
+        "class_eval",
         "commonsense_qa",
         "cybermetric",
         "gpqa",
         "hellaswag",
+        "humaneval",
+        "mbpp",
         "medqa",
         "musr",
         "onet",
@@ -109,7 +150,9 @@ _STATIC_MAPPING_FAMILIES = frozenset(
         "pubmedqa",
         "race_h",
         "sec_qa",
+        "usaco",
         "vstar_bench",
+        "vimgolf_challenges",
         "winogrande",
         "wmdp",
     }

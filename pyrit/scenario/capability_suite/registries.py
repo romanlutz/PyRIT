@@ -258,6 +258,7 @@ def build_default_scorer_registry() -> CapabilitySuiteScorerFactoryRegistry:
     Returns:
         CapabilitySuiteScorerFactoryRegistry: A registry with all built-in native scorers.
     """
+    from pyrit.scenario.capability_suite.code_evaluation import CodeEvaluationScorer
     from pyrit.scenario.capability_suite.scorers import (
         ResultOnlyScorerAdapter,
         SandboxCommandScorer,
@@ -268,6 +269,7 @@ def build_default_scorer_registry() -> CapabilitySuiteScorerFactoryRegistry:
     )
 
     registry = CapabilitySuiteScorerFactoryRegistry()
+    registry.register(kind="code_evaluation", factory=lambda config: CodeEvaluationScorer.from_config(config))
     registry.register(
         kind="text_match",
         factory=lambda config: ResultOnlyScorerAdapter(scorer=TextMatchScorer.from_config(config)),

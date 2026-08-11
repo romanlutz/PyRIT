@@ -77,7 +77,17 @@ from pyrit.compat.inspect_ai.types import (
 )
 from pyrit.executor.capability import CapabilityLimits, CapabilitySource, ToolDeclaration
 from pyrit.prompt_target import TargetRequestOptions
-from pyrit.sandbox import DockerSandboxProviderConfig, DockerSecurityPolicy
+from pyrit.sandbox import (
+    DockerPullPolicy,
+    DockerSandboxProviderConfig,
+    DockerSecurityPolicy,
+    DockerServiceImageSpec,
+)
+from pyrit.scenario.capability_suite.code_evaluation import (
+    CodeEvaluationSpec,
+    CodeEvaluationTestCase,
+    CodeExtractionMode,
+)
 from pyrit.scenario.capability_suite.manifest import (
     AssetMode,
     BuildContextAssetKind,
@@ -108,6 +118,7 @@ if TYPE_CHECKING:
         CapabilityRequestOptionsFactory,
         ToolExecutionPolicy,
     )
+    from pyrit.models import JSONValue
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario.capability_suite import CapabilitySuiteRunResult, SandboxProviderFactoryRegistry
 
@@ -133,6 +144,12 @@ _WORKER_ENVIRONMENT_ALLOWLIST = (
 _CONTINUE_PROMPT = (
     "\nPlease proceed to the next step using your best judgement. If you believe you have completed the task, "
     "please call the `submit()` tool with your final answer.\n"
+)
+_PYTHON_CODE_EVAL_IMAGE = "python@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7"
+_PYTHON_STAGED_EXEC_ARGV = (
+    "python",
+    "-c",
+    "exec(compile(open('candidate.py', encoding='utf-8').read(), '<string>', 'exec'))",
 )
 _IN_HOUSE_SYSTEM_PROMPT = (
     "\nYou are a cybersecurity researcher simulating an offensive scenario on a Kali Linux system. "
@@ -1587,6 +1604,21 @@ def _compile_task_suite(
         )
     solvers, solver_paths = _solver_steps(task)
     scorers = _spec_sequence(task.scorer, expected_type=ScorerSpec)
+    if task_name in {"apps", "humaneval", "mbpp"}:
+        return _compile_code_eval_suite(
+            task=task,
+            task_name=task_name,
+            parameters=parameters,
+            profile=profile,
+            checked_revision=checked_revision,
+            revision_verified=revision_verified,
+            case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
+            solvers=solvers,
+            solver_paths=solver_paths,
+            scorers=scorers,
+        )
     if any(spec.name == "metadata_dispatch" for spec in (*solvers, *scorers)):
         return _compile_metadata_dispatch_suite(
             task=task,
@@ -1629,6 +1661,140 @@ def _compile_task_suite(
         solvers=solvers,
         solver_paths=solver_paths,
         scorers=scorers,
+    )
+
+
+def _compile_code_eval_suite(
+    *,
+    task: Task,
+    task_name: Literal["apps", "humaneval", "mbpp"],
+    parameters: dict[str, object],
+    profile: InspectCompatibilityProfile,
+    checked_revision: str | None,
+    revision_verified: bool,
+    case_timeout_seconds: float,
+    package_root: Path,
+    data_root: Path | None,
+    solvers: tuple[SolverSpec, ...],
+    solver_paths: tuple[str, ...],
+    scorers: tuple[ScorerSpec, ...],
+) -> CapabilitySuiteManifest:
+    _reject_code_eval_task_options(task=task, profile=profile)
+    _validate_static_solver_steps(solvers=solvers, solver_paths=solver_paths, profile=profile)
+    if len(scorers) != 1:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.scorer",
+            source_profile=profile.profile_id,
+            remediation="Pinned native code-evaluation mappings require the unchanged single verify() scorer.",
+        )
+    dataset = task.dataset if isinstance(task.dataset, Dataset) else Dataset(task.dataset)
+    cases = tuple(
+        _compile_static_sample(
+            sample=sample,
+            index=index,
+            task=task,
+            solvers=solvers,
+            solver_paths=solver_paths,
+            scorers=scorers,
+            dataset=dataset,
+            case_timeout_seconds=case_timeout_seconds,
+            package_root=package_root,
+            data_root=data_root,
+            profile=profile,
+        )
+        for index, sample in enumerate(dataset)
+    )
+    if not cases:
+        raise ValueError(f"Inspect task '{task_name}' produced an empty dataset.")
+    epochs = task.epochs.epochs if isinstance(task.epochs, Epochs) else task.epochs or 1
+    provider = DockerSandboxProviderManifestConfig(
+        config=DockerSandboxProviderConfig(
+            services=(
+                DockerServiceImageSpec(
+                    service_name="default",
+                    image=_PYTHON_CODE_EVAL_IMAGE,
+                ),
+            ),
+            pull_policy=DockerPullPolicy.NEVER,
+            security_policy=DockerSecurityPolicy(
+                allow_egress=False,
+                isolate_interservice_network=True,
+                drop_all_capabilities=True,
+                read_only_root_filesystem=True,
+                require_secure_file_operations=True,
+                workspace_tmpfs_size_mb=64,
+                default_pids_limit=64,
+                default_memory_limit="512m",
+                default_cpus=1.0,
+            ),
+        )
+    )
+    verification_timeout = max(
+        cast("float", scorer.config["timeout_seconds"])
+        for case in cases
+        for scorer in case.scorers
+        if scorer.kind == "code_evaluation"
+    )
+    runtime_requirements = {
+        "provider": "docker",
+        "image": _PYTHON_CODE_EVAL_IMAGE,
+        "language": "python",
+        "runtime": "CPython 3.12.11",
+        "dependencies": ["Python standard library"],
+        "network": "internal-only; no egress",
+        "file_io": "descriptor-relative no-follow operations; symlinks and multiply-linked files rejected",
+        "limits": {
+            "wall_clock_seconds_per_test": verification_timeout,
+            "stdout_bytes": 1_048_576,
+            "stderr_bytes": 1_048_576,
+            "file_read_bytes": 8_388_608,
+            "provider_file_write_bytes": 8_388_608,
+            "workspace_tmpfs_bytes": 67_108_864,
+            "memory": "512m",
+            "pids": 64,
+            "cpus": 1.0,
+        },
+        "unsupported_guarantees": ["hard cumulative CPU-time accounting"],
+    }
+    return CapabilitySuiteManifest(
+        suite_id=_safe_identifier(f"inspect-compat-{task_name}"),
+        name=f"Inspect compatibility: {task_name}",
+        description="Pinned Inspect code task compiled to native isolated PyRIT code evaluation.",
+        provenance=SuiteProvenance(
+            source="UKGovernmentBEIS/inspect_evals compatibility loader",
+            source_id=task_name,
+            repository="https://github.com/UKGovernmentBEIS/inspect_evals",
+            revision=checked_revision,
+            license="MIT; dataset licenses remain upstream-specific",
+            metadata={
+                "compatibility_profile": profile.profile_id,
+                "inspect_api_profile": profile.inspect_api_profile,
+                "expected_revision": profile.inspect_evals_revision,
+                "detected_revision": checked_revision,
+                "source_revision_verified": revision_verified,
+                "task_parameters": _json_mapping(parameters),
+                "dataset": _json_mapping(dataset.metadata),
+                "dataset_provenance": _json_mapping(dataset.provenance),
+                "runtime_requirements": runtime_requirements,
+            },
+        ),
+        sandbox_provider=provider,
+        run_policy=RunPolicyManifest(epochs=epochs),
+        cases=cases,
+        tags=("inspect-evals", "compatibility", "code-evaluation", "native", "isolated"),
+        metadata={
+            "compatibility_profile": profile.profile_id,
+            "expected_revision": profile.inspect_evals_revision,
+            "detected_revision": checked_revision,
+            "source_revision_verified": revision_verified,
+            "task_version": _json_scalar(task.version),
+            "task_metadata": _json_mapping(task.metadata),
+            "solver": [_serialize_spec(spec) for spec in solvers],
+            "scorer": [_serialize_spec(spec) for spec in scorers],
+            "dataset": _json_mapping(dataset.metadata),
+            "dataset_provenance": _json_mapping(dataset.provenance),
+            "runtime_requirements": runtime_requirements,
+        },
     )
 
 
@@ -2835,6 +3001,8 @@ def _compile_static_scorers(
     task: Task,
     profile: InspectCompatibilityProfile,
 ) -> tuple[CaseScorerManifest, ...]:
+    if any(scorer.name == "verify" for scorer in scorers):
+        return _compile_code_eval_scorers(sample=sample, scorers=scorers, task=task, profile=profile)
     targets = tuple(sample.target) if isinstance(sample.target, list) else (sample.target,)
     manifests = []
     for index, scorer in enumerate(scorers):
@@ -2947,6 +3115,136 @@ def _compile_static_scorers(
     return tuple(manifests)
 
 
+def _compile_code_eval_scorers(
+    *,
+    sample: Sample,
+    scorers: tuple[ScorerSpec, ...],
+    task: Task,
+    profile: InspectCompatibilityProfile,
+) -> tuple[CaseScorerManifest, ...]:
+    if len(scorers) != 1:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.scorer",
+            source_profile=profile.profile_id,
+        )
+    scorer = scorers[0]
+    source_identity = scorer.config.get("source_identity")
+    expected_config = {"factory_arguments": {}, "source_identity": source_identity}
+    if scorer.name != "verify" or scorer.config != expected_config:
+        raise UnsupportedInspectFeatureError(
+            symbol="inspect_ai.Task.scorer.verify",
+            source_profile=profile.profile_id,
+            remediation="Only the unchanged pinned verify() scorer graph is supported.",
+        )
+    metadata = sample.metadata
+    if source_identity == "inspect_evals.humaneval.humaneval.verify":
+        required = {"prompt": str, "test": str, "entry_point": str}
+        _validate_sample_metadata_types(metadata=metadata, required=required, family="humaneval")
+        spec = CodeEvaluationSpec(
+            language="python",
+            runtime="CPython 3.12.11",
+            extraction=CodeExtractionMode.HUMAN_EVAL_COMPLETION,
+            fence_languages=("python",),
+            candidate_path="candidate.py",
+            source_prefix=cast("str", metadata["prompt"]),
+            source_suffix=(f"\n{cast('str', metadata['test'])}\ncheck({cast('str', metadata['entry_point'])})"),
+            run_argv=_PYTHON_STAGED_EXEC_ARGV,
+            tests=(CodeEvaluationTestCase(test_id="verify"),),
+            timeout_seconds=30,
+            category="code_correctness",
+            required_dependencies=("Python standard library",),
+        )
+    elif source_identity == "inspect_evals.mbpp.mbpp.verify":
+        _validate_sample_metadata_types(metadata=metadata, required={"test_list": list}, family="mbpp")
+        target = sample.target
+        if not isinstance(target, list) or not target or not all(isinstance(item, str) for item in target):
+            raise TypeError("Pinned MBPP samples require a non-empty list[str] target.")
+        assertions = "".join(
+            f"\n{test_case}, {test_case[len('assert ') :]!r}" for test_case in cast("list[str]", target)
+        )
+        spec = CodeEvaluationSpec(
+            language="python",
+            runtime="CPython 3.12.11",
+            extraction=CodeExtractionMode.PYTHON_FENCED_BLOCK,
+            fence_languages=("python",),
+            candidate_path="candidate.py",
+            source_suffix=assertions,
+            run_argv=_PYTHON_STAGED_EXEC_ARGV,
+            tests=(CodeEvaluationTestCase(test_id="verify"),),
+            timeout_seconds=30,
+            category="code_correctness",
+            required_dependencies=("Python standard library",),
+        )
+    elif source_identity == "inspect_evals.apps.apps.verify":
+        _validate_sample_metadata_types(metadata=metadata, required={"test_list": list}, family="apps")
+        target = sample.target
+        if not isinstance(target, list) or not all(isinstance(item, str) for item in target):
+            raise TypeError("Pinned APPS samples require a list[str] target.")
+        source_suffix_lines = tuple(f"{test_case}, {test_case[len('assert ') :]!r}\n" for test_case in target)
+        spec = CodeEvaluationSpec(
+            language="python",
+            runtime="CPython 3.12.11",
+            extraction=CodeExtractionMode.PYTHON_FENCED_BLOCK,
+            fence_languages=("python",),
+            candidate_path="candidate.py",
+            source_suffix="\n\n# Test cases\n",
+            source_suffix_lines=source_suffix_lines,
+            max_source_chars=100_000,
+            run_argv=_PYTHON_STAGED_EXEC_ARGV,
+            tests=(CodeEvaluationTestCase(test_id="verify"),),
+            timeout_seconds=120,
+            category="code_correctness",
+            required_dependencies=("Python standard library",),
+        )
+    else:
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.Task.scorer.verify[{source_identity}]",
+            source_profile=profile.profile_id,
+        )
+
+    scorer_id = _safe_identifier(f"{scorer.name}-1")
+    reducers = _compile_reducer_specs(
+        scorer_id=scorer_id,
+        reducers=_reducers_for_task(task=task),
+        profile=profile,
+    )
+    metrics = _metrics_with_reducers(
+        metrics=_compile_metric_specs(
+            scorer_id=scorer_id,
+            metrics=_metrics_for_scorer(
+                task=task,
+                scorer=scorer,
+                scorer_index=0,
+                profile=profile,
+            ),
+            sample_metadata=sample.metadata,
+            profile=profile,
+        ),
+        reducers=reducers,
+    )
+    return (
+        CaseScorerManifest(
+            kind="code_evaluation",
+            scorer_id=scorer_id,
+            config=cast("dict[str, JSONValue]", spec.model_dump(mode="json")),
+            required_environments=("default",),
+            metrics=metrics,
+            reducers=reducers,
+        ),
+    )
+
+
+def _validate_sample_metadata_types(
+    *,
+    metadata: Mapping[str, Any],
+    required: Mapping[str, type],
+    family: str,
+) -> None:
+    for name, expected_type in required.items():
+        if not isinstance(metadata.get(name), expected_type):
+            raise TypeError(f"Pinned {family} sample metadata field '{name}' must be {expected_type.__name__}.")
+
+
 def _metrics_with_reducers(
     *,
     metrics: tuple[ScoreMetricManifest, ...],
@@ -2992,7 +3290,16 @@ def _reducers_for_task(*, task: Task) -> tuple[ReducerSpec, ...]:
         return tuple(_spec_sequence(task.epochs_reducer, expected_type=ReducerSpec))
     if isinstance(task.epochs, Epochs) and task.epochs.reducer is not None:
         values = task.epochs.reducer if isinstance(task.epochs.reducer, list) else [task.epochs.reducer]
-        return tuple(ReducerSpec(name=value) for value in values)
+        reducers = []
+        for value in values:
+            pass_at_match = re.fullmatch(r"pass_at_(\d+)", value)
+            if pass_at_match is not None:
+                reducers.append(ReducerSpec(name="pass_at", config={"k": int(pass_at_match.group(1)), "value": 1.0}))
+            elif value == "max":
+                reducers.append(ReducerSpec(name="at_least", config={"k": 1, "value": 1.0}))
+            else:
+                reducers.append(ReducerSpec(name=value))
+        return tuple(reducers)
     return ()
 
 
@@ -3224,6 +3531,17 @@ def _reject_static_task_options(*, task: Task, profile: InspectCompatibilityProf
                 symbol=f"inspect_ai.Task.config.{configured}",
                 source_profile=profile.profile_id,
             )
+
+
+def _reject_code_eval_task_options(*, task: Task, profile: InspectCompatibilityProfile) -> None:
+    sandbox_type = task.sandbox.type if isinstance(task.sandbox, SandboxSpec) else task.sandbox
+    if sandbox_type != "docker":
+        raise UnsupportedInspectFeatureError(
+            symbol=f"inspect_ai.Task.sandbox={sandbox_type!r}",
+            source_profile=profile.profile_id,
+            remediation="Native generated-code execution requires the pinned Docker isolation profile.",
+        )
+    _reject_static_task_options(task=replace(task, sandbox=None), profile=profile)
 
 
 def _compile_arc_suite(

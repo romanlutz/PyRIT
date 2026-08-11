@@ -76,6 +76,40 @@ def test_worker_process_uses_isolated_python_and_minimal_environment(
     assert command[1:4] == ("-I", "-B", "-m")
 
 
+def test_code_evaluation_mapping_rejects_unknown_scorer_through_public_loader(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    package = root / "src" / "inspect_evals" / "humaneval"
+    package.mkdir(parents=True)
+    (root / "src" / "inspect_evals" / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "humaneval.py").write_text(
+        "from inspect_ai import Task, task\n"
+        "from inspect_ai.dataset import MemoryDataset, Sample\n"
+        "from inspect_ai.scorer import CORRECT, Score, accuracy, scorer\n"
+        "from inspect_ai.solver import generate\n"
+        "@scorer(metrics=[accuracy()])\n"
+        "def custom_verify():\n"
+        "    async def score(state, target):\n"
+        "        return Score(value=CORRECT)\n"
+        "    return score\n"
+        "@task\n"
+        "def humaneval():\n"
+        "    sample = Sample(input='complete add', target='return a + b', id='case', "
+        "metadata={'prompt': 'def add(a, b):\\n', 'test': 'def check(candidate):\\n"
+        "    assert candidate(1, 2) == 3', 'entry_point': 'add'})\n"
+        "    return Task(dataset=MemoryDataset([sample]), solver=generate(), "
+        "scorer=custom_verify(), sandbox='docker')\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UnsupportedInspectFeatureError, match="custom_verify"):
+        load_inspect_eval(
+            source_root=root,
+            task_spec="humaneval/humaneval.py@humaneval",
+            verify_source_revision=False,
+        )
+
+
 def test_offline_worker_sets_huggingface_offline_before_source_import(tmp_path: Path) -> None:
     root = tmp_path / "source"
     package = root / "src" / "inspect_evals"

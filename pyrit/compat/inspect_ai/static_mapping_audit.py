@@ -57,9 +57,234 @@ _CYBERMETRIC_FILES = {
     ),
 }
 
+_CODE_EVAL_AUDITS: dict[tuple[str, str], dict[str, Any]] = {
+    ("humaneval", "humaneval"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "openai/openai_humaneval",
+                "revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+                "split": "test",
+                "rows": 164,
+                "offline_manifest_sha256": "b44ab444e38f59ff01ce05f966adf79de83731bd766797216759a369d2eda9a1",
+                "license": "MIT",
+            }
+        ],
+        "factory_arguments": {
+            "solver": "default-only",
+            "instruction_prompt": "string",
+            "scorer": "default-only",
+            "sandbox": ["docker"],
+        },
+        "candidate_extraction": (
+            "first python fence, otherwise first generic fence; fenced full functions are reduced with pinned body "
+            "slicing"
+        ),
+        "harness": "prompt + completion + test + check(entry_point)",
+        "runtime": {"language": "python", "timeout_seconds": 30, "dependencies": ["standard library"]},
+        "epochs": 1,
+        "metrics": ["accuracy", "stderr"],
+        "meaningful_variants": {
+            "supported": ["default solver/scorer", "arbitrary instruction_prompt string", "docker sandbox"],
+            "rejected_before_execution": ["custom solver", "custom scorer", "non-docker sandbox"],
+        },
+        "support": "supported",
+    },
+    ("mbpp", "mbpp"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "google-research-datasets/mbpp",
+                "revision": "4bb6404fdc6cacfda99d4ac4205087b89d32030c",
+                "configs": ["full/prompt", "sanitized/test"],
+                "rows": {"sanitized/test": 257, "full/prompt_selected": [2, 3, 4]},
+                "offline_manifest_sha256": "cf3fe2178321c7b481c5319abc72a061a2df89d16ba9b303844de3f1e94bb2a3",
+                "license": "CC-BY-4.0",
+            }
+        ],
+        "factory_arguments": {"temperature": "finite float"},
+        "candidate_extraction": "first python fence or raw completion",
+        "harness": "completion plus all target assertions; test_imports is intentionally not injected",
+        "runtime": {"language": "python", "timeout_seconds": 30, "dependencies": ["standard library"]},
+        "epochs": 5,
+        "reducers": ["mean", "pass_at_1", "pass_at_2", "pass_at_5"],
+        "meaningful_variants": {
+            "supported": ["finite temperature values"],
+            "fixed": ["five epochs", "mean/pass@1/pass@2/pass@5 reducers", "sanitized test split"],
+        },
+        "support": "supported",
+    },
+    ("apps", "apps"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "codeparrot/apps",
+                "revision": "21e74ddf8de1a21436da12e3e653065c5213e9d1",
+                "split": "test",
+                "license": "MIT",
+            }
+        ],
+        "factory_arguments": {
+            "temperature": "float",
+            "num_epochs": "positive int",
+            "epoch_reducer": ["mean", "max", "median", "mode", "pass_at_k"],
+            "level": ["interview", "competition", "introductory"],
+            "token_limit": "positive int",
+        },
+        "candidate_extraction": "first python fence or raw completion",
+        "harness": (
+            "solution(one_argument) assertions synthesized from paired inputs/outputs; fn_name and starter_code are "
+            "intentionally ignored; source truncated at 100000 characters"
+        ),
+        "runtime": {"language": "python", "timeout_seconds": 120, "dependencies": ["standard library"]},
+        "meaningful_variants": {
+            "supported": [
+                "interview/competition/introductory levels",
+                "positive num_epochs",
+                "mean/max/pass_at_k reducers",
+                "temperature and token_limit overrides",
+            ],
+            "unsupported": ["median reducer", "mode reducer"],
+            "unsupported_reason": "The shared typed reducer framework does not represent pinned median/mode semantics.",
+        },
+        "support": "partial",
+    },
+    ("bigcodebench", "bigcodebench"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "bigcode/bigcodebench",
+                "revision": "b74c0d0bf70d2c0bc459be537895cca163007f1a",
+                "default_config": "v0.1.2",
+                "license": "Apache-2.0",
+            }
+        ],
+        "factory_arguments": {
+            "solver": "default-only",
+            "instruction_prompt": "string",
+            "scorer": "default-only",
+            "sandbox": ["docker"],
+            "version": "Hugging Face split name; default v0.1.2",
+            "subset": "optional list of integer row offsets",
+            "docker_handling": ["default", "force_build", "force_pull"],
+        },
+        "candidate_extraction": "first python fence, otherwise first generic fence, otherwise raw completion",
+        "harness": "completion + unittest harness + unittest.main()",
+        "runtime": {
+            "language": "python",
+            "timeout_seconds": 30,
+            "dependencies": "row-specific libs plus the unpinned docker-requirements closure",
+            "blocker": "compose uses a mutable :latest image and the runtime dependency closure includes TensorFlow",
+        },
+        "metrics": ["mean", "std"],
+        "meaningful_variants": {
+            "unsupported": ["all versions, subsets, and docker_handling modes"],
+            "unsupported_reason": "No content-addressed runtime proves the exact dependency environment.",
+        },
+        "support": "partial",
+    },
+    ("class_eval", "class_eval"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "FudanSELab/ClassEval",
+                "revision": "fef204b34e221f207f47904ee660bb920d4c5d1d",
+                "split": "test",
+                "license": "CC-BY-NC-4.0",
+            }
+        ],
+        "factory_arguments": {
+            "few_shot": "sets epoch count",
+            "few_shot_seed": "unused",
+            "docker_handling": "runtime preparation",
+        },
+        "harness": "complete generated class plus test code",
+        "candidate_extraction": "first python fence or raw completion",
+        "runtime": {
+            "language": "python",
+            "timeout_seconds": 30,
+            "dependencies": "unpinned docker-requirements closure",
+            "blocker": (
+                "compose uses a mutable :latest image and the runtime dependency closure is not content-verified"
+            ),
+        },
+        "epochs_and_reducers": "few_shot is used as epoch count with pass_at_<few_shot>",
+        "metrics": ["mean", "std"],
+        "meaningful_variants": {
+            "unsupported": ["all few_shot counts, seeds, and docker_handling modes"],
+            "unsupported_reason": "The non-commercial dataset and mutable runtime are not approved exact inputs.",
+        },
+        "support": "partial",
+    },
+    ("usaco", "usaco"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "kind": "google_drive_zip",
+                "sha256": "e4658a59f63132a0d2e43da9c0a42829d12106a02c4db8413017e6175215bf63",
+                "default_rows": 307,
+                "license": None,
+            }
+        ],
+        "factory_arguments": {
+            "temperature": "finite float",
+            "shuffle": [True, False],
+            "problem_levels": ["bronze", "silver", "gold", "platinum"],
+            "json_basename": ["usaco_subset307", "usaco_v2"],
+        },
+        "candidate_extraction": "first python fence or raw completion",
+        "harness": "Linux Python with file/stdin test cases and stripped stdout comparison",
+        "runtime": {
+            "language": "python",
+            "test_files": ["<n>.in/<n>.out", "I.<n>/O.<n>"],
+            "execution": "sequential tests with first-failure short circuit and binary stdin",
+            "comparison": "stdout.strip() == expected.strip()",
+            "requirements": ["resource module", "per-row CPU limit", "per-row address-space limit"],
+            "blocker": "dataset license absent and runtime acquisition not immutable",
+        },
+        "epochs_and_reducers": {"epochs": 1, "reducers": ["pass_at_1"]},
+        "meaningful_variants": {
+            "unsupported": ["all levels, dataset basenames, shuffle modes, and temperatures"],
+            "unsupported_reason": "Dataset redistribution/use rights and an immutable Linux runtime are unproven.",
+        },
+        "support": "partial",
+    },
+    ("vimgolf_challenges", "vimgolf_single_turn"): {
+        "audit_version": 1,
+        "dataset_sources": [
+            {
+                "repository": "cybergod-kevin/vimgolf-public-challenges-inspect-eval",
+                "revision": "909a17f2b57d5866c077ebac019f6b0f271de919",
+                "rows": 612,
+                "license": None,
+            }
+        ],
+        "factory_arguments": {},
+        "candidate_extraction": "last non-empty response line",
+        "harness": (
+            "reject empty/non-shorter solutions, tokenize keycodes, replay one-line keys from input.txt, then accept "
+            "normalized final content or SHA256 equality"
+        ),
+        "runtime": {
+            "language": "Vim keystrokes",
+            "timeout_seconds": 15,
+            "files": ["/app/input.txt", "/app/solution.txt"],
+            "construction_dependency": "vimgolf Python package",
+            "blocker": "unpinned Vim/base/apt runtime, optional unpinned vimgolf package, and absent dataset license",
+        },
+        "meaningful_variants": {
+            "unsupported": ["the parameterless vimgolf_single_turn factory"],
+            "unsupported_reason": "Dataset rights and an immutable editor/verifier runtime are unproven.",
+        },
+        "support": "partial",
+    },
+}
+
 
 def reviewed_static_mapping_audit(*, family: str, factory: str) -> dict[str, Any] | None:
     """Return reviewed evidence for one pinned advanced mapping factory."""
+    if (audit := _CODE_EVAL_AUDITS.get((family, factory))) is not None:
+        return audit
     if family == "bbh" and factory == "bbh":
         return _bbh_audit()
     if family == "cybermetric" and factory in _CYBERMETRIC_FILES:

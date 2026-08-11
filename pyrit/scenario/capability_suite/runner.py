@@ -229,6 +229,9 @@ class CapabilitySuiteRunner:
         if unsupported:
             details = "; ".join(f"{case.case_id}: {case.unsupported_reason}" for case in unsupported)
             raise ValueError(f"Capability suite contains non-runnable cases: {details}")
+        from pyrit.scenario.capability_suite.code_evaluation import validate_code_evaluation_preflight
+
+        validate_code_evaluation_preflight(manifest=self._manifest)
         content_hash = manifest_hash(self._manifest)
         provenance_id = f"capability-suite-{content_hash[:32]}"
         run_id = resume_id or f"capability-suite-{uuid.uuid4()}"
@@ -799,6 +802,8 @@ class CapabilitySuiteRunner:
             else {}
         )
         for scorer_manifest in case.scorers:
+            if cancellation_event is not None and cancellation_event.is_set():
+                return result.model_copy(update={"outcome": CapabilityOutcome.CANCELLED})
             try:
                 scorer = self._scorer_registry.build(kind=scorer_manifest.kind, config=scorer_manifest.config)
                 produced_scores = await scorer.score_async(
@@ -807,6 +812,8 @@ class CapabilitySuiteRunner:
                     session=session,
                     cancellation_event=cancellation_event,
                 )
+                if cancellation_event is not None and cancellation_event.is_set():
+                    return result.model_copy(update={"outcome": CapabilityOutcome.CANCELLED})
                 scorer_id = scorer_manifest.scorer_id or scorer_manifest.kind
                 scores.extend(
                     score.model_copy(
@@ -828,6 +835,8 @@ class CapabilitySuiteRunner:
                         message=str(error),
                     )
                 )
+            if cancellation_event is not None and cancellation_event.is_set():
+                return result.model_copy(update={"outcome": CapabilityOutcome.CANCELLED})
         return result.model_copy(update={"scores": tuple(scores), "evidence": (*result.evidence, *errors)})
 
     @staticmethod

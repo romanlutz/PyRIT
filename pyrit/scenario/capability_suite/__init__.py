@@ -19,6 +19,16 @@ compilation.
 """
 
 from pyrit.scenario.capability_suite.aggregation import CapabilitySuiteAggregate, aggregate_attempts
+from pyrit.scenario.capability_suite.code_evaluation import (
+    CodeComparisonMode,
+    CodeEvaluationFile,
+    CodeEvaluationScorer,
+    CodeEvaluationSpec,
+    CodeEvaluationTestCase,
+    CodeExtractionMode,
+    extract_generated_code,
+    validate_code_evaluation_preflight,
+)
 from pyrit.scenario.capability_suite.compiler import (
     BuildContextAssetSource,
     CheckedOutEvalRepoCompiler,
@@ -149,6 +159,12 @@ __all__ = [
     "CaseSetupStepManifest",
     "CaseToolManifest",
     "CheckedOutEvalRepoCompiler",
+    "CodeComparisonMode",
+    "CodeEvaluationFile",
+    "CodeEvaluationScorer",
+    "CodeEvaluationSpec",
+    "CodeEvaluationTestCase",
+    "CodeExtractionMode",
     "CompatibilityReport",
     "DockerSandboxProviderManifestConfig",
     "FidelityClassification",
@@ -204,10 +220,12 @@ __all__ = [
     "compile_inspect_eval_family",
     "dump_manifest_json",
     "expand_suite",
+    "extract_generated_code",
     "load_manifest_json",
     "load_manifest_file",
     "manifest_hash",
     "register_migration",
     "scan_checked_out_eval_repo",
     "validate_safe_relative_path",
+    "validate_code_evaluation_preflight",
 ]

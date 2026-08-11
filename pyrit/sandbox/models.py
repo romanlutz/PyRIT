@@ -226,6 +226,28 @@ class DockerServiceBuildSpec(BaseModel):
     depends_on: tuple[str, ...] = ()
 
 
+class DockerServiceImageSpec(BaseModel):
+    """An immutable prebuilt-image service synthesized into a Compose definition."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    service_name: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+    image: str = Field(min_length=1)
+    command: tuple[str, ...] | None = None
+    environment: dict[str, str] = Field(default_factory=dict)
+    working_dir: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    depends_on: tuple[str, ...] = ()
+
+    @field_validator("image")
+    @classmethod
+    def _validate_content_addressed_image(cls, value: str) -> str:
+        _, separator, digest = value.rpartition("@sha256:")
+        if separator != "@sha256:" or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Prebuilt Docker service images must use an immutable @sha256:<digest> reference.")
+        return value
+
+
 class DockerSecurityPolicy(BaseModel):
     """
     Security defaults enforced for every Docker sandbox service.
@@ -253,6 +275,8 @@ class DockerSecurityPolicy(BaseModel):
     allow_egress: bool = True
     drop_all_capabilities: bool = True
     read_only_root_filesystem: bool = False
+    require_secure_file_operations: bool = False
+    workspace_tmpfs_size_mb: int | None = Field(default=None, gt=0, le=4096)
     default_pids_limit: int | None = Field(default=256, gt=0)
     default_memory_limit: str | None = None
     default_cpus: float | None = Field(default=None, gt=0)
@@ -264,7 +288,7 @@ class DockerSandboxProviderConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     compose_files: tuple[Path, ...] = ()
-    services: tuple[DockerServiceBuildSpec, ...] = ()
+    services: tuple[DockerServiceBuildSpec | DockerServiceImageSpec, ...] = ()
     project_context: Path | None = None
     project_name_prefix: str = Field(default="pyrit-sbx", max_length=32, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     pull_policy: DockerPullPolicy = DockerPullPolicy.MISSING

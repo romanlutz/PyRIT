@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from pyrit.compat.inspect_ai import PINNED_INSPECT_EVALS_PROFILE, load_inspect_eval, run_inspect_eval_async
+from pyrit.compat.inspect_ai import (
+    PINNED_INSPECT_EVALS_PROFILE,
+    UnsupportedInspectFeatureError,
+    load_inspect_eval,
+    run_inspect_eval_async,
+)
 from pyrit.compat.inspect_ai.catalog import build_inspect_catalog, check_inspect_catalog_regression
 from pyrit.models import Message, MessagePiece, TargetResponseMetadata, ToolCallRequest
 from pyrit.prompt_target import (
@@ -22,6 +27,11 @@ from pyrit.prompt_target import (
     TargetCapabilities,
     TargetConfiguration,
     TargetRequestOptions,
+)
+from pyrit.scenario.capability_suite import (
+    CapabilitySuiteRunner,
+    build_default_sandbox_provider_registry,
+    build_default_scorer_registry,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +58,17 @@ class _RequestOptionsFactory:
     ) -> TargetRequestOptions:
         del declarations, execution_policy
         return TargetRequestOptions()
+
+
+class _OpenAIRequestOptionsFactory:
+    def build_request_options(
+        self,
+        *,
+        declarations: tuple[ToolDeclaration, ...],
+        execution_policy: ToolExecutionPolicy,
+    ) -> OpenAIChatRequestOptions:
+        del declarations, execution_policy
+        return OpenAIChatRequestOptions()
 
 
 class _ArcTarget(PromptTarget):
@@ -699,3 +720,193 @@ async def test_user_supplied_pinned_in_house_ctf_runs_real_docker(sqlite_instanc
     assert attempt.task_result is not None, attempt.error
     assert attempt.task_result.tool_calls == 1
     assert attempt.task_result.scores[0].score_value == "False"
+
+
+def _code_eval_records(family: str) -> list[dict[str, object]] | dict[str, list[dict[str, object]]]:
+    if family == "humaneval":
+        return [
+            {
+                "task_id": "HumanEval/fixture",
+                "prompt": 'def add(a, b):\n    """Return the sum."""\n',
+                "canonical_solution": "    return a + b\n",
+                "test": "def check(candidate):\n    assert candidate(2, 3) == 5",
+                "entry_point": "add",
+            }
+        ]
+    if family == "mbpp":
+        revision = "4bb6404fdc6cacfda99d4ac4205087b89d32030c"
+        few_shot = [
+            {
+                "task_id": task_id,
+                "text": f"few-shot {task_id}",
+                "test_list": [f"assert identity_{task_id}({task_id}) == {task_id}"],
+                "code": f"def identity_{task_id}(value):\n    return value",
+            }
+            for task_id in (2, 3, 4)
+        ]
+        return {
+            f"google-research-datasets/mbpp|full|prompt|{revision}": few_shot,
+            f"google-research-datasets/mbpp|sanitized|test|{revision}": [
+                {
+                    "task_id": 11,
+                    "prompt": "Write a function that doubles an integer.",
+                    "test_list": ["assert double(3) == 6"],
+                    "code": "def double(value):\n    return value * 2",
+                    "source_file": "fixture.py",
+                    "test_imports": [],
+                }
+            ],
+        }
+    return [
+        {
+            "problem_id": 7,
+            "question": "Return twice the input integer.",
+            "difficulty": "interview",
+            "input_output": json.dumps({"inputs": [3, -2], "outputs": [6, -4]}),
+        }
+    ]
+
+
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.parametrize(
+    ("family", "task_spec", "parameters", "expected_epochs"),
+    [
+        ("humaneval", "humaneval/humaneval.py@humaneval", {}, 1),
+        ("mbpp", "mbpp/mbpp.py@mbpp", {"temperature": 0.0}, 5),
+        (
+            "apps",
+            "apps/apps.py@apps",
+            {"num_epochs": 3, "epoch_reducer": ["mean", "max", "pass_at_1", "pass_at_3"]},
+            3,
+        ),
+    ],
+)
+def test_user_supplied_pinned_checkout_constructs_code_evaluation_mappings(
+    family: str,
+    task_spec: str,
+    parameters: dict[str, object],
+    expected_epochs: int,
+) -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    loaded = load_inspect_eval(
+        source_root=Path(source_value),
+        task_spec=task_spec,
+        task_parameters=parameters,
+        dataset_records=_code_eval_records(family),
+    )
+
+    assert loaded.report.source_revision_verified is True
+    assert loaded.suite.run_policy.epochs == expected_epochs
+    assert loaded.suite.cases[0].scorers[0].kind == "code_evaluation"
+    assert loaded.suite.metadata["runtime_requirements"]["image"].startswith("python@sha256:")
+
+
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.parametrize("reducer", ["median", "mode"])
+def test_user_supplied_pinned_apps_rejects_unmapped_reducers(reducer: str) -> None:
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    with pytest.raises(UnsupportedInspectFeatureError, match=reducer):
+        load_inspect_eval(
+            source_root=Path(source_value),
+            task_spec="apps/apps.py@apps",
+            task_parameters={"epoch_reducer": reducer},
+            dataset_records=_code_eval_records("apps"),
+        )
+
+
+@pytest.mark.docker
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.skipif(not _docker_available(), reason="Docker CLI, Compose v2, and a running daemon are required.")
+@pytest.mark.parametrize(
+    ("family", "task_spec", "response", "expected"),
+    [
+        (
+            "humaneval",
+            "humaneval/humaneval.py@humaneval",
+            "    try:\n        __file__\n    except NameError:\n        return a + b\n    return 0\n",
+            True,
+        ),
+        ("humaneval", "humaneval/humaneval.py@humaneval", "    return a - b\n", False),
+        ("mbpp", "mbpp/mbpp.py@mbpp", "```python\ndef double(value):\n    return value * 2\n```", True),
+        ("mbpp", "mbpp/mbpp.py@mbpp", "```python\ndef double(value):\n    return value\n```", False),
+        ("apps", "apps/apps.py@apps", "```python\ndef solution(value):\n    return value * 2\n```", True),
+        ("apps", "apps/apps.py@apps", "```python\ndef solution(value):\n    return value\n```", False),
+    ],
+)
+async def test_pinned_code_mapping_executes_known_answers_in_docker(
+    family: str,
+    task_spec: str,
+    response: str,
+    expected: bool,
+    sqlite_instance,
+) -> None:
+    del sqlite_instance
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value:
+        pytest.skip("Set PYRIT_INSPECT_EVALS_SOURCE_ROOT to an exact pinned inspect_evals checkout.")
+
+    execution = await run_inspect_eval_async(
+        source_root=Path(source_value),
+        task_spec=task_spec,
+        dataset_records=_code_eval_records(family),
+        target=_ArcTarget(response=response),
+    )
+
+    scores = [
+        attempt.task_result.scores[0].get_value()
+        for attempt in execution.result.attempts
+        if attempt.task_result is not None
+    ]
+    assert scores
+    assert all(score is expected for score in scores)
+
+
+@pytest.mark.docker
+@pytest.mark.run_only_if_all_tests
+@pytest.mark.skipif(not _docker_available(), reason="Docker CLI, Compose v2, and a running daemon are required.")
+@pytest.mark.parametrize(
+    ("family", "task_spec"),
+    [
+        ("humaneval", "humaneval/humaneval.py@humaneval"),
+        ("mbpp", "mbpp/mbpp.py@mbpp"),
+    ],
+)
+async def test_pinned_real_code_dataset_reruns_offline_and_executes_first_row(
+    family: str,
+    task_spec: str,
+    sqlite_instance,
+) -> None:
+    del sqlite_instance
+    source_value = os.getenv("PYRIT_INSPECT_EVALS_SOURCE_ROOT")
+    if not source_value or os.getenv("PYRIT_INSPECT_EVALS_REAL_DATA") != "1":
+        pytest.skip("Set the pinned source root and PYRIT_INSPECT_EVALS_REAL_DATA=1 for exact real-data evidence.")
+
+    online = load_inspect_eval(source_root=Path(source_value), task_spec=task_spec, allow_network=True)
+    offline = load_inspect_eval(source_root=Path(source_value), task_spec=task_spec, allow_network=False)
+    online_payload = json.dumps(online.suite.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    offline_payload = json.dumps(offline.suite.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(online_payload.encode()).hexdigest() == hashlib.sha256(offline_payload.encode()).hexdigest()
+
+    sample = offline.task.dataset[0]
+    response = sample.target if family == "humaneval" else sample.metadata["code"]
+    assert isinstance(response, str)
+    one_case_suite = offline.suite.model_copy(update={"cases": offline.suite.cases[:1]})
+    result = await CapabilitySuiteRunner(
+        manifest=one_case_suite,
+        target=_ArcTarget(response=response),
+        request_options_factory=_OpenAIRequestOptionsFactory(),
+        sandbox_provider_registry=build_default_sandbox_provider_registry(),
+        scorer_registry=build_default_scorer_registry(),
+    ).run_async()
+
+    assert result.attempts
+    assert all(attempt.task_result is not None for attempt in result.attempts)
+    assert all(
+        attempt.task_result.scores[0].score_value == "True" for attempt in result.attempts if attempt.task_result
+    )

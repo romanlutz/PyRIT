@@ -11,7 +11,7 @@ import random
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
-from typing import Any, Literal, overload
+from typing import Any, Generic, Literal, TypeVar, overload
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -285,6 +285,19 @@ class SandboxSpec:
 
     type: str
     config: str | dict[str, Any] | None = None
+
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class ExecResult(Generic[_T]):
+    """Construction-only marker matching the pinned Inspect execution result shape."""
+
+    success: bool
+    returncode: int
+    stdout: _T
+    stderr: _T
 
 
 @dataclass(frozen=True)
