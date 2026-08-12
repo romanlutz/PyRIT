@@ -21,10 +21,21 @@ from pyrit.backend.main import SPAStaticFiles, app, lifespan, setup_frontend
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 
+@pytest.fixture
+def mock_scenario_run_lifecycle():
+    """Mock scenario scheduling lifecycle hooks."""
+    service = MagicMock(
+        reconcile_interrupted_runs_async=AsyncMock(return_value=0),
+        shutdown_async=AsyncMock(),
+    )
+    with patch("pyrit.backend.main.get_scenario_run_service", return_value=service):
+        yield service
+
+
 class TestLifespan:
     """Tests for the application lifespan context manager."""
 
-    async def test_lifespan_yields(self) -> None:
+    async def test_lifespan_yields(self, mock_scenario_run_lifecycle) -> None:
         """Test that lifespan delegates to ConfigurationLoader and yields."""
         fake_config = ConfigurationLoader()
         with (
@@ -43,8 +54,10 @@ class TestLifespan:
             assert app.state.default_labels == {}
             assert app.state.max_concurrent_scenario_runs == fake_config.max_concurrent_scenario_runs
             assert app.state.allow_custom_initializers is False
+            mock_scenario_run_lifecycle.reconcile_interrupted_runs_async.assert_awaited_once()
+            mock_scenario_run_lifecycle.shutdown_async.assert_awaited_once()
 
-    async def test_lifespan_warns_when_custom_initializers_allowed(self) -> None:
+    async def test_lifespan_warns_when_custom_initializers_allowed(self, mock_scenario_run_lifecycle) -> None:
         """Test that lifespan logs a warning when allow_custom_initializers is enabled."""
         fake_config = ConfigurationLoader(allow_custom_initializers=True)
         with (
@@ -62,7 +75,9 @@ class TestLifespan:
 
             mock_warning.assert_called_once()
 
-    async def test_lifespan_populates_default_labels_from_operator_and_operation(self) -> None:
+    async def test_lifespan_populates_default_labels_from_operator_and_operation(
+        self, mock_scenario_run_lifecycle
+    ) -> None:
         """Test that operator and operation are exposed as default_labels."""
         fake_config = ConfigurationLoader(operator="alice", operation="op-42")
         with (
@@ -79,7 +94,7 @@ class TestLifespan:
 
             assert app.state.default_labels == {"operator": "alice", "operation": "op-42"}
 
-    async def test_lifespan_reads_config_file_env_var(self) -> None:
+    async def test_lifespan_reads_config_file_env_var(self, mock_scenario_run_lifecycle) -> None:
         """Test that PYRIT_CONFIG_FILE is forwarded to ConfigurationLoader.load_with_overrides."""
         fake_config = ConfigurationLoader()
         with (

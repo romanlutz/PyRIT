@@ -119,6 +119,61 @@ describe('scenarioRunProgressReducer', () => {
     expect(reset.cursor).toBe('cursor-2')
   })
 
+  it('does not double-count overload evidence during cancellation catch-up', () => {
+    const overload = {
+      component_role: 'objective_target',
+      count: 1,
+      rate_limit_count: 1,
+      server_error_count: 0,
+      status_codes: [429],
+      latest_timestamp: '2026-01-01T00:01:00Z',
+    }
+    const first = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'apply-page',
+      page: makePage({ run: { ...makePage().run, overload_summaries: [overload] } }),
+      fresh: true,
+    })
+    const cancelled = scenarioRunProgressReducer(first, {
+      type: 'apply-run-summary',
+      run: {
+        scenario_result_id: 'run-1',
+        scenario_name: 'TestScenario',
+        scenario_registry_name: 'test.scenario',
+        scenario_version: 1,
+        status: 'CANCELLED',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:02:00Z',
+        techniques_used: [],
+        total_attacks: 2,
+        completed_attacks: 2,
+        objective_achieved_rate: 0,
+        failed_attacks: [],
+        attack_retries: [],
+        total_retries: 2,
+        labels: {},
+        overload_summaries: [{ ...overload, count: 2, rate_limit_count: 2 }],
+      },
+    })
+    const caughtUp = scenarioRunProgressReducer(cancelled, {
+      type: 'apply-page',
+      page: makePage({
+        plan: null,
+        run: {
+          ...makePage().run,
+          status: 'CANCELLED',
+          overload_summaries: [{
+            ...overload,
+            latest_timestamp: '2026-01-01T00:02:00Z',
+          }],
+        },
+      }),
+      fresh: false,
+    })
+
+    expect(cancelled.overloadSummaries[0].count).toBe(1)
+    expect(caughtUp.overloadSummaries[0].count).toBe(2)
+  })
+
   it('retains last-good data and marks it stale after a transient failure', () => {
     const first = readyState([makeResult('attempt-1', 'group-a', 'seed-1', 'success', 1)])
     const failed = scenarioRunProgressReducer(first, {

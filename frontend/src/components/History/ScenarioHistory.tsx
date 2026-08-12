@@ -28,6 +28,7 @@ import {
 } from '@fluentui/react-icons'
 
 import { labelsApi, scenariosApi } from '@/services/api'
+import { useScenarioQueue } from '@/hooks/useScenarioQueue'
 import { toApiError } from '@/services/errors'
 import type { ScenarioRunState, ScenarioRunSummary } from '@/types'
 import { fetchAllPages } from '@/utils/fetchAllPages'
@@ -38,9 +39,10 @@ import {
   DEFAULT_SCENARIO_HISTORY_FILTERS,
   type ScenarioHistoryFilters,
 } from './scenarioHistoryFilters'
+import ScenarioQueue from '../Scenarios/ScenarioQueue'
 
 const PAGE_SIZE = 25
-const STATUS_OPTIONS: ScenarioRunState[] = ['CREATED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'CANCELLED']
+const STATUS_OPTIONS: ScenarioRunState[] = ['CREATED', 'QUEUED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'CANCELLED']
 
 interface ScenarioHistoryProps {
   filters: ScenarioHistoryFilters
@@ -91,6 +93,7 @@ export default function ScenarioHistory({
   onNavigate,
 }: ScenarioHistoryProps) {
   const styles = useScenarioHistoryStyles()
+  const queue = useScenarioQueue()
   const [runs, setRuns] = useState<ScenarioRunSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -294,6 +297,15 @@ export default function ScenarioHistory({
           </MessageBar>
         )}
       </header>
+
+      <div className={styles.queue}>
+        <ScenarioQueue
+          snapshot={queue.snapshot}
+          loading={queue.loading}
+          stale={queue.stale}
+          error={queue.error}
+        />
+      </div>
 
       <div className={styles.content}>
         {displayLoading ? (
