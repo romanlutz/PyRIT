@@ -104,7 +104,7 @@ describe("Navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("places Scenarios immediately after Attack History without a history placeholder", () => {
+  it("renders the final primary navigation order", () => {
     renderWithProvider(<Navigation {...defaultProps} />);
     const navigation = screen.getByRole("navigation", { name: "Primary" });
     const labels = within(navigation)
@@ -116,10 +116,27 @@ describe("Navigation", () => {
       "Chat",
       "Attack History",
       "Scenarios",
+      "Scenario History",
       "Configuration",
       "Initializers",
     ]);
-    expect(screen.queryByRole("button", { name: "Scenario History" })).not.toBeInTheDocument();
+  });
+
+  it("marks Scenario History current and navigates to its dedicated view", async () => {
+    const user = userEvent.setup();
+    const onNavigate = jest.fn();
+    renderWithProvider(
+      <Navigation
+        {...defaultProps}
+        currentView="scenarioHistory"
+        onNavigate={onNavigate}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Scenario History" });
+    expect(button).toHaveAttribute("aria-current", "page");
+    await user.click(button);
+    expect(onNavigate).toHaveBeenCalledWith("scenarioHistory");
   });
 
   it("calls onNavigate with 'scenarios' when the scenarios button is clicked", async () => {

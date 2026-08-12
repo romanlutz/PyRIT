@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
+from pyrit.models.catalog.scenario import ScenarioTargetSummary  # noqa: TC001
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
 from pyrit.models.results.attack_result import AttackOutcome
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -95,6 +96,12 @@ class ScenarioProgressHeader(BaseModel):
     status: ScenarioRunState
     created_at: datetime
     completed_at: datetime | None = None
+    pyrit_version: str | None = None
+    target: "ScenarioTargetSummary | None" = None
+    techniques_used: list[str] = Field(default_factory=list)
+    datasets_used: list[str] = Field(default_factory=list)
+    scenario_parameters: dict[str, Any] = Field(default_factory=dict)
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class ScenarioProgressResult(BaseModel):
@@ -141,3 +148,6 @@ class ScenarioAttackResultDelta(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     attribution_data: dict[str, Any] = Field(default_factory=dict)
+
+
+ScenarioProgressHeader.model_rebuild()
