@@ -27,6 +27,7 @@ from pyrit.models import (
     AtomicAttackIdentifier,
     ScenarioAdaptiveRunSizeDetails,
     ScenarioDefaultRunSizeEstimate,
+    ScenarioRunPlanGroupKind,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
@@ -526,6 +527,7 @@ class AdaptiveScenario(Scenario):
                     objective_scorer=self._objective_scorer,
                     memory_labels=dict(self._memory_labels),
                     display_group=dataset_name,
+                    progress_group_kind=ScenarioRunPlanGroupKind.ADAPTIVE,
                 )
             )
 
