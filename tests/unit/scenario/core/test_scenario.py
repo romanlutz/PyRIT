@@ -20,8 +20,10 @@ from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AttackOutcome,
     AttackResult,
+    AttackSeedGroup,
     ComponentIdentifier,
     ScenarioRunState,
+    SeedObjective,
 )
 from pyrit.scenario import (
     DatasetAttackConfiguration,
@@ -278,6 +280,58 @@ class TestScenarioInitialization2:
         [stored] = scenario._memory.get_scenario_results(scenario_result_ids=[scenario._scenario_result_id])
         assert stored.metadata["run_plan"]["version"] == 1
         assert len(stored.metadata["run_plan"]["atomic_groups"]) == len(mock_atomic_attacks)
+
+    async def test_initialize_async_deduplicates_logical_seed_groups_in_run_plan(self, mock_objective_target) -> None:
+        duplicate_seed_groups = [
+            AttackSeedGroup(seeds=[SeedObjective(value="duplicate objective")]),
+            AttackSeedGroup(seeds=[SeedObjective(value="duplicate objective")]),
+        ]
+        atomic_attack = MagicMock(spec=AtomicAttack)
+        atomic_attack.atomic_attack_name = "duplicate_attack"
+        atomic_attack.display_group = "duplicate_attack"
+        atomic_attack.technique_eval_hash = "duplicate-technique"
+        type(atomic_attack).seed_groups = PropertyMock(return_value=duplicate_seed_groups)
+        scenario = ConcreteScenario(
+            name="Duplicate Seed Scenario",
+            version=1,
+            atomic_attacks_to_return=[atomic_attack],
+        )
+
+        scenario.set_params_from_args(args={"objective_target": mock_objective_target})
+        await scenario.initialize_async()
+
+        [stored] = scenario._memory.get_scenario_results(scenario_result_ids=[scenario._scenario_result_id])
+        persisted_plan = stored.metadata[SCENARIO_RUN_PLAN_METADATA_KEY]
+        expected_seed_id = duplicate_seed_groups[0].logical_id
+        assert persisted_plan["atomic_groups"][0]["seed_group_ids"] == [expected_seed_id]
+        assert [seed_group["id"] for seed_group in persisted_plan["seed_groups"]] == [expected_seed_id]
+        assert scenario._build_run_plan().model_dump(mode="json") == persisted_plan
+        assert atomic_attack.seed_groups is duplicate_seed_groups
+        assert len(atomic_attack.seed_groups) == 2
+
+    async def test_build_run_plan_preserves_unique_seed_group_order(self, mock_objective_target) -> None:
+        seed_groups = [
+            AttackSeedGroup(seeds=[SeedObjective(value="first objective")]),
+            AttackSeedGroup(seeds=[SeedObjective(value="second objective")]),
+        ]
+        atomic_attack = MagicMock(spec=AtomicAttack)
+        atomic_attack.atomic_attack_name = "unique_attack"
+        atomic_attack.display_group = "unique_attack"
+        atomic_attack.technique_eval_hash = "unique-technique"
+        type(atomic_attack).seed_groups = PropertyMock(return_value=seed_groups)
+        scenario = ConcreteScenario(
+            name="Unique Seed Scenario",
+            version=1,
+            atomic_attacks_to_return=[atomic_attack],
+        )
+
+        scenario.set_params_from_args(args={"objective_target": mock_objective_target})
+        await scenario.initialize_async()
+
+        plan = scenario._build_run_plan()
+        expected_seed_ids = [seed_group.logical_id for seed_group in seed_groups]
+        assert plan.atomic_groups[0].seed_group_ids == expected_seed_ids
+        assert [seed_group.id for seed_group in plan.seed_groups] == expected_seed_ids
 
     async def test_initialize_async_sets_objective_target(self, mock_objective_target):
         """Test that initialize_async sets objective_target properly."""

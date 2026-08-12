@@ -949,8 +949,12 @@ class Scenario(ABC):
         atomic_groups: list[ScenarioRunPlanAtomicGroup] = []
         for atomic_attack in self._atomic_attacks:
             seed_group_ids: list[str] = []
+            seen_seed_group_ids: set[str] = set()
             for seed_group in atomic_attack.seed_groups:
                 seed_group_id = seed_group.logical_id
+                if seed_group_id in seen_seed_group_ids:
+                    continue
+                seen_seed_group_ids.add(seed_group_id)
                 seed_group_ids.append(seed_group_id)
                 seed_groups.setdefault(
                     seed_group_id,
