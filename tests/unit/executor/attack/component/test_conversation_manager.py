@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from unit.mocks import get_mock_scorer_identifier
 
+from pyrit.converter import Base64Converter
 from pyrit.executor.attack import ConversationManager, ConversationState
 from pyrit.executor.attack.component import PrependedConversationConfig
 from pyrit.executor.attack.component.conversation_manager import (
@@ -1093,6 +1094,25 @@ class TestPrependedConversationConfigSettings:
         text_value = context.next_message.get_piece().original_value
         assert len(text_value) > 0
 
+    async def test_non_chat_target_rejects_converter_scoping_that_excludes_history_roles(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        converter_config = ConverterConfiguration.from_converters(converters=[Base64Converter()])
+
+        with pytest.raises(ValueError, match="non-chat target.*excluded roles.*assistant"):
+            await manager.initialize_context_async(
+                context=context,
+                target=mock_prompt_target,
+                conversation_id=str(uuid.uuid4()),
+                request_converters=converter_config,
+            )
+
     async def test_non_chat_target_behavior_normalize_first_turn_creates_next_message(
         self,
         attack_identifier: ComponentIdentifier,
@@ -1178,13 +1198,13 @@ class TestPrependedConversationConfigSettings:
     # apply_converters_to_roles Tests
     # -------------------------------------------------------------------------
 
-    async def test_apply_converters_to_roles_default_applies_to_all(
+    async def test_apply_converters_to_roles_default_applies_to_user_only(
         self,
         attack_identifier: ComponentIdentifier,
         mock_chat_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that converters are applied to all roles by default."""
+        """Test that converters are applied only to user history by default."""
         mock_normalizer = MagicMock(spec=PromptNormalizer)
         mock_normalizer.convert_values_async = AsyncMock()
         manager = ConversationManager(prompt_normalizer=mock_normalizer)
@@ -1201,8 +1221,7 @@ class TestPrependedConversationConfigSettings:
             request_converters=converter_config,
         )
 
-        # convert_values_async should be called for each message (both user and assistant)
-        assert mock_normalizer.convert_values_async.call_count == 2
+        mock_normalizer.convert_values_async.assert_awaited_once()
 
     async def test_apply_converters_to_roles_user_only(
         self,
