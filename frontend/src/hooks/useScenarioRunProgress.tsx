@@ -26,11 +26,17 @@ export function useScenarioRunProgress(scenarioResultId: string): UseScenarioRun
   )
   const [retryEpoch, setRetryEpoch] = useState(0)
   const cursorRef = useRef<string | null>(null)
+  const cursorScenarioResultIdRef = useRef(scenarioResultId)
   const abortControllerRef = useRef<AbortController | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollingStoppedRef = useRef(false)
 
   useEffect(() => {
+    if (cursorScenarioResultIdRef.current !== scenarioResultId) {
+      cursorScenarioResultIdRef.current = scenarioResultId
+      cursorRef.current = null
+    }
+
     let active = true
     pollingStoppedRef.current = false
 

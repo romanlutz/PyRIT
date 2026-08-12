@@ -143,6 +143,48 @@ describe('useScenarioRunProgress', () => {
     unmount()
   })
 
+  it('isolates cursors when the run ID changes while preserving same-run polling', async () => {
+    jest.useFakeTimers()
+    mockGetRunProgress
+      .mockResolvedValueOnce(makePage({ next_cursor: 'run-a-cursor' }))
+      .mockResolvedValueOnce(makePage({
+        run: { ...makePage().run, scenario_result_id: 'run-b' },
+        next_cursor: 'run-b-cursor',
+      }))
+      .mockResolvedValueOnce(makePage({
+        run: { ...makePage().run, scenario_result_id: 'run-b' },
+        plan: null,
+        next_cursor: 'run-b-next-cursor',
+      }))
+
+    const { rerender, unmount } = renderHook(
+      ({ runId }) => useScenarioRunProgress(runId),
+      { initialProps: { runId: 'run-a' } },
+    )
+    await act(async () => Promise.resolve())
+
+    rerender({ runId: 'run-b' })
+    await act(async () => Promise.resolve())
+
+    expect(mockGetRunProgress).toHaveBeenNthCalledWith(
+      2,
+      'run-b',
+      { since: undefined, limit: 500 },
+      expect.any(AbortSignal),
+    )
+
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(SCENARIO_RUN_POLL_INTERVAL_MS)
+    })
+    expect(mockGetRunProgress).toHaveBeenNthCalledWith(
+      3,
+      'run-b',
+      { since: 'run-b-cursor', limit: 500 },
+      expect.any(AbortSignal),
+    )
+    unmount()
+  })
+
   it('transitions a queued run to active progress on a later poll', async () => {
     jest.useFakeTimers()
     mockGetRunProgress
