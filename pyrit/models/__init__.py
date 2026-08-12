@@ -108,6 +108,7 @@ from pyrit.models.scenario_progress import (
     ScenarioProgressResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanGroupKind,
     ScenarioRunPlanSeedGroup,
     ScenarioRunProgress,
 )
@@ -240,6 +241,7 @@ __all__ = [
     "ScenarioProgressResult",
     "ScenarioRunPlan",
     "ScenarioRunPlanAtomicGroup",
+    "ScenarioRunPlanGroupKind",
     "ScenarioRunPlanSeedGroup",
     "ScenarioRunProgress",
     "Seed",
