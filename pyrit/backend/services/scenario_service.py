@@ -229,10 +229,11 @@ class ScenarioService:
             ScenarioDefaultRunSizeEstimate: Scenario-owned estimate.
         """
         try:
-            estimate = await asyncio.wait_for(
-                self._run_default_estimate_async(scenario_name=scenario_name),
-                timeout=_DEFAULT_ESTIMATE_TIMEOUT_SECONDS,
-            )
+            async with self._estimate_semaphore:
+                estimate = await asyncio.wait_for(
+                    self._run_default_estimate_async(scenario_name=scenario_name),
+                    timeout=_DEFAULT_ESTIMATE_TIMEOUT_SECONDS,
+                )
         except TimeoutError:
             logger.warning(
                 "Default-run estimate timed out for scenario '%s' after %.1f seconds",
@@ -262,14 +263,13 @@ class ScenarioService:
 
     async def _run_default_estimate_async(self, *, scenario_name: str) -> ScenarioDefaultRunSizeEstimate:
         """
-        Run one bounded-concurrency default estimate.
+        Run one default estimate.
 
         Returns:
             ScenarioDefaultRunSizeEstimate: The authoritative scenario estimate.
         """
-        async with self._estimate_semaphore:
-            scenario = await asyncio.to_thread(self._registry.create_instance, scenario_name)
-            return await scenario.get_default_run_size_estimate_async()
+        scenario = await asyncio.to_thread(self._registry.create_instance, scenario_name)
+        return await scenario.get_default_run_size_estimate_async()
 
     def _clear_estimate_task(self, task: _EstimateTask, *, cache_key: _EstimateCacheKey) -> None:
         """Remove a completed single-flight task without disturbing a replacement."""

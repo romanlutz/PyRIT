@@ -7,6 +7,7 @@ Tests for backend scenario service and routes.
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Awaitable
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -388,34 +389,93 @@ class TestScenarioServiceListScenarios:
         assert maximum_active == 2
         assert all(item.default_run_size == estimate for item in result.items)
 
-    async def test_catalog_timeout_is_wall_clock_bounded_and_cached(self) -> None:
-        """Queued catalog estimates time out together and reuse the unavailable result."""
-        metadata = [_make_scenario_metadata(registry_name=f"test.scenario_{index}") for index in range(4)]
+    async def test_catalog_queue_wait_does_not_start_execution_timeout(self) -> None:
+        """A queued catalog estimate starts its execution timeout only after acquiring capacity."""
+        metadata = [_make_scenario_metadata(registry_name=f"test.scenario_{index}") for index in range(2)]
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=1,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=1)],
+        )
+        first_estimate_started = asyncio.Event()
+        release_first_estimate = asyncio.Event()
+        second_timeout_started = asyncio.Event()
+        estimate_count = 0
+        timeout_count = 0
+
+        async def estimate_async() -> ScenarioDefaultRunSizeEstimate:
+            nonlocal estimate_count
+            estimate_count += 1
+            if estimate_count == 1:
+                first_estimate_started.set()
+                await release_first_estimate.wait()
+            return estimate
+
+        async def wait_for_async(
+            awaitable: Awaitable[ScenarioDefaultRunSizeEstimate], *, timeout: float
+        ) -> ScenarioDefaultRunSizeEstimate:
+            nonlocal timeout_count
+            timeout_count += 1
+            if timeout_count == 2:
+                second_timeout_started.set()
+            return await awaitable
+
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=estimate_async)
+        service = ScenarioService()
+        service._registry = MagicMock()
+        service._registry.get_all_registered_class_metadata.return_value = metadata
+        service._registry.create_instance.return_value = scenario
+        service._estimate_semaphore = asyncio.Semaphore(1)
+
+        with patch("pyrit.backend.services.scenario_service.asyncio.wait_for", side_effect=wait_for_async):
+            catalog_task = asyncio.create_task(service.list_scenarios_async())
+            await first_estimate_started.wait()
+            await asyncio.sleep(0)
+            assert not second_timeout_started.is_set()
+
+            release_first_estimate.set()
+            result = await catalog_task
+
+        assert second_timeout_started.is_set()
+        assert timeout_count == 2
+        assert all(item.default_run_size == estimate for item in result.items)
+
+    async def test_catalog_execution_timeout_is_unavailable_and_cached(self) -> None:
+        """A genuine estimate execution timeout is unavailable and reused from cache."""
+        metadata = _make_scenario_metadata()
+        estimate_started = asyncio.Event()
+        estimate_cancelled = asyncio.Event()
+        block_estimate = asyncio.Event()
 
         async def slow_estimate_async() -> ScenarioDefaultRunSizeEstimate:
-            await asyncio.sleep(60)
-            raise AssertionError("The default estimate should time out before completing.")
+            estimate_started.set()
+            try:
+                await block_estimate.wait()
+            except asyncio.CancelledError:
+                estimate_cancelled.set()
+                raise
+            raise AssertionError("The blocked estimate should be cancelled by its execution timeout.")
 
         scenario = MagicMock()
         scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=slow_estimate_async)
         service = ScenarioService()
         service._registry = MagicMock()
-        service._registry.get_all_registered_class_metadata.return_value = metadata
-        service._registry.get_registered_class_metadata.return_value = metadata[0]
         service._registry.create_instance.return_value = scenario
-        service._estimate_semaphore = asyncio.Semaphore(1)
 
-        with patch("pyrit.backend.services.scenario_service._DEFAULT_ESTIMATE_TIMEOUT_SECONDS", 0.02):
-            started_at = asyncio.get_running_loop().time()
-            result = await service.list_scenarios_async()
-            elapsed = asyncio.get_running_loop().time() - started_at
-            cached = await service.get_scenario_async(scenario_name=metadata[0].registry_name)
+        with patch("pyrit.backend.services.scenario_service._DEFAULT_ESTIMATE_TIMEOUT_SECONDS", 0.01):
+            estimate_task = asyncio.create_task(service._get_default_run_size_estimate_async(metadata=metadata))
+            await estimate_started.wait()
+            result = await estimate_task
+            cached = await service._get_default_run_size_estimate_async(metadata=metadata)
+            await asyncio.sleep(0)
 
-        assert elapsed < 0.2
-        assert all(item.default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable for item in result.items)
-        assert cached is not None
-        assert cached.default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable
-        assert service._registry.create_instance.call_count <= len(metadata)
+        assert result.status is ScenarioRunSizeEstimateStatus.Unavailable
+        assert cached is result
+        assert estimate_cancelled.is_set()
+        service._registry.create_instance.assert_called_once_with(metadata.registry_name)
+        scenario.get_default_run_size_estimate_async.assert_awaited_once()
+        assert service._estimate_tasks == {}
 
     async def test_configured_estimate_does_not_wait_for_catalog_estimate(self) -> None:
         """Interactive detail estimates use separate capacity from default catalog cards."""
