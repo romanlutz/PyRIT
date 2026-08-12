@@ -17,6 +17,9 @@ import pyrit.backend.services.scenario_run_service as _svc_mod
 from pyrit.backend.main import app
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
 from pyrit.models import (
+    SCENARIO_RUN_PLAN_METADATA_KEY,
+    AttackOutcome,
+    AttackResult,
     ScenarioProgressHeader,
     ScenarioRunPlan,
     ScenarioRunProgress,
@@ -258,6 +261,40 @@ class TestGetScenarioRunRoute:
             response = client.get("/api/scenarios/runs/nonexistent")
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_get_run_with_forward_version_plan_returns_legacy_detail(self, client: TestClient) -> None:
+        attack_result = AttackResult(
+            conversation_id="conversation-1",
+            objective="objective",
+            outcome=AttackOutcome.SUCCESS,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            attribution_data={"parent_collection": "legacy attack"},
+        )
+        db_result = make_scenario_result(
+            scenario_name="foundry.red_team_agent",
+            attack_results={"legacy attack": [attack_result]},
+            metadata={
+                SCENARIO_RUN_PLAN_METADATA_KEY: {
+                    "version": 2,
+                    "atomic_groups": [],
+                    "seed_groups": [],
+                }
+            },
+        )
+        memory = MagicMock()
+        memory.get_scenario_results.return_value = [db_result]
+        memory.get_attack_results.return_value = []
+        with patch.object(_svc_mod.CentralMemory, "get_memory_instance", return_value=memory):
+            service = _svc_mod.ScenarioRunService()
+
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            response = client.get(f"/api/scenarios/runs/{db_result.id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["planned_total_available"] is False
+        assert response.json()["total_attacks"] == 1
+        assert response.json()["completed_attacks"] == 1
+        assert response.json()["techniques_used"] == ["legacy attack"]
 
     def test_progress_invalid_cursor_returns_400(self, client: TestClient) -> None:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:

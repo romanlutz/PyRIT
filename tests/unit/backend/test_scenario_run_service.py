@@ -673,6 +673,75 @@ class TestScenarioRunServiceGetRun:
         assert fetched.error == "Scenario failed"
         assert fetched.error_type == "RuntimeError"
 
+    @pytest.mark.parametrize(
+        ("raw_plan", "expected_registry_name", "expected_total", "expected_planned_total", "expected_warning"),
+        [
+            (
+                ScenarioRunPlan(
+                    scenario_registry_name="registered.scenario",
+                    atomic_groups=[
+                        ScenarioRunPlanAtomicGroup(
+                            id="group-1",
+                            atomic_attack_name="legacy attack",
+                            display_group="Attack",
+                            technique_eval_hash="eval",
+                            seed_group_ids=["seed-1"],
+                        )
+                    ],
+                    seed_groups=[
+                        ScenarioRunPlanSeedGroup(
+                            id="seed-1",
+                            objective_sha256=_svc_mod.to_sha256("objective"),
+                            objective="objective",
+                        )
+                    ],
+                ).model_dump(mode="json"),
+                "registered.scenario",
+                1,
+                True,
+                False,
+            ),
+            (None, None, 1, False, False),
+            ({"version": 2, "atomic_groups": [], "seed_groups": []}, None, 1, False, True),
+            ({"version": 1, "atomic_groups": "malformed", "seed_groups": []}, None, 1, False, True),
+        ],
+        ids=["valid", "legacy", "forward-version", "malformed"],
+    )
+    def test_get_run_detail_preserves_readability_across_plan_metadata(
+        self,
+        mock_memory,
+        caplog: pytest.LogCaptureFixture,
+        raw_plan: dict[str, Any] | None,
+        expected_registry_name: str | None,
+        expected_total: int,
+        expected_planned_total: bool,
+        expected_warning: bool,
+    ) -> None:
+        metadata = {SCENARIO_RUN_PLAN_METADATA_KEY: raw_plan} if raw_plan is not None else {}
+        attack_result = AttackResult(
+            conversation_id="conversation-1",
+            objective="objective",
+            outcome=AttackOutcome.SUCCESS,
+            timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            attribution_data={"parent_collection": "legacy attack", "parent_eval_hash": "eval"},
+        )
+        db_result = make_scenario_result(
+            scenario_name="foundry.red_team_agent",
+            attack_results={"legacy attack": [attack_result]},
+            metadata=metadata,
+        )
+        mock_memory.get_scenario_results.return_value = [db_result]
+
+        fetched = ScenarioRunService().get_run(scenario_result_id=str(db_result.id))
+
+        assert fetched is not None
+        assert fetched.scenario_registry_name == expected_registry_name
+        assert fetched.total_attacks == expected_total
+        assert fetched.completed_attacks == 1
+        assert fetched.planned_total_available is expected_planned_total
+        assert fetched.techniques_used == (["Attack"] if expected_planned_total else ["legacy attack"])
+        assert ("using legacy run detail fields" in caplog.text) is expected_warning
+
     def test_get_run_falls_back_to_persisted_error(self, mock_memory) -> None:
         """Test that get_run extracts error from persisted error AttackResult when no active task.
 

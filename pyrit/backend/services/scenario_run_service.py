@@ -780,7 +780,14 @@ class ScenarioRunService:
             ScenarioRunState.FAILED,
             ScenarioRunState.CANCELLED,
         )
-        plan = self._load_run_plan(scenario_result=scenario_result)
+        try:
+            plan = self._load_run_plan(scenario_result=scenario_result)
+        except (ValidationError, ValueError):
+            logger.warning(
+                "Scenario run %s has invalid persisted plan metadata; using legacy run detail fields.",
+                scenario_result_id,
+            )
+            plan = None
 
         # Build result fields from DB (always computed so in-progress runs show progress)
         total_attacks, completed_attacks, objective_achieved_rate, successful_attacks = self._calculate_progress_counts(
