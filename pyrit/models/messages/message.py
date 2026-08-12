@@ -30,6 +30,8 @@ class Message(BaseModel):
     )
 
     message_pieces: list[MessagePiece]
+    # Ephemeral guard that keeps context initialization idempotent.
+    # PrivateAttr excludes it from serialization and DB persistence.
     _request_converters_applied: bool = PrivateAttr(default=False)
 
     # ------------------------------------------------------------------ #
