@@ -53,6 +53,7 @@ const PLAN: ScenarioRunPlan = {
     display_group: 'Technique One',
     technique_eval_hash: 'eval-1',
     seed_group_ids: ['seed-1'],
+    group_kind: 'attack',
   }],
   seed_groups: [{
     id: 'seed-1',
@@ -71,6 +72,7 @@ const ATTEMPT: ScenarioProgressResult = {
   timestamp: '2026-01-01T00:00:05Z',
   total_retries: 1,
   retries: [],
+  result_kind: 'attack',
 }
 
 function makeState(overrides: Partial<ScenarioRunProgressState> = {}): ScenarioRunProgressState {
@@ -145,13 +147,191 @@ describe('ScenarioRunPage', () => {
     expect(screen.getByTestId('run-state-badge')).toHaveTextContent('In progress')
     expect(screen.getByRole('progressbar', { name: 'Overall scenario run progress' })).toHaveAttribute(
       'aria-valuetext',
-      '1 of 1 executable units completed',
+      '1 of 1 progress units completed',
     )
     expect(screen.getByRole('table', { name: 'Atomic attack groups' })).toBeInTheDocument()
-    expect(screen.getByRole('table', { name: 'Logical seed groups' })).toBeInTheDocument()
-    expect(screen.getByRole('table', { name: 'Persisted attack attempts' })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Objectives' })).toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Target-facing attacks' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel run' })).toBeInTheDocument()
     expect(screen.queryByRole('columnheader', { name: 'Actions' })).not.toBeInTheDocument()
+  })
+
+  it('leads with target-facing attacks and keeps orchestration records secondary', async () => {
+    const user = userEvent.setup()
+    const objectiveIds = ['seed-1', 'seed-2', 'seed-3', 'seed-4']
+    const plan: ScenarioRunPlan = {
+      version: 1,
+      scenario_registry_name: 'adaptive.text',
+      seed_groups: objectiveIds.map((id, index) => ({
+        id,
+        objective_sha256: `sha-${index + 1}`,
+        objective: `Objective ${index + 1}`,
+      })),
+      atomic_groups: [
+        {
+          id: 'baseline',
+          atomic_attack_name: 'baseline',
+          display_group: 'Direct baseline',
+          technique_eval_hash: 'baseline-eval',
+          seed_group_ids: objectiveIds,
+          group_kind: 'direct_baseline',
+        },
+        ...objectiveIds.map((seedId, index) => ({
+          id: `adaptive-${index + 1}`,
+          atomic_attack_name: 'adaptive',
+          display_group: index === 0 ? 'Fairness' : 'Harassment',
+          technique_eval_hash: `adaptive-eval-${index + 1}`,
+          seed_group_ids: [seedId],
+          group_kind: 'adaptive' as const,
+        })),
+      ],
+    }
+    const results: ScenarioProgressResult[] = objectiveIds.flatMap((seedId, index) => {
+      const adaptiveGroupId = `adaptive-${index + 1}`
+      return [
+        {
+          ...ATTEMPT,
+          attack_result_id: `baseline-${index}`,
+          atomic_group_id: 'baseline',
+          atomic_attack_name: 'baseline',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3).padStart(2, '0')}:00Z`,
+          total_retries: 0,
+          result_kind: 'direct_baseline',
+        },
+        {
+          ...ATTEMPT,
+          attack_result_id: `technique-${index}`,
+          atomic_group_id: adaptiveGroupId,
+          atomic_attack_name: 'adaptive',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3 + 1).padStart(2, '0')}:00Z`,
+          total_retries: 0,
+          result_kind: 'adaptive_technique',
+          technique_name: index === 0 ? 'Fairness technique' : 'Harassment technique',
+          attempt_index: 1,
+        },
+        {
+          ...ATTEMPT,
+          attack_result_id: `envelope-${index}`,
+          atomic_group_id: adaptiveGroupId,
+          atomic_attack_name: 'adaptive',
+          seed_group_id: seedId,
+          timestamp: `2026-01-01T00:${String(index * 3 + 2).padStart(2, '0')}:00Z`,
+          total_retries: 7,
+          result_kind: 'aggregate_parent',
+        },
+      ]
+    })
+    mockHookState(makeState({
+      run: {
+        ...makeState().run!,
+        scenario_registry_name: 'adaptive.text',
+        status: 'COMPLETED',
+        completed_at: '2026-01-01T00:15:00Z',
+      },
+      plan,
+      activeAtomicGroupIds: [],
+      results,
+    }))
+
+    renderPage()
+
+    expect(screen.getByRole('group', {
+      name: '4 objectives multiplied by 2 observed attacks each equals 8 target-facing attacks. 8/8 planned progress units completed. 12 persisted result records: 8 target-facing attack results + 4 Adaptive orchestration summaries. 0 actual retries.',
+    })).toBeInTheDocument()
+    expect(screen.getByText(
+      'Per objective: 1 direct baseline + 1 Adaptive technique.',
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      '8/8 planned progress units completed · 12 persisted result records: 8 target-facing attack results + 4 Adaptive orchestration summaries · 0 actual retries',
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Technique summary' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('Fairness technique').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Harassment technique').length).toBeGreaterThan(0)
+
+    const objectiveTable = screen.getByRole('table', { name: 'Objectives' })
+    const firstObjectiveCells = within(within(objectiveTable).getAllByRole('row')[1]).getAllByRole('cell')
+    expect(firstObjectiveCells[1]).toHaveTextContent('2/2')
+    expect(firstObjectiveCells[2]).toHaveTextContent('3')
+    expect(firstObjectiveCells[3]).toHaveTextContent('2')
+    expect(firstObjectiveCells[6]).toHaveTextContent('0')
+    const attackTable = screen.getByRole('table', { name: 'Target-facing attacks' })
+    expect(within(attackTable).getAllByRole('row')).toHaveLength(9)
+    expect(within(attackTable).queryByText('envelope-0')).not.toBeInTheDocument()
+
+    const disclosure = screen.getByText('Orchestration results (4)')
+    expect(disclosure.closest('details')).not.toHaveAttribute('open')
+    await user.click(disclosure)
+
+    const orchestrationTable = screen.getByRole('table', { name: 'Orchestration results' })
+    expect(within(orchestrationTable).getAllByRole('row')).toHaveLength(5)
+    const aggregateRow = within(orchestrationTable).getByText('envelope-0').closest('tr')
+    expect(aggregateRow).not.toBeNull()
+    expect(within(aggregateRow!).queryByRole('link')).not.toBeInTheDocument()
+    expect(aggregateRow).toHaveTextContent('Aggregate parent')
+  })
+
+  it('does not force a per-objective equation for nonuniform observed attacks', () => {
+    const plan: ScenarioRunPlan = {
+      ...PLAN,
+      atomic_groups: [{
+        ...PLAN.atomic_groups[0],
+        seed_group_ids: ['seed-1', 'seed-2'],
+      }],
+      seed_groups: [
+        PLAN.seed_groups[0],
+        {
+          id: 'seed-2',
+          objective_sha256: 'sha-2',
+          objective: 'A second objective with a different observed attack count.',
+        },
+      ],
+    }
+    mockHookState(makeState({
+      run: {
+        ...makeState().run!,
+        status: 'COMPLETED',
+        completed_at: '2026-01-01T00:15:00Z',
+      },
+      plan,
+      activeAtomicGroupIds: [],
+      results: [
+        { ...ATTEMPT, total_retries: 0 },
+        { ...ATTEMPT, attack_result_id: 'attack-result-2', seed_group_id: 'seed-2', total_retries: 0 },
+        { ...ATTEMPT, attack_result_id: 'attack-result-3', seed_group_id: 'seed-2', total_retries: 0 },
+      ],
+    }))
+
+    renderPage()
+
+    expect(screen.getByRole('group', {
+      name: '3 target-facing attacks. 2/2 planned progress units completed. 3 persisted result records. 1 actual retries.',
+    })).toBeInTheDocument()
+    expect(screen.queryByText('observed attacks each')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Per objective:/)).not.toBeInTheDocument()
+  })
+
+  it('accounts for unclassified legacy records in persisted storage provenance', () => {
+    mockHookState(makeState({
+      results: [
+        { ...ATTEMPT, total_retries: 0 },
+        {
+          ...ATTEMPT,
+          attack_result_id: 'legacy-unknown',
+          atomic_group_id: 'legacy-group',
+          atomic_attack_name: 'legacy-attack',
+          result_kind: 'unknown',
+          total_retries: 0,
+        },
+      ],
+    }))
+
+    renderPage()
+
+    expect(screen.getByRole('group', {
+      name: '1 objective multiplied by 1 observed attack each equals 1 target-facing attack. 1/1 planned progress units completed. 2 persisted result records: 1 target-facing attack result + 1 unclassified record. 0 actual retries.',
+    })).toBeInTheDocument()
   })
 
   it('renders contract-backed safe target and run configuration metadata', () => {
@@ -188,8 +368,8 @@ describe('ScenarioRunPage', () => {
 
     renderPage()
 
-    expect(screen.getByText(/legacy run has no complete persisted execution plan/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/1 known completed units; planned total unavailable/i)).toHaveLength(2)
+    expect(screen.getByText(/legacy run has no complete persisted progress plan/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/1 known completed progress units; planned total unavailable/i)).toHaveLength(3)
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     expect(screen.getByText('Progress percentage unavailable')).toBeInTheDocument()
     expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)
@@ -268,11 +448,11 @@ describe('ScenarioRunPage', () => {
     const user = userEvent.setup()
     renderPage()
     const detailsButton = screen.getByRole('button', {
-      name: 'View details for attack attempt attack-result-1',
+      name: 'View details for result record attack-result-1',
     })
 
     await user.click(detailsButton)
-    const dialog = screen.getByRole('dialog', { name: 'Attack attempt details' })
+    const dialog = screen.getByRole('dialog', { name: 'Result record details' })
     expect(within(dialog).getByText(PLAN.seed_groups[0].objective)).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Close' }))
 
@@ -288,8 +468,8 @@ describe('ScenarioRunPage', () => {
       `/attacks/attack-result-1?scenarioResultId=${SCENARIO_RESULT_ID}`,
     )
     expect(attackLink).toHaveTextContent('attack-result-1')
-    const attemptsTable = screen.getByRole('table', { name: 'Persisted attack attempts' })
-    expect(within(attemptsTable).getByRole('columnheader', { name: 'Attack' })).toBeInTheDocument()
+    const attemptsTable = screen.getByRole('table', { name: 'Target-facing attacks' })
+    expect(within(attemptsTable).getByRole('columnheader', { name: 'Result record' })).toBeInTheDocument()
     const firstBodyRow = within(attemptsTable).getAllByRole('row')[1]
     expect(within(firstBodyRow).getAllByRole('cell')[0]).toContainElement(
       attackLink,
@@ -345,9 +525,9 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', {
-      name: 'View details for attack attempt attack-result-1',
+      name: 'View details for result record attack-result-1',
     }))
-    expect(screen.getByRole('dialog', { name: 'Attack attempt details' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Result record details' })).toBeInTheDocument()
     expect(screen.queryByTestId('attack-route')).not.toBeInTheDocument()
   })
 
