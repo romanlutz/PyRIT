@@ -2,6 +2,9 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import type { ChangeEvent } from 'react'
 import {
   Button,
+  Breadcrumb,
+  BreadcrumbDivider,
+  BreadcrumbItem,
   Drawer,
   Menu,
   MenuItem,
@@ -17,6 +20,7 @@ import {
 } from '@fluentui/react-components'
 import type { SwitchOnChangeData } from '@fluentui/react-components'
 import { AddRegular, ArrowDownloadRegular, PanelRightRegular } from '@fluentui/react-icons'
+import { Link } from 'react-router'
 import MessageList from './MessageList'
 import SystemPromptBanner from './SystemPromptBanner'
 import ChatInputArea from './ChatInputArea'
@@ -34,6 +38,7 @@ import { exportConversation } from '../../utils/conversationExport'
 import type { ExportFormat } from '../../utils/conversationExport'
 import type { Message, MessageAttachment, TargetInstance, TargetInfo } from '../../types'
 import { targetInfoMatchesTarget } from '../../utils/targetIdentity'
+import { scenarioRunRoutePath } from '../../utils/routeParams'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
 
@@ -84,6 +89,8 @@ interface ChatWindowProps {
   isLoadingAttack?: boolean
   /** Number of related (non-main) conversations in the loaded attack. */
   relatedConversationCount?: number
+  /** Validated scenario-run provenance for attacks opened from a run dashboard. */
+  scenarioResultId?: string | null
 }
 
 export default function ChatWindow({
@@ -101,6 +108,7 @@ export default function ChatWindow({
   attackTarget,
   isLoadingAttack,
   relatedConversationCount,
+  scenarioResultId,
 }: ChatWindowProps) {
   const styles = useChatWindowStyles()
   const restoreFocusTargetAttributes = useRestoreFocusTarget()
@@ -684,6 +692,25 @@ export default function ChatWindow({
         />
       )}
       <div className={styles.chatArea} data-testid="chat-area">
+        {scenarioResultId && (
+          <div className={styles.breadcrumbBar}>
+            <Breadcrumb aria-label="Attack provenance" size="small">
+              <BreadcrumbItem>
+                <Text size={200}>Scenario History</Text>
+              </BreadcrumbItem>
+              <BreadcrumbDivider />
+              <BreadcrumbItem>
+                <Link
+                  className={styles.breadcrumbLink}
+                  to={scenarioRunRoutePath(scenarioResultId)}
+                  aria-label={`Return to scenario run ${scenarioResultId}`}
+                >
+                  Scenario run {scenarioResultId.slice(0, 8)}
+                </Link>
+              </BreadcrumbItem>
+            </Breadcrumb>
+          </div>
+        )}
         <div className={styles.ribbon}>
           <div className={styles.conversationInfo}>
             {activeTarget ? (

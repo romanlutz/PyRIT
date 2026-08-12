@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, final
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, final
 
 try:
     # Built-in on Python 3.11+. Fall back to the ``exceptiongroup`` backport on 3.10
@@ -45,6 +45,7 @@ from pyrit.models import (
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanGroupKind,
     ScenarioRunPlanSeedGroup,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateStatus,
@@ -58,7 +59,11 @@ from pyrit.prompt_target.common.target_requirements import TargetRequirements
 from pyrit.registry import ScorerRegistry
 from pyrit.registry.resolution import resolve_declared_params, resolve_reference_value
 from pyrit.scenario.core.atomic_attack import AtomicAttack
-from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration, read_only_dataset_resolution
+from pyrit.scenario.core.dataset_configuration import (
+    CompoundDatasetAttackConfiguration,
+    DatasetAttackConfiguration,
+    read_only_dataset_resolution,
+)
 from pyrit.scenario.core.scenario_context import ScenarioContext
 from pyrit.scenario.core.scenario_target_defaults import get_default_scorer_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
@@ -137,6 +142,10 @@ class Scenario(ABC):
 
     #: Whether the default estimator must mirror matrix-builder seed compatibility.
     RUN_SIZE_USES_FACTORY_COMPATIBILITY: ClassVar[bool] = False
+
+    #: How a generic dataset-size run override is interpreted. ``None`` derives the
+    #: standard behavior from the default configuration.
+    DATASET_SIZE_LIMIT_OVERRIDE_SCOPE: ClassVar[Literal["per_dataset", "combined", "unsupported"] | None] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """
@@ -258,6 +267,19 @@ class Scenario(ABC):
         # Resolved effective baseline inclusion for the current run. Set in initialize_async
         # before _build_atomic_attacks_async is awaited so overrides can read it.
         self._include_baseline: bool = False
+
+    def get_dataset_size_limit_override_scope(self) -> Literal["per_dataset", "combined", "unsupported"]:
+        """
+        Return how this scenario interprets a generic dataset-size run override.
+
+        Returns:
+            Literal: The explicit override scope exposed through the scenario catalog.
+        """
+        if self.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is not None:
+            return self.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE
+        if isinstance(self._default_dataset_config, CompoundDatasetAttackConfiguration):
+            return "per_dataset"
+        return "per_dataset" if len(self._default_dataset_config.dataset_names) <= 1 else "combined"
 
     @property
     def name(self) -> str:
@@ -717,7 +739,7 @@ class Scenario(ABC):
             selected_count = len(selected_groups.get(name, []))
             selection_note = None
             if selected_count != logical_count:
-                selection_note = f"The default selection uses {selected_count} of {logical_count} logical seed groups."
+                selection_note = f"The default selection uses {selected_count} of {logical_count} available objectives."
             datasets.append(
                 ScenarioDatasetSummary(
                     name=name,
@@ -879,7 +901,7 @@ class Scenario(ABC):
                 self._apply_persisted_objectives(stored_result=stored_result)
                 reconstructed_plan = self._build_run_plan()
                 metadata = dict(stored_result.metadata)
-                metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = reconstructed_plan.model_dump(mode="json")
+                metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = reconstructed_plan.model_dump(mode="json", exclude_none=True)
                 self._memory.update_scenario_metadata(
                     scenario_result_id=self._scenario_result_id,
                     metadata=metadata,
@@ -935,7 +957,7 @@ class Scenario(ABC):
                         seen.add(sha)
                         hashes.append(sha)
             metadata["objective_hashes"] = hashes
-        metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = self._build_run_plan().model_dump(mode="json")
+        metadata[SCENARIO_RUN_PLAN_METADATA_KEY] = self._build_run_plan().model_dump(mode="json", exclude_none=True)
         return metadata
 
     def _build_run_plan(self) -> ScenarioRunPlan:
@@ -969,6 +991,11 @@ class Scenario(ABC):
                     display_group=atomic_attack.display_group,
                     technique_eval_hash=technique_eval_hash,
                     seed_group_ids=seed_group_ids,
+                    group_kind=getattr(
+                        atomic_attack,
+                        "_progress_group_kind",
+                        ScenarioRunPlanGroupKind.ATTACK,
+                    ),
                 )
             )
         return ScenarioRunPlan(
