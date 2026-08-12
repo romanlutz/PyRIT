@@ -728,9 +728,12 @@ class Scenario(ABC):
         configured_dataset = self._dataset_config
         with read_only_dataset_resolution():
             self._dataset_config = configured_dataset
-            full_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=False)
-            self._dataset_config = configured_dataset
-            selected_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
+            if type(self)._resolve_seed_groups_by_dataset_async is Scenario._resolve_seed_groups_by_dataset_async:
+                full_groups, selected_groups = await configured_dataset.resolve_attack_groups_for_estimate_async()
+            else:
+                full_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=False)
+                self._dataset_config = configured_dataset
+                selected_groups = await self._resolve_seed_groups_by_dataset_async(apply_sampling=True)
 
         configured_caps = self._dataset_config.size_caps_by_dataset()
         datasets: list[ScenarioDatasetSummary] = []

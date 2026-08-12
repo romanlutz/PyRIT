@@ -67,6 +67,13 @@ class ScenarioRunSizeEstimateStatus(str, Enum):
     Unavailable = "unavailable"
 
 
+class ScenarioRunSizeEstimateCondition(str, Enum):
+    """Reason an estimate remains conditional until launch."""
+
+    TargetCapabilities = "target_capabilities"
+    LaunchConfiguration = "launch_configuration"
+
+
 class ScenarioRunSizeFactor(BaseModel):
     """One labeled multiplicative factor in a run-size component."""
 
@@ -81,6 +88,7 @@ class ScenarioRunSizeComponent(BaseModel):
     count: int = Field(..., ge=0)
     factors: list[ScenarioRunSizeFactor] = Field(default_factory=list)
     is_baseline: bool = False
+    condition: ScenarioRunSizeEstimateCondition | None = None
     note: str | None = None
 
     @model_validator(mode="after")
@@ -100,6 +108,65 @@ class ScenarioRunSizeComponent(BaseModel):
                 raise ValueError(
                     f"Component '{self.label}' count ({self.count}) must equal its factor product ({factor_product})"
                 )
+        return self
+
+
+class ScenarioAdaptiveRunSizeDetails(BaseModel):
+    """Structured work bounds for an adaptive scenario estimate."""
+
+    objective_count: int = Field(..., ge=0)
+    selected_candidate_technique_count: int = Field(..., ge=1)
+    candidate_technique_count: int = Field(..., ge=1)
+    max_attempts_per_objective: int = Field(..., ge=1)
+    techniques_per_objective_upper_bound: int = Field(..., ge=1)
+    technique_attempt_count_upper_bound: int = Field(..., ge=0)
+    stop_on_first_success: Literal[True] = True
+    compatibility_may_reduce_attempts: Literal[True] = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_selected_candidate_count(cls, data: Any) -> Any:
+        """
+        Preserve version-1 payload compatibility when the selected count is absent.
+
+        Returns:
+            Any: Input data with the selected count defaulted to the compatible count.
+        """
+        if (
+            isinstance(data, dict)
+            and "selected_candidate_technique_count" not in data
+            and "candidate_technique_count" in data
+        ):
+            return {
+                **data,
+                "selected_candidate_technique_count": data["candidate_technique_count"],
+            }
+        return data
+
+    @model_validator(mode="after")
+    def validate_attempt_bounds(self) -> "ScenarioAdaptiveRunSizeDetails":
+        """
+        Ensure the serialized adaptive attempt bounds match the configured pool.
+
+        Returns:
+            ScenarioAdaptiveRunSizeDetails: The validated details.
+
+        Raises:
+            ValueError: If either derived upper bound is inconsistent.
+        """
+        if self.candidate_technique_count > self.selected_candidate_technique_count:
+            raise ValueError("candidate_technique_count cannot exceed selected_candidate_technique_count")
+        expected_per_objective = min(self.candidate_technique_count, self.max_attempts_per_objective)
+        if self.techniques_per_objective_upper_bound != expected_per_objective:
+            raise ValueError(
+                "techniques_per_objective_upper_bound must equal "
+                "min(candidate_technique_count, max_attempts_per_objective)"
+            )
+        expected_total = self.objective_count * expected_per_objective
+        if self.technique_attempt_count_upper_bound != expected_total:
+            raise ValueError(
+                "technique_attempt_count_upper_bound must equal objective_count * techniques_per_objective_upper_bound"
+            )
         return self
 
 
@@ -127,6 +194,30 @@ class ScenarioDatasetSummary(BaseModel):
     selection_note: str | None = None
 
 
+class ScenarioDatasetSizeLimit(BaseModel):
+    """Structured default and override semantics for a scenario's dataset-size limit."""
+
+    default_scope: Literal["none", "per_dataset", "combined", "heterogeneous"] = "none"
+    default_count: int | None = Field(default=None, ge=1)
+    override_scope: Literal["per_dataset", "combined", "unsupported"] = "per_dataset"
+
+    @model_validator(mode="after")
+    def validate_default_count(self) -> "ScenarioDatasetSizeLimit":
+        """
+        Require a count exactly when the default has one representable scope.
+
+        Returns:
+            ScenarioDatasetSizeLimit: The validated limit metadata.
+
+        Raises:
+            ValueError: If the count does not match the declared default scope.
+        """
+        has_representable_default = self.default_scope in {"per_dataset", "combined"}
+        if has_representable_default != (self.default_count is not None):
+            raise ValueError("default_count must be set exactly for per_dataset or combined defaults")
+        return self
+
+
 class ScenarioDefaultRunSizeEstimate(BaseModel):
     """
     Structured estimate of default planned scenario execution units.
@@ -142,8 +233,12 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
         ge=0,
         validation_alias=AliasChoices("total_attack_count", "total"),
     )
+    minimum_attack_count: int | None = Field(default=None, ge=0)
+    maximum_attack_count: int | None = Field(default=None, ge=0)
+    condition: ScenarioRunSizeEstimateCondition | None = None
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
+    adaptive_details: ScenarioAdaptiveRunSizeDetails | None = None
     note: str | None = Field(default=None, validation_alias=AliasChoices("note", "caveat"))
     retries_included: Literal[False] = False
 
@@ -191,14 +286,30 @@ class ScenarioDefaultRunSizeEstimate(BaseModel):
         Raises:
             ValueError: If an exact estimate omits or misstates its total.
         """
-        if self.status is ScenarioRunSizeEstimateStatus.Exact:
-            if self.total_attack_count is None:
-                raise ValueError("Exact default-run estimates require total_attack_count")
-            component_total = sum(component.count for component in self.components)
-            if component_total != self.total_attack_count:
-                raise ValueError(
-                    f"Exact default-run estimate components total {component_total}, not {self.total_attack_count}"
-                )
+        if (
+            self.minimum_attack_count is not None
+            and self.maximum_attack_count is not None
+            and self.minimum_attack_count > self.maximum_attack_count
+        ):
+            raise ValueError("minimum_attack_count must be less than or equal to maximum_attack_count")
+
+        if self.status is not ScenarioRunSizeEstimateStatus.Exact:
+            return self
+
+        if self.total_attack_count is None:
+            raise ValueError("Exact default-run estimates require total_attack_count")
+        for field_name, bound in (
+            ("minimum_attack_count", self.minimum_attack_count),
+            ("maximum_attack_count", self.maximum_attack_count),
+        ):
+            if bound is not None and bound != self.total_attack_count:
+                raise ValueError(f"Exact default-run estimates require {field_name} to equal total_attack_count")
+
+        component_total = sum(component.count for component in self.components)
+        if component_total != self.total_attack_count:
+            raise ValueError(
+                f"Exact default-run estimate components total {component_total}, not {self.total_attack_count}"
+            )
         return self
 
     @classmethod
@@ -246,6 +357,10 @@ class RegisteredScenario(BaseModel):
     )
     all_techniques: list[str] = Field(..., description="All available concrete technique names")
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    dataset_size_limit: ScenarioDatasetSizeLimit = Field(
+        default_factory=ScenarioDatasetSizeLimit,
+        description="Structured scenario-default and explicit-override dataset-size limit semantics",
+    )
     default_dataset_summaries: list[ScenarioDatasetSummary] = Field(
         default_factory=list,
         description="Logical and effectively selected attack-group counts for the default configuration",
@@ -446,6 +561,33 @@ class ScenarioTargetSummary(BaseModel):
     endpoint: str | None = Field(None, description="Configured endpoint, when present")
     model_name: str | None = Field(None, description="Configured model or deployment name")
     identifier_hash: str | None = Field(None, description="Canonical target identifier hash")
+
+
+class ScenarioRunHeader(BaseModel):
+    """Stable scenario run fields shared with lightweight progress responses."""
+
+    scenario_result_id: str = Field(..., description="UUID of the ScenarioResult in memory")
+    scenario_name: str = Field(..., description="Registry key of the scenario being run")
+    scenario_registry_name: str | None = Field(None, description="Requested scenario registry key when available")
+    scenario_version: int = Field(0, ge=0, description="Version of the scenario")
+    status: ScenarioRunState = Field(..., description="Current run status")
+    created_at: datetime = Field(..., description="When the run was created")
+    techniques_used: list[str] = Field(default_factory=list, description="Technique names that were executed")
+    labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
+    completed_at: datetime | None = Field(None, description="When the scenario finished")
+    pyrit_version: str | None = Field(None, description="PyRIT version that created the run")
+    target: ScenarioTargetSummary | None = Field(None, description="Safe objective-target identity")
+    datasets_used: list[str] = Field(default_factory=list, description="Resolved datasets selected for the run")
+    scenario_parameters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Safe resolved scenario parameters; sensitive fields are removed",
+    )
+    queue_position: int | None = Field(None, ge=1, description="Current 1-based waiting position")
+    active_scenario_result_id: str | None = Field(None, description="Currently executing scenario result ID")
+    overload_summaries: list[ScenarioOverloadSummary] = Field(
+        default_factory=list,
+        description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
+    )
 
 
 ScenarioRunSummary.model_rebuild()

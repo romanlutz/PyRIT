@@ -75,6 +75,7 @@ from pyrit.registry import (
     TargetRegistry,
 )
 from pyrit.scenario import Scenario
+from pyrit.scenario.core.dataset_configuration import CompoundDatasetAttackConfiguration
 
 if TYPE_CHECKING:
     from pyrit.converter import Converter
@@ -916,7 +917,27 @@ class ScenarioRunService:
         if dataset_names or max_dataset_size is not None or filters:
             default_config = introspection_instance._default_dataset_config
 
-            if dataset_names:
+            if isinstance(default_config, CompoundDatasetAttackConfiguration):
+                names_changed = dataset_names is not None and dataset_names != default_config.dataset_names
+                if names_changed:
+                    try:
+                        resolved["dataset_config"] = default_config.with_dataset_names(
+                            dataset_names=dataset_names,
+                            max_dataset_size=max_dataset_size,
+                            filters=filters or None,
+                        )
+                    except TypeError as exc:
+                        raise ValueError(
+                            f"Scenario '{scenario_name}' does not support overriding datasets through "
+                            f"its {type(default_config).__name__} configuration: {exc}"
+                        ) from exc
+                else:
+                    if max_dataset_size is not None:
+                        default_config.update_child_max_dataset_size(max_dataset_size=max_dataset_size)
+                    if filters:
+                        default_config.update_filters(filters=filters)
+                    resolved["dataset_config"] = default_config
+            elif dataset_names:
                 # Construct a fresh instance of the scenario's own dataset-config
                 # class so subclass-specific behavior is preserved.
                 default_config_class = type(default_config)

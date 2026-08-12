@@ -18,6 +18,7 @@ import {
   versionApi,
   targetsApi,
   attacksApi,
+  datasetsApi,
   scenariosApi,
 } from "./api";
 
@@ -469,6 +470,22 @@ describe("api service", () => {
     });
   });
 
+  describe("datasetsApi", () => {
+    it("lists registered datasets", async () => {
+      const mockResponse = {
+        data: {
+          items: [{ name: "harmbench" }, { name: "xstest" }],
+        },
+      };
+      (apiClient.get as jest.Mock).mockResolvedValueOnce(mockResponse);
+
+      const result = await datasetsApi.listDatasets();
+
+      expect(apiClient.get).toHaveBeenCalledWith("/datasets");
+      expect(result).toEqual(mockResponse.data);
+    });
+  });
+
   describe("scenariosApi", () => {
     it("lists the scenario catalog with default params", async () => {
       const mockResponse = {
@@ -541,8 +558,12 @@ describe("api service", () => {
           version: 1,
           status: "exact",
           total_attack_count: 8,
+          minimum_attack_count: null,
+          maximum_attack_count: null,
+          condition: null,
           components: [],
           datasets: [],
+          adaptive_details: null,
           note: null,
           retries_included: false,
         },
@@ -571,6 +592,55 @@ describe("api service", () => {
         { signal: controller.signal }
       );
       expect(result.total_attack_count).toBe(8);
+    });
+
+    it("preserves Adaptive conditional work metadata in the initial estimate response", async () => {
+      const mockResponse = {
+        data: {
+          version: 1,
+          status: "conditional",
+          total_attack_count: null,
+          minimum_attack_count: null,
+          maximum_attack_count: null,
+          condition: null,
+          components: [],
+          datasets: [],
+          adaptive_details: {
+            objective_count: 21,
+            selected_candidate_technique_count: 2,
+            candidate_technique_count: 2,
+            max_attempts_per_objective: 3,
+            techniques_per_objective_upper_bound: 2,
+            technique_attempt_count_upper_bound: 42,
+            stop_on_first_success: true,
+            compatibility_may_reduce_attempts: true,
+          },
+          note: null,
+          retries_included: false,
+        },
+      };
+      (apiClient.post as jest.Mock).mockResolvedValueOnce(mockResponse);
+      const controller = new AbortController();
+      const request = {
+        target_name: "target-a",
+        techniques: ["default"],
+        include_baseline: true,
+        scenario_params: { max_attempts_per_objective: 3 },
+      };
+
+      const result = await scenariosApi.estimateRun(
+        "adaptive.text_adaptive",
+        request,
+        controller.signal
+      );
+
+      expect(apiClient.post).toHaveBeenCalledWith(
+        "/scenarios/catalog/adaptive.text_adaptive/estimate",
+        request,
+        { signal: controller.signal }
+      );
+      expect(result.adaptive_details).toEqual(mockResponse.data.adaptive_details);
+      expect(result.total_attack_count).toBeNull();
     });
 
     it("posts the exact RunScenarioRequest payload to start a run", async () => {
