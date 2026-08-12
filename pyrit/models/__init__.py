@@ -104,11 +104,15 @@ from pyrit.models.results.scenario_result import ScenarioResult, ScenarioRunStat
 from pyrit.models.results.strategy_result import StrategyResult, StrategyResultT
 from pyrit.models.retry_event import RetryEvent
 from pyrit.models.scenario_progress import (
+    ADAPTIVE_ATTEMPT_LABEL,
+    ADAPTIVE_TECHNIQUE_ID_LABEL,
+    ADAPTIVE_TECHNIQUE_NAME_LABEL,
     SCENARIO_RUN_PLAN_METADATA_KEY,
     SCENARIO_RUN_PLAN_VERSION,
     ScenarioAttackResultDelta,
     ScenarioProgressHeader,
     ScenarioProgressResult,
+    ScenarioProgressResultKind,
     ScenarioQueueEntry,
     ScenarioQueueSnapshot,
     ScenarioRunPlan,
@@ -241,6 +245,9 @@ __all__ = [
     "ScenarioRunSizeEstimateStatus",
     "ScenarioRunSizeFactor",
     "ScenarioRunState",
+    "ADAPTIVE_ATTEMPT_LABEL",
+    "ADAPTIVE_TECHNIQUE_ID_LABEL",
+    "ADAPTIVE_TECHNIQUE_NAME_LABEL",
     "SCENARIO_RUN_PLAN_METADATA_KEY",
     "SCENARIO_RUN_PLAN_VERSION",
     "ScenarioAttackResultDelta",
@@ -248,6 +255,7 @@ __all__ = [
     "ScenarioQueueSnapshot",
     "ScenarioProgressHeader",
     "ScenarioProgressResult",
+    "ScenarioProgressResultKind",
     "ScenarioRunPlan",
     "ScenarioRunPlanAtomicGroup",
     "ScenarioRunPlanGroupKind",

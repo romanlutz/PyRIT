@@ -3453,6 +3453,53 @@ class MemoryInterface(abc.ABC):
             entry = session.query(ScenarioResultEntry).filter_by(id=scenario_result_id).first()
             return entry.get_scenario_result() if entry is not None else None
 
+    def _query_scenario_history_unit_rows(
+        self,
+        *,
+        session: Session,
+        page_ids: Sequence[uuid.UUID],
+    ) -> Sequence[Any]:
+        """Return the latest logical attempt rows for one scenario-history page."""
+        if not page_ids:
+            return []
+
+        atomic_name, technique_hash, seed_group_id = self._get_scenario_attempt_unit_expressions()
+        unit_partition = (
+            AttackResultEntry.attribution_parent_id,
+            atomic_name,
+            technique_hash,
+            seed_group_id,
+        )
+        ranked_units = select(
+            AttackResultEntry.attribution_parent_id.label("scenario_result_id"),
+            atomic_name.label("atomic_attack_name"),
+            technique_hash.label("technique_eval_hash"),
+            seed_group_id.label("seed_group_id"),
+            AttackResultEntry.objective_sha256.label("objective_sha256"),
+            AttackResultEntry.outcome.label("latest_outcome"),
+            func.max(AttackResultEntry.timestamp).over(partition_by=unit_partition).label("latest_timestamp"),
+            (
+                func.sum(func.coalesce(AttackResultEntry.total_retries, 0)).over(partition_by=unit_partition)
+                + func.count().over(partition_by=unit_partition)
+                - 1
+            ).label("total_retries"),
+            func.sum(case((AttackResultEntry.outcome == AttackOutcome.ERROR.value, 1), else_=0))
+            .over(partition_by=unit_partition)
+            .label("error_count"),
+            func.row_number()
+            .over(
+                partition_by=unit_partition,
+                order_by=(
+                    case((AttackResultEntry.outcome != AttackOutcome.ERROR.value, 1), else_=0).desc(),
+                    AttackResultEntry.timestamp.desc(),
+                    AttackResultEntry.id.desc(),
+                ),
+            )
+            .label("unit_rank"),
+        ).where(AttackResultEntry.attribution_parent_id.in_(page_ids))
+        ranked_subquery = ranked_units.subquery()
+        return session.execute(select(ranked_subquery).where(ranked_subquery.c.unit_rank == 1)).all()
+
     def get_scenario_run_history_page(
         self,
         *,
@@ -3548,44 +3595,7 @@ class MemoryInterface(abc.ABC):
             rows = session.execute(statement).all()
             page_rows = rows[:limit]
             page_ids = [row.id for row in page_rows]
-            unit_rows = []
-            if page_ids:
-                atomic_name, technique_hash, seed_group_id = self._get_scenario_attempt_unit_expressions()
-                unit_partition = (
-                    AttackResultEntry.attribution_parent_id,
-                    atomic_name,
-                    technique_hash,
-                    seed_group_id,
-                )
-                ranked_units = select(
-                    AttackResultEntry.attribution_parent_id.label("scenario_result_id"),
-                    atomic_name.label("atomic_attack_name"),
-                    technique_hash.label("technique_eval_hash"),
-                    seed_group_id.label("seed_group_id"),
-                    AttackResultEntry.objective_sha256.label("objective_sha256"),
-                    AttackResultEntry.outcome.label("latest_outcome"),
-                    func.max(AttackResultEntry.timestamp).over(partition_by=unit_partition).label("latest_timestamp"),
-                    (
-                        func.sum(func.coalesce(AttackResultEntry.total_retries, 0)).over(partition_by=unit_partition)
-                        + func.count().over(partition_by=unit_partition)
-                        - 1
-                    ).label("total_retries"),
-                    func.sum(case((AttackResultEntry.outcome == AttackOutcome.ERROR.value, 1), else_=0))
-                    .over(partition_by=unit_partition)
-                    .label("error_count"),
-                    func.row_number()
-                    .over(
-                        partition_by=unit_partition,
-                        order_by=(
-                            case((AttackResultEntry.outcome != AttackOutcome.ERROR.value, 1), else_=0).desc(),
-                            AttackResultEntry.timestamp.desc(),
-                            AttackResultEntry.id.desc(),
-                        ),
-                    )
-                    .label("unit_rank"),
-                ).where(AttackResultEntry.attribution_parent_id.in_(page_ids))
-                ranked_subquery = ranked_units.subquery()
-                unit_rows = session.execute(select(ranked_subquery).where(ranked_subquery.c.unit_rank == 1)).all()
+            unit_rows = self._query_scenario_history_unit_rows(session=session, page_ids=page_ids)
 
         records = [
             ScenarioHistoryRunRecord(
@@ -3684,6 +3694,7 @@ class MemoryInterface(abc.ABC):
         statement = (
             select(
                 AttackResultEntry.id,
+                AttackResultEntry.conversation_id,
                 AttackResultEntry.objective,
                 AttackResultEntry.objective_sha256,
                 AttackResultEntry.atomic_attack_identifier,
@@ -3695,6 +3706,7 @@ class MemoryInterface(abc.ABC):
                 AttackResultEntry.error_type,
                 AttackResultEntry.error_message,
                 AttackResultEntry.attribution_data,
+                AttackResultEntry.labels,
             )
             .where(and_(*conditions))
             .order_by(AttackResultEntry.timestamp.asc(), AttackResultEntry.id.asc())
@@ -3718,6 +3730,7 @@ class MemoryInterface(abc.ABC):
             deltas.append(
                 ScenarioAttackResultDelta(
                     attack_result_id=str(row.id),
+                    conversation_id=row.conversation_id,
                     objective=row.objective,
                     objective_sha256=row.objective_sha256,
                     atomic_attack_identifier=atomic_identifier,
@@ -3729,6 +3742,7 @@ class MemoryInterface(abc.ABC):
                     error_type=row.error_type,
                     error_message=row.error_message,
                     attribution_data=row.attribution_data or {},
+                    labels=row.labels or {},
                 )
             )
         return deltas, has_more
