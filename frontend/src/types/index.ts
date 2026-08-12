@@ -633,6 +633,7 @@ export interface ScenarioRunSummary {
   scenario_version: number
   status: ScenarioRunState
   created_at: string
+  started_at?: string | null
   updated_at: string
   error?: string | null
   error_type?: string | null
@@ -678,6 +679,7 @@ export interface ScenarioProgressHeader {
   scenario_version: number
   status: ScenarioRunState
   created_at: string
+  started_at?: string | null
   completed_at?: string | null
   pyrit_version?: string | null
   target?: ScenarioTargetSummary | null

@@ -134,6 +134,7 @@ export function scenarioRunProgressReducer(
         scenario_version: action.run.scenario_version,
         status: action.run.status,
         created_at: action.run.created_at,
+        started_at: action.run.started_at,
         completed_at: action.run.completed_at,
         pyrit_version: action.run.pyrit_version,
         target: action.run.target,
@@ -233,15 +234,18 @@ export function getElapsedMilliseconds(
   run: ScenarioProgressHeader,
   nowMilliseconds: number,
 ): number {
-  const created = Date.parse(run.created_at)
+  if (!run.started_at) {
+    return 0
+  }
+  const started = Date.parse(run.started_at)
   const terminalEnd = run.completed_at ? Date.parse(run.completed_at) : Number.NaN
   const end = isTerminalRunState(run.status) && Number.isFinite(terminalEnd)
     ? terminalEnd
     : nowMilliseconds
-  if (!Number.isFinite(created) || !Number.isFinite(end)) {
+  if (!Number.isFinite(started) || !Number.isFinite(end)) {
     return 0
   }
-  return Math.max(0, end - created)
+  return Math.max(0, end - started)
 }
 
 export function getEtaMilliseconds(

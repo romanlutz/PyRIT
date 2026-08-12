@@ -394,6 +394,7 @@ class ScenarioRunSummary(BaseModel):
     scenario_version: int = Field(0, ge=0, description="Version of the scenario")
     status: ScenarioRunState = Field(..., description="Current run status")
     created_at: datetime = Field(..., description="When the run was created")
+    started_at: datetime | None = Field(None, description="When active scenario execution started")
     updated_at: datetime = Field(..., description="When the run status last changed")
     error: str | None = Field(None, description="Error message if status is FAILED")
     error_type: str | None = Field(None, description="Exception class name if status is FAILED")
@@ -410,7 +411,10 @@ class ScenarioRunSummary(BaseModel):
         description="Per-attack retry events, surfaced as each attack result lands so the CLI can stream warnings",
     )
     total_retries: int = Field(
-        0, ge=0, description="Total retry attempts recorded across all attack results (endpoint-stress signal)"
+        0,
+        ge=0,
+        description="Total retry work beyond each logical unit's initial attempt, including inner retries "
+        "and additional scenario attempts",
     )
     labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
     completed_at: datetime | None = Field(None, description="When the scenario finished")

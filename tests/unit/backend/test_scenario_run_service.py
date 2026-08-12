@@ -19,7 +19,7 @@ from pyrit.backend.services.scenario_run_service import (
     ScenarioRunService,
 )
 from pyrit.converter import Converter
-from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord
+from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord, ScenarioRunStateRecord
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
@@ -149,6 +149,7 @@ def _make_history_record(
         status=run_state.value,
         labels={},
         created_at=scenario_result.creation_time,
+        started_at=None,
         completed_at=scenario_result.completion_time,
         error_message=None,
         error_type=None,
@@ -220,6 +221,7 @@ class TestScenarioRunServiceStartRun:
     async def test_start_run_returns_running_status(self, mock_all_registries) -> None:
         """Test that starting a run returns RUNNING status with run_id = scenario_result_id."""
         service = ScenarioRunService()
+        mock_memory = mock_all_registries["memory"]
         service._terminal_errors["sr-uuid-1"] = "prior failed attempt"
         response = await service.start_run_async(request=_make_request())
 
@@ -228,6 +230,15 @@ class TestScenarioRunServiceStartRun:
         assert response.scenario_name == "foundry.red_team_agent"
         assert "sr-uuid-1" not in service._terminal_errors
         assert response.error is None
+        metadata_call = mock_memory.update_scenario_run_state_and_metadata_fields.call_args
+        assert metadata_call.kwargs["scenario_result_id"] == "sr-uuid-1"
+        assert metadata_call.kwargs["scenario_run_state"] == ScenarioRunState.IN_PROGRESS
+        persisted_start = datetime.fromisoformat(
+            metadata_call.kwargs["metadata_fields"][_svc_mod.SCENARIO_RUN_STARTED_AT_METADATA_KEY]
+        )
+        assert persisted_start.tzinfo is not None
+        mock_memory.update_scenario_metadata_fields.assert_not_called()
+        mock_memory.update_scenario_run_state.assert_not_called()
 
     async def test_start_run_invalid_scenario_raises_value_error(self, mock_memory) -> None:
         """Test that an invalid scenario name raises ValueError immediately."""
@@ -1118,12 +1129,11 @@ class TestScenarioRunServiceRecovery:
 
     async def test_reconcile_marks_created_queued_and_running_rows_failed(self, mock_memory) -> None:
         interrupted = [
-            _make_db_scenario_result(result_id="created", run_state=ScenarioRunState.CREATED),
-            _make_db_scenario_result(result_id="queued", run_state=ScenarioRunState.QUEUED),
-            _make_db_scenario_result(result_id="running", run_state=ScenarioRunState.IN_PROGRESS),
-            _make_db_scenario_result(result_id="complete", run_state=ScenarioRunState.COMPLETED),
+            ScenarioRunStateRecord(scenario_result_id="created", state=ScenarioRunState.CREATED),
+            ScenarioRunStateRecord(scenario_result_id="queued", state=ScenarioRunState.QUEUED),
+            ScenarioRunStateRecord(scenario_result_id="running", state=ScenarioRunState.IN_PROGRESS),
         ]
-        mock_memory.get_scenario_results.return_value = interrupted
+        mock_memory.get_scenario_run_state_page.return_value = (interrupted, False)
 
         reconciled = await ScenarioRunService().reconcile_interrupted_runs_async()
 
@@ -1138,6 +1148,28 @@ class TestScenarioRunServiceRecovery:
             and call.kwargs["error_type"] == "ScenarioInterruptedError"
             for call in mock_memory.update_scenario_run_state.call_args_list
         )
+        mock_memory.get_scenario_results.assert_not_called()
+        mock_memory.get_scenario_run_state_page.assert_called_once_with(
+            states=(ScenarioRunState.CREATED, ScenarioRunState.QUEUED, ScenarioRunState.IN_PROGRESS),
+            after_id=None,
+            limit=500,
+        )
+
+    async def test_reconcile_pages_nonterminal_state_projection(self, mock_memory) -> None:
+        first = ScenarioRunStateRecord(
+            scenario_result_id="00000000-0000-0000-0000-000000000001",
+            state=ScenarioRunState.QUEUED,
+        )
+        second = ScenarioRunStateRecord(
+            scenario_result_id="00000000-0000-0000-0000-000000000002",
+            state=ScenarioRunState.IN_PROGRESS,
+        )
+        mock_memory.get_scenario_run_state_page.side_effect = [([first], True), ([second], False)]
+
+        reconciled = await ScenarioRunService().reconcile_interrupted_runs_async()
+
+        assert reconciled == 2
+        assert mock_memory.get_scenario_run_state_page.call_args_list[1].kwargs["after_id"] == first.scenario_result_id
 
     async def test_shutdown_fails_active_and_queued_runs_without_starting_next(self, mock_all_registries) -> None:
         mock_scenario_registry = mock_all_registries["scenario_registry"]
@@ -1511,6 +1543,29 @@ class TestScenarioRunServiceFailedAttackReporting:
         assert failed.error_message == "429 Too Many Requests"
         assert failed.total_retries == 4
 
+    def test_negative_error_attack_retries_are_clamped(self, mock_memory) -> None:
+        from pyrit.models import AttackOutcome
+
+        errored = MagicMock()
+        errored.outcome = AttackOutcome.ERROR
+        errored.objective = "malformed persisted result"
+        errored.error_type = "PersistedError"
+        errored.error_message = "invalid retry count"
+        errored.total_retries = -1
+
+        db_result = _make_db_scenario_result(
+            result_id="sr-negative-retries",
+            run_state=ScenarioRunState.COMPLETED,
+            attack_results={"attack_a": [errored]},
+        )
+        mock_memory.get_scenario_results.return_value = [db_result]
+
+        fetched = ScenarioRunService().get_run(scenario_result_id="sr-negative-retries")
+
+        assert fetched is not None
+        assert fetched.total_retries == 0
+        assert fetched.failed_attacks[0].total_retries == 0
+
     def test_no_failed_attacks_when_all_succeed(self, mock_memory) -> None:
         from pyrit.models import AttackOutcome
 
@@ -1732,6 +1787,86 @@ def test_planned_progress_deduplicates_attempts_and_keeps_latest_non_error(mock_
     assert summary.total_retries == 3
 
 
+def test_history_and_detail_retry_work_match_across_attempt_partitions(mock_memory) -> None:
+    objective = "partitioned objective"
+    plan = ScenarioRunPlan(
+        scenario_registry_name="test.scenario",
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="group-1",
+                atomic_attack_name="attack",
+                display_group="Attack",
+                technique_eval_hash="eval",
+                seed_group_ids=["seed-1"],
+            )
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(
+                id="seed-1",
+                objective_sha256=_svc_mod.to_sha256(objective),
+                objective=objective,
+            )
+        ],
+    )
+    timestamp = datetime(2026, 8, 8, tzinfo=timezone.utc)
+    attempts = [
+        AttackResult(
+            conversation_id=f"conversation-{index}",
+            objective=objective,
+            outcome=outcome,
+            total_retries=inner_retries,
+            timestamp=timestamp + timedelta(seconds=index),
+        )
+        for index, (outcome, inner_retries) in enumerate(
+            ((AttackOutcome.ERROR, 1), (AttackOutcome.ERROR, 0), (AttackOutcome.SUCCESS, 2))
+        )
+    ]
+    scenario_result = make_scenario_result(
+        attack_results={"attack": attempts},
+        scenario_run_state=ScenarioRunState.COMPLETED,
+        metadata={SCENARIO_RUN_PLAN_METADATA_KEY: plan.model_dump(mode="json")},
+    )
+    record = replace(
+        _make_history_record(result_id=str(scenario_result.id), run_state=ScenarioRunState.COMPLETED),
+        scenario_registry_name=plan.scenario_registry_name,
+        plan_atomic_groups=[group.model_dump(mode="json") for group in plan.atomic_groups],
+        plan_seed_id_map=[{"id": "seed-1", "objective_sha256": _svc_mod.to_sha256(objective)}],
+    )
+    units = [
+        ScenarioHistoryUnitRecord(
+            scenario_result_id=str(scenario_result.id),
+            atomic_attack_name="attack",
+            technique_eval_hash="eval",
+            seed_group_id=_svc_mod.to_sha256(objective),
+            objective_sha256=_svc_mod.to_sha256(objective),
+            latest_outcome=AttackOutcome.ERROR.value,
+            latest_timestamp=timestamp + timedelta(seconds=1),
+            total_retries=2,
+            error_count=2,
+            attempt_count=2,
+        ),
+        ScenarioHistoryUnitRecord(
+            scenario_result_id=str(scenario_result.id),
+            atomic_attack_name="attack",
+            technique_eval_hash="eval",
+            seed_group_id="seed-1",
+            objective_sha256=_svc_mod.to_sha256(objective),
+            latest_outcome=AttackOutcome.SUCCESS.value,
+            latest_timestamp=timestamp + timedelta(seconds=2),
+            total_retries=2,
+            error_count=0,
+            attempt_count=1,
+        ),
+    ]
+    service = ScenarioRunService()
+
+    detail = service._build_response_from_db(scenario_result=scenario_result)
+    history = service._build_history_summary(record=record, units=units)
+
+    assert detail.total_retries == 5
+    assert history.total_retries == detail.total_retries
+
+
 def test_planned_progress_maps_legacy_objective_hash_to_logical_seed_id(mock_memory) -> None:
     objective = "legacy resumed objective"
     seed_group = AttackSeedGroup(seeds=[SeedObjective(value=objective)])
@@ -1805,6 +1940,33 @@ def test_get_progress_uses_lightweight_queries_without_full_hydration(mock_memor
     assert progress.plan_complete is True
     mock_memory.get_scenario_results.assert_not_called()
     assert str(header.id) not in service._active_tasks
+
+
+def test_get_progress_exposes_persisted_started_at(mock_memory) -> None:
+    started_at = datetime(2026, 8, 8, 12, 30, tzinfo=timezone.utc)
+    header = make_scenario_result(
+        attack_results={},
+        metadata={
+            SCENARIO_RUN_PLAN_METADATA_KEY: ScenarioRunPlan(
+                atomic_groups=[],
+                seed_groups=[],
+                scenario_registry_name="test.scenario",
+            ).model_dump(mode="json"),
+            _svc_mod.SCENARIO_RUN_STARTED_AT_METADATA_KEY: started_at.isoformat(),
+        },
+    )
+    mock_memory.get_scenario_result_header.return_value = header
+    mock_memory.get_scenario_attack_result_deltas.return_value = ([], False)
+
+    progress = ScenarioRunService().get_run_progress_from_storage(
+        scenario_result_id=str(header.id),
+        since=None,
+        limit=25,
+        active_group_ids=[],
+    )
+
+    assert progress is not None
+    assert progress.run.started_at == started_at
 
 
 def test_get_progress_rejects_duplicate_stored_plan_groups(mock_memory) -> None:

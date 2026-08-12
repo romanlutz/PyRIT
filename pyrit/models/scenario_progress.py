@@ -16,6 +16,7 @@ from pyrit.models.results.scenario_result import ScenarioRunState
 from pyrit.models.retry_event import RetryEvent
 
 SCENARIO_RUN_PLAN_METADATA_KEY = "run_plan"
+SCENARIO_RUN_STARTED_AT_METADATA_KEY = "started_at"
 SCENARIO_RUN_PLAN_VERSION = 1
 
 
@@ -95,6 +96,7 @@ class ScenarioProgressHeader(BaseModel):
     scenario_version: int
     status: ScenarioRunState
     created_at: datetime
+    started_at: AwareDatetime | None = None
     completed_at: datetime | None = None
     pyrit_version: str | None = None
     target: "ScenarioTargetSummary | None" = None

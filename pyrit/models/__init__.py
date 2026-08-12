@@ -103,6 +103,7 @@ from pyrit.models.retry_event import RetryEvent
 from pyrit.models.scenario_progress import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     SCENARIO_RUN_PLAN_VERSION,
+    SCENARIO_RUN_STARTED_AT_METADATA_KEY,
     ScenarioAttackResultDelta,
     ScenarioProgressHeader,
     ScenarioProgressResult,
@@ -236,6 +237,7 @@ __all__ = [
     "ScenarioRunSizeFactor",
     "ScenarioRunState",
     "SCENARIO_RUN_PLAN_METADATA_KEY",
+    "SCENARIO_RUN_STARTED_AT_METADATA_KEY",
     "SCENARIO_RUN_PLAN_VERSION",
     "ScenarioAttackResultDelta",
     "ScenarioQueueEntry",

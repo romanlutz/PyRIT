@@ -477,7 +477,12 @@ function formatTimestamp(value: string): string {
 }
 
 function formatElapsed(run: ScenarioRunSummary): string {
-  const start = Date.parse(run.created_at)
+  if (!run.started_at) {
+    return run.status === 'CREATED' || run.status === 'QUEUED'
+      ? 'Not started'
+      : 'Execution time unavailable'
+  }
+  const start = Date.parse(run.started_at)
   const end = run.completed_at ? Date.parse(run.completed_at) : Date.now()
   const seconds = Math.max(0, Math.floor((end - start) / 1000))
   if (seconds < 60) return `${seconds}s elapsed`

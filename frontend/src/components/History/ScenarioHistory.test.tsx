@@ -152,6 +152,7 @@ describe('ScenarioHistory', () => {
         scenario_registry_name: null,
         scenario_version: 1,
         status: 'IN_PROGRESS',
+        started_at: '2026-01-01T00:00:20Z',
         completed_at: null,
         total_attacks: 0,
         completed_attacks: 0,
@@ -182,9 +183,42 @@ describe('ScenarioHistory', () => {
     expect(screen.getByText('v1')).toBeInTheDocument()
     expect(screen.getAllByText('TextTarget')).toHaveLength(2)
     expect(screen.getByText('Not yet')).toBeInTheDocument()
-    expect(screen.getByText('30s elapsed')).toBeInTheDocument()
+    expect(screen.getByText('10s elapsed')).toBeInTheDocument()
     expect(screen.getAllByText('0/0')).toHaveLength(2)
     expect(screen.getByText('1 / 0')).toBeInTheDocument()
+  })
+
+  it('does not display queue wait as execution elapsed time', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        status: 'QUEUED',
+        started_at: null,
+        completed_at: null,
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    expect(await screen.findByText('Not started')).toBeInTheDocument()
+    expect(screen.queryByText(/\d+(?:s|m|h).*elapsed$/)).not.toBeInTheDocument()
+  })
+
+  it('does not display queue wait for a terminal run that never started', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        status: 'CANCELLED',
+        started_at: null,
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    expect(await screen.findByText('Execution time unavailable')).toBeInTheDocument()
+    expect(screen.queryByText(/\d+(?:s|m|h).*elapsed$/)).not.toBeInTheDocument()
   })
 
   it('isolates option-loading failures from the primary history request', async () => {

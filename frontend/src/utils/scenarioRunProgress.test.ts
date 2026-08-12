@@ -72,6 +72,7 @@ function makePage(overrides: Partial<ScenarioRunProgress> = {}): ScenarioRunProg
       scenario_version: 1,
       status: 'IN_PROGRESS',
       created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T00:00:00Z',
     },
     plan: PLAN,
     reset: false,
@@ -142,6 +143,7 @@ describe('scenarioRunProgressReducer', () => {
         scenario_version: 1,
         status: 'CANCELLED',
         created_at: '2026-01-01T00:00:00Z',
+        started_at: '2026-01-01T00:00:30Z',
         updated_at: '2026-01-01T00:02:00Z',
         techniques_used: [],
         total_attacks: 2,
@@ -171,6 +173,7 @@ describe('scenarioRunProgressReducer', () => {
     })
 
     expect(cancelled.overloadSummaries[0].count).toBe(1)
+    expect(cancelled.run?.started_at).toBe('2026-01-01T00:00:30Z')
     expect(caughtUp.overloadSummaries[0].count).toBe(2)
   })
 
@@ -295,16 +298,45 @@ describe('scenario run progress calculations', () => {
     ])
   })
 
-  it('uses now for active elapsed time and completed_at for terminal elapsed time', () => {
-    const active = makePage().run
-    expect(getElapsedMilliseconds(active, Date.parse('2026-01-01T00:05:00Z'))).toBe(300_000)
+  it('uses execution start for elapsed time and excludes a long queue delay from active ETA', () => {
+    const active = {
+      ...makePage().run,
+      created_at: '2026-01-01T00:00:00Z',
+      started_at: '2026-01-01T01:00:00Z',
+    }
+    expect(getElapsedMilliseconds(active, Date.parse('2026-01-01T01:05:00Z'))).toBe(300_000)
 
     const terminal = {
       ...active,
       status: 'COMPLETED' as const,
-      completed_at: '2026-01-01T00:03:00Z',
+      completed_at: '2026-01-01T01:03:00Z',
     }
-    expect(getElapsedMilliseconds(terminal, Date.parse('2026-01-01T00:05:00Z'))).toBe(180_000)
+    expect(getElapsedMilliseconds(terminal, Date.parse('2026-01-01T01:05:00Z'))).toBe(180_000)
+
+    const state = readyState([makeResult('a-1', 'group-a', 'seed-1', 'success', 1)])
+    state.run = active
+    expect(getEtaMilliseconds(state, Date.parse('2026-01-01T01:02:00Z'))).toBe(240_000)
+  })
+
+  it('does not count queue wait as elapsed time or fabricate a queued ETA', () => {
+    const queued = {
+      ...makePage().run,
+      status: 'QUEUED' as const,
+      created_at: '2026-01-01T00:00:00Z',
+      started_at: null,
+    }
+    const now = Date.parse('2026-01-01T01:00:00Z')
+
+    expect(getElapsedMilliseconds(queued, now)).toBe(0)
+
+    const state = readyState([makeResult('a-1', 'group-a', 'seed-1', 'success', 1)])
+    state.run = queued
+    expect(getEtaMilliseconds(state, now)).toBeNull()
+
+    expect(getElapsedMilliseconds(
+      { ...queued, status: 'CANCELLED', completed_at: '2026-01-01T00:30:00Z' },
+      now,
+    )).toBe(0)
   })
 
   it('calculates ETA from observed wall-clock completion rate and hides unsafe estimates', () => {

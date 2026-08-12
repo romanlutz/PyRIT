@@ -42,6 +42,7 @@ from pyrit.memory.memory_interface import (
 )
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
+    SCENARIO_RUN_STARTED_AT_METADATA_KEY,
     AtomicAttackIdentifier,
     AttackOutcome,
     ComponentIdentifier,
@@ -111,6 +112,7 @@ _SAFE_SCENARIO_PARAMETER_NAMES = frozenset(
 )
 _HISTORY_ATOMIC_GROUPS_ADAPTER = TypeAdapter(list[ScenarioRunPlanAtomicGroup])
 _HISTORY_SEED_ID_MAP_ADAPTER = TypeAdapter(list[dict[str, str]])
+_STARTED_AT_ADAPTER = TypeAdapter(datetime)
 
 
 @dataclass
@@ -455,22 +457,32 @@ class ScenarioRunService:
         Returns:
             int: Number of reconciled rows.
         """
-        results = await asyncio.to_thread(self._memory.get_scenario_results)
-        interrupted = [
-            result
-            for result in results
-            if result.scenario_run_state
-            in (ScenarioRunState.CREATED, ScenarioRunState.QUEUED, ScenarioRunState.IN_PROGRESS)
-        ]
-        for result in interrupted:
-            await asyncio.to_thread(
-                self._memory.update_scenario_run_state,
-                scenario_result_id=str(result.id),
-                scenario_run_state=ScenarioRunState.FAILED,
-                error_message=_RESTART_INTERRUPTION_REASON,
-                error_type=_INTERRUPTED_ERROR_TYPE,
+        states = (ScenarioRunState.CREATED, ScenarioRunState.QUEUED, ScenarioRunState.IN_PROGRESS)
+        after_id = None
+        reconciled = 0
+        while True:
+            interrupted, has_more = await asyncio.to_thread(
+                self._memory.get_scenario_run_state_page,
+                states=states,
+                after_id=after_id,
+                limit=500,
             )
-        return len(interrupted)
+            for result in interrupted:
+                await asyncio.to_thread(
+                    self._memory.update_scenario_run_state,
+                    scenario_result_id=result.scenario_result_id,
+                    scenario_run_state=ScenarioRunState.FAILED,
+                    error_message=_RESTART_INTERRUPTION_REASON,
+                    error_type=_INTERRUPTED_ERROR_TYPE,
+                )
+            reconciled += len(interrupted)
+            if not has_more:
+                return reconciled
+            if not interrupted:
+                raise RuntimeError(
+                    "Scenario run state projection reported another page without returning a cursor row."
+                )
+            after_id = interrupted[-1].scenario_result_id
 
     async def shutdown_async(self) -> None:
         """Stop scheduling and terminalize active and queued runs for process shutdown."""
@@ -557,9 +569,10 @@ class ScenarioRunService:
         """Start one run while the scheduler lock guarantees exclusive ownership."""
         scheduled.started_at = datetime.now(timezone.utc)
         await asyncio.to_thread(
-            self._memory.update_scenario_run_state,
+            self._memory.update_scenario_run_state_and_metadata_fields,
             scenario_result_id=scheduled.scenario_result_id,
             scenario_run_state=ScenarioRunState.IN_PROGRESS,
+            metadata_fields={SCENARIO_RUN_STARTED_AT_METADATA_KEY: scheduled.started_at.isoformat()},
         )
         self._active_scenario_result_id = scheduled.scenario_result_id
         self._active_tasks[scheduled.scenario_result_id] = scheduled
@@ -1226,7 +1239,7 @@ class ScenarioRunService:
         failed_attacks: list[AttackErrorSummary] = []
         attack_retries: list[AttackRetrySummary] = []
         overload_events: deque[Any] = deque(maxlen=_MAX_OVERLOAD_EVENTS)
-        total_retries = 0
+        inner_retries_by_unit: dict[tuple[str, str], int] = {}
         attempts_by_unit: dict[tuple[str, str], int] = {}
         for atomic_attack_name, results in scenario_result.attack_results.items():
             for attack_result in results:
@@ -1238,7 +1251,7 @@ class ScenarioRunService:
                 attempts_by_unit[unit_key] = attempts_by_unit.get(unit_key, 0) + 1
                 retries = getattr(attack_result, "total_retries", 0)
                 if isinstance(retries, int):
-                    total_retries += retries
+                    inner_retries_by_unit[unit_key] = inner_retries_by_unit.get(unit_key, 0) + max(0, retries)
 
                 retry_events = getattr(attack_result, "retry_events", None)
                 if isinstance(retry_events, list) and retry_events:
@@ -1258,10 +1271,16 @@ class ScenarioRunService:
                             objective=attack_result.objective,
                             error_type=attack_result.error_type,
                             error_message=attack_result.error_message,
-                            total_retries=retries if isinstance(retries, int) else 0,
+                            total_retries=max(0, retries) if isinstance(retries, int) else 0,
                         )
                     )
-        total_retries += sum(max(0, attempt_count - 1) for attempt_count in attempts_by_unit.values())
+        total_retries = sum(
+            self._total_retry_work(
+                inner_retries=inner_retries_by_unit.get(unit_key, 0),
+                attempt_count=attempt_count,
+            )
+            for unit_key, attempt_count in attempts_by_unit.items()
+        )
 
         updated_at = scenario_result.creation_time
         if terminal and scenario_result.completion_time is not None:
@@ -1274,6 +1293,7 @@ class ScenarioRunService:
             scenario_version=scenario_result.scenario_version,
             status=status,
             created_at=scenario_result.creation_time,
+            started_at=self._load_started_at(scenario_result=scenario_result),
             updated_at=updated_at,
             error=error,
             error_type=error_type,
@@ -1416,6 +1436,7 @@ class ScenarioRunService:
             scenario_version=record.scenario_version,
             status=status,
             created_at=record.created_at,
+            started_at=record.started_at,
             updated_at=updated_at,
             error=record.error_message,
             error_type=record.error_type,
@@ -1479,6 +1500,9 @@ class ScenarioRunService:
             preferred = incoming if incoming_completed else existing
         else:
             preferred = incoming if incoming.latest_timestamp > existing.latest_timestamp else existing
+        attempt_count = max(0, existing.attempt_count) + max(0, incoming.attempt_count)
+        existing_inner_retries = max(0, existing.total_retries - max(0, existing.attempt_count - 1))
+        incoming_inner_retries = max(0, incoming.total_retries - max(0, incoming.attempt_count - 1))
         return ScenarioHistoryUnitRecord(
             scenario_result_id=preferred.scenario_result_id,
             atomic_attack_name=preferred.atomic_attack_name,
@@ -1487,9 +1511,40 @@ class ScenarioRunService:
             objective_sha256=preferred.objective_sha256 or existing.objective_sha256 or incoming.objective_sha256,
             latest_outcome=preferred.latest_outcome,
             latest_timestamp=max(existing.latest_timestamp, incoming.latest_timestamp),
-            total_retries=max(0, existing.total_retries) + max(0, incoming.total_retries) + 1,
+            total_retries=ScenarioRunService._total_retry_work(
+                inner_retries=existing_inner_retries + incoming_inner_retries,
+                attempt_count=attempt_count,
+            ),
             error_count=max(0, existing.error_count) + max(0, incoming.error_count),
+            attempt_count=attempt_count,
         )
+
+    @staticmethod
+    def _total_retry_work(*, inner_retries: int, attempt_count: int) -> int:
+        """
+        Count retry work beyond the first logical attempt.
+
+        Returns:
+            int: Inner retries plus additional scenario attempts.
+        """
+        return max(0, inner_retries) + max(0, attempt_count - 1)
+
+    @staticmethod
+    def _load_started_at(*, scenario_result: ScenarioResult) -> datetime | None:
+        """
+        Load the persisted aware execution start timestamp from scenario metadata.
+
+        Returns:
+            datetime | None: The execution start, or None for legacy or invalid metadata.
+        """
+        raw_value = (getattr(scenario_result, "metadata", None) or {}).get(SCENARIO_RUN_STARTED_AT_METADATA_KEY)
+        if raw_value is None:
+            return None
+        try:
+            started_at = _STARTED_AT_ADAPTER.validate_python(raw_value)
+        except ValidationError:
+            return None
+        return started_at if started_at.tzinfo is not None else None
 
     @staticmethod
     def _safe_run_metadata(
@@ -1956,6 +2011,7 @@ class ScenarioRunService:
                 scenario_version=header_result.scenario_version,
                 status=header_result.scenario_run_state,
                 created_at=header_result.creation_time,
+                started_at=self._load_started_at(scenario_result=header_result),
                 completed_at=header_result.completion_time if terminal else None,
                 pyrit_version=header_result.pyrit_version,
                 target=target,
