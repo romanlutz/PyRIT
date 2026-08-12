@@ -7,7 +7,8 @@ Tests for ScenarioRunService.
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,7 @@ from pyrit.backend.services.scenario_run_service import (
     ScenarioRunService,
 )
 from pyrit.converter import Converter
+from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
@@ -114,7 +116,9 @@ def _make_db_scenario_result(
     sr.id = result_id
     sr.scenario_name = scenario_name
     sr.scenario_version = 1
+    sr.pyrit_version = "0.10.0"
     sr.scenario_run_state = run_state
+    sr.scenario_identifier = None
     sr.get_techniques_used.return_value = []
     sr.attack_results = attack_results or {}
     sr.number_tries = 1
@@ -127,6 +131,31 @@ def _make_db_scenario_result(
     sr.error_message = None
     sr.error_type = None
     return sr
+
+
+def _make_history_record(
+    *,
+    result_id: str,
+    run_state: ScenarioRunState,
+) -> ScenarioHistoryRunRecord:
+    scenario_result = make_scenario_result(scenario_name="foundry.red_team_agent", attack_results={})
+    return ScenarioHistoryRunRecord(
+        scenario_result_id=result_id,
+        scenario_name=scenario_result.scenario_name,
+        scenario_version=scenario_result.scenario_version,
+        pyrit_version=scenario_result.pyrit_version,
+        scenario_identifier=scenario_result.scenario_identifier.model_dump(mode="json"),
+        objective_target_identifier={},
+        status=run_state.value,
+        labels={},
+        created_at=scenario_result.creation_time,
+        completed_at=scenario_result.completion_time,
+        error_message=None,
+        error_type=None,
+        scenario_registry_name=None,
+        plan_atomic_groups=None,
+        plan_seed_id_map=None,
+    )
 
 
 @pytest.fixture
@@ -678,31 +707,200 @@ class TestScenarioRunServiceListRuns:
 
     def test_list_runs_empty(self, mock_memory) -> None:
         """Test that list_runs returns empty list when DB has no results."""
-        mock_memory.get_scenario_results.return_value = []
+        mock_memory.get_scenario_run_history_page.return_value = ([], {}, False)
         service = ScenarioRunService()
         result = service.list_runs()
         assert result.items == []
-        mock_memory.get_scenario_results.assert_called_once_with(limit=100)
+        assert result.pagination.has_more is False
+        mock_memory.get_scenario_results.assert_not_called()
 
     def test_list_runs_returns_all_runs(self, mock_memory) -> None:
         """Test that list_runs returns all runs from the database."""
-        db_results = [
-            _make_db_scenario_result(result_id="sr-1", run_state=ScenarioRunState.COMPLETED),
-            _make_db_scenario_result(result_id="sr-2", run_state=ScenarioRunState.IN_PROGRESS),
+        records = [
+            _make_history_record(result_id="sr-1", run_state=ScenarioRunState.COMPLETED),
+            _make_history_record(result_id="sr-2", run_state=ScenarioRunState.IN_PROGRESS),
         ]
-        mock_memory.get_scenario_results.return_value = db_results
+        mock_memory.get_scenario_run_history_page.return_value = (records, {"sr-1": [], "sr-2": []}, False)
 
         service = ScenarioRunService()
         result = service.list_runs()
         assert len(result.items) == 2
-        mock_memory.get_scenario_results.assert_called_once_with(limit=100)
+        assert [item.scenario_result_id for item in result.items] == ["sr-1", "sr-2"]
+        mock_memory.get_scenario_results.assert_not_called()
 
     def test_list_runs_passes_custom_limit(self, mock_memory) -> None:
         """Test that list_runs passes a custom limit to the memory query."""
-        mock_memory.get_scenario_results.return_value = []
+        mock_memory.get_scenario_run_history_page.return_value = ([], {}, False)
         service = ScenarioRunService()
         service.list_runs(limit=10)
-        mock_memory.get_scenario_results.assert_called_once_with(limit=10)
+        mock_memory.get_scenario_run_history_page.assert_called_once_with(
+            scenario_names=[],
+            statuses=[],
+            labels=None,
+            cursor=None,
+            limit=10,
+        )
+
+    def test_history_cursor_is_filter_bound_and_rejects_malformed_values(self, mock_memory) -> None:
+        record = _make_history_record(result_id=str(uuid.uuid4()), run_state=ScenarioRunState.COMPLETED)
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, True)
+        service = ScenarioRunService()
+
+        first_page = service.list_runs(scenario_names=["first"], labels={"operator": ["alice", "bob"]})
+
+        assert first_page.pagination.has_more is True
+        assert first_page.pagination.next_cursor is not None
+        with pytest.raises(ValueError, match="filters"):
+            service.list_runs(scenario_names=["second"], cursor=first_page.pagination.next_cursor)
+        with pytest.raises(ValueError, match="Malformed scenario history cursor"):
+            service.list_runs(cursor="not-a-cursor")
+
+    def test_history_uses_plan_and_latest_non_error_attempt_per_unit(self, mock_memory) -> None:
+        record = _make_history_record(result_id="sr-aggregate", run_state=ScenarioRunState.COMPLETED)
+        plan = ScenarioRunPlan(
+            scenario_registry_name="registered.scenario",
+            atomic_groups=[
+                ScenarioRunPlanAtomicGroup(
+                    id="group-1",
+                    atomic_attack_name="attack",
+                    display_group="Attack",
+                    technique_eval_hash="eval-1",
+                    seed_group_ids=["seed-1", "seed-2"],
+                )
+            ],
+            seed_groups=[
+                ScenarioRunPlanSeedGroup(id="seed-1", objective_sha256="hash-1", objective="first"),
+                ScenarioRunPlanSeedGroup(id="seed-2", objective_sha256="hash-2", objective="second"),
+            ],
+        )
+        record = replace(
+            record,
+            scenario_registry_name=plan.scenario_registry_name,
+            plan_atomic_groups=[group.model_dump(mode="json") for group in plan.atomic_groups],
+            plan_seed_id_map=[{"id": seed.id, "objective_sha256": seed.objective_sha256} for seed in plan.seed_groups],
+        )
+        timestamp = datetime(2026, 8, 7, tzinfo=timezone.utc)
+        units = [
+            ScenarioHistoryUnitRecord(
+                scenario_result_id=record.scenario_result_id,
+                atomic_attack_name="attack",
+                technique_eval_hash="eval-1",
+                seed_group_id="hash-1",
+                objective_sha256="hash-1",
+                latest_outcome=AttackOutcome.ERROR.value,
+                latest_timestamp=timestamp - timedelta(seconds=1),
+                total_retries=0,
+                error_count=1,
+            ),
+            ScenarioHistoryUnitRecord(
+                scenario_result_id=record.scenario_result_id,
+                atomic_attack_name="attack",
+                technique_eval_hash="eval-1",
+                seed_group_id="seed-1",
+                objective_sha256="hash-1",
+                latest_outcome=AttackOutcome.SUCCESS.value,
+                latest_timestamp=timestamp,
+                total_retries=2,
+                error_count=0,
+            ),
+        ]
+        mock_memory.get_scenario_run_history_page.return_value = (
+            [record],
+            {record.scenario_result_id: units},
+            False,
+        )
+
+        summary = ScenarioRunService().list_runs().items[0]
+
+        assert summary.total_attacks == 2
+        assert summary.completed_attacks == 1
+        assert summary.successful_attacks == 1
+        assert summary.error_attacks == 1
+        assert summary.total_retries == 3
+        assert summary.planned_total_available is True
+        assert summary.attack_details_available is False
+
+    def test_history_metadata_is_allow_listed_and_secret_free(self, mock_memory) -> None:
+        scenario_result = make_scenario_result(
+            scenario_name="SafeScenario",
+            objective_target_identifier=ComponentIdentifier(
+                class_name="OpenAIChatTarget",
+                class_module="tests",
+                endpoint="https://user:password@example.test/v1?api-key=secret#fragment",
+                model_name="gpt-4o",
+            ),
+            params={
+                "max_turns": 5,
+                "api_key": "top-secret",
+                "connection_string": "AccountKey=connection-secret",
+                "headers": {"X-Custom": "header-secret"},
+                "nested": {"access_token": "also-secret", "safe": "visible"},
+            },
+            datasets=["harmbench"],
+            attack_results={},
+        )
+        record = _make_history_record(result_id="sr-safe", run_state=ScenarioRunState.COMPLETED)
+        record = replace(
+            record,
+            scenario_name=scenario_result.scenario_name,
+            scenario_identifier=scenario_result.scenario_identifier.model_dump(mode="json"),
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, False)
+
+        summary = ScenarioRunService().list_runs().items[0]
+        serialized = summary.model_dump_json()
+
+        assert summary.target is not None
+        assert summary.target.endpoint == "https://example.test"
+        assert summary.target.model_name == "gpt-4o"
+        assert summary.datasets_used == ["harmbench"]
+        assert summary.scenario_parameters["max_turns"] == 5
+        assert "connection_string" not in summary.scenario_parameters
+        assert "headers" not in summary.scenario_parameters
+        assert "nested" not in summary.scenario_parameters
+        assert "top-secret" not in serialized
+        assert "also-secret" not in serialized
+        assert "connection-secret" not in serialized
+        assert "header-secret" not in serialized
+        assert "/v1" not in serialized
+        assert "password" not in serialized
+
+    def test_history_falls_back_honestly_for_incomplete_persisted_plan(self, mock_memory) -> None:
+        record = _make_history_record(result_id="sr-legacy", run_state=ScenarioRunState.COMPLETED)
+        record = replace(
+            record,
+            scenario_registry_name="registered.scenario",
+            plan_atomic_groups="{}",
+            plan_seed_id_map="[]",
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, False)
+
+        summary = ScenarioRunService().list_runs().items[0]
+
+        assert summary.planned_total_available is False
+        assert summary.total_attacks == 0
+        assert summary.completed_attacks == 0
+
+    def test_history_discards_duplicate_plan_groups_before_legacy_fallback(self, mock_memory) -> None:
+        record = _make_history_record(result_id="sr-duplicate-plan", run_state=ScenarioRunState.COMPLETED)
+        group = ScenarioRunPlanAtomicGroup(
+            id="duplicate",
+            atomic_attack_name="attack",
+            display_group="Attack",
+            technique_eval_hash="eval",
+            seed_group_ids=["seed-1"],
+        ).model_dump(mode="json")
+        record = replace(
+            record,
+            plan_atomic_groups=[group, group],
+            plan_seed_id_map=[{"id": "seed-1", "objective_sha256": "hash-1"}],
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {record.scenario_result_id: []}, False)
+
+        summary = ScenarioRunService().list_runs().items[0]
+
+        assert summary.planned_total_available is False
+        assert summary.total_attacks == 0
 
 
 class TestScenarioRunServiceCancelRun:

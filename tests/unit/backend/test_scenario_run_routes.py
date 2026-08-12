@@ -192,6 +192,42 @@ class TestListScenarioRunsRoute:
         assert response.status_code == status.HTTP_200_OK
         assert len(response.json()["items"]) == 2
 
+    def test_list_runs_passes_repeated_filters_and_labels(self, client: TestClient) -> None:
+        """Test that history query parameters preserve repeated values."""
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.list_runs.return_value = ScenarioRunListResponse(items=[])
+            mock_get.return_value = mock_service
+
+            response = client.get(
+                "/api/scenarios/runs"
+                "?scenario_names=first&scenario_names=second"
+                "&run_statuses=IN_PROGRESS&run_statuses=FAILED"
+                "&label=operator%3Aalice&label=operator%3Abob&label=team%3Asafety"
+                "&limit=10&cursor=opaque"
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.list_runs.assert_called_once_with(
+            scenario_names=["first", "second"],
+            statuses=[ScenarioRunState.IN_PROGRESS, ScenarioRunState.FAILED],
+            labels={"operator": ["alice", "bob"], "team": ["safety"]},
+            limit=10,
+            cursor="opaque",
+        )
+
+    def test_list_runs_returns_400_for_invalid_cursor(self, client: TestClient) -> None:
+        """Test that invalid cursors are surfaced clearly."""
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get:
+            mock_service = MagicMock()
+            mock_service.list_runs.side_effect = ValueError("Malformed scenario history cursor.")
+            mock_get.return_value = mock_service
+
+            response = client.get("/api/scenarios/runs?cursor=bad")
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["detail"] == "Malformed scenario history cursor."
+
 
 class TestGetScenarioRunRoute:
     """Tests for GET /api/scenarios/runs/{id}."""

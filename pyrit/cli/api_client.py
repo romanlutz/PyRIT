@@ -316,11 +316,31 @@ class PyRITApiClient:
 
         Returns:
             list[ScenarioRunSummary]: All tracked scenario runs.
+
+        Raises:
+            ValueError: If the requested limit is invalid or a paginated response has no cursor.
         """
         from pyrit.models.catalog import ScenarioRunSummary
 
-        payload = await self._get_json_async(path="/api/scenarios/runs", params={"limit": limit})
-        return [ScenarioRunSummary.model_validate(item) for item in payload.get("items", [])]
+        if limit < 1:
+            raise ValueError("Scenario history limit must be positive.")
+
+        runs: list[ScenarioRunSummary] = []
+        cursor: str | None = None
+        while len(runs) < limit:
+            params: dict[str, int | str] = {"limit": min(100, limit - len(runs))}
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload = await self._get_json_async(path="/api/scenarios/runs", params=params)
+            runs.extend(ScenarioRunSummary.model_validate(item) for item in payload.get("items", []))
+            pagination = payload.get("pagination", {})
+            if not pagination.get("has_more"):
+                break
+            next_cursor = pagination.get("next_cursor")
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise ValueError("Scenario history response is missing its next-page cursor.")
+            cursor = next_cursor
+        return runs[:limit]
 
     # ------------------------------------------------------------------
     # Lifecycle
