@@ -748,13 +748,16 @@ class TestScenarioRoutes:
             assert response.status_code == status.HTTP_404_NOT_FOUND
 
     def test_estimate_scenario_returns_configured_projection(self, client: TestClient) -> None:
-        """POST catalog estimate forwards request fields and returns the structured estimate."""
+        """Configured estimation returns the exact projection without touching run scheduling."""
         estimate = ScenarioDefaultRunSizeEstimate(
             status=ScenarioRunSizeEstimateStatus.Exact,
-            total_attack_count=12,
-            components=[ScenarioRunSizeComponent(label="Configured Jailbreak", count=12)],
+            total_attack_count=8,
+            components=[ScenarioRunSizeComponent(label="Configured Jailbreak", count=8)],
         )
-        with patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service:
+        with (
+            patch("pyrit.backend.routes.scenarios.get_scenario_service") as mock_get_service,
+            patch("pyrit.backend.routes.scenarios.get_scenario_run_service") as mock_get_run_service,
+        ):
             mock_service = MagicMock()
             mock_service.estimate_scenario_run_size_async = AsyncMock(return_value=estimate)
             mock_get_service.return_value = mock_service
@@ -763,7 +766,7 @@ class TestScenarioRoutes:
                 "/api/scenarios/catalog/airt.jailbreak/estimate",
                 json={
                     "techniques": ["prompt_sending"],
-                    "include_baseline": True,
+                    "include_baseline": False,
                     "scenario_params": {
                         "num_jailbreaks": 2,
                         "num_jailbreak_attempts": 1,
@@ -772,14 +775,15 @@ class TestScenarioRoutes:
             )
 
         assert response.status_code == status.HTTP_200_OK
-        assert response.json()["total_attack_count"] == 12
+        assert response.json()["total_attack_count"] == 8
         request = mock_service.estimate_scenario_run_size_async.await_args.kwargs["request"]
         assert request.techniques == ["prompt_sending"]
-        assert request.include_baseline is True
+        assert request.include_baseline is False
         assert request.scenario_params == {
             "num_jailbreaks": 2,
             "num_jailbreak_attempts": 1,
         }
+        mock_get_run_service.assert_not_called()
 
     def test_estimate_scenario_returns_400_for_invalid_configuration(self, client: TestClient) -> None:
         """Configured estimate validation errors become clear client errors."""
