@@ -240,9 +240,16 @@ export interface TargetInfo {
   identifier_hash: string
 }
 
+export interface AttackResultMetadata {
+  child_attack_result_ids?: string[]
+  completion_policy?: string
+  [key: string]: unknown
+}
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string
+  objective?: string
   attack_type: string
   attack_specific_params?: Record<string, unknown> | null
   target?: TargetInfo | null
@@ -254,6 +261,8 @@ export interface AttackSummary {
   labels: Record<string, string>
   created_at: string
   updated_at: string
+  execution_time_ms?: number
+  metadata?: AttackResultMetadata
 }
 
 export interface CreateAttackRequest {
@@ -486,12 +495,12 @@ export interface ScenarioDefaultRunSizeEstimate {
   version: 1
   status: ScenarioRunSizeEstimateStatus
   total_attack_count: number | null
-  minimum_attack_count?: number | null
-  maximum_attack_count?: number | null
-  condition?: 'target_capabilities' | 'launch_configuration' | null
+  minimum_attack_count: number | null
+  maximum_attack_count: number | null
+  condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunSizeComponent[]
   datasets: ScenarioDatasetSummary[]
-  adaptive_details?: ScenarioAdaptiveRunSizeDetails | null
+  adaptive_details: ScenarioAdaptiveRunSizeDetails | null
   note: string | null
   retries_included: false
 }
@@ -518,7 +527,7 @@ export interface ScenarioRunEstimateComponent {
   count: number
   factors: ScenarioRunEstimateFactor[]
   isBaseline: boolean
-  condition?: 'target_capabilities' | 'launch_configuration' | null
+  condition: 'target_capabilities' | 'launch_configuration' | null
   note: string | null
 }
 
@@ -555,12 +564,12 @@ export interface ScenarioRunEstimate {
   version: number
   scope: 'default' | 'request'
   total: number | null
-  minimum?: number | null
-  maximum?: number | null
-  condition?: 'target_capabilities' | 'launch_configuration' | null
+  minimum: number | null
+  maximum: number | null
+  condition: 'target_capabilities' | 'launch_configuration' | null
   components: ScenarioRunEstimateComponent[]
   datasets: ScenarioRunEstimateDataset[]
-  adaptiveDetails?: ScenarioRunEstimateAdaptiveDetails | null
+  adaptiveDetails: ScenarioRunEstimateAdaptiveDetails | null
   note: string | null
   retriesIncluded: boolean
 }
@@ -632,7 +641,7 @@ export interface ScenarioOverloadSummary {
   latest_timestamp: string
 }
 
-export interface ScenarioRunSummary {
+export interface ScenarioRunHeader {
   scenario_result_id: string
   scenario_name: string
   scenario_registry_name?: string | null
@@ -640,29 +649,35 @@ export interface ScenarioRunSummary {
   status: ScenarioRunState
   created_at: string
   started_at?: string | null
+  techniques_used?: string[]
+  labels?: Record<string, string>
+  completed_at?: string | null
+  pyrit_version?: string | null
+  target?: ScenarioTargetSummary | null
+  datasets_used?: string[]
+  scenario_parameters?: Record<string, unknown>
+  queue_position?: number | null
+  active_scenario_result_id?: string | null
+  overload_summaries?: ScenarioOverloadSummary[]
+}
+
+export interface ScenarioRunSummary extends ScenarioRunHeader {
+  techniques_used: string[]
+  labels: Record<string, string>
   updated_at: string
   error?: string | null
   error_type?: string | null
-  techniques_used: string[]
   total_attacks: number
   completed_attacks: number
   objective_achieved_rate: number
   failed_attacks: AttackErrorSummary[]
   attack_retries: AttackRetrySummary[]
   total_retries: number
-  labels: Record<string, string>
-  completed_at?: string | null
-  pyrit_version?: string | null
-  target?: ScenarioTargetSummary | null
-  datasets_used?: string[]
-  scenario_parameters?: Record<string, unknown>
   planned_total_available?: boolean
   successful_attacks?: number
   error_attacks?: number
   attack_details_available?: boolean
-  queue_position?: number | null
-  active_scenario_result_id?: string | null
-  overload_summaries?: ScenarioOverloadSummary[]
+  attack_details_truncated?: boolean
 }
 
 export interface ScenarioTargetSummary {
@@ -678,25 +693,7 @@ export interface ScenarioRunListResponse {
 }
 
 /** Compact persisted run header returned by the progress endpoint. */
-export interface ScenarioProgressHeader {
-  scenario_result_id: string
-  scenario_name: string
-  scenario_registry_name?: string | null
-  scenario_version: number
-  status: ScenarioRunState
-  created_at: string
-  started_at?: string | null
-  completed_at?: string | null
-  pyrit_version?: string | null
-  target?: ScenarioTargetSummary | null
-  techniques_used?: string[]
-  datasets_used?: string[]
-  scenario_parameters?: Record<string, unknown>
-  labels?: Record<string, string>
-  queue_position?: number | null
-  active_scenario_result_id?: string | null
-  overload_summaries?: ScenarioOverloadSummary[]
-}
+export type ScenarioProgressHeader = ScenarioRunHeader
 
 export interface ScenarioQueueEntry {
   scenario_result_id: string
@@ -716,7 +713,7 @@ export interface ScenarioQueueSnapshot {
   queued: ScenarioQueueEntry[]
 }
 
-/** One persisted attack attempt in ascending progress order. */
+/** One persisted result record in ascending progress order. */
 export interface ScenarioProgressResult {
   attack_result_id: string
   atomic_group_id: string
@@ -729,6 +726,9 @@ export interface ScenarioProgressResult {
   retries: RetryEvent[]
   error_type?: string | null
   error_message?: string | null
+  result_kind?: 'attack' | 'direct_baseline' | 'adaptive_technique' | 'adaptive_orchestration' | 'aggregate_parent' | 'unknown'
+  technique_name?: string | null
+  attempt_index?: number | null
 }
 
 export interface ScenarioRunPlanSeedGroup {
@@ -743,6 +743,7 @@ export interface ScenarioRunPlanAtomicGroup {
   display_group: string
   technique_eval_hash: string
   seed_group_ids: string[]
+  group_kind?: 'attack' | 'direct_baseline' | 'adaptive' | null
 }
 
 export interface ScenarioRunPlan {

@@ -3,14 +3,14 @@
 
 """Canonical models for durable scenario run plans and incremental progress."""
 
-from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
-from pyrit.models.catalog.scenario import ScenarioOverloadSummary, ScenarioTargetSummary  # noqa: TC001
+from pyrit.models.catalog.scenario import ScenarioRunHeader
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
+from pyrit.models.identifiers.component_identifier import ComponentIdentifier
 from pyrit.models.results.attack_result import AttackOutcome
 from pyrit.models.results.scenario_result import ScenarioRunState
 from pyrit.models.retry_event import RetryEvent
@@ -18,14 +18,55 @@ from pyrit.models.retry_event import RetryEvent
 SCENARIO_RUN_PLAN_METADATA_KEY = "run_plan"
 SCENARIO_RUN_STARTED_AT_METADATA_KEY = "started_at"
 SCENARIO_RUN_PLAN_VERSION = 1
+ADAPTIVE_ATTEMPT_LABEL = "_adaptive_attempt"
+ADAPTIVE_TECHNIQUE_ID_LABEL = "_adaptive_technique_id"
+ADAPTIVE_TECHNIQUE_NAME_LABEL = "_adaptive_technique_name"
+SEQUENTIAL_ATTACK_CLASS_NAME = "SequentialAttack"
+
+
+def is_sequential_attack_envelope(
+    *,
+    conversation_id: str,
+    atomic_attack_identifier: ComponentIdentifier | None,
+) -> bool:
+    """
+    Classify a persisted ``SequentialAttack`` aggregate envelope.
+
+    Typed attack metadata takes precedence. Identifier-less legacy envelopes
+    are distinguished by the empty conversation ID that ``SequentialAttack``
+    has always persisted for its aggregate result.
+
+    Returns:
+        bool: Whether the row is a non-target-facing aggregate envelope.
+    """
+    if not isinstance(atomic_attack_identifier, ComponentIdentifier):
+        return atomic_attack_identifier is None and not conversation_id.strip()
+
+    typed_identifier = AtomicAttackIdentifier.from_component_identifier(atomic_attack_identifier)
+    technique_identifier = typed_identifier.attack_technique
+    attack_identifier = technique_identifier.attack if technique_identifier is not None else None
+    if attack_identifier is None:
+        attack_identifier = typed_identifier.get_child("attack")
+    return attack_identifier is not None and attack_identifier.class_name == SEQUENTIAL_ATTACK_CLASS_NAME
 
 
 class ScenarioRunPlanGroupKind(str, Enum):
     """Semantic kind of a planned scenario progress group."""
 
-    __slots__ = ()
+    ATTACK = "attack"
+    DIRECT_BASELINE = "direct_baseline"
+    ADAPTIVE = "adaptive"
+
+
+class ScenarioProgressResultKind(str, Enum):
+    """Semantic role of one persisted result within scenario progress."""
 
     ATTACK = "attack"
+    DIRECT_BASELINE = "direct_baseline"
+    ADAPTIVE_TECHNIQUE = "adaptive_technique"
+    ADAPTIVE_ORCHESTRATION = "adaptive_orchestration"
+    AGGREGATE_PARENT = "aggregate_parent"
+    UNKNOWN = "unknown"
 
 
 class ScenarioRunPlanSeedGroup(BaseModel):
@@ -87,30 +128,12 @@ class ScenarioRunPlan(BaseModel):
         return self
 
 
-class ScenarioProgressHeader(BaseModel):
+class ScenarioProgressHeader(ScenarioRunHeader):
     """Compact persisted run header returned by the progress endpoint."""
-
-    scenario_result_id: str
-    scenario_name: str
-    scenario_registry_name: str | None = None
-    scenario_version: int
-    status: ScenarioRunState
-    created_at: datetime
-    started_at: AwareDatetime | None = None
-    completed_at: datetime | None = None
-    pyrit_version: str | None = None
-    target: "ScenarioTargetSummary | None" = None
-    techniques_used: list[str] = Field(default_factory=list)
-    datasets_used: list[str] = Field(default_factory=list)
-    scenario_parameters: dict[str, Any] = Field(default_factory=dict)
-    labels: dict[str, str] = Field(default_factory=dict)
-    queue_position: int | None = Field(None, ge=1)
-    active_scenario_result_id: str | None = None
-    overload_summaries: list["ScenarioOverloadSummary"] = Field(default_factory=list)
 
 
 class ScenarioProgressResult(BaseModel):
-    """One persisted attack attempt in ascending progress order."""
+    """One persisted result record in ascending progress order."""
 
     attack_result_id: str
     atomic_group_id: str
@@ -123,6 +146,9 @@ class ScenarioProgressResult(BaseModel):
     retries: list[RetryEvent] = Field(default_factory=list)
     error_type: str | None = None
     error_message: str | None = None
+    result_kind: ScenarioProgressResultKind = ScenarioProgressResultKind.UNKNOWN
+    technique_name: str | None = None
+    attempt_index: int | None = Field(None, ge=1)
 
 
 class ScenarioRunProgress(BaseModel):
@@ -164,6 +190,7 @@ class ScenarioAttackResultDelta(BaseModel):
     """Lightweight memory projection used to map one scenario progress delta."""
 
     attack_result_id: str
+    conversation_id: str = ""
     objective: str
     objective_sha256: str | None = None
     atomic_attack_identifier: AtomicAttackIdentifier | None = None
@@ -175,6 +202,7 @@ class ScenarioAttackResultDelta(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     attribution_data: dict[str, Any] = Field(default_factory=dict)
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 ScenarioProgressHeader.model_rebuild()

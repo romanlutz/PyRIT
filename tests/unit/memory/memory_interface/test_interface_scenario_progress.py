@@ -8,8 +8,7 @@ from datetime import datetime, timezone
 
 from unit.mocks import get_mock_target_identifier, make_scenario_result
 
-from pyrit.memory import MemoryInterface
-from pyrit.memory.memory_interface import ScenarioProgressKeysetCursor
+from pyrit.memory import MemoryInterface, ScenarioProgressKeysetCursor
 from pyrit.models import (
     AtomicAttackIdentifier,
     AttackOutcome,
@@ -26,6 +25,7 @@ def _make_delta_result(
     attack_result_id: uuid.UUID,
     timestamp: datetime,
     objective: str,
+    labels: dict[str, str] | None = None,
 ) -> AttackResult:
     seed_group = AttackSeedGroup(seeds=[SeedObjective(value=objective)])
     identifier = AtomicAttackIdentifier.build(
@@ -42,6 +42,7 @@ def _make_delta_result(
         timestamp=timestamp,
         attribution_parent_id=scenario_result_id,
         attribution_data={"parent_collection": "attack", "parent_eval_hash": "eval"},
+        labels=labels or {},
     )
 
 
@@ -72,6 +73,7 @@ def test_scenario_progress_deltas_page_equal_timestamps_by_id(
             attack_result_id=second_id,
             timestamp=timestamp,
             objective="second",
+            labels={"_adaptive_attempt": "1", "_adaptive_technique_name": "Technique alpha"},
         ),
         _make_delta_result(
             scenario_result_id=str(unrelated.id),
@@ -99,9 +101,14 @@ def test_scenario_progress_deltas_page_equal_timestamps_by_id(
     assert has_more is True
     assert [row.attack_result_id for row in second_page] == [str(second_id)]
     assert second_has_more is False
+    assert second_page[0].conversation_id == f"conversation-{second_id}"
     assert second_page[0].atomic_attack_identifier is not None
     source_identifier = AtomicAttackIdentifier.from_component_identifier(rows[1].atomic_attack_identifier)
     assert second_page[0].atomic_attack_identifier.logical_seed_group_id == source_identifier.logical_seed_group_id
+    assert second_page[0].labels == {
+        "_adaptive_attempt": "1",
+        "_adaptive_technique_name": "Technique alpha",
+    }
 
 
 def test_scenario_result_header_does_not_hydrate_attack_results(

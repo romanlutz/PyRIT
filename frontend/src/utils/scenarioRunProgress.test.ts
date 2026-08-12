@@ -6,12 +6,15 @@ import type {
 
 import {
   INITIAL_SCENARIO_RUN_PROGRESS_STATE,
+  getAttackGroupRollups,
   getAtomicGroupRollups,
+  getAttemptAccounting,
+  getAttemptPresentations,
+  getAttemptRollups,
   getElapsedMilliseconds,
   getEtaMilliseconds,
   getOverallProgress,
   getSeedGroupRollups,
-  getTechniqueRollups,
   scenarioRunProgressReducer,
   type ScenarioRunProgressState,
 } from './scenarioRunProgress'
@@ -26,6 +29,7 @@ const PLAN: ScenarioRunPlan = {
       display_group: 'Technique A',
       technique_eval_hash: 'eval-a',
       seed_group_ids: ['seed-1', 'seed-2'],
+      group_kind: 'attack',
     },
     {
       id: 'group-b',
@@ -33,6 +37,7 @@ const PLAN: ScenarioRunPlan = {
       display_group: 'Technique B',
       technique_eval_hash: 'eval-b',
       seed_group_ids: ['seed-1'],
+      group_kind: 'attack',
     },
   ],
   seed_groups: [
@@ -171,10 +176,26 @@ describe('scenarioRunProgressReducer', () => {
       }),
       fresh: false,
     })
+    const olderDelta = scenarioRunProgressReducer(caughtUp, {
+      type: 'apply-page',
+      page: makePage({
+        plan: null,
+        run: {
+          ...makePage().run,
+          status: 'CANCELLED',
+          overload_summaries: [{
+            ...overload,
+            latest_timestamp: '2026-01-01T00:00:30Z',
+          }],
+        },
+      }),
+      fresh: false,
+    })
 
     expect(cancelled.overloadSummaries[0].count).toBe(1)
     expect(cancelled.run?.started_at).toBe('2026-01-01T00:00:30Z')
     expect(caughtUp.overloadSummaries[0].count).toBe(2)
+    expect(olderDelta.overloadSummaries[0].latest_timestamp).toBe('2026-01-01T00:02:00Z')
   })
 
   it('retains last-good data and marks it stale after a transient failure', () => {
@@ -190,10 +211,41 @@ describe('scenarioRunProgressReducer', () => {
     expect(failed.stale).toBe(true)
     expect(failed.error).toBe('Network unavailable')
   })
+
+  it('reports an initial failure and returns to loading when retried', () => {
+    const failed = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'request-failed',
+      message: 'Backend unavailable',
+      notFound: false,
+    })
+    const retried = scenarioRunProgressReducer(failed, { type: 'retry' })
+
+    expect(failed.loadStatus).toBe('error')
+    expect(failed.stale).toBe(false)
+    expect(retried.loadStatus).toBe('loading')
+    expect(retried.error).toBeNull()
+  })
+
+  it('drops a cached plan when the server resets without a replacement', () => {
+    const reset = scenarioRunProgressReducer(readyState([
+      makeResult('attempt-1', 'group-a', 'seed-1', 'success', 1),
+    ]), {
+      type: 'apply-page',
+      page: makePage({
+        plan: null,
+        reset: true,
+        results: [],
+      }),
+      fresh: false,
+    })
+
+    expect(reset.plan).toBeNull()
+    expect(reset.results).toEqual([])
+  })
 })
 
 describe('scenario run progress calculations', () => {
-  it('counts executable units once across multiple attempts and completes from the latest non-error outcome', () => {
+  it('counts progress units once and includes repeated logical attempts as retry work', () => {
     const state = readyState([
       makeResult('error-1', 'group-a', 'seed-1', 'error', 1),
       makeResult('failure-1', 'group-a', 'seed-1', 'failure', 2),
@@ -202,14 +254,40 @@ describe('scenario run progress calculations', () => {
     ])
 
     expect(getOverallProgress(state)).toEqual({ completed: 1, planned: 3, percent: 33 })
-    expect(getTechniqueRollups(state)[0]).toMatchObject({
+    expect(getAttackGroupRollups(state)[0]).toMatchObject({
       completed: 1,
       planned: 2,
       succeeded: 1,
       evaluated: 1,
       errors: 2,
       retries: 3,
+      persistedAttempts: 4,
+      attackAttempts: 4,
     })
+    expect(getAttemptAccounting(state).retries).toBe(3)
+    expect(getAttemptRollups(state)[0].retries).toBe(3)
+  })
+
+  it('attributes cross-label Adaptive retries without undercounting the logical unit', () => {
+    const state = readyState([
+      makeResult('adaptive-1', 'group-a', 'seed-1', 'failure', 1, {
+        result_kind: 'adaptive_technique',
+        technique_name: 'Technique Alpha',
+      }),
+      makeResult('adaptive-2', 'group-a', 'seed-1', 'success', 2, {
+        result_kind: 'adaptive_technique',
+        technique_name: 'Technique Beta',
+      }),
+    ])
+    const rollups = getAttemptRollups(state)
+
+    expect(rollups).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Technique Alpha', retries: 0 }),
+      expect.objectContaining({ label: 'Technique Beta', retries: 1 }),
+    ]))
+    expect(rollups.reduce((total, rollup) => total + rollup.retries, 0)).toBe(1)
+    expect(getAttemptAccounting(state).retries).toBe(1)
+    expect(getAttackGroupRollups(state)[0].retries).toBe(1)
   })
 
   it('keeps an error-only unit attempted but incomplete', () => {
@@ -236,14 +314,29 @@ describe('scenario run progress calculations', () => {
     expect(getEtaMilliseconds(state, Date.parse('2026-01-01T00:10:00Z'))).toBeNull()
   })
 
-  it('calculates technique and seed rollups across techniques', () => {
+  it('keeps legacy groups without typed semantics unknown rather than guessing they are attacks', () => {
+    const state = readyState([makeResult('legacy-attempt', 'group-a', 'seed-1', 'success', 1)])
+    const legacyPlan = state.plan
+      ? {
+          ...state.plan,
+          atomic_groups: state.plan.atomic_groups.map(({ group_kind: _groupKind, ...group }) => group),
+        }
+      : null
+
+    expect(getAttemptPresentations({ ...state, plan: legacyPlan }).get('legacy-attempt')).toMatchObject({
+      role: 'unknown',
+      label: 'Additional persisted result',
+    })
+  })
+
+  it('calculates attack-group and objective rollups across progress groups', () => {
     const state = readyState([
       makeResult('a-1', 'group-a', 'seed-1', 'success', 1),
       makeResult('a-2', 'group-a', 'seed-2', 'failure', 2),
       makeResult('b-1', 'group-b', 'seed-1', 'failure', 3),
     ])
 
-    expect(getTechniqueRollups(state)).toEqual([
+    expect(getAttackGroupRollups(state)).toEqual([
       expect.objectContaining({
         displayGroup: 'Technique A',
         completed: 2,
@@ -268,6 +361,311 @@ describe('scenario run progress calculations', () => {
       succeeded: 1,
       evaluated: 2,
       successPercent: 50,
+      persistedAttempts: 2,
+      attackAttempts: 2,
+    })
+  })
+
+  it('sorts legacy seed groups by ID when objective text is unavailable', () => {
+    const state = {
+      ...readyState([
+        makeResult('z-attempt', 'group-a', 'seed-z', 'success', 1),
+        makeResult('a-attempt', 'group-b', 'seed-a', 'failure', 2),
+      ]),
+      plan: null,
+      planComplete: false,
+    }
+
+    expect(getSeedGroupRollups(state).map(({ id, objective }) => ({ id, objective }))).toEqual([
+      { id: 'seed-a', objective: null },
+      { id: 'seed-z', objective: null },
+    ])
+  })
+
+  it('presents inferred and explicit attempt roles with safe fallback labels', () => {
+    const state = {
+      ...readyState([
+        makeResult('orchestration', 'group-a', 'seed-1', 'failure', 1),
+        makeResult('adaptive-child', 'group-a', 'seed-2', 'success', 2, {
+          result_kind: 'adaptive_technique',
+        }),
+        makeResult('adaptive-parent', 'group-a', 'seed-2', 'failure', 3, {
+          result_kind: 'aggregate_parent',
+        }),
+        makeResult('aggregate-parent', 'group-b', 'seed-1', 'failure', 4, {
+          result_kind: 'aggregate_parent',
+        }),
+        makeResult('fallback-attack', 'group-b', 'seed-2', 'error', 5, {
+          atomic_attack_name: '',
+        }),
+      ]),
+      plan: {
+        ...PLAN,
+        atomic_groups: [
+          { ...PLAN.atomic_groups[0], group_kind: 'adaptive' as const },
+          {
+            ...PLAN.atomic_groups[1],
+            atomic_attack_name: '',
+            display_group: '',
+            group_kind: 'attack' as const,
+          },
+        ],
+      },
+    }
+    const presentations = getAttemptPresentations(state)
+
+    expect(presentations.get('orchestration')).toMatchObject({
+      role: 'adaptive_orchestration',
+      label: 'Adaptive orchestration',
+    })
+    expect(presentations.get('adaptive-child')).toMatchObject({
+      role: 'adaptive_technique',
+      label: 'Adaptive technique',
+    })
+    expect(presentations.get('adaptive-parent')?.label).toBe('Adaptive aggregate parent')
+    expect(presentations.get('aggregate-parent')?.label).toBe('Aggregate parent')
+    expect(presentations.get('fallback-attack')).toMatchObject({
+      role: 'attack',
+      label: 'Attack',
+    })
+    expect(getAttemptRollups(state)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'attack', succeeded: 0, errors: 1 }),
+    ]))
+  })
+
+  it('extends plan metadata for persisted seeds and groups absent from the plan', () => {
+    const state = readyState([
+      makeResult('new-seed', 'group-a', 'seed-extra', 'success', 1),
+      makeResult('new-group', 'group-new', 'seed-1', 'failure', 2, {
+        atomic_attack_name: '',
+      }),
+    ])
+    const rollups = getAtomicGroupRollups(state)
+
+    expect(rollups.find((group) => group.id === 'group-a')?.planned).toBe(3)
+    expect(rollups.find((group) => group.id === 'group-new')?.displayGroup).toBe(
+      'Persisted attack group',
+    )
+  })
+
+  it('separates eight progress units, twelve persisted results, and zero retries', () => {
+    const objectiveIds = ['seed-1', 'seed-2', 'seed-3', 'seed-4']
+    const plan: ScenarioRunPlan = {
+      version: 1,
+      scenario_registry_name: 'adaptive.text',
+      seed_groups: objectiveIds.map((id, index) => ({
+        id,
+        objective_sha256: `sha-${index + 1}`,
+        objective: `Objective ${index + 1}`,
+      })),
+      atomic_groups: [
+        {
+          id: 'baseline',
+          atomic_attack_name: 'baseline',
+          display_group: 'Direct baseline',
+          technique_eval_hash: 'baseline-eval',
+          seed_group_ids: objectiveIds,
+          group_kind: 'direct_baseline',
+        },
+        ...objectiveIds.map((seedId, index) => ({
+          id: `adaptive-${index + 1}`,
+          atomic_attack_name: 'adaptive',
+          display_group: index < 1 ? 'Fairness' : 'Harassment',
+          technique_eval_hash: `adaptive-eval-${index + 1}`,
+          seed_group_ids: [seedId],
+          group_kind: 'adaptive' as const,
+        })),
+      ],
+    }
+    const results = objectiveIds.flatMap((seedId, index) => [
+      makeResult(`baseline-${index}`, 'baseline', seedId, 'success', index * 3, {
+        atomic_attack_name: 'baseline',
+      }),
+      makeResult(`technique-${index}`, `adaptive-${index + 1}`, seedId, 'success', index * 3 + 1, {
+        technique_name: index === 0 ? 'Fairness technique' : 'Harassment technique',
+        attempt_index: 1,
+      }),
+      makeResult(`envelope-${index}`, `adaptive-${index + 1}`, seedId, 'success', index * 3 + 2, {
+        total_retries: 7,
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+    const state = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'apply-page',
+      page: makePage({
+        plan,
+        results,
+        run: {
+          ...makePage().run,
+          scenario_registry_name: 'adaptive.text',
+          status: 'COMPLETED',
+          completed_at: '2026-01-01T00:15:00Z',
+        },
+      }),
+      fresh: true,
+    })
+
+    expect(getOverallProgress(state)).toEqual({ completed: 8, planned: 8, percent: 100 })
+    expect(getAttemptAccounting(state)).toMatchObject({
+      objectiveCount: 4,
+      persistedAttempts: 12,
+      attackAttempts: 8,
+      aggregateParentRecords: 4,
+      adaptiveAggregateParentRecords: 4,
+      uniformTargetAttacksPerObjective: 2,
+      completedProgressUnits: 8,
+      plannedProgressUnits: 8,
+      retries: 0,
+    })
+    expect(Array.from(getAttemptAccounting(state).uniformTargetRoleCounts?.entries() ?? [])).toEqual([
+      ['direct_baseline', 1],
+      ['adaptive_technique', 1],
+    ])
+    expect(getSeedGroupRollups(state)[0]).toMatchObject({
+      completed: 2,
+      planned: 2,
+      persistedAttempts: 3,
+      attackAttempts: 2,
+      retries: 0,
+    })
+    expect(getAttemptRollups(state)).toEqual([
+      expect.objectContaining({ role: 'direct_baseline', persistedAttempts: 4, retries: 0 }),
+      expect.objectContaining({ role: 'adaptive_technique', label: 'Fairness technique', persistedAttempts: 1 }),
+      expect.objectContaining({ role: 'adaptive_technique', label: 'Harassment technique', persistedAttempts: 3 }),
+      expect.objectContaining({ role: 'aggregate_parent', persistedAttempts: 4, retries: 0 }),
+    ])
+  })
+
+  it('recognizes legacy Adaptive envelopes from typed sibling technique results', () => {
+    const state = readyState([
+      makeResult('adaptive-child', 'group-a', 'seed-1', 'failure', 1, {
+        result_kind: 'adaptive_technique',
+        technique_name: 'many_shot',
+        attempt_index: 1,
+      }),
+      makeResult('adaptive-envelope', 'group-a', 'seed-1', 'failure', 2, {
+        result_kind: 'aggregate_parent',
+      }),
+      makeResult('unrelated-envelope', 'group-a', 'seed-2', 'failure', 3, {
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getAttemptAccounting(state)).toMatchObject({
+      attackAttempts: 1,
+      aggregateParentRecords: 2,
+      adaptiveAggregateParentRecords: 1,
+      retries: 0,
+    })
+  })
+
+  it('counts only Adaptive child attempts in retry and error accounting', () => {
+    const state = readyState([
+      makeResult('adaptive-child-error', 'group-a', 'seed-1', 'error', 1, {
+        total_retries: 2,
+        result_kind: 'adaptive_technique',
+        technique_name: 'first technique',
+        attempt_index: 1,
+      }),
+      makeResult('adaptive-child-success', 'group-a', 'seed-1', 'success', 2, {
+        result_kind: 'adaptive_technique',
+        technique_name: 'second technique',
+        attempt_index: 2,
+      }),
+      makeResult('adaptive-envelope', 'group-a', 'seed-1', 'error', 3, {
+        total_retries: 7,
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getOverallProgress(state).completed).toBe(1)
+    expect(getAttemptAccounting(state)).toMatchObject({
+      persistedAttempts: 3,
+      attackAttempts: 2,
+      aggregateParentRecords: 1,
+      retries: 3,
+    })
+    expect(getAttackGroupRollups(state).find((group) => group.id === 'Technique A')).toMatchObject({
+      completed: 1,
+      succeeded: 1,
+      errors: 1,
+      persistedAttempts: 3,
+      attackAttempts: 2,
+    })
+    expect(getSeedGroupRollups(state).find((seed) => seed.id === 'seed-1')).toMatchObject({
+      completed: 1,
+      succeeded: 1,
+      errors: 1,
+      persistedAttempts: 3,
+      attackAttempts: 2,
+    })
+    expect(getAttemptRollups(state)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'adaptive_technique',
+        label: 'first technique',
+        persistedAttempts: 1,
+        errors: 1,
+        retries: 2,
+      }),
+      expect.objectContaining({
+        role: 'adaptive_technique',
+        label: 'second technique',
+        persistedAttempts: 1,
+        errors: 0,
+        retries: 1,
+      }),
+      expect.objectContaining({
+        role: 'aggregate_parent',
+        persistedAttempts: 1,
+        retries: 0,
+      }),
+    ]))
+  })
+
+  it('does not let a later successful aggregate envelope complete a target-facing error', () => {
+    const state = readyState([
+      makeResult('target-error', 'group-a', 'seed-1', 'error', 1, {
+        result_kind: 'attack',
+      }),
+      makeResult('aggregate-success', 'group-a', 'seed-1', 'success', 2, {
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getOverallProgress(state)).toEqual({ completed: 0, planned: 3, percent: 0 })
+    expect(getAttackGroupRollups(state).find((group) => group.id === 'Technique A')).toMatchObject({
+      completed: 0,
+      succeeded: 0,
+      errors: 1,
+      persistedAttempts: 2,
+      attackAttempts: 1,
+    })
+    expect(getSeedGroupRollups(state).find((seed) => seed.id === 'seed-1')).toMatchObject({
+      completed: 0,
+      succeeded: 0,
+      errors: 1,
+      persistedAttempts: 2,
+      attackAttempts: 1,
+    })
+    expect(getAttemptAccounting(state)).toMatchObject({
+      persistedAttempts: 2,
+      attackAttempts: 1,
+      aggregateParentRecords: 1,
+      completedProgressUnits: 0,
+    })
+  })
+
+  it('omits uniform target arithmetic when no target-facing attacks exist', () => {
+    const state = readyState([
+      makeResult('aggregate-only', 'group-a', 'seed-1', 'failure', 1, {
+        result_kind: 'aggregate_parent',
+      }),
+    ])
+
+    expect(getAttemptAccounting(state)).toMatchObject({
+      attackAttempts: 0,
+      uniformTargetAttacksPerObjective: null,
+      uniformTargetRoleCounts: null,
     })
   })
 
@@ -316,6 +714,10 @@ describe('scenario run progress calculations', () => {
     const state = readyState([makeResult('a-1', 'group-a', 'seed-1', 'success', 1)])
     state.run = active
     expect(getEtaMilliseconds(state, Date.parse('2026-01-01T01:02:00Z'))).toBe(240_000)
+    expect(getElapsedMilliseconds(
+      { ...active, created_at: 'not-a-timestamp' },
+      Date.parse('2026-01-01T00:05:00Z'),
+    )).toBe(0)
   })
 
   it('does not count queue wait as elapsed time or fabricate a queued ETA', () => {
@@ -342,6 +744,8 @@ describe('scenario run progress calculations', () => {
   it('calculates ETA from observed wall-clock completion rate and hides unsafe estimates', () => {
     const state = readyState([makeResult('a-1', 'group-a', 'seed-1', 'success', 1)])
     expect(getEtaMilliseconds(state, Date.parse('2026-01-01T00:02:00Z'))).toBe(240_000)
+    expect(getEtaMilliseconds(state, Date.parse(makePage().run.created_at))).toBeNull()
+    expect(getEtaMilliseconds(state, Number.MAX_VALUE)).toBeNull()
 
     expect(getEtaMilliseconds(
       { ...state, results: [] },
