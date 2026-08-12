@@ -10,6 +10,7 @@ import Home from './components/Home/Home'
 import TargetConfig from './components/Config/TargetConfig'
 import Initializers from './components/Initializers/Initializers'
 import AttackHistory from './components/History/AttackHistory'
+import ScenarioHistory from './components/History/ScenarioHistory'
 import ScenarioCatalog from './components/Scenarios/ScenarioCatalog'
 import ScenarioDetail from './components/Scenarios/ScenarioDetail'
 import ScenarioRunPage from './components/Scenarios/ScenarioRunPage'
@@ -20,6 +21,11 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { ConnectionHealthProvider, useConnectionHealth } from './hooks/useConnectionHealth'
 import { DEFAULT_GLOBAL_LABELS } from './components/Labels/labelDefaults'
 import { filtersFromSearchParams, filtersToSearchParams } from './components/History/historyFilters'
+import {
+  scenarioHistoryFiltersFromSearchParams,
+  scenarioHistoryFiltersToSearchParams,
+} from './components/History/scenarioHistoryFilters'
+import type { ScenarioHistoryFilters } from './components/History/scenarioHistoryFilters'
 import type { ViewName } from './components/Sidebar/Navigation'
 import type { TargetInstance, TargetInfo } from './types'
 import {
@@ -47,6 +53,7 @@ const VIEW_PATHS: Record<ViewName, string> = {
   config: '/config',
   initializers: '/initializers',
   scenarios: '/scenarios',
+  scenarioHistory: '/scenario-history',
 }
 
 /**
@@ -56,8 +63,11 @@ const VIEW_PATHS: Record<ViewName, string> = {
  * single canonical `VIEW_PATHS` entry.
  */
 function viewFromPath(pathname: string): ViewName {
-  if (pathname === VIEW_PATHS.scenarios || pathname.startsWith(`${VIEW_PATHS.scenarios}/`) || pathname.startsWith('/scenario-history/')) {
+  if (pathname === VIEW_PATHS.scenarios || pathname.startsWith(`${VIEW_PATHS.scenarios}/`)) {
     return 'scenarios'
+  }
+  if (pathname === VIEW_PATHS.scenarioHistory || pathname.startsWith(`${VIEW_PATHS.scenarioHistory}/`)) {
+    return 'scenarioHistory'
   }
   const match = (Object.entries(VIEW_PATHS) as [ViewName, string][]).find(
     ([, path]) => path === pathname,
@@ -123,14 +133,22 @@ function App() {
   // the History nav button can restore filters after visiting another view.
   const [searchParams, setSearchParams] = useSearchParams()
   const historyFilters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
+  const scenarioHistoryFilters = useMemo(
+    () => scenarioHistoryFiltersFromSearchParams(searchParams),
+    [searchParams],
+  )
   const scenarioResultId = useMemo(
     () => scenarioRunProvenance(searchParams),
     [searchParams],
   )
   const lastHistorySearch = useRef('')
+  const lastScenarioHistorySearch = useRef('')
   useEffect(() => {
     if (location.pathname === VIEW_PATHS.history) {
       lastHistorySearch.current = location.search
+    }
+    if (location.pathname === VIEW_PATHS.scenarioHistory) {
+      lastScenarioHistorySearch.current = location.search
     }
   }, [location.pathname, location.search])
 
@@ -138,7 +156,11 @@ function App() {
     setSearchParams(filtersToSearchParams(filters), { replace: true })
   }, [setSearchParams])
 
-    /** App version display, attached to feedback context */
+  const handleScenarioHistoryFiltersChange = useCallback((filters: ScenarioHistoryFilters) => {
+    setSearchParams(scenarioHistoryFiltersToSearchParams(filters), { replace: true })
+  }, [setSearchParams])
+
+  /** App version display, attached to feedback context */
   const [appVersion, setAppVersion] = useState<string>('')
   /** Whether the feedback dialog is currently open */
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -293,6 +315,10 @@ function App() {
       navigate(VIEW_PATHS.history + lastHistorySearch.current)
       return
     }
+    if (view === 'scenarioHistory') {
+      navigate(VIEW_PATHS.scenarioHistory + lastScenarioHistorySearch.current)
+      return
+    }
     navigate(VIEW_PATHS[view])
   }, [navigate])
 
@@ -334,6 +360,15 @@ function App() {
   const handleOpenAttack = useCallback((openAttackResultId: string) => {
     navigate(attackRoutePath(openAttackResultId))
   }, [navigate])
+
+  const handleOpenScenarioRun = useCallback((scenarioResultId: string) => {
+    navigate(`${VIEW_PATHS.scenarioHistory}/${encodeURIComponent(scenarioResultId)}`, {
+      state: {
+        fromScenarioHistory: true,
+        scenarioHistorySearch: location.search,
+      },
+    })
+  }, [location.search, navigate])
 
   const chatElement = isAttackNotFound || isAttackError ? (
     <AttackNotFound
@@ -425,6 +460,17 @@ function App() {
                   <ScenarioDetail
                     activeTarget={activeTarget}
                     labels={globalLabels}
+                    onNavigate={handleNavigate}
+                  />
+                }
+              />
+              <Route
+                path="/scenario-history"
+                element={
+                  <ScenarioHistory
+                    filters={scenarioHistoryFilters}
+                    onFiltersChange={handleScenarioHistoryFiltersChange}
+                    onOpenRun={handleOpenScenarioRun}
                     onNavigate={handleNavigate}
                   />
                 }
