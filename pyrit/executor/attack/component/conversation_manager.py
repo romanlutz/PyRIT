@@ -321,10 +321,22 @@ class ConversationManager:
         # single-string fallback path via capability-based routing.
         is_chat_target = target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
         if not is_chat_target:
+            config = prepended_conversation_config or PrependedConversationConfig()
+            if request_converters:
+                present_roles = {
+                    piece.api_role for message in prepended_conversation for piece in message.message_pieces
+                }
+                excluded_roles = present_roles - set(config.apply_converters_to_roles)
+                if excluded_roles:
+                    raise ValueError(
+                        "Cannot preserve prepended-conversation converter role scoping for a non-chat target: "
+                        f"the flattened context contains excluded roles {sorted(excluded_roles)}. "
+                        "Use a chat target, remove request converters, or explicitly opt into every prepended role."
+                    )
             return await self._handle_non_chat_target_async(
                 context=context,
                 prepended_conversation=prepended_conversation,
-                config=prepended_conversation_config,
+                config=config,
             )
 
         # Process prepended conversation for objective target
@@ -453,10 +465,10 @@ class ConversationManager:
             conversation=Conversation(conversation_id=conversation_id, target_identifier=target_identifier)
         )
 
-        # Get roles that should have converters applied
-        apply_to_roles = (
-            prepended_conversation_config.apply_converters_to_roles if prepended_conversation_config else None
-        )
+        # Assistant history represents simulated target output, so the absent-config
+        # path must use the same safe role default as an explicit default config.
+        config = prepended_conversation_config or PrependedConversationConfig()
+        apply_to_roles = config.apply_converters_to_roles
 
         turn_count = 0
 
@@ -575,7 +587,7 @@ class ConversationManager:
         *,
         message: Message,
         request_converters: list[ConverterConfiguration],
-        apply_to_roles: list[ChatMessageRole] | None,
+        apply_to_roles: list[ChatMessageRole],
     ) -> None:
         """
         Apply converters to message pieces.
@@ -583,12 +595,10 @@ class ConversationManager:
         Args:
             message: The message containing pieces to convert.
             request_converters: Converter configurations to apply.
-            apply_to_roles: If provided, only apply to pieces with these roles.
-                If None, apply to all roles.
+            apply_to_roles: Only apply to pieces with these roles.
         """
         for piece in message.message_pieces:
-            # Filter by role if specified
-            if apply_to_roles is not None and piece.api_role not in apply_to_roles:
+            if piece.api_role not in apply_to_roles:
                 continue
 
             temp_message = Message(message_pieces=[piece])
