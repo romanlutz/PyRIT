@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pyrit.backend.main import SPAStaticFiles, app, lifespan, setup_frontend
+from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.memory import AzureSQLMemory
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 
@@ -74,6 +76,31 @@ class TestLifespan:
                 pass
 
             mock_warning.assert_called_once()
+
+    async def test_lifespan_shared_memory_reconciliation_is_non_destructive(self) -> None:
+        shared_memory = MagicMock(spec=AzureSQLMemory)
+        fake_config = ConfigurationLoader()
+        with patch(
+            "pyrit.backend.services.scenario_run_service.CentralMemory.get_memory_instance",
+            return_value=shared_memory,
+        ):
+            service = ScenarioRunService()
+
+        with (
+            patch.object(ConfigurationLoader, "load_with_overrides", return_value=fake_config),
+            patch.object(ConfigurationLoader, "initialize_pyrit_async", new=AsyncMock()),
+            patch(
+                "pyrit.backend.main.get_initializer_service",
+                return_value=MagicMock(run_additional_initializers_async=AsyncMock()),
+            ),
+            patch("pyrit.backend.main.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.main.setup_frontend"),
+        ):
+            async with lifespan(app):
+                pass
+
+        shared_memory.get_scenario_run_state_page.assert_not_called()
+        shared_memory.update_scenario_run_state.assert_not_called()
 
     async def test_lifespan_populates_default_labels_from_operator_and_operation(
         self, mock_scenario_run_lifecycle

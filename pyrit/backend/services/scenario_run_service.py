@@ -33,7 +33,7 @@ from pydantic import TypeAdapter, ValidationError
 from pyrit.backend.models.common import PaginationInfo, filter_sensitive_fields
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
 from pyrit.common.utils import to_sha256
-from pyrit.memory import CentralMemory
+from pyrit.memory import CentralMemory, SQLiteMemory
 from pyrit.memory.memory_interface import (
     ScenarioHistoryKeysetCursor,
     ScenarioHistoryRunRecord,
@@ -89,6 +89,8 @@ _MAX_OVERLOAD_ROLES = 16
 _MAX_TERMINAL_ERRORS = 100
 _SCHEDULER_RETRY_INITIAL_SECONDS = 0.05
 _SCHEDULER_RETRY_MAX_SECONDS = 1.0
+_SCHEDULER_METADATA_KEY = "scheduler_managed_by"
+_SCHEDULER_METADATA_VALUE = "ScenarioRunService.process_local_fifo"
 _INTERRUPTED_ERROR_TYPE = "ScenarioInterruptedError"
 _RESTART_INTERRUPTION_REASON = (
     "The backend process restarted before this scenario run completed; "
@@ -452,11 +454,22 @@ class ScenarioRunService:
 
     async def reconcile_interrupted_runs_async(self) -> int:
         """
-        Mark non-terminal persisted rows failed when executable objects were lost.
+        Mark scheduler-managed local rows failed when executable objects were lost.
+
+        Shared and unknown memory backends are intentionally non-destructive because
+        another process may still own their runs. File-backed SQLite assumes one
+        scheduler process has exclusive ownership of that database file.
 
         Returns:
             int: Number of reconciled rows.
         """
+        if not isinstance(self._memory, SQLiteMemory):
+            logger.info(
+                "Skipping interrupted Scenario run reconciliation for shared or unsupported %s memory.",
+                type(self._memory).__name__,
+            )
+            return 0
+
         states = (ScenarioRunState.CREATED, ScenarioRunState.QUEUED, ScenarioRunState.IN_PROGRESS)
         after_id = None
         reconciled = 0
@@ -468,6 +481,12 @@ class ScenarioRunService:
                 limit=500,
             )
             for result in interrupted:
+                header = await asyncio.to_thread(
+                    self._memory.get_scenario_result_header,
+                    scenario_result_id=result.scenario_result_id,
+                )
+                if header is None or header.metadata.get(_SCHEDULER_METADATA_KEY) != _SCHEDULER_METADATA_VALUE:
+                    continue
                 await asyncio.to_thread(
                     self._memory.update_scenario_run_state,
                     scenario_result_id=result.scenario_result_id,
@@ -475,7 +494,7 @@ class ScenarioRunService:
                     error_message=_RESTART_INTERRUPTION_REASON,
                     error_type=_INTERRUPTED_ERROR_TYPE,
                 )
-            reconciled += len(interrupted)
+                reconciled += 1
             if not has_more:
                 return reconciled
             if not interrupted:
@@ -558,9 +577,10 @@ class ScenarioRunService:
                 await self._start_scheduled_run_locked_async(scheduled=scheduled)
                 return
             await asyncio.to_thread(
-                self._memory.update_scenario_run_state,
+                self._memory.update_scenario_run_state_and_metadata_fields,
                 scenario_result_id=scheduled.scenario_result_id,
                 scenario_run_state=ScenarioRunState.QUEUED,
+                metadata_fields={_SCHEDULER_METADATA_KEY: _SCHEDULER_METADATA_VALUE},
             )
             self._queued_runs.append(scheduled)
             self._queue_revision += 1
@@ -572,7 +592,10 @@ class ScenarioRunService:
             self._memory.update_scenario_run_state_and_metadata_fields,
             scenario_result_id=scheduled.scenario_result_id,
             scenario_run_state=ScenarioRunState.IN_PROGRESS,
-            metadata_fields={SCENARIO_RUN_STARTED_AT_METADATA_KEY: scheduled.started_at.isoformat()},
+            metadata_fields={
+                _SCHEDULER_METADATA_KEY: _SCHEDULER_METADATA_VALUE,
+                SCENARIO_RUN_STARTED_AT_METADATA_KEY: scheduled.started_at.isoformat(),
+            },
         )
         self._active_scenario_result_id = scheduled.scenario_result_id
         self._active_tasks[scheduled.scenario_result_id] = scheduled
@@ -1077,6 +1100,7 @@ class ScenarioRunService:
             request.scenario_name,
             scenario_params=request.scenario_params or {},
             scenario_result_id=request.scenario_result_id or None,
+            initial_metadata={_SCHEDULER_METADATA_KEY: _SCHEDULER_METADATA_VALUE},
             **init_kwargs,
         )
 

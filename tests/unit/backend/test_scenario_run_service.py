@@ -19,7 +19,13 @@ from pyrit.backend.services.scenario_run_service import (
     ScenarioRunService,
 )
 from pyrit.converter import Converter
-from pyrit.memory import ScenarioHistoryRunRecord, ScenarioHistoryUnitRecord, ScenarioRunStateRecord
+from pyrit.memory import (
+    AzureSQLMemory,
+    ScenarioHistoryRunRecord,
+    ScenarioHistoryUnitRecord,
+    ScenarioRunStateRecord,
+    SQLiteMemory,
+)
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
@@ -162,7 +168,7 @@ def _make_history_record(
 @pytest.fixture
 def mock_memory():
     """Patch CentralMemory.get_memory_instance to return a mock."""
-    mock = MagicMock()
+    mock = MagicMock(spec=SQLiteMemory)
     mock.get_scenario_results.return_value = []
     # Default: no error AttackResults linked to any scenario. Tests that exercise
     # the error fallback path explicitly set get_attack_results.return_value.
@@ -237,6 +243,10 @@ class TestScenarioRunServiceStartRun:
             metadata_call.kwargs["metadata_fields"][_svc_mod.SCENARIO_RUN_STARTED_AT_METADATA_KEY]
         )
         assert persisted_start.tzinfo is not None
+        assert (
+            metadata_call.kwargs["metadata_fields"][_svc_mod._SCHEDULER_METADATA_KEY]
+            == _svc_mod._SCHEDULER_METADATA_VALUE
+        )
         mock_memory.update_scenario_metadata_fields.assert_not_called()
         mock_memory.update_scenario_run_state.assert_not_called()
 
@@ -387,6 +397,7 @@ class TestScenarioRunServiceStartRun:
             "airt.jailbreak",
             scenario_params=scenario_params,
             scenario_result_id=None,
+            initial_metadata={_svc_mod._SCHEDULER_METADATA_KEY: _svc_mod._SCHEDULER_METADATA_VALUE},
             objective_target=objective_target,
             max_concurrency=10,
             max_retries=0,
@@ -451,6 +462,7 @@ class TestScenarioRunServiceStartRun:
         mock_sr.create_and_initialize_async = AsyncMock(side_effect=_create_scenario)
         mock_memory.get_scenario_results.side_effect = _get_results
         mock_memory.update_scenario_run_state.side_effect = _update_state
+        mock_memory.update_scenario_run_state_and_metadata_fields.side_effect = _update_state
 
         active_response = await service.start_run_async(request=_make_request())
         await asyncio.wait_for(active_started.wait(), timeout=1)
@@ -467,6 +479,16 @@ class TestScenarioRunServiceStartRun:
         assert queued_response.status == ScenarioRunState.QUEUED
         assert queued_response.queue_position == 1
         assert queued_response.active_scenario_result_id == "run-1"
+        queued_transition = next(
+            call
+            for call in mock_memory.update_scenario_run_state_and_metadata_fields.call_args_list
+            if call.kwargs["scenario_result_id"] == "run-2"
+            and call.kwargs["scenario_run_state"] == ScenarioRunState.QUEUED
+        )
+        assert (
+            queued_transition.kwargs["metadata_fields"][_svc_mod._SCHEDULER_METADATA_KEY]
+            == _svc_mod._SCHEDULER_METADATA_VALUE
+        )
         assert [(entry.scenario_result_id, entry.position) for entry in service.get_queue_snapshot().queued] == [
             ("run-2", 1)
         ]
@@ -740,6 +762,7 @@ class TestScenarioRunServiceStartRun:
         mock_sr.create_and_initialize_async = AsyncMock(side_effect=_create_scenario)
         mock_memory.get_scenario_results.side_effect = _get_results
         mock_memory.update_scenario_run_state.side_effect = _update_state
+        mock_memory.update_scenario_run_state_and_metadata_fields.side_effect = _update_state
 
         responses = await asyncio.gather(*(service.start_run_async(request=_make_request()) for _ in range(4)))
 
@@ -1127,13 +1150,34 @@ class TestScenarioRunServiceCancelRun:
 class TestScenarioRunServiceRecovery:
     """Tests for restart reconciliation and overload evidence."""
 
-    async def test_reconcile_marks_created_queued_and_running_rows_failed(self, mock_memory) -> None:
+    async def test_reconcile_marks_only_scheduler_managed_local_rows_failed(self, mock_memory) -> None:
+        scheduler_metadata = {_svc_mod._SCHEDULER_METADATA_KEY: _svc_mod._SCHEDULER_METADATA_VALUE}
         interrupted = [
-            ScenarioRunStateRecord(scenario_result_id="created", state=ScenarioRunState.CREATED),
-            ScenarioRunStateRecord(scenario_result_id="queued", state=ScenarioRunState.QUEUED),
-            ScenarioRunStateRecord(scenario_result_id="running", state=ScenarioRunState.IN_PROGRESS),
+            ScenarioRunStateRecord(
+                scenario_result_id="created",
+                state=ScenarioRunState.CREATED,
+            ),
+            ScenarioRunStateRecord(
+                scenario_result_id="queued",
+                state=ScenarioRunState.QUEUED,
+            ),
+            ScenarioRunStateRecord(
+                scenario_result_id="running",
+                state=ScenarioRunState.IN_PROGRESS,
+            ),
+            ScenarioRunStateRecord(
+                scenario_result_id="framework-run",
+                state=ScenarioRunState.IN_PROGRESS,
+            ),
         ]
         mock_memory.get_scenario_run_state_page.return_value = (interrupted, False)
+        headers = {
+            "created": MagicMock(metadata=scheduler_metadata),
+            "queued": MagicMock(metadata=scheduler_metadata),
+            "running": MagicMock(metadata=scheduler_metadata),
+            "framework-run": MagicMock(metadata={}),
+        }
+        mock_memory.get_scenario_result_header.side_effect = lambda *, scenario_result_id: headers[scenario_result_id]
 
         reconciled = await ScenarioRunService().reconcile_interrupted_runs_async()
 
@@ -1165,11 +1209,23 @@ class TestScenarioRunServiceRecovery:
             state=ScenarioRunState.IN_PROGRESS,
         )
         mock_memory.get_scenario_run_state_page.side_effect = [([first], True), ([second], False)]
+        mock_memory.get_scenario_result_header.return_value = MagicMock(
+            metadata={_svc_mod._SCHEDULER_METADATA_KEY: _svc_mod._SCHEDULER_METADATA_VALUE}
+        )
 
         reconciled = await ScenarioRunService().reconcile_interrupted_runs_async()
 
         assert reconciled == 2
         assert mock_memory.get_scenario_run_state_page.call_args_list[1].kwargs["after_id"] == first.scenario_result_id
+
+    async def test_reconcile_shared_backend_is_non_destructive(self) -> None:
+        shared_memory = MagicMock(spec=AzureSQLMemory)
+        with patch(_MEMORY_PATCH, return_value=shared_memory):
+            reconciled = await ScenarioRunService().reconcile_interrupted_runs_async()
+
+        assert reconciled == 0
+        shared_memory.get_scenario_run_state_page.assert_not_called()
+        shared_memory.update_scenario_run_state.assert_not_called()
 
     async def test_shutdown_fails_active_and_queued_runs_without_starting_next(self, mock_all_registries) -> None:
         mock_scenario_registry = mock_all_registries["scenario_registry"]
@@ -1200,6 +1256,7 @@ class TestScenarioRunServiceRecovery:
         mock_scenario_registry.create_and_initialize_async = AsyncMock(side_effect=_create_scenario)
         mock_memory.get_scenario_results.side_effect = _get_results
         mock_memory.update_scenario_run_state.side_effect = _update_state
+        mock_memory.update_scenario_run_state_and_metadata_fields.side_effect = _update_state
         service = ScenarioRunService()
         await service.start_run_async(request=_make_request())
         await service.start_run_async(request=_make_request())
