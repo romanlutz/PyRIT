@@ -441,7 +441,11 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             context.last_score = await self._score_response_async(context=context)
 
             # Check if objective achieved
-            achieved_objective = bool(context.last_score.get_value()) if context.last_score else False
+            achieved_objective = (
+                not context.last_response_was_refusal and bool(context.last_score.get_value())
+                if context.last_score
+                else False
+            )
 
             # Increment the executed turns
             context.executed_turns += 1
