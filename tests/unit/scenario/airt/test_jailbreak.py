@@ -3,12 +3,13 @@
 
 """Tests for the Jailbreak class."""
 
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.backend.services import ScenarioRunService
 from pyrit.common.path import JAILBREAK_TEMPLATES_PATH
 from pyrit.converter import TextJailbreakConverter
 from pyrit.datasets import TextJailBreak
@@ -21,9 +22,8 @@ from pyrit.models import (
     SeedPrompt,
 )
 from pyrit.prompt_target import PromptTarget
-from pyrit.registry import TargetRegistry
+from pyrit.registry import ScenarioRegistry, TargetRegistry
 from pyrit.registry.components.attack_technique_registry import AttackTechniqueRegistry
-from pyrit.registry.components.scenario_registry import ScenarioRegistry
 from pyrit.scenario.core import BaselineAttackPolicy
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.scenario.scenarios.airt.jailbreak import (
@@ -270,6 +270,9 @@ class TestJailbreakInitialization:
 
         assert estimate.status is ScenarioRunSizeEstimateStatus.Conditional
         assert estimate.total_attack_count is None
+        assert estimate.minimum_attack_count == 2
+        assert estimate.maximum_attack_count == 4
+        assert estimate.condition.value == "target_capabilities"
         assert [component.label for component in estimate.components] == [
             "Inline jailbreak delivery",
             "Native system-prompt jailbreak delivery",
@@ -813,6 +816,22 @@ class TestJailbreakTechniqueModel:
         }
         assert {_PROMPT_SENDING, _JAILBREAK_SYSTEM_PROMPT, "flip"}.issubset(available)
         assert incompatible.isdisjoint(available)
+
+    def test_warns_when_registered_factories_cannot_compose_jailbreak_converter(self, caplog):
+        custom_factory = AttackTechniqueFactory(
+            name="custom_without_converter_composition",
+            attack_class=PromptSendingAttack,
+            technique_tags=["single_turn"],
+        )
+        AttackTechniqueRegistry.get_registry_singleton().register_from_factories([custom_factory])
+        _build_jailbreak_technique.cache_clear()
+
+        with caplog.at_level(logging.WARNING):
+            technique_class = _build_jailbreak_technique()
+
+        assert "custom_without_converter_composition" in caplog.text
+        assert "cannot compose the required request converter" in caplog.text
+        assert custom_factory.name not in {technique.value for technique in technique_class.get_all_techniques()}
 
     def test_registry_metadata_omits_incompatible_techniques(self):
         metadata = ScenarioRegistry()._build_metadata("airt.jailbreak", Jailbreak)
