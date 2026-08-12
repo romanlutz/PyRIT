@@ -28,6 +28,7 @@ import type {
   CreateConversationRequest,
   CreateConversationResponse,
   ChangeMainConversationResponse,
+  DatasetListResponse,
   ListRegisteredScenariosResponse,
   RegisteredScenario,
   RunScenarioRequest,
@@ -347,6 +348,13 @@ export const labelsApi = {
     source: 'attacks' | 'scenarios' = 'attacks',
   ): Promise<{ source: string; labels: Record<string, string[]> }> => {
     const response = await apiClient.get('/labels', { params: { source } })
+    return response.data
+  },
+}
+
+export const datasetsApi = {
+  listDatasets: async (): Promise<DatasetListResponse> => {
+    const response = await apiClient.get('/datasets')
     return response.data
   },
 }

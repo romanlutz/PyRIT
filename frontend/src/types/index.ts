@@ -379,6 +379,16 @@ export interface ChangeMainConversationResponse {
   conversation_id: string
 }
 
+// --- Datasets ---
+
+export interface DatasetInfo {
+  name: string
+}
+
+export interface DatasetListResponse {
+  items: DatasetInfo[]
+}
+
 // --- Scenarios ---
 
 export interface RegisteredScenario {
@@ -393,6 +403,7 @@ export interface RegisteredScenario {
   aggregate_technique_expansions: Record<string, string[]>
   all_techniques: string[]
   default_datasets: string[]
+  dataset_size_limit: ScenarioDatasetSizeLimit
   default_dataset_summaries: ScenarioDatasetSummary[]
   baseline_policy: 'enabled' | 'disabled' | 'forbidden'
   include_baseline_by_default: boolean
@@ -463,6 +474,12 @@ export interface ScenarioDatasetSummary {
   selected_seed_group_count: number
   configured_caps: ScenarioDatasetSizeCap[]
   selection_note: string | null
+}
+
+export interface ScenarioDatasetSizeLimit {
+  default_scope: 'none' | 'per_dataset' | 'combined' | 'heterogeneous'
+  default_count: number | null
+  override_scope: 'per_dataset' | 'combined' | 'unsupported'
 }
 
 export interface ScenarioDefaultRunSizeEstimate {
@@ -568,17 +585,6 @@ export type ScenarioRunEstimateState =
   | {
       status: 'loading'
       scope: 'default' | 'request'
-    }
-  | {
-      status: 'refreshing'
-      estimate: ScenarioRunEstimate
-      label: string
-    }
-  | {
-      status: 'stale'
-      estimate: ScenarioRunEstimate
-      label: string
-      error: string
     }
   | ScenarioRunEstimateResult
 

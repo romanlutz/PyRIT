@@ -17,21 +17,22 @@ from fastapi.testclient import TestClient
 from pyrit.backend.main import app
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
-from pyrit.backend.services.scenario_run_service import ScenarioRunService
-from pyrit.backend.services.scenario_service import (
+from pyrit.backend.services import (
+    ScenarioRunService,
     ScenarioService,
     get_scenario_service,
 )
 from pyrit.models import (
     Parameter,
     ScenarioDatasetSizeCap,
+    ScenarioDatasetSizeLimit,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSizeEstimateStatus,
 )
-from pyrit.models.catalog.scenario import RegisteredScenario
+from pyrit.models.catalog import RegisteredScenario
 from pyrit.registry import ScenarioMetadata
 from pyrit.scenario.core import DatasetAttackConfiguration, ScenarioTechnique
 
@@ -65,6 +66,15 @@ def clear_service_cache():
     get_scenario_service.cache_clear()
 
 
+def _initialize_test_service(service: ScenarioService) -> None:
+    """Initialize service state without binding the process-wide registry."""
+    service._estimate_cache = OrderedDict()
+    service._estimate_tasks = OrderedDict()
+    service._estimate_task_lock = asyncio.Lock()
+    service._estimate_semaphore = asyncio.Semaphore(4)
+    service._configured_estimate_semaphore = asyncio.Semaphore(4)
+
+
 def _make_scenario_metadata(
     *,
     registry_name: str = "test.scenario",
@@ -83,6 +93,7 @@ def _make_scenario_metadata(
     default_datasets: tuple[str, ...] = ("test_dataset",),
     baseline_policy: str = "enabled",
     include_baseline_by_default: bool = True,
+    dataset_size_limit: ScenarioDatasetSizeLimit | None = None,
 ) -> ScenarioMetadata:
     """Create a ScenarioMetadata instance for testing."""
     return ScenarioMetadata(
@@ -98,6 +109,7 @@ def _make_scenario_metadata(
         aggregate_techniques=aggregate_techniques,
         aggregate_technique_expansions=aggregate_technique_expansions,
         default_datasets=default_datasets,
+        dataset_size_limit=dataset_size_limit or ScenarioDatasetSizeLimit(),
         baseline_policy=baseline_policy,
         include_baseline_by_default=include_baseline_by_default,
     )
@@ -113,7 +125,7 @@ class TestScenarioServiceListScenarios:
 
     async def test_list_scenarios_returns_empty_when_no_scenarios(self) -> None:
         """Test that list returns empty list when no scenarios are registered."""
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = []
@@ -127,7 +139,7 @@ class TestScenarioServiceListScenarios:
         """Test that list returns scenarios from registry."""
         metadata = _make_scenario_metadata()
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = [metadata]
@@ -145,8 +157,27 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].aggregate_technique_expansions["default"] == ["role_play"]
             assert result.items[0].all_techniques == ["role_play", "many_shot"]
             assert result.items[0].default_datasets == ["test_dataset"]
+            assert result.items[0].dataset_size_limit == ScenarioDatasetSizeLimit()
             assert result.items[0].baseline_policy == "enabled"
             assert result.items[0].include_baseline_by_default is True
+
+    async def test_list_scenarios_projects_dataset_size_limit_metadata(self) -> None:
+        """Catalog responses preserve structured scenario-owned limit semantics."""
+        limit = ScenarioDatasetSizeLimit(
+            default_scope="per_dataset",
+            default_count=4,
+            override_scope="per_dataset",
+        )
+        metadata = _make_scenario_metadata(dataset_size_limit=limit)
+
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
+            service = ScenarioService()
+            service._registry = MagicMock()
+            service._registry.get_all_registered_class_metadata.return_value = [metadata]
+
+            result = await service.list_scenarios_async()
+
+        assert result.items[0].dataset_size_limit == limit
 
     async def test_estimate_is_offloaded_and_cached(self) -> None:
         """Scenario-owned estimates run in a worker once and are reused by subsequent reads."""
@@ -174,7 +205,7 @@ class TestScenarioServiceListScenarios:
         scenario = MagicMock()
         scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_registered_class_metadata.return_value = metadata
@@ -210,7 +241,7 @@ class TestScenarioServiceListScenarios:
         scenario = MagicMock()
         scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=estimate_async)
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.create_instance.return_value = scenario
@@ -246,7 +277,7 @@ class TestScenarioServiceListScenarios:
         scenario = MagicMock()
         scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=estimate_async)
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.create_instance.return_value = scenario
@@ -277,7 +308,7 @@ class TestScenarioServiceListScenarios:
         scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
 
         with (
-            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioService, "__init__", _initialize_test_service),
             patch("pyrit.backend.services.scenario_service._ESTIMATE_INFLIGHT_SIZE", 1),
         ):
             service = ScenarioService()
@@ -310,7 +341,7 @@ class TestScenarioServiceListScenarios:
         bad_scenario = MagicMock()
         bad_scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=RuntimeError("dataset unavailable"))
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = metadata
@@ -324,6 +355,111 @@ class TestScenarioServiceListScenarios:
         assert result.items[0].default_run_size.status is ScenarioRunSizeEstimateStatus.Exact
         assert result.items[1].default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable
         assert "RuntimeError" in result.items[1].default_run_size.note
+
+    async def test_catalog_estimates_use_bounded_parallelism(self) -> None:
+        """Catalog cards estimate concurrently without exceeding the configured bound."""
+        metadata = [_make_scenario_metadata(registry_name=f"test.scenario_{index}") for index in range(6)]
+        estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=1,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=1)],
+        )
+        active = 0
+        maximum_active = 0
+
+        async def estimate_async() -> ScenarioDefaultRunSizeEstimate:
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return estimate
+
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=estimate_async)
+        service = ScenarioService()
+        service._registry = MagicMock()
+        service._registry.get_all_registered_class_metadata.return_value = metadata
+        service._registry.create_instance.return_value = scenario
+        service._estimate_semaphore = asyncio.Semaphore(2)
+
+        result = await service.list_scenarios_async()
+
+        assert maximum_active == 2
+        assert all(item.default_run_size == estimate for item in result.items)
+
+    async def test_catalog_timeout_is_wall_clock_bounded_and_cached(self) -> None:
+        """Queued catalog estimates time out together and reuse the unavailable result."""
+        metadata = [_make_scenario_metadata(registry_name=f"test.scenario_{index}") for index in range(4)]
+
+        async def slow_estimate_async() -> ScenarioDefaultRunSizeEstimate:
+            await asyncio.sleep(60)
+            raise AssertionError("The default estimate should time out before completing.")
+
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=slow_estimate_async)
+        service = ScenarioService()
+        service._registry = MagicMock()
+        service._registry.get_all_registered_class_metadata.return_value = metadata
+        service._registry.get_registered_class_metadata.return_value = metadata[0]
+        service._registry.create_instance.return_value = scenario
+        service._estimate_semaphore = asyncio.Semaphore(1)
+
+        with patch("pyrit.backend.services.scenario_service._DEFAULT_ESTIMATE_TIMEOUT_SECONDS", 0.02):
+            started_at = asyncio.get_running_loop().time()
+            result = await service.list_scenarios_async()
+            elapsed = asyncio.get_running_loop().time() - started_at
+            cached = await service.get_scenario_async(scenario_name=metadata[0].registry_name)
+
+        assert elapsed < 0.2
+        assert all(item.default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable for item in result.items)
+        assert cached is not None
+        assert cached.default_run_size.status is ScenarioRunSizeEstimateStatus.Unavailable
+        assert service._registry.create_instance.call_count <= len(metadata)
+
+    async def test_configured_estimate_does_not_wait_for_catalog_estimate(self) -> None:
+        """Interactive detail estimates use separate capacity from default catalog cards."""
+        metadata = _make_scenario_metadata()
+        default_estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=1,
+            components=[ScenarioRunSizeComponent(label="Default sweep", count=1)],
+        )
+        configured_estimate = ScenarioDefaultRunSizeEstimate(
+            status=ScenarioRunSizeEstimateStatus.Exact,
+            total_attack_count=2,
+            components=[ScenarioRunSizeComponent(label="Configured sweep", count=2)],
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def default_estimate_async() -> ScenarioDefaultRunSizeEstimate:
+            started.set()
+            await release.wait()
+            return default_estimate
+
+        scenario = MagicMock()
+        scenario.get_default_run_size_estimate_async = AsyncMock(side_effect=default_estimate_async)
+        service = ScenarioService()
+        service._registry = MagicMock()
+        service._registry.get_registered_class_metadata.return_value = metadata
+        service._registry.create_instance.return_value = scenario
+        service._estimate_semaphore = asyncio.Semaphore(1)
+        service._estimate_configured_run_size_async = AsyncMock(return_value=configured_estimate)
+
+        catalog_task = asyncio.create_task(service._get_default_run_size_estimate_async(metadata=metadata))
+        await started.wait()
+        interactive = await asyncio.wait_for(
+            service.estimate_scenario_run_size_async(
+                scenario_name=metadata.registry_name,
+                request=ScenarioRunSizeEstimateRequest(),
+            ),
+            timeout=0.2,
+        )
+        release.set()
+
+        assert interactive == configured_estimate
+        assert await catalog_task == default_estimate
 
     async def test_unavailable_estimate_cache_expires(self) -> None:
         """A transient estimate failure is retried after the unavailable-result TTL."""
@@ -339,7 +475,7 @@ class TestScenarioServiceListScenarios:
         )
 
         with (
-            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioService, "__init__", _initialize_test_service),
             patch("pyrit.backend.services.scenario_service._UNAVAILABLE_CACHE_TTL_SECONDS", 0),
         ):
             service = ScenarioService()
@@ -367,7 +503,7 @@ class TestScenarioServiceListScenarios:
         scenario.get_default_run_size_estimate_async = AsyncMock(return_value=estimate)
 
         with (
-            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioService, "__init__", _initialize_test_service),
             patch("pyrit.backend.services.scenario_service._ESTIMATE_CACHE_SIZE", 1),
         ):
             service = ScenarioService()
@@ -386,7 +522,7 @@ class TestScenarioServiceListScenarios:
             include_baseline_by_default=False,
         )
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = [metadata]
@@ -402,7 +538,7 @@ class TestScenarioServiceListScenarios:
             _make_scenario_metadata(registry_name=f"test.scenario_{i}", class_name=f"Scenario{i}") for i in range(5)
         ]
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = metadata_list
@@ -424,7 +560,7 @@ class TestScenarioServiceListScenarios:
             _make_scenario_metadata(registry_name=f"test.scenario_{i}", class_name=f"Scenario{i}") for i in range(5)
         ]
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = metadata_list
@@ -442,7 +578,7 @@ class TestScenarioServiceListScenarios:
             _make_scenario_metadata(registry_name=f"test.scenario_{i}", class_name=f"Scenario{i}") for i in range(3)
         ]
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = metadata_list
@@ -472,7 +608,7 @@ class TestScenarioServiceGetScenario:
         objective_target = MagicMock()
 
         with (
-            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioService, "__init__", _initialize_test_service),
             patch.object(ScenarioRunService, "resolve_target_name", return_value=objective_target) as resolve_target,
         ):
             service = ScenarioService()
@@ -522,7 +658,7 @@ class TestScenarioServiceGetScenario:
         introspection_instance._default_dataset_config = DatasetAttackConfiguration(dataset_names=["harmbench"])
         scenario_class = MagicMock(return_value=introspection_instance)
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_registered_class_metadata.return_value = metadata
@@ -550,7 +686,7 @@ class TestScenarioServiceGetScenario:
         scenario_class = MagicMock(return_value=introspection_instance)
 
         with (
-            patch.object(ScenarioService, "__init__", lambda self: None),
+            patch.object(ScenarioService, "__init__", _initialize_test_service),
             patch.object(ScenarioRunService, "resolve_target_name") as resolve_target,
         ):
             service = ScenarioService()
@@ -574,7 +710,7 @@ class TestScenarioServiceGetScenario:
         """Test that get returns the matching scenario."""
         metadata = _make_scenario_metadata(registry_name="foundry.red_team_agent")
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_registered_class_metadata.return_value = metadata
@@ -586,7 +722,7 @@ class TestScenarioServiceGetScenario:
 
     async def test_get_scenario_returns_none_for_missing(self) -> None:
         """Test that get returns None when scenario not found."""
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_registered_class_metadata.return_value = None
@@ -712,6 +848,8 @@ class TestScenarioRoutes:
             default_run_size=ScenarioDefaultRunSizeEstimate(
                 status=ScenarioRunSizeEstimateStatus.Exact,
                 total_attack_count=8,
+                minimum_attack_count=8,
+                maximum_attack_count=8,
                 components=[
                     ScenarioRunSizeComponent(
                         label="Default technique sweep",
@@ -735,6 +873,8 @@ class TestScenarioRoutes:
             assert data["default_run_size"]["version"] == 1
             assert data["default_run_size"]["status"] == "exact"
             assert data["default_run_size"]["total_attack_count"] == 8
+            assert data["default_run_size"]["minimum_attack_count"] == 8
+            assert data["default_run_size"]["maximum_attack_count"] == 8
 
     def test_get_scenario_returns_404_when_not_found(self, client: TestClient) -> None:
         """Test that GET /api/scenarios/catalog/{name} returns 404 when not found."""
@@ -776,6 +916,8 @@ class TestScenarioRoutes:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total_attack_count"] == 8
+        assert response.json()["minimum_attack_count"] is None
+        assert response.json()["maximum_attack_count"] is None
         request = mock_service.estimate_scenario_run_size_async.await_args.kwargs["request"]
         assert request.techniques == ["prompt_sending"]
         assert request.include_baseline is False
@@ -873,7 +1015,7 @@ class TestScenarioServiceSupportedParameters:
             ),
         )
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = [metadata]
@@ -902,7 +1044,7 @@ class TestScenarioServiceSupportedParameters:
         """Test that scenarios without parameters have empty supported_parameters."""
         metadata = _make_scenario_metadata()
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = [metadata]
@@ -932,7 +1074,7 @@ class TestScenarioServiceSupportedParameters:
             ),
         )
 
-        with patch.object(ScenarioService, "__init__", lambda self: None):
+        with patch.object(ScenarioService, "__init__", _initialize_test_service):
             service = ScenarioService()
             service._registry = MagicMock()
             service._registry.get_all_registered_class_metadata.return_value = [metadata]
