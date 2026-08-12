@@ -364,16 +364,23 @@ class ConversationManager:
         Returns:
             Empty ConversationState (non-chat targets don't track turns).
         """
+        # Context initialization can run again during retry setup. A marked message already contains
+        # the flattened history and converted live request, so rebuilding it would duplicate the
+        # prefix and rerun converters that may be stateful or nondeterministic.
         if context.next_message and context.next_message.request_converters_applied:
             return ConversationState()
 
         normalizer = config.get_message_normalizer()
+        # Keep separate audit and wire renderings. String normalizers can inspect both value fields,
+        # so each temporary view collapses them to one representation before flattening.
         original_context = await self._normalize_non_chat_context_async(
             messages=self._build_original_normalizer_view(prepended_conversation),
             normalizer=normalizer,
         )
         converted_context = original_context
         if request_converters:
+            # Apply converters while roles are still structural. After flattening, assistant text is
+            # indistinguishable from user text to a request converter and cannot be safely excluded.
             converted_messages = await self._build_converted_normalizer_view_async(
                 messages=prepended_conversation,
                 request_converters=request_converters,
@@ -384,6 +391,8 @@ class ConversationManager:
                 normalizer=normalizer,
             )
 
+        # Build on a copy so a conversion or compatibility failure does not partially mutate the
+        # attack context. The prepared request is assigned only after every step succeeds.
         next_message = (
             context.next_message.duplicate()
             if context.next_message
@@ -393,6 +402,9 @@ class ConversationManager:
             )
         )
         if request_converters and not next_message.request_converters_applied:
+            # Convert the live request before attaching history. Letting the normal send path convert
+            # afterward would apply the converter to the entire flattened string, including roles
+            # excluded above. The marker tells PromptNormalizer not to run the same chain again.
             await self._prompt_normalizer.convert_values_async(
                 converter_configurations=request_converters,
                 message=next_message,
@@ -422,6 +434,7 @@ class ConversationManager:
         Returns:
             list[Message]: Converted message copies ready for string normalization.
         """
+        # Prepended history may also be used by another target path, so conversion must not mutate it.
         converted_messages = [message.duplicate() for message in messages]
         if request_converters:
             for message in converted_messages:
@@ -434,6 +447,8 @@ class ConversationManager:
                 source_messages=messages,
                 converted_messages=converted_messages,
             )
+        # ConversationContextNormalizer displays both values when they differ. In this temporary
+        # wire-only view, align them so flattening emits converted text without audit annotations.
         for message in converted_messages:
             for piece in message.message_pieces:
                 piece.original_value = piece.converted_value
@@ -459,6 +474,9 @@ class ConversationManager:
                 converted_message.message_pieces,
                 strict=True,
             ):
+                # Existing non-text history already has a defined string representation. Reject only
+                # modality changes introduced by this conversion pass, which flattening would reduce
+                # to a placeholder and thereby discard the converter's actual output.
                 converter_was_applied = len(converted_piece.converter_identifiers) > len(
                     source_piece.converter_identifiers
                 )
@@ -501,6 +519,8 @@ class ConversationManager:
         """
         messages_to_normalize = messages
         if isinstance(normalizer, ConversationContextNormalizer):
+            # ConversationContextNormalizer omits system messages. Squash them into the following
+            # user message first so non-chat delivery does not silently lose system instructions.
             messages_to_normalize = await GenericSystemSquashNormalizer().normalize_async(messages)
         return await normalizer.normalize_string_async(messages_to_normalize)
 
@@ -512,6 +532,8 @@ class ConversationManager:
         converted_context: str,
     ) -> None:
         """Prepend original and converted context without mixing their values."""
+        # Preserve provenance and wire data independently: memory should retain the unconverted
+        # conversation while the target receives the role-scoped converted conversation.
         text_piece = next(
             (
                 piece
@@ -531,6 +553,8 @@ class ConversationManager:
             )
             return
 
+        # A multimodal request may have no piece that is text in both views. Add a dedicated text
+        # piece rather than overwriting or coercing the existing artifact.
         template_piece = message.get_piece()
         context_piece = MessagePiece(
             id=uuid.uuid4(),
@@ -738,6 +762,9 @@ class ConversationManager:
         if message.api_role not in apply_to_roles:
             return
 
+        # Apply to the complete message so ConverterConfiguration.indexes_to_apply remains relative
+        # to the original piece list. Converting one temporary piece at a time would reset every
+        # selected piece to index zero.
         await self._prompt_normalizer.convert_values_async(
             message=message,
             converter_configurations=request_converters,
