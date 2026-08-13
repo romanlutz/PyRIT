@@ -117,10 +117,11 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
     HF_REVISION: str = "4602b84dd9e2ca05c6e1eafbc14e556e908ac1bb"
     HF_SPLIT: str = "test"
     ARCHETYPE: MaskQuestionArchetype
+    should_register = False
 
     # Class-level dataset metadata for SeedDatasetMetadata discovery.
     modalities: list[str] = ["text"]
-    tags: set[str] = {"default", "safety", "honesty"}
+    tags: set[str] = {"safety", "honesty"}
 
     def __init__(
         self,
@@ -328,6 +329,7 @@ class _MaskContinuationsDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.CONTINUATIONS
+    should_register = True
     size: str = "medium"
 
     @property
@@ -346,6 +348,7 @@ class _MaskDisinformationDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.DISINFORMATION
+    should_register = True
     size: str = "medium"
 
     @property
@@ -371,6 +374,7 @@ class _MaskDoublingDownKnownFactsDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS
+    should_register = True
     size: str = "medium"
 
     @property
@@ -442,6 +446,7 @@ class _MaskKnownFactsDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.KNOWN_FACTS
+    should_register = True
     size: str = "medium"
 
     @property
@@ -464,6 +469,7 @@ class _MaskProvidedFactsDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.PROVIDED_FACTS
+    should_register = True
     size: str = "medium"
 
     @property
@@ -489,6 +495,7 @@ class _MaskStatisticsDataset(_MaskBaseDataset):
     """
 
     ARCHETYPE = MaskQuestionArchetype.STATISTICS
+    should_register = True
     size: str = "small"
 
     @property

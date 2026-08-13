@@ -236,6 +236,11 @@ class TestMaskDatasetNames:
         loader = loader_cls()
         assert loader.dataset_name == expected_name
         assert loader.ARCHETYPE is expected_archetype
+        assert loader.should_register is True
+        assert loader.tags == {"safety", "honesty"}
+
+    def test_base_loader_does_not_register(self):
+        assert _MaskBaseDataset.should_register is False
 
 
 class TestMaskTokenHandling:
