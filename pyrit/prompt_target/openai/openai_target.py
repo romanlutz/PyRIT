@@ -6,7 +6,7 @@ import logging
 import re
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import Any, Optional
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 from openai import (
@@ -22,14 +22,14 @@ from openai._exceptions import (
     AuthenticationError,
 )
 
-from pyrit.auth import ensure_async_token_provider, get_azure_openai_auth
+from pyrit.auth import resolve_openai_auth
 from pyrit.common import default_values
 from pyrit.exceptions.exception_classes import (
     RateLimitException,
     handle_bad_request_exception,
 )
 from pyrit.models import Message, MessagePiece
-from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.prompt_target import AuthMode, PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.openai.openai_error_handling import (
@@ -57,11 +57,15 @@ class OpenAITarget(PromptTarget):
         capabilities=TargetCapabilities(supports_multi_message_pieces=True)
     )
 
+    # OpenAI-family targets can mint an Entra ID token for a recognized Azure
+    # endpoint (see ``is_azure_openai_endpoint``), so they support both modes.
+    supported_auth_modes: ClassVar[tuple[AuthMode, ...]] = ("api_key", "identity")
+
     model_name_environment_variable: str
     endpoint_environment_variable: str
     api_key_environment_variable: str
 
-    _async_client: Optional[AsyncOpenAI] = None
+    _async_client: AsyncOpenAI | None = None
 
     @property
     def _client(self) -> AsyncOpenAI:
@@ -78,14 +82,14 @@ class OpenAITarget(PromptTarget):
     def __init__(
         self,
         *,
-        model_name: Optional[str] = None,
-        endpoint: Optional[str] = None,
-        api_key: Optional[str | Callable[[], str | Awaitable[str]]] = None,
-        headers: Optional[str] = None,
-        max_requests_per_minute: Optional[int] = None,
-        httpx_client_kwargs: Optional[dict[str, Any]] = None,
-        underlying_model: Optional[str] = None,
-        custom_configuration: Optional[TargetConfiguration] = None,
+        model_name: str | None = None,
+        endpoint: str | None = None,
+        api_key: str | Callable[[], str | Awaitable[str]] | None = None,
+        headers: str | None = None,
+        max_requests_per_minute: int | None = None,
+        httpx_client_kwargs: dict[str, Any] | None = None,
+        underlying_model: str | None = None,
+        custom_configuration: TargetConfiguration | None = None,
     ) -> None:
         """
         Initialize an instance of OpenAITarget.
@@ -96,8 +100,8 @@ class OpenAITarget(PromptTarget):
             endpoint (str, Optional): The target URL for the OpenAI service.
             api_key (str | Callable[[], str | Awaitable[str]], Optional): The API key for accessing the
                 OpenAI service, or a callable that returns an access token (sync or async).
-                For Azure endpoints, if no API key is provided (via parameter or environment variable),
-                Entra ID authentication is used automatically.
+                For recognized Azure OpenAI / AI Foundry endpoints, if no API key is provided
+                (via parameter or environment variable), Entra ID authentication is used automatically.
                 You can also explicitly pass a token provider from pyrit.auth
                 (e.g., get_azure_openai_auth(endpoint) for async, or get_azure_token_provider(scope) for sync).
                 Synchronous token providers are automatically wrapped to work with async clients.
@@ -116,7 +120,8 @@ class OpenAITarget(PromptTarget):
                 this target instance. If None, uses the class-level defaults. Defaults to None.
 
         Raises:
-            ValueError: If no API key is provided and the endpoint is not an Azure endpoint.
+            ValueError: If no API key is provided (via parameter or environment variable) and the
+                endpoint is not a recognized Azure OpenAI / AI Foundry endpoint.
         """
         self._headers: dict[str, str] = {}
         self._httpx_client_kwargs = httpx_client_kwargs or {}
@@ -147,26 +152,11 @@ class OpenAITarget(PromptTarget):
             custom_configuration=custom_configuration,
         )
 
-        # API key: use passed value, env var, or fall back to Entra ID for Azure endpoints
-        resolved_api_key: str | Callable[[], str | Awaitable[str]]
-        if api_key is not None and callable(api_key):
-            resolved_api_key = api_key
-        else:
-            api_key_value = default_values.get_non_required_value(
-                env_var_name=self.api_key_environment_variable, passed_value=api_key
-            )
-            if api_key_value:
-                resolved_api_key = api_key_value
-            elif "azure" in endpoint_value.lower():
-                resolved_api_key = get_azure_openai_auth(endpoint_value)
-            else:
-                raise ValueError(
-                    f"Environment variable {self.api_key_environment_variable} is required for non-Azure endpoints. "
-                    "For Azure endpoints, Entra ID authentication is used automatically."
-                )
-
-        # Ensure api_key is async-compatible (wrap sync token providers if needed)
-        self._api_key = ensure_async_token_provider(resolved_api_key)
+        self._api_key = resolve_openai_auth(
+            endpoint=endpoint_value,
+            api_key=api_key,
+            api_key_environment_variable=self.api_key_environment_variable,
+        )
 
         self._initialize_openai_client()
 
@@ -235,7 +225,7 @@ class OpenAITarget(PromptTarget):
             f"Old Azure URL format detected {issue_desc}. "
             f"Current URL: {url}. "
             f"Recommended format: {suggested_url} {recommendation}. "
-            f"Old format URLs will be deprecated in a future release. "
+            "Use the recommended format for compatibility with current Azure OpenAI clients. "
             f"See https://learn.microsoft.com/en-us/azure/ai-services/openai/api-version-deprecation "
             "for more information."
         )
@@ -442,10 +432,8 @@ class OpenAITarget(PromptTarget):
             if self._check_content_filter(response):
                 return self._handle_content_filter_response(response, request_piece)
 
-            # Validate response via subclass implementation
-            error_message = self._validate_response(response, request_piece)
-            if error_message:
-                return error_message
+            # Validate response via subclass implementation (raises on invalid responses)
+            self._validate_response(response, request_piece)
 
             # Construct and return Message from validated response
             return await self._construct_message_from_response_async(response, request_piece)
@@ -559,6 +547,9 @@ class OpenAITarget(PromptTarget):
         it is attached to each response piece as ``prompt_metadata["partial_content"]``
         so that scorers with ``score_blocked_content=True`` can evaluate it.
 
+        Provider-reported metadata (token usage, stop reason) is captured via
+        ``_capture_response_metadata`` so a filtered response records what it consumed.
+
         Args:
             response: The response object from OpenAI SDK.
             request: The original request message piece.
@@ -581,9 +572,11 @@ class OpenAITarget(PromptTarget):
             for piece in error_message.message_pieces:
                 piece.prompt_metadata["partial_content"] = partial_content
 
+        self._capture_response_metadata(response=response, pieces=error_message.message_pieces)
+
         return error_message
 
-    def _extract_partial_content(self, response: Any) -> Optional[str]:
+    def _extract_partial_content(self, response: Any) -> str | None:
         """
         Extract any partial content the model generated before the content filter triggered.
 
@@ -598,24 +591,58 @@ class OpenAITarget(PromptTarget):
         """
         return None
 
-    def _validate_response(self, response: Any, request: MessagePiece) -> Optional[Message]:
+    def _capture_response_metadata(self, *, response: Any, pieces: list[MessagePiece]) -> None:
         """
-        Validate the response and return error Message if needed.
+        Record provider-reported response metadata (token usage, stop reason) onto the pieces.
 
-        Override this method in subclasses that need custom response validation.
-        Default implementation returns None (no validation errors).
+        Override this in subclasses to read API-specific response structures. The base
+        implementation is a no-op.
+
+        Subclasses call this on their success path and the base class calls it on the
+        content-filter path, so a single override covers both. A filtered response still reports
+        the tokens it consumed, which would otherwise be lost precisely where a red teamer most
+        wants to see it.
+
+        Args:
+            response: The response object from OpenAI SDK. May be a synthetic stand-in that carries
+                no usage or completion data, so implementations must tolerate missing attributes.
+            pieces (list[MessagePiece]): The constructed response pieces.
+        """
+
+    def _validate_response(self, response: Any, request: MessagePiece) -> None:
+        """
+        Validate the response, raising if it is invalid.
+
+        Override this method in subclasses that need custom response validation. Validation only
+        inspects the response; constructing the resulting Message is the responsibility of
+        ``_construct_message_from_response_async``. The default implementation is a no-op.
 
         Args:
             response: The response object from OpenAI SDK.
             request: The original request MessagePiece.
 
-        Returns:
-            Optional[Message]: Error Message if validation fails, None otherwise.
-
         Raises:
             Various exceptions for validation failures.
         """
-        return None
+
+    def _is_truncated_response(self, response: Any) -> bool:
+        """
+        Return True if the response was cut off by the output-token limit.
+
+        Every API shape signals truncation differently (Chat Completions
+        ``finish_reason == "length"``, Responses ``status == "incomplete"`` with
+        ``reason == "max_output_tokens"``), so subclasses that can detect it override this. A
+        truncated response is valid but incomplete: ``_validate_response`` warns instead of
+        raising, and ``_construct_message_from_response_async`` preserves whatever the model
+        produced. The base implementation reports no truncation.
+
+        Args:
+            response: The response object from OpenAI SDK.
+
+        Returns:
+            bool: True if the response was truncated at the token limit, False otherwise.
+        """
+        return False
 
     @abstractmethod
     def _set_openai_env_configuration_vars(self) -> None:

@@ -19,31 +19,21 @@ Usage:
 import json
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 # Import sibling script for post-generation TOC validation.
 sys.path.insert(0, str(Path(__file__).parent))
-import validate_docs  # noqa: E402
+import validate_docs
+from example_index import ExampleReference, SymbolEntry, _build_example_index
 
-API_JSON_DIR = Path("doc/_api")
-API_MD_DIR = Path("doc/api")
+DOC_ROOT = Path("doc")
+API_JSON_DIR = DOC_ROOT / "_api"
+API_MD_DIR = DOC_ROOT / "api"
 
 # Modules excluded from generated API docs (internal implementation details)
 EXCLUDED_MODULES = {
     "pyrit.backend",
 }
-
-
-@dataclass(frozen=True)
-class SymbolEntry:
-    """A resolved API symbol that can be cross-referenced from a docstring."""
-
-    module: str  # dotted module path, e.g. "pyrit.prompt_target"
-    kind: str  # "class" | "function" | "method"
-    name: str  # short name (last segment)
-    qualname: str  # "PromptTarget" or "PromptTarget.send_prompt_async"
-    anchor: str  # MyST label, e.g. "api-pyrit_prompt_target-PromptTarget"
 
 
 # Backtick code spans that look like Python identifiers (with optional
@@ -308,6 +298,57 @@ def _rewrite_param_table(params: list[dict], index: dict[str, list[SymbolEntry]]
             p["desc"] = _rewrite_symbol_refs(p["desc"], index, current_class=current_class)
 
 
+def _format_bases(bases: list[str], symbol_index: dict[str, list[SymbolEntry]] | None) -> str:
+    """Render each base class as an individually-linkable code span.
+
+    Each base is wrapped in single backticks and run through the symbol
+    rewriter separately so that known PyRIT bases become MyST cross-reference
+    links while external bases (e.g. ``str``, ``Enum``) stay as plain code
+    spans. The comma-joined output keeps the rendered ``Bases:`` line readable
+    even when only some bases resolve.
+    """
+    if not bases:
+        return ""
+    if symbol_index is None:
+        return ", ".join(f"`{b}`" for b in bases if b)
+    return ", ".join(_rewrite_symbol_refs(f"`{b}`", symbol_index) for b in bases if b)
+
+
+def _format_reexport_alias(
+    mod_name: str,
+    name: str,
+    symbol_index: dict[str, list[SymbolEntry]] | None,
+) -> str:
+    """Render a re-export alias name as a MyST link when unambiguous.
+
+    Aliases usually live on the current module, so the module-qualified path
+    is tried first. If that lookup is unambiguous we link directly to it;
+    otherwise we fall back to the regular short-name rewriter so unresolvable
+    aliases get the same plain code-span treatment as the rest of the docs.
+    """
+    if not name:
+        return ""
+    if symbol_index is None:
+        return f"`{name}`"
+    fqn = f"{mod_name}.{name}" if mod_name else name
+    entries = symbol_index.get(fqn)
+    if entries and len(entries) == 1:
+        return f"[`{name}`](#{entries[0].anchor})"
+    return _rewrite_symbol_refs(f"`{name}`", symbol_index)
+
+
+def _format_reexport_target(
+    target: str,
+    symbol_index: dict[str, list[SymbolEntry]] | None,
+) -> str:
+    """Render a re-export target FQN as a MyST link when it resolves."""
+    if not target:
+        return ""
+    if symbol_index is None:
+        return f"`{target}`"
+    return _rewrite_symbol_refs(f"`{target}`", symbol_index)
+
+
 def _rewrite_returns_or_raises(
     items: list[dict], index: dict[str, list[SymbolEntry]], current_class: str | None
 ) -> None:
@@ -331,6 +372,28 @@ def _process_docstring_text(
     return _rewrite_symbol_refs(escaped, symbol_index, current_class=current_class)
 
 
+def _example_link_path(
+    path: str,
+    *,
+    api_md_dir: Path = API_MD_DIR,
+    doc_root: Path = DOC_ROOT,
+) -> str:
+    """Return a doc-root-relative example path from a generated API page."""
+    api_depth = len(api_md_dir.relative_to(doc_root).parts)
+    return "/".join([*(".." for _ in range(api_depth)), path])
+
+
+def render_examples(examples: list[ExampleReference] | None) -> str:
+    """Render links to user-guide pages that exercise an API symbol."""
+    if not examples:
+        return ""
+    parts = ["**Examples:**\n"]
+    for example in examples:
+        title = example.title.replace("[", r"\[").replace("]", r"\]")
+        parts.append(f"- [{title}]({_example_link_path(example.path)})")
+    return "\n".join(parts)
+
+
 def render_function(
     func: dict,
     *,
@@ -338,6 +401,7 @@ def render_function(
     module: str,
     class_name: str | None = None,
     symbol_index: dict[str, list[SymbolEntry]] | None = None,
+    examples_by_anchor: dict[str, list[ExampleReference]] | None = None,
 ) -> str:
     """Render a function as markdown."""
     name = func["name"]
@@ -380,6 +444,10 @@ def render_function(
         if raises_md:
             parts.append(raises_md + "\n")
 
+    examples_md = render_examples(examples_by_anchor.get(anchor) if examples_by_anchor and class_name is None else None)
+    if examples_md:
+        parts.append(examples_md + "\n")
+
     return "\n".join(parts)
 
 
@@ -388,16 +456,17 @@ def render_class(
     *,
     module: str,
     symbol_index: dict[str, list[SymbolEntry]] | None = None,
+    examples_by_anchor: dict[str, list[ExampleReference]] | None = None,
 ) -> str:
     """Render a class as markdown."""
     name = cls["name"]
     bases = cls.get("bases", [])
-    bases_str = f"({', '.join(bases)})" if bases else ""
 
     anchor = _class_anchor(module, name)
     parts = [f"({anchor})=", f"## `{name}`\n"]
-    if bases_str:
-        parts.append(f"Bases: `{bases_str[1:-1]}`\n")
+    bases_md = _format_bases(bases, symbol_index)
+    if bases_md:
+        parts.append(f"Bases: {bases_md}\n")
 
     ds = cls.get("docstring", {})
     text = _process_docstring_text(ds.get("text") if ds else None, symbol_index, current_class=name)
@@ -414,6 +483,10 @@ def render_class(
                 _rewrite_param_table(init_params, symbol_index, name)
             parts.append("**Constructor Parameters:**\n")
             parts.append(render_params(init_params) + "\n")
+
+    examples_md = render_examples(examples_by_anchor.get(anchor) if examples_by_anchor else None)
+    if examples_md:
+        parts.append(examples_md + "\n")
 
     # Methods
     methods = cls.get("methods", [])
@@ -447,12 +520,15 @@ def render_module(
     data: dict,
     *,
     symbol_index: dict[str, list[SymbolEntry]] | None = None,
+    examples_by_anchor: dict[str, list[ExampleReference]] | None = None,
 ) -> str:
     """Render a full module page."""
     mod_name = data["name"]
     short_name = mod_name.rsplit(".", 1)[-1]
+    mod_label = f"api-{_module_slug(mod_name)}"
     parts = [
         "---",
+        f"label: {mod_label}",
         f"short_title: {short_name}",
         "---\n",
         f"# {mod_name}\n",
@@ -471,15 +547,35 @@ def render_module(
 
     if functions:
         parts.append("## Functions\n")
-        parts.extend(render_function(f, module=mod_name, symbol_index=symbol_index) for f in functions)
+        parts.extend(
+            render_function(
+                f,
+                module=mod_name,
+                symbol_index=symbol_index,
+                examples_by_anchor=examples_by_anchor,
+            )
+            for f in functions
+        )
 
-    parts.extend(render_class(cls, module=mod_name, symbol_index=symbol_index) for cls in classes)
+    parts.extend(
+        render_class(
+            cls,
+            module=mod_name,
+            symbol_index=symbol_index,
+            examples_by_anchor=examples_by_anchor,
+        )
+        for cls in classes
+    )
 
     if aliases:
         parts.append("## Re-exports\n")
         for a in aliases:
-            target = a.get("target", "")
-            parts.append(f"- `{a['name']}` → `{target}`\n")
+            name_md = _format_reexport_alias(mod_name, a.get("name", ""), symbol_index)
+            target_md = _format_reexport_target(a.get("target", ""), symbol_index)
+            if target_md:
+                parts.append(f"- {name_md} → {target_md}\n")
+            else:
+                parts.append(f"- {name_md}\n")
 
     return "\n".join(parts)
 
@@ -626,13 +722,20 @@ def main() -> None:
     # Build a symbol index over the post-resolution module tree so the
     # docstring rewriter can turn backticked names into MyST cross-references.
     symbol_index = _build_symbol_index(modules)
+    example_index = _build_example_index(
+        doc_root=DOC_ROOT,
+        toc_path=DOC_ROOT / "myst.yml",
+        symbol_index=symbol_index,
+    )
+    indexed_pages = {example.path for examples in example_index.values() for example in examples}
+    print(f"Indexed examples: {len(example_index)} symbols across {len(indexed_pages)} pages")
 
     # Generate per-module pages
     for data in modules:
         mod_name = data["name"]
         slug = mod_name.replace(".", "_")
         md_path = API_MD_DIR / f"{slug}.md"
-        content = render_module(data, symbol_index=symbol_index)
+        content = render_module(data, symbol_index=symbol_index, examples_by_anchor=example_index)
         members = data.get("members", [])
         rendered_count = sum(1 for m in members if m.get("kind") in ("class", "function"))
         md_path.write_text(content, encoding="utf-8")

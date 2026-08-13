@@ -9,14 +9,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
+    AutoModelForCausalLM,  # type: ignore[ty:possibly-missing-import]
+    AutoTokenizer,  # type: ignore[ty:possibly-missing-import]
     BatchEncoding,
     PretrainedConfig,
 )
 
 from pyrit.common import default_values
-from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.download_hf_model import download_specific_files_async
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
@@ -46,6 +45,11 @@ class HuggingFaceChatTarget(PromptTarget):
     _cached_model: Any = None
     _cached_tokenizer: Any = None
     _cached_model_id: str | None = None
+
+    # Instance attributes populated lazily by ``load_model_and_tokenizer_async``. Typed as
+    # ``Any`` because the concrete model class comes from ``transformers`` factory methods
+    # whose return types ty cannot statically resolve.
+    model: Any
 
     # Class-level flag to enable or disable cache
     _cache_enabled = True
@@ -143,7 +147,7 @@ class HuggingFaceChatTarget(PromptTarget):
             self.huggingface_token = None
 
         try:
-            import torch
+            import torch  # type: ignore[ty:unresolved-import]
         except ModuleNotFoundError as e:
             raise RuntimeError("Could not import torch. You may need to install it via 'pip install pyrit[all]'") from e
 
@@ -278,7 +282,7 @@ class HuggingFaceChatTarget(PromptTarget):
                     await download_specific_files_async(
                         self.model_id or "",
                         None,
-                        self.huggingface_token,  # type: ignore[ty:invalid-argument-type]
+                        self.huggingface_token,
                         cache_dir,
                     )
                 else:
@@ -287,21 +291,13 @@ class HuggingFaceChatTarget(PromptTarget):
                     await download_specific_files_async(
                         self.model_id or "",
                         self.necessary_files,
-                        self.huggingface_token,  # type: ignore[ty:invalid-argument-type]
+                        self.huggingface_token,
                         Path(cache_dir),
                     )
 
-                # Load the tokenizer and model from the specified directory
+                # Load the tokenizer and model from the downloaded local snapshot.
                 logger.info(f"Loading model {self.model_id} from cache path: {cache_dir}...")
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_id or "", cache_dir=cache_dir, trust_remote_code=self.trust_remote_code
-                )
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_id or "",
-                    cache_dir=cache_dir,
-                    trust_remote_code=self.trust_remote_code,
-                    **optional_model_kwargs,
-                )
+                self._load_from_path(str(cache_dir), **optional_model_kwargs)
 
             # Move the model to the correct device
             self.model = self.model.to(self.device)
@@ -321,15 +317,6 @@ class HuggingFaceChatTarget(PromptTarget):
         except Exception as e:
             logger.error(f"Error loading model {self.model_id}: {e}")
             raise
-
-    async def load_model_and_tokenizer(self) -> None:  # pyrit-async-suffix-exempt
-        """Use ``load_model_and_tokenizer_async`` instead; this is a deprecated alias."""
-        print_deprecation_message(
-            old_item="pyrit.prompt_target.HuggingFaceChatTarget.load_model_and_tokenizer",
-            new_item="pyrit.prompt_target.HuggingFaceChatTarget.load_model_and_tokenizer_async",
-            removed_in="0.16.0",
-        )
-        await self.load_model_and_tokenizer_async()
 
     @limit_requests_per_minute
     @pyrit_target_retry
@@ -383,7 +370,7 @@ class HuggingFaceChatTarget(PromptTarget):
 
             assistant_response = cast(
                 "str",
-                self.tokenizer.decode(generated_tokens, skip_special_tokens=self.skip_special_tokens),
+                self.tokenizer.decode(generated_tokens, skip_special_tokens=self.skip_special_tokens),  # type: ignore[ty:unresolved-attribute]
             ).strip()
 
             if not assistant_response:
@@ -481,7 +468,7 @@ class HuggingFaceChatTarget(PromptTarget):
             the same process may interfere with determinism.
         """
         if self._random_seed is not None:
-            import torch
+            import torch  # type: ignore[ty:unresolved-import]
 
             torch.manual_seed(self._random_seed)
             if self.use_cuda:

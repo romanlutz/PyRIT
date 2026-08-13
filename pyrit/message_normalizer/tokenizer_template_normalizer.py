@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Literal, Optional, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from pyrit.common import get_non_required_value
 from pyrit.message_normalizer.chat_message_normalizer import ChatMessageNormalizer
@@ -23,7 +23,7 @@ TokenizerSystemBehavior = Literal["keep", "squash", "ignore", "developer"]
 """
 Extended system message behavior for tokenizer templates:
 - "keep": Keep system messages as-is (default for most models)
-- "squash": Merge system message into first user message
+- "squash": Merge system messages into the following user message
 - "ignore": Drop system messages entirely
 - "developer": Change system role to developer role (for newer OpenAI models)
 """
@@ -101,7 +101,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
             tokenizer: A Hugging Face tokenizer with a chat template.
             system_message_behavior: How to handle system messages. Options:
                 - "keep": Keep system messages as-is (default)
-                - "squash": Merge system into first user message
+                - "squash": Merge system messages into the following user message
                 - "ignore": Drop system messages entirely
                 - "developer": Change system role to developer role
         """
@@ -109,7 +109,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         self.system_message_behavior = system_message_behavior
 
     @staticmethod
-    def _load_tokenizer(model_name: str, token: Optional[str]) -> "PreTrainedTokenizerBase":
+    def _load_tokenizer(model_name: str, token: str | None) -> "PreTrainedTokenizerBase":
         """
         Load a tokenizer from HuggingFace.
 
@@ -122,11 +122,13 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         Returns:
             The loaded tokenizer.
         """
-        from transformers import AutoTokenizer
+        import transformers
 
         return cast(
             "PreTrainedTokenizerBase",
-            AutoTokenizer.from_pretrained(model_name, token=token or None),
+            transformers.AutoTokenizer.from_pretrained(  # ty: ignore[possibly-missing-attribute]
+                model_name, token=token or None
+            ),
         )
 
     @classmethod
@@ -134,8 +136,8 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         cls,
         model_name_or_alias: str,
         *,
-        token: Optional[str] = None,
-        system_message_behavior: Optional[TokenizerSystemBehavior] = None,
+        token: str | None = None,
+        system_message_behavior: TokenizerSystemBehavior | None = None,
     ) -> "TokenizerTemplateNormalizer":
         """
         Create a normalizer from a model name or alias.
@@ -193,7 +195,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
 
         Handles system messages based on the configured system_message_behavior:
         - "keep": Pass system messages as-is
-        - "squash": Merge system into first user message
+        - "squash": Merge system messages into the following user message
         - "ignore": Drop system messages entirely
         - "developer": Change system role to developer role
 

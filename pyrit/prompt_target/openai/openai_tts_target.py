@@ -2,17 +2,14 @@
 # Licensed under the MIT license.
 
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
+from pyrit.common import forward_init_parameters
 from pyrit.exceptions import (
     pyrit_target_retry,
 )
-from pyrit.models import (
-    ComponentIdentifier,
-    Message,
-    construct_response_from_request,
-    data_serializer_factory,
-)
+from pyrit.memory import data_serializer_factory
+from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
@@ -34,14 +31,15 @@ class OpenAITTSTarget(OpenAITarget):
         )
     )
 
+    @forward_init_parameters
     def __init__(
         self,
         *,
         voice: TTSVoice = "alloy",
         response_format: TTSResponseFormat = "mp3",
         language: str = "en",
-        speed: Optional[float] = None,
-        custom_configuration: Optional[TargetConfiguration] = None,
+        speed: float | None = None,
+        custom_configuration: TargetConfiguration | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -145,8 +143,8 @@ class OpenAITTSTarget(OpenAITarget):
                 model=str(body_parameters["model"]),
                 voice=str(body_parameters["voice"]),
                 input=str(body_parameters["input"]),
-                response_format=body_parameters.get("response_format"),
-                speed=body_parameters.get("speed"),
+                response_format=body_parameters.get("response_format"),  # type: ignore[ty:invalid-argument-type]
+                speed=body_parameters.get("speed"),  # type: ignore[ty:invalid-argument-type]
             ),
             request=message,
         )

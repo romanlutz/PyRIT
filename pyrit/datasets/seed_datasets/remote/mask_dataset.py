@@ -9,7 +9,7 @@ from enum import Enum
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import Seed, SeedDataset, SeedObjective, SeedPrompt
+from pyrit.models import SeedDataset, SeedObjective, SeedPrompt, SeedUnion
 from pyrit.models.literals import ChatMessageRole
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
             revision=self.HF_REVISION,
         )
 
-        seeds: list[Seed] = []
+        seeds: list[SeedUnion] = []
         for row in data:
             seeds.extend(self._row_to_seeds(row=row))
 
@@ -182,7 +182,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
 
         return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
 
-    def _row_to_seeds(self, *, row: dict) -> list[Seed]:
+    def _row_to_seeds(self, *, row: dict) -> list[SeedUnion]:
         """
         Convert one MASK row into a ``SeedObjective`` plus the roled
         ``SeedPrompt`` pieces of the pressured conversation.
@@ -194,7 +194,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
             row: A single row from the HuggingFace dataset for this archetype.
 
         Returns:
-            list[Seed]: ``[SeedObjective, SeedPrompt(system, seq=0), ...,
+            list[SeedUnion]: ``[SeedObjective, SeedPrompt(system, seq=0), ...,
                 SeedPrompt(user, seq=N)]`` for the row.
         """
         group_id = uuid.uuid4()
@@ -332,7 +332,7 @@ class _MaskContinuationsDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_continuations"
 
 
@@ -350,7 +350,7 @@ class _MaskDisinformationDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_disinformation"
 
 
@@ -375,7 +375,7 @@ class _MaskDoublingDownKnownFactsDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_doubling_down_known_facts"
 
     def _build_conversation_prompts(
@@ -446,7 +446,7 @@ class _MaskKnownFactsDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_known_facts"
 
 
@@ -468,7 +468,7 @@ class _MaskProvidedFactsDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_provided_facts"
 
 
@@ -493,5 +493,5 @@ class _MaskStatisticsDataset(_MaskBaseDataset):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "mask_statistics"
