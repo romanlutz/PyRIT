@@ -298,6 +298,7 @@ class TestRedTeamingAttackInitialization:
         assert attack._request_converters == converter_config.request_converters
         assert attack._response_converters == converter_config.response_converters
         assert attack._prompt_normalizer == mock_prompt_normalizer
+        assert attack._conversation_manager._prompt_normalizer is mock_prompt_normalizer
         assert attack._max_turns == 20
 
     def test_init_without_objective_scorer_raises_error(

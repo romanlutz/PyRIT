@@ -13,11 +13,7 @@ from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import (
-    ConversationContextNormalizer,
-    GenericSystemSquashNormalizer,
-    MessageStringNormalizer,
-)
+from pyrit.message_normalizer import ConversationContextNormalizer
 from pyrit.models import (
     ChatMessageRole,
     ComponentIdentifier,
@@ -279,18 +275,12 @@ class ConversationManager:
 
         This is the primary method for setting up an attack context. It:
         1. Merges memory_labels from attack strategy with context labels
-        2. Processes prepended_conversation based on target type and config
+        2. Persists prepended_conversation structurally with role-scoped converters
         3. Updates context.executed_turns for multi-turn attacks
-        4. Sets context.next_message if there's an unanswered user message
 
-        For chat-capable PromptTarget:
-            - Adds prepended messages to memory with simulated_assistant role
-            - All messages get new UUIDs
-
-        For non-chat PromptTarget:
-            - Applies request converters to configured prepended roles before normalization
-            - Normalizes the prepended conversation to a string and prepends it to
-              ``context.next_message`` (using ``config.message_normalizer`` when provided)
+        For all PromptTarget types, prepended messages are added to memory with
+        simulated_assistant roles and new UUIDs. Targets without editable history receive
+        a one-shot formatter that combines this structured history with the first live request.
 
         Args:
             context: The attack context to initialize.
@@ -320,21 +310,7 @@ class ConversationManager:
             logger.debug(f"No prepended conversation for context initialization: {conversation_id}")
             return state
 
-        # Targets that don't natively support editable history cannot consume a
-        # prepended multi-message conversation as-is — route them to the
-        # single-string fallback path via capability-based routing.
-        is_chat_target = target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
-        if not is_chat_target:
-            config = prepended_conversation_config or PrependedConversationConfig()
-            return await self._handle_non_chat_target_async(
-                context=context,
-                prepended_conversation=prepended_conversation,
-                config=config,
-                request_converters=request_converters,
-            )
-
-        # Process prepended conversation for objective target
-        return await self._process_prepended_for_chat_target_async(
+        return await self._process_prepended_conversation_async(
             context=context,
             prepended_conversation=prepended_conversation,
             conversation_id=conversation_id,
@@ -342,243 +318,8 @@ class ConversationManager:
             prepended_conversation_config=prepended_conversation_config,
             max_turns=max_turns,
             target_identifier=target.get_identifier(),
+            target=target,
         )
-
-    async def _handle_non_chat_target_async(
-        self,
-        *,
-        context: AttackContext[Any],
-        prepended_conversation: list[Message],
-        config: PrependedConversationConfig,
-        request_converters: list[ConverterConfiguration] | None,
-    ) -> ConversationState:
-        """
-        Handle prepended conversation for non-chat targets.
-
-        Args:
-            context: The attack context.
-            prepended_conversation: Messages to prepend.
-            config: Configuration for non-chat target behavior.
-            request_converters: Converters to apply before flattening.
-
-        Returns:
-            Empty ConversationState (non-chat targets don't track turns).
-        """
-        # Context initialization can run again during retry setup. A marked message already contains
-        # the flattened history and converted live request, so rebuilding it would duplicate the
-        # prefix and rerun converters that may be stateful or nondeterministic.
-        if context.next_message and context.next_message.request_converters_applied:
-            return ConversationState()
-
-        normalizer = config.get_message_normalizer()
-        # Keep separate audit and wire renderings. String normalizers can inspect both value fields,
-        # so each temporary view collapses them to one representation before flattening.
-        original_context = await self._normalize_non_chat_context_async(
-            messages=self._build_original_normalizer_view(prepended_conversation),
-            normalizer=normalizer,
-        )
-        converted_context = original_context
-        if request_converters:
-            # Apply converters while roles are still structural. After flattening, assistant text is
-            # indistinguishable from user text to a request converter and cannot be safely excluded.
-            converted_messages = await self._build_converted_normalizer_view_async(
-                messages=prepended_conversation,
-                request_converters=request_converters,
-                apply_to_roles=config.apply_converters_to_roles,
-            )
-            converted_context = await self._normalize_non_chat_context_async(
-                messages=converted_messages,
-                normalizer=normalizer,
-            )
-
-        # Build on a copy so a conversion or compatibility failure does not partially mutate the
-        # attack context. The prepared request is assigned only after every step succeeds.
-        next_message = (
-            context.next_message.duplicate()
-            if context.next_message
-            else Message.from_prompt(
-                prompt=context.objective,
-                role="user",
-            )
-        )
-        if request_converters and not next_message.request_converters_applied:
-            # Convert the live request before attaching history. Letting the normal send path convert
-            # afterward would apply the converter to the entire flattened string, including roles
-            # excluded above. The marker tells PromptNormalizer not to run the same chain again.
-            await self._prompt_normalizer.convert_values_async(
-                converter_configurations=request_converters,
-                message=next_message,
-            )
-            next_message.mark_request_converters_applied()
-
-        self._prepend_non_chat_context(
-            message=next_message,
-            original_context=original_context,
-            converted_context=converted_context,
-        )
-        context.next_message = next_message
-
-        logger.debug(f"Normalized prepended conversation for non-chat target: {len(converted_context)} characters")
-        return ConversationState()
-
-    async def _build_converted_normalizer_view_async(
-        self,
-        *,
-        messages: list[Message],
-        request_converters: list[ConverterConfiguration],
-        apply_to_roles: list[ChatMessageRole],
-    ) -> list[Message]:
-        """
-        Build copies containing only the values that should be sent.
-
-        Returns:
-            list[Message]: Converted message copies ready for string normalization.
-        """
-        # Prepended history may also be used by another target path, so conversion must not mutate it.
-        converted_messages = [message.duplicate() for message in messages]
-        if request_converters:
-            for message in converted_messages:
-                await self._apply_converters_async(
-                    message=message,
-                    request_converters=request_converters,
-                    apply_to_roles=apply_to_roles,
-                )
-            self._validate_flattenable_converter_output(
-                source_messages=messages,
-                converted_messages=converted_messages,
-            )
-        # ConversationContextNormalizer displays both values when they differ. In this temporary
-        # wire-only view, align them so flattening emits converted text without audit annotations.
-        for message in converted_messages:
-            for piece in message.message_pieces:
-                piece.original_value = piece.converted_value
-                piece.original_value_data_type = piece.converted_value_data_type
-        return converted_messages
-
-    @staticmethod
-    def _validate_flattenable_converter_output(
-        *,
-        source_messages: list[Message],
-        converted_messages: list[Message],
-    ) -> None:
-        """
-        Reject converted history that a string normalizer cannot preserve.
-
-        Raises:
-            ValueError: If an applied converter produced non-text prepended history.
-        """
-        output_types: set[str] = set()
-        for source_message, converted_message in zip(source_messages, converted_messages, strict=True):
-            for source_piece, converted_piece in zip(
-                source_message.message_pieces,
-                converted_message.message_pieces,
-                strict=True,
-            ):
-                # Existing non-text history already has a defined string representation. Reject only
-                # modality changes introduced by this conversion pass, which flattening would reduce
-                # to a placeholder and thereby discard the converter's actual output.
-                converter_was_applied = len(converted_piece.converter_identifiers) > len(
-                    source_piece.converter_identifiers
-                )
-                if converter_was_applied and converted_piece.converted_value_data_type != "text":
-                    output_types.add(converted_piece.converted_value_data_type)
-
-        if output_types:
-            raise ValueError(
-                "Cannot flatten prepended conversation for a non-chat target after request converters "
-                f"produced non-text output types {sorted(output_types)}. Role-scoped prepended conversion "
-                "must produce text; use text-output converters or a chat target with editable history."
-            )
-
-    @staticmethod
-    def _build_original_normalizer_view(messages: list[Message]) -> list[Message]:
-        """
-        Build copies containing only the original values.
-
-        Returns:
-            list[Message]: Message copies with converted fields reset to their originals.
-        """
-        original_messages = [message.duplicate() for message in messages]
-        for message in original_messages:
-            for piece in message.message_pieces:
-                piece.converted_value = piece.original_value
-                piece.converted_value_data_type = piece.original_value_data_type
-        return original_messages
-
-    @staticmethod
-    async def _normalize_non_chat_context_async(
-        *,
-        messages: list[Message],
-        normalizer: MessageStringNormalizer,
-    ) -> str:
-        """
-        Flatten role-separated messages into a context string.
-
-        Returns:
-            str: The flattened conversation context.
-        """
-        messages_to_normalize = messages
-        if isinstance(normalizer, ConversationContextNormalizer):
-            # ConversationContextNormalizer omits system messages. Squash them into the following
-            # user message first so non-chat delivery does not silently lose system instructions.
-            messages_to_normalize = await GenericSystemSquashNormalizer().normalize_async(messages)
-        return await normalizer.normalize_string_async(messages_to_normalize)
-
-    @staticmethod
-    def _prepend_non_chat_context(
-        *,
-        message: Message,
-        original_context: str,
-        converted_context: str,
-    ) -> None:
-        """Prepend original and converted context without mixing their values."""
-        # Preserve provenance and wire data independently: memory should retain the unconverted
-        # conversation while the target receives the role-scoped converted conversation.
-        text_piece = next(
-            (
-                piece
-                for piece in message.message_pieces
-                if piece.original_value_data_type == "text" and piece.converted_value_data_type == "text"
-            ),
-            None,
-        )
-        if text_piece:
-            text_piece.original_value = ConversationManager._prepend_context_value(
-                context=original_context,
-                value=text_piece.original_value,
-            )
-            text_piece.converted_value = ConversationManager._prepend_context_value(
-                context=converted_context,
-                value=text_piece.converted_value,
-            )
-            return
-
-        # A multimodal request may have no piece that is text in both views. Add a dedicated text
-        # piece rather than overwriting or coercing the existing artifact.
-        template_piece = message.get_piece()
-        context_piece = MessagePiece(
-            id=uuid.uuid4(),
-            role=template_piece.role,
-            original_value=original_context,
-            converted_value=converted_context,
-            original_value_data_type="text",
-            converted_value_data_type="text",
-            conversation_id=template_piece.conversation_id,
-            sequence=template_piece.sequence,
-        )
-        message.message_pieces.insert(0, context_piece)
-
-    @staticmethod
-    def _prepend_context_value(*, context: str, value: str) -> str:
-        """
-        Prepend context once to a message value.
-
-        Returns:
-            str: The value prefixed with context when it was not already present.
-        """
-        if not context or value == context or value.startswith(f"{context}\n\n"):
-            return value
-        return f"{context}\n\n{value}"
 
     async def add_prepended_conversation_to_memory_async(
         self,
@@ -589,9 +330,10 @@ class ConversationManager:
         prepended_conversation_config: PrependedConversationConfig | None = None,
         max_turns: int | None = None,
         target_identifier: ComponentIdentifier | None = None,
+        target: PromptTarget | None = None,
     ) -> int:
         """
-        Add prepended conversation messages to memory for a chat target.
+        Add prepended conversation messages to memory for a target.
 
         This is a lower-level method that handles adding messages to memory without
         modifying any attack context state. It can be called directly by attacks
@@ -611,6 +353,8 @@ class ConversationManager:
             max_turns: If provided, validates that turn count doesn't exceed this limit.
             target_identifier (ComponentIdentifier | None): The target the conversation is held
                 with, if known. Recorded once per conversation.
+            target (PromptTarget | None): Target that will receive the first live request. When it
+                lacks editable history, its target-normalization path receives the configured formatter.
 
         Returns:
             The number of turns (assistant messages) added.
@@ -623,6 +367,9 @@ class ConversationManager:
         if not valid_messages:
             return 0
 
+        if target and target_identifier is None:
+            target_identifier = target.get_identifier()
+
         self._memory.add_conversation_to_memory(
             conversation=Conversation(conversation_id=conversation_id, target_identifier=target_identifier)
         )
@@ -631,6 +378,9 @@ class ConversationManager:
         # path must use the same safe role default as an explicit default config.
         config = prepended_conversation_config or PrependedConversationConfig()
         apply_to_roles = config.apply_converters_to_roles
+        requires_prepended_adaptation = bool(
+            target and not target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
+        )
 
         turn_count = 0
 
@@ -659,14 +409,25 @@ class ConversationManager:
                     request_converters=request_converters,
                     apply_to_roles=apply_to_roles,
                 )
+                if requires_prepended_adaptation:
+                    self._validate_flattenable_converter_output(
+                        source_message=message,
+                        converted_message=message_copy,
+                    )
 
             # Add to memory
             self._memory.add_message_to_memory(request=message_copy)
             logger.debug(f"Added prepended message {i + 1}/{len(valid_messages)} to memory")
 
+        if requires_prepended_adaptation:
+            self._prompt_normalizer.register_prepended_conversation_normalizer(
+                conversation_id=conversation_id,
+                message_normalizer=config.get_message_normalizer(),
+            )
+
         return turn_count
 
-    async def _process_prepended_for_chat_target_async(
+    async def _process_prepended_conversation_async(
         self,
         *,
         context: AttackContext[Any],
@@ -676,9 +437,10 @@ class ConversationManager:
         prepended_conversation_config: PrependedConversationConfig | None,
         max_turns: int | None,
         target_identifier: ComponentIdentifier | None = None,
+        target: PromptTarget,
     ) -> ConversationState:
         """
-        Process prepended conversation for a chat target.
+        Process prepended conversation for a target.
 
         Adds messages to memory with:
         - New UUIDs for all pieces
@@ -694,6 +456,7 @@ class ConversationManager:
             max_turns: Maximum turns for validation.
             target_identifier (ComponentIdentifier | None): The objective target the
                 conversation is held with, if known.
+            target: The objective target that will receive the conversation.
 
         Returns:
             ConversationState with turn_count and scores.
@@ -714,6 +477,7 @@ class ConversationManager:
             prepended_conversation_config=prepended_conversation_config,
             max_turns=max_turns,
             target_identifier=target_identifier,
+            target=target,
         )
 
         # Update context for multi-turn attacks to reflect prepended_conversation
@@ -743,6 +507,35 @@ class ConversationManager:
                         context.last_score = score  # type: ignore[ty:invalid-assignment]
 
         return state
+
+    @staticmethod
+    def _validate_flattenable_converter_output(
+        *,
+        source_message: Message,
+        converted_message: Message,
+    ) -> None:
+        """
+        Reject non-text output produced by this prepended conversion pass.
+
+        Raises:
+            ValueError: If an applied converter produced non-text prepended history.
+        """
+        output_types = {
+            converted_piece.converted_value_data_type
+            for source_piece, converted_piece in zip(
+                source_message.message_pieces,
+                converted_message.message_pieces,
+                strict=True,
+            )
+            if len(converted_piece.converter_identifiers) > len(source_piece.converter_identifiers)
+            and converted_piece.converted_value_data_type != "text"
+        }
+        if output_types:
+            raise ValueError(
+                "Cannot flatten prepended conversation for a target without editable history after "
+                f"request converters produced non-text output types {sorted(output_types)}. Prepended "
+                "conversion must produce text."
+            )
 
     async def _apply_converters_async(
         self,

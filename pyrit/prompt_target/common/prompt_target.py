@@ -6,6 +6,7 @@ import logging
 from typing import Any, ClassVar, Literal, final
 
 from pyrit.memory import CentralMemory, MemoryInterface
+from pyrit.message_normalizer import MessageStringNormalizer, PrependedConversationNormalizer
 from pyrit.models import (
     ComponentIdentifier,
     Conversation,
@@ -132,7 +133,12 @@ class PromptTarget(Identifiable):
             logging.basicConfig(level=logging.INFO)
 
     @final
-    async def send_prompt_async(self, *, message: Message) -> list[Message]:
+    async def send_prompt_async(
+        self,
+        *,
+        message: Message,
+        prepended_conversation_normalizer: MessageStringNormalizer | None = None,
+    ) -> list[Message]:
         """
         Validate, normalize, and send a prompt to the target.
 
@@ -149,6 +155,8 @@ class PromptTarget(Identifiable):
 
         Args:
             message (Message): The message to send.
+            prepended_conversation_normalizer (MessageStringNormalizer | None): Optional one-shot
+                formatter for structured prepended history on a target without editable history.
 
         Returns:
             list[Message]: Response messages from the target.
@@ -157,7 +165,10 @@ class PromptTarget(Identifiable):
             ValueError: If the message or normalized conversation are empty.
         """
         message.validate()
-        normalized_conversation = await self._get_normalized_conversation_async(message=message)
+        normalized_conversation = await self._get_normalized_conversation_async(
+            message=message,
+            prepended_conversation_normalizer=prepended_conversation_normalizer,
+        )
         if not normalized_conversation:
             raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
         self._validate_request(normalized_conversation=normalized_conversation)
@@ -220,7 +231,12 @@ class PromptTarget(Identifiable):
         if not self.configuration.includes(capability=CapabilityName.MULTI_TURN) and len(normalized_conversation) > 1:
             raise ValueError(f"This target only supports a single turn conversation. {custom_configuration_message}")
 
-    async def _get_normalized_conversation_async(self, *, message: Message) -> list[Message]:
+    async def _get_normalized_conversation_async(
+        self,
+        *,
+        message: Message,
+        prepended_conversation_normalizer: MessageStringNormalizer | None = None,
+    ) -> list[Message]:
         """
         Fetch the conversation from memory, append the current message, and run the
         normalization pipeline.
@@ -235,6 +251,9 @@ class PromptTarget(Identifiable):
 
         Args:
             message (Message): The current message to append.
+            prepended_conversation_normalizer (MessageStringNormalizer | None): Optional formatter
+                that combines the existing prepended history with this request before the standard
+                capability pipeline runs.
 
         Returns:
             list[Message]: The normalized conversation (possibly with system prompt squashed,
@@ -245,6 +264,12 @@ class PromptTarget(Identifiable):
             list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
         )
         conversation.append(message)
+        if prepended_conversation_normalizer and not self.configuration.includes(
+            capability=CapabilityName.EDITABLE_HISTORY
+        ):
+            conversation = await PrependedConversationNormalizer(
+                message_normalizer=prepended_conversation_normalizer
+            ).normalize_async(conversation)
         normalized = await self.configuration.normalize_async(messages=conversation)
         if normalized:
             # Normalizers may create new Message objects (via Message.from_prompt) with

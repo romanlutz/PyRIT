@@ -13,9 +13,11 @@ if TYPE_CHECKING:
 import pytest
 from openai.types.chat import ChatCompletion
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from unit.mocks import MockPromptTarget
 
 from pyrit.memory.memory_interface import MemoryInterface
-from pyrit.models import Message, MessagePiece
+from pyrit.message_normalizer import ConversationContextNormalizer, MessageStringNormalizer
+from pyrit.models import ComponentIdentifier, Message, MessagePiece
 from pyrit.prompt_target import AzureMLChatTarget, OpenAIChatTarget
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityHandlingPolicy,
@@ -489,3 +491,180 @@ async def test_get_normalized_conversation_passthrough_when_no_adaptation_needed
     assert result[0].get_value() == "be nice"
     assert result[1].get_piece().api_role == "user"
     assert result[1].get_value() == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Prepended history adaptation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_adapts_prepended_history_without_mutating_memory():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+
+    prepended_user = _make_message(role="user", content="original history")
+    prepended_user.get_piece().converted_value = "converted history"
+    prepended_user.get_piece().converter_identifiers = [
+        ComponentIdentifier(class_name="TestConverter", class_module="tests")
+    ]
+    prepended_assistant = _make_message(role="simulated_assistant", content="assistant history")
+    live_request = _make_message(role="user", content="original live")
+    live_request.get_piece().converted_value = "converted live"
+    memory_messages: MutableSequence[Message] = [prepended_user, prepended_assistant]
+
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = memory_messages
+    target._memory = mock_memory
+
+    result = await target._get_normalized_conversation_async(
+        message=live_request,
+        prepended_conversation_normalizer=ConversationContextNormalizer(),
+    )
+
+    assert len(result) == 1
+    assert result[0].get_piece().original_value == (
+        "Turn 1:\nuser: original history\nassistant: assistant history\n\noriginal live"
+    )
+    assert result[0].get_piece().converted_value == (
+        "Turn 1:\nuser: converted history\nassistant: assistant history\n\nconverted live"
+    )
+    assert len(memory_messages) == 2
+    assert memory_messages[0].get_piece().original_value == "original history"
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_preserves_system_history_and_multimodal_live_request():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_message_pieces=True,
+            input_modalities=frozenset({frozenset({"text", "image_path"})}),
+        )
+    )
+    system_message = _make_message(role="system", content="Describe images precisely")
+    live_request = Message(
+        message_pieces=[
+            MessagePiece(
+                role="user",
+                original_value="diagram.png",
+                converted_value="diagram.png",
+                original_value_data_type="image_path",
+                converted_value_data_type="image_path",
+                conversation_id="conv1",
+            )
+        ]
+    )
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = [system_message]
+    target._memory = mock_memory
+
+    result = await target._get_normalized_conversation_async(
+        message=live_request,
+        prepended_conversation_normalizer=ConversationContextNormalizer(),
+    )
+
+    assert len(result) == 1
+    assert len(result[0].message_pieces) == 2
+    assert result[0].message_pieces[0].converted_value == "Turn 1:\nuser: Describe images precisely"
+    assert result[0].message_pieces[1].converted_value == "diagram.png"
+    assert result[0].message_pieces[1].converted_value_data_type == "image_path"
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_prepended_history_adapter_is_used_only_when_explicitly_passed():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_system_prompt=True,
+        )
+    )
+    prepended = _make_message(role="user", content="prepended")
+    prior_live = _make_message(role="user", content="first live")
+    prior_response = _make_message(role="assistant", content="first response")
+    second_live = _make_message(role="user", content="second live")
+
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.side_effect = [
+        [prepended],
+        [prepended, prior_live, prior_response],
+    ]
+    target._memory = mock_memory
+
+    await target.send_prompt_async(
+        message=prior_live,
+        prepended_conversation_normalizer=ConversationContextNormalizer(),
+    )
+    await target.send_prompt_async(message=second_live)
+
+    assert target.prompt_sent == ["Turn 1:\nuser: prepended\n\nfirst live", "second live"]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_uses_custom_prepended_formatter():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = [_make_message(role="user", content="prepended")]
+    target._memory = mock_memory
+    formatter = MagicMock(spec=MessageStringNormalizer)
+    formatter.normalize_string_async = AsyncMock(return_value="CUSTOM HISTORY")
+
+    result = await target._get_normalized_conversation_async(
+        message=_make_message(role="user", content="live"),
+        prepended_conversation_normalizer=formatter,
+    )
+
+    assert result[0].get_value() == "CUSTOM HISTORY\n\nlive"
+    formatter.normalize_string_async.assert_awaited_once()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_rejects_non_text_converted_prepended_history():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+    prepended = _make_message(role="user", content="original")
+    prepended.get_piece().converted_value = "converted.png"
+    prepended.get_piece().converted_value_data_type = "image_path"
+    prepended.get_piece().converter_identifiers = [
+        ComponentIdentifier(class_name="ImageConverter", class_module="tests")
+    ]
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = [prepended]
+    target._memory = mock_memory
+
+    with pytest.raises(ValueError, match="non-text output types.*image_path"):
+        await target._get_normalized_conversation_async(
+            message=_make_message(role="user", content="live"),
+            prepended_conversation_normalizer=ConversationContextNormalizer(),
+        )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_allows_preexisting_non_text_history_with_converter_provenance():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+    prepended = Message(
+        message_pieces=[
+            MessagePiece(
+                role="user",
+                original_value="existing.png",
+                converted_value="existing.png",
+                original_value_data_type="image_path",
+                converted_value_data_type="image_path",
+                conversation_id="conv1",
+                converter_identifiers=[ComponentIdentifier(class_name="PriorConverter", class_module="tests")],
+            )
+        ]
+    )
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = [prepended]
+    target._memory = mock_memory
+
+    result = await target._get_normalized_conversation_async(
+        message=_make_message(role="user", content="live"),
+        prepended_conversation_normalizer=ConversationContextNormalizer(),
+    )
+
+    assert result[0].get_value() == "Turn 1:\nuser: [Image_path]\n\nlive"

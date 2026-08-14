@@ -464,6 +464,7 @@ class _TreeOfAttacksNode:
             request_converters=self._request_converters,
             prepended_conversation_config=prepended_conversation_config,
             target_identifier=self._objective_target.get_identifier(),
+            target=self._objective_target,
         )
 
         # Build context string for adversarial chat system prompt (like Crescendo)
@@ -1373,7 +1374,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             batch_size (int): Number of nodes to process in parallel per batch. Defaults to 10.
             prepended_conversation_config (PrependedConversationConfig | None):
                 Configuration for how to process prepended conversations. Controls converter
-                application by role, message normalization, and non-chat target behavior.
+                application by role and first-send formatting for targets without editable history.
 
         Raises:
             ValueError: If attack_scoring_config uses a non-FloatScaleThresholdScorer objective scorer,

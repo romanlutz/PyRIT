@@ -76,7 +76,7 @@ class PromptSendingAttack(SingleTurnAttackStrategy):
                 a params type that rejects certain fields.
             prepended_conversation_config (PrependedConversationConfiguration | None):
                 Configuration for how to process prepended conversations. Controls converter
-                application by role, message normalization, and non-chat target behavior.
+                application by role and first-send formatting for targets without editable history.
                 Request converters apply to prepended user messages by default; include
                 ``"assistant"`` explicitly to transform simulated assistant history.
 

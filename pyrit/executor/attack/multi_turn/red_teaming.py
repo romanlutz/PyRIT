@@ -171,7 +171,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         # Initialize utilities
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
 
-        self._conversation_manager = ConversationManager()
+        self._conversation_manager = ConversationManager(prompt_normalizer=self._prompt_normalizer)
 
         # set the maximum number of turns for the attack
         if max_turns <= 0:

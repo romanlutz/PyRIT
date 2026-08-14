@@ -62,27 +62,13 @@ class _TestAttackContext(AttackContext):
 
 
 class _ImageOutputConverter(Converter):
-    """A deterministic text-to-image converter for non-chat flattening tests."""
+    """A deterministic text-to-image converter for prepended-history adaptation tests."""
 
     SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
     SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         return ConverterResult(output_text="converted.png", output_type="image_path")
-
-
-class _CountingTextConverter(Converter):
-    """A text converter that produces a different result on each call."""
-
-    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
-    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
-
-    def __init__(self) -> None:
-        self.call_count = 0
-
-    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
-        self.call_count += 1
-        return ConverterResult(output_text=f"conversion-{self.call_count}<{prompt}>", output_type="text")
 
 
 # =============================================================================
@@ -736,105 +722,41 @@ class TestInitializeContext:
         assert stored[0].get_piece().role == "simulated_assistant"
         assert stored[0].get_piece().api_role == "assistant"
 
-    async def test_normalizes_for_non_chat_target_by_default(
+    async def test_stores_prepended_conversation_for_non_editable_target(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that prepended conversation is normalized for non-chat targets by default."""
         manager = ConversationManager()
         conversation_id = str(uuid.uuid4())
         context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
         context.prepended_conversation = sample_conversation
-        context.next_message = None
 
-        # By default, should normalize (not raise) - matching PrependedConversationConfig field default
-        await manager.initialize_context_async(
+        state = await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
             conversation_id=conversation_id,
         )
 
-        # next_message should now contain the normalized prepended context
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert len(text_value) > 0
+        stored = manager.get_conversation(conversation_id)
+        assert len(stored) == 2
+        assert [message.api_role for message in stored] == ["user", "assistant"]
+        assert stored[1].get_piece().role == "simulated_assistant"
+        assert state.turn_count == 1
+        assert context.next_message is None
 
-    async def test_normalizes_for_non_chat_target_when_configured(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that non-chat target normalizes prepended conversation when configured."""
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = Message.from_prompt(prompt="Next message", role="user")
-
-        config = PrependedConversationConfig()
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-            prepended_conversation_config=config,
-        )
-
-        # next_message should now contain the prepended context
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert "Next message" in text_value
-        assert "Hello" in text_value or "doing well" in text_value
-
-    @pytest.mark.parametrize(
-        "prepended_conversation_config",
-        [
-            None,
-            PrependedConversationConfig(message_normalizer=ConversationContextNormalizer()),
-        ],
-    )
-    async def test_system_prompt_for_non_chat_target_preserves_instruction_and_objective(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        prepended_conversation_config: PrependedConversationConfig | None,
-    ) -> None:
-        manager = ConversationManager()
-        context = _TestAttackContext(params=AttackParameters(objective="Explain saponification"))
-        context.prepended_conversation = [Message.from_system_prompt("You are a chemistry tutor")]
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
-            prepended_conversation_config=prepended_conversation_config,
-        )
-
-        assert context.next_message is not None
-        assert context.next_message.get_value() == "Turn 1:\nuser: You are a chemistry tutor\n\nExplain saponification"
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
-            prepended_conversation_config=prepended_conversation_config,
-        )
-
-        assert context.next_message.get_value() == "Turn 1:\nuser: You are a chemistry tutor\n\nExplain saponification"
-
-    async def test_system_prompt_for_non_chat_target_preserves_supplied_next_message(
+    async def test_non_editable_target_does_not_rewrite_supplied_next_message(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
     ) -> None:
         manager = ConversationManager()
+        next_message = Message.from_prompt(prompt="Caller-supplied question", role="user")
         context = _TestAttackContext(
             params=AttackParameters(
                 objective="Unused objective",
-                next_message=Message.from_prompt(prompt="Caller-supplied question", role="user"),
+                next_message=next_message,
             )
         )
         context.prepended_conversation = [Message.from_system_prompt("Follow the policy")]
@@ -845,48 +767,35 @@ class TestInitializeContext:
             conversation_id=str(uuid.uuid4()),
         )
 
-        assert context.next_message is not None
-        assert context.next_message.get_value() == "Turn 1:\nuser: Follow the policy\n\nCaller-supplied question"
+        assert context.next_message is next_message
+        assert context.next_message.get_value() == "Caller-supplied question"
 
-    async def test_system_prompt_for_non_chat_target_preserves_multimodal_next_message(
+    async def test_non_editable_target_registers_custom_first_send_formatter(
         self,
         attack_identifier: ComponentIdentifier,
+        mock_prompt_normalizer: MagicMock,
         mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
     ) -> None:
-        manager = ConversationManager()
-        image_piece = MessagePiece(
-            role="user",
-            original_value="diagram.png",
-            original_value_data_type="image_path",
-        )
-        context = _TestAttackContext(
-            params=AttackParameters(
-                objective="Unused objective",
-                next_message=Message(message_pieces=[image_piece]),
-            )
-        )
-        context.prepended_conversation = [Message.from_system_prompt("Describe images precisely")]
+        manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
+        conversation_id = str(uuid.uuid4())
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        message_normalizer = MagicMock(spec=ConversationContextNormalizer)
+        config = PrependedConversationConfig(message_normalizer=message_normalizer)
 
         await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
+            prepended_conversation_config=config,
         )
 
-        assert context.next_message is not None
-        assert len(context.next_message.message_pieces) == 2
-        assert context.next_message.message_pieces[0].converted_value == "Turn 1:\nuser: Describe images precisely"
-        assert context.next_message.message_pieces[1].converted_value == "diagram.png"
-        assert context.next_message.message_pieces[1].original_value_data_type == "image_path"
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
+        mock_prompt_normalizer.register_prepended_conversation_normalizer.assert_called_once_with(
+            conversation_id=conversation_id,
+            message_normalizer=message_normalizer,
         )
-
-        assert len(context.next_message.message_pieces) == 2
-        assert context.next_message.message_pieces[0].converted_value == "Turn 1:\nuser: Describe images precisely"
+        message_normalizer.normalize_string_async.assert_not_called()
 
     async def test_returns_turn_count_for_multi_turn_attacks(
         self,
@@ -1090,36 +999,7 @@ class TestInitializeContext:
 class TestPrependedConversationConfigSettings:
     """Tests for PrependedConversationConfig settings in initialize_context_async."""
 
-    # -------------------------------------------------------------------------
-    # non_chat_target_behavior Tests
-    # -------------------------------------------------------------------------
-
-    async def test_non_chat_target_behavior_normalize_is_default(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that non-chat targets normalize by default (no config), matching dataclass field default."""
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = None
-
-        # Should normalize by default (matching PrependedConversationConfig field default)
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-        )
-
-        # next_message should contain normalized context
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert len(text_value) > 0
-
-    async def test_non_chat_target_converts_selected_roles_before_flattening(
+    async def test_non_editable_target_converts_selected_roles_before_storage(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
@@ -1131,26 +1011,21 @@ class TestPrependedConversationConfigSettings:
         context.next_message = Message.from_prompt(prompt="live request", role="user")
         converter_config = ConverterConfiguration.from_converters(converters=[Base64Converter()])
 
+        conversation_id = str(uuid.uuid4())
         await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
             request_converters=converter_config,
         )
 
-        assert context.next_message is not None
-        piece = context.next_message.get_piece()
+        stored = manager.get_conversation(conversation_id)
         encoded_user = base64.b64encode(b"Hello, how are you?").decode()
-        encoded_live_request = base64.b64encode(b"live request").decode()
-        assert piece.original_value == (
-            "Turn 1:\nuser: Hello, how are you?\nassistant: I'm doing well, thank you!\n\nlive request"
-        )
-        assert piece.converted_value == (
-            f"Turn 1:\nuser: {encoded_user}\nassistant: I'm doing well, thank you!\n\n{encoded_live_request}"
-        )
-        assert context.next_message.request_converters_applied
+        assert stored[0].get_piece().converted_value == encoded_user
+        assert stored[1].get_piece().converted_value == "I'm doing well, thank you!"
+        assert context.next_message.get_piece().converted_value == "live request"
 
-    async def test_non_chat_target_converts_assistant_history_only_when_opted_in(
+    async def test_non_editable_target_converts_assistant_history_only_when_opted_in(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
@@ -1163,22 +1038,21 @@ class TestPrependedConversationConfigSettings:
         converter_config = ConverterConfiguration.from_converters(converters=[Base64Converter()])
         config = PrependedConversationConfig(apply_converters_to_roles=["assistant"])
 
+        conversation_id = str(uuid.uuid4())
         await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
             request_converters=converter_config,
             prepended_conversation_config=config,
         )
 
-        assert context.next_message is not None
+        stored = manager.get_conversation(conversation_id)
         encoded_assistant = base64.b64encode(b"I'm doing well, thank you!").decode()
-        encoded_live_request = base64.b64encode(b"live request").decode()
-        assert context.next_message.get_piece().converted_value == (
-            f"Turn 1:\nuser: Hello, how are you?\nassistant: {encoded_assistant}\n\n{encoded_live_request}"
-        )
+        assert stored[0].get_piece().converted_value == "Hello, how are you?"
+        assert stored[1].get_piece().converted_value == encoded_assistant
 
-    async def test_non_chat_target_rejects_non_text_history_converter_output(
+    async def test_non_editable_target_rejects_non_text_output_from_current_converter(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
@@ -1189,7 +1063,7 @@ class TestPrependedConversationConfigSettings:
         context.prepended_conversation = sample_conversation
         converter_config = ConverterConfiguration.from_converters(converters=[_ImageOutputConverter()])
 
-        with pytest.raises(ValueError, match="non-chat target.*non-text output types.*image_path"):
+        with pytest.raises(ValueError, match="non-text output types.*image_path"):
             await manager.initialize_context_async(
                 context=context,
                 target=mock_prompt_target,
@@ -1199,40 +1073,7 @@ class TestPrependedConversationConfigSettings:
 
         assert sample_conversation[0].get_piece().converted_value_data_type == "text"
 
-    async def test_non_chat_target_repeated_setup_reuses_prepared_request(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        manager = ConversationManager()
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = Message.from_prompt(prompt="live request", role="user")
-        converter = _CountingTextConverter()
-        converter_config = ConverterConfiguration.from_converters(converters=[converter])
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
-            request_converters=converter_config,
-        )
-        assert context.next_message is not None
-        first_prepared_value = context.next_message.get_piece().converted_value
-        assert converter.call_count == 2
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
-            request_converters=converter_config,
-        )
-
-        assert context.next_message.get_piece().converted_value == first_prepared_value
-        assert converter.call_count == 2
-
-    async def test_non_chat_target_preserves_converter_piece_indexes(
+    async def test_non_editable_target_preserves_converter_piece_indexes(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_target: MagicMock,
@@ -1265,99 +1106,17 @@ class TestPrependedConversationConfigSettings:
             )
         ]
 
+        conversation_id = str(uuid.uuid4())
         await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
-            conversation_id=str(uuid.uuid4()),
+            conversation_id=conversation_id,
             request_converters=converter_config,
         )
 
-        assert context.next_message is not None
-        converted_value = context.next_message.get_piece().converted_value
-        assert base64.b64encode(b"first piece").decode() in converted_value
-        assert "second piece" in converted_value
-        assert base64.b64encode(b"second piece").decode() not in converted_value
-
-    async def test_non_chat_target_behavior_normalize_first_turn_creates_next_message(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that normalize_first_turn creates next_message when none exists."""
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = None
-
-        config = PrependedConversationConfig()
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-            prepended_conversation_config=config,
-        )
-
-        # Should have created a next_message with the normalized context
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert len(text_value) > 0
-
-    async def test_non_chat_target_behavior_normalize_first_turn_prepends_to_existing_message(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that normalize_first_turn prepends context to existing next_message."""
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = Message.from_prompt(prompt="My question", role="user")
-
-        config = PrependedConversationConfig()
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-            prepended_conversation_config=config,
-        )
-
-        # Should have prepended context to existing message
-        text_value = context.next_message.get_piece().original_value
-        assert "My question" in text_value
-        # Context should come before the original question
-        question_index = text_value.find("My question")
-        assert question_index > 0  # Context should be prepended
-
-    async def test_non_chat_target_behavior_normalize_returns_empty_state(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that normalize_first_turn returns empty ConversationState (no turn tracking)."""
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-
-        config = PrependedConversationConfig()
-
-        state = await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-            prepended_conversation_config=config,
-        )
-
-        # Non-chat targets don't track turns
-        assert state.turn_count == 0
-        assert state.last_assistant_message_scores == []
+        stored_pieces = manager.get_conversation(conversation_id)[0].message_pieces
+        assert stored_pieces[0].converted_value == base64.b64encode(b"first piece").decode()
+        assert stored_pieces[1].converted_value == "second piece"
 
     # -------------------------------------------------------------------------
     # apply_converters_to_roles Tests
@@ -1479,66 +1238,25 @@ class TestPrependedConversationConfigSettings:
     async def test_message_normalizer_default_uses_conversation_context_normalizer(
         self,
         attack_identifier: ComponentIdentifier,
+        mock_prompt_normalizer: MagicMock,
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that default normalizer produces Turn N format."""
-        manager = ConversationManager()
+        """Test that the default formatter is registered for target-side adaptation."""
+        manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
         conversation_id = str(uuid.uuid4())
         context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
         context.prepended_conversation = sample_conversation
-        context.next_message = None
-
-        config = PrependedConversationConfig()
 
         await manager.initialize_context_async(
             context=context,
             target=mock_prompt_target,
             conversation_id=conversation_id,
-            prepended_conversation_config=config,
         )
 
-        # Default ConversationContextNormalizer produces "Turn N:" format
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert "Turn 1" in text_value or "turn 1" in text_value.lower()
-
-    async def test_message_normalizer_custom_normalizer_is_used(
-        self,
-        attack_identifier: ComponentIdentifier,
-        mock_prompt_target: MagicMock,
-        sample_conversation: list[Message],
-    ) -> None:
-        """Test that custom message_normalizer is used when provided."""
-        from pyrit.message_normalizer import MessageStringNormalizer
-
-        # Create a mock normalizer that returns a specific format
-        mock_normalizer = MagicMock(spec=MessageStringNormalizer)
-        mock_normalizer.normalize_string_async = AsyncMock(return_value="CUSTOM_FORMAT: test content")
-
-        manager = ConversationManager()
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-        context.next_message = None
-
-        config = PrependedConversationConfig(
-            message_normalizer=mock_normalizer,
-        )
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-            prepended_conversation_config=config,
-        )
-
-        # Verify custom normalizer was called
-        mock_normalizer.normalize_string_async.assert_called_once()
-        # Verify the custom format is in the message
-        assert context.next_message is not None
-        text_value = context.next_message.get_piece().original_value
-        assert "CUSTOM_FORMAT: test content" in text_value
+        registered = mock_prompt_normalizer.register_prepended_conversation_normalizer.call_args.kwargs
+        assert registered["conversation_id"] == conversation_id
+        assert isinstance(registered["message_normalizer"], ConversationContextNormalizer)
 
     # -------------------------------------------------------------------------
     # Chat Target Behavior (Config has no effect)

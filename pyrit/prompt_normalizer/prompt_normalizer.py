@@ -19,6 +19,7 @@ from pyrit.exceptions import (
     get_execution_context,
 )
 from pyrit.memory import CentralMemory, MemoryInterface, set_message_piece_sha256_async
+from pyrit.message_normalizer import MessageStringNormalizer
 from pyrit.models import (
     ComponentIdentifier,
     Conversation,
@@ -62,6 +63,22 @@ class PromptNormalizer:
         self._start_token = start_token
         self._end_token = end_token
         self.id = str(uuid4())
+        self._prepended_conversation_normalizers: dict[str, MessageStringNormalizer] = {}
+
+    def register_prepended_conversation_normalizer(
+        self,
+        *,
+        conversation_id: str,
+        message_normalizer: MessageStringNormalizer,
+    ) -> None:
+        """
+        Register the formatter used to deliver structured prepended history on the next send.
+
+        Args:
+            conversation_id: Conversation whose next request should include prepended history.
+            message_normalizer: Formatter the target should use for that history.
+        """
+        self._prepended_conversation_normalizers[conversation_id] = message_normalizer
 
     async def send_prompt_async(
         self,
@@ -108,20 +125,27 @@ class PromptNormalizer:
         for piece in request.message_pieces:
             piece.conversation_id = conversation_id
 
-        # A caller may need to apply converters before a lossy normalization step
-        # such as flattening role-separated history for a non-chat target.
-        if not request.request_converters_applied:
-            await self.convert_values_async(
-                converter_configurations=request_converter_configurations,
-                message=request,
-            )
+        prepended_conversation_normalizer = self._prepended_conversation_normalizers.pop(
+            request.conversation_id,
+            None,
+        )
+        await self.convert_values_async(
+            converter_configurations=request_converter_configurations,
+            message=request,
+        )
 
         await self._calc_hash_async(request=request)
 
         responses = None
 
         try:
-            responses = await target.send_prompt_async(message=request)
+            if prepended_conversation_normalizer:
+                responses = await target.send_prompt_async(
+                    message=request,
+                    prepended_conversation_normalizer=prepended_conversation_normalizer,
+                )
+            else:
+                responses = await target.send_prompt_async(message=request)
             self.memory.add_message_to_memory(request=request)
         except EmptyResponseException:
             # Empty responses are retried, but we don't want them to stop execution

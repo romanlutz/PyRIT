@@ -25,6 +25,7 @@ from pyrit.exceptions import (
     get_execution_context,
 )
 from pyrit.memory import CentralMemory
+from pyrit.message_normalizer import ConversationContextNormalizer
 from pyrit.models import (
     Message,
     MessagePiece,
@@ -113,6 +114,39 @@ async def test_send_prompt_async_multiple_converters(mock_memory_instance, seed_
     )
 
     assert prompt_target.prompt_sent == ["S_G_V_s_b_G_8_="]
+
+
+async def test_send_prompt_async_passes_registered_prepended_formatter_once(mock_memory_instance):
+    prompt_target = MagicMock(spec=PromptTarget)
+    prompt_target.get_identifier.return_value = get_mock_target_identifier("MockTarget")
+    prompt_target.send_prompt_async = AsyncMock(
+        side_effect=[
+            [MessagePiece(role="assistant", original_value="first").to_message()],
+            [MessagePiece(role="assistant", original_value="second").to_message()],
+        ]
+    )
+    normalizer = PromptNormalizer()
+    formatter = ConversationContextNormalizer()
+    conversation_id = "prepended-conversation"
+    normalizer.register_prepended_conversation_normalizer(
+        conversation_id=conversation_id,
+        message_normalizer=formatter,
+    )
+
+    await normalizer.send_prompt_async(
+        message=Message.from_prompt(prompt="first request", role="user"),
+        target=prompt_target,
+        conversation_id=conversation_id,
+    )
+    await normalizer.send_prompt_async(
+        message=Message.from_prompt(prompt="second request", role="user"),
+        target=prompt_target,
+        conversation_id=conversation_id,
+    )
+
+    first_call, second_call = prompt_target.send_prompt_async.await_args_list
+    assert first_call.kwargs["prepended_conversation_normalizer"] is formatter
+    assert "prepended_conversation_normalizer" not in second_call.kwargs
 
 
 async def test_send_prompt_async_no_response_adds_memory(mock_memory_instance, seed_group):

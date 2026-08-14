@@ -181,7 +181,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             max_turns (int): Maximum number of turns allowed.
             prepended_conversation_config (PrependedConversationConfiguration | None):
                 Configuration for how to process prepended conversations. Controls converter
-                application by role, message normalization, and non-chat target behavior.
+                application by role and first-send formatting for targets without editable history.
 
         Raises:
             ValueError: If objective_target does not natively support editable history.

@@ -23,12 +23,13 @@ class PrependedConversationConfig:
 
     This class provides control over:
     - Which message roles should have request converters applied
-    - How to normalize conversation history for non-chat objective targets
+    - How targets without editable history format prepended messages on the first live send
 
-    Non-chat objective targets apply request converters to the configured roles before
-    normalizing the prepended conversation into the first turn (via ``message_normalizer``;
-    default: ConversationContextNormalizer). Those converters must produce text because
-    string normalization cannot preserve converted image, audio, or other non-text output.
+    Prepended messages remain role-structured in memory. Request converters are applied to
+    configured roles before a target without editable history renders that history into the
+    first live request (via ``message_normalizer``; default: ConversationContextNormalizer).
+    Those converters must produce text because string normalization cannot preserve converted
+    image, audio, or other non-text output.
     """
 
     # Request converters default to prepended user messages only. Assistant history is
@@ -37,8 +38,8 @@ class PrependedConversationConfig:
 
     # Optional normalizer to format conversation history into a single text block.
     # Must implement MessageStringNormalizer (e.g., TokenizerTemplateNormalizer or ConversationContextNormalizer).
-    # When None and normalization is needed (e.g., for non-chat targets), a default
-    # ConversationContextNormalizer is used that produces "Turn N: User/Assistant" format.
+    # When None and adaptation is needed, a default ConversationContextNormalizer is used
+    # that produces "Turn N: User/Assistant" format.
     message_normalizer: MessageStringNormalizer | None = None
 
     def get_message_normalizer(self) -> MessageStringNormalizer:

@@ -14,6 +14,7 @@ from pyrit.message_normalizer.message_normalizer import (
     MessageListNormalizer,
     MessageStringNormalizer,
 )
+from pyrit.message_normalizer.prepended_conversation_normalizer import PrependedConversationNormalizer
 from pyrit.message_normalizer.tokenizer_template_normalizer import TokenizerTemplateNormalizer
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "GenericSystemSquashNormalizer",
     "HistorySquashNormalizer",
     "JsonSchemaNormalizer",
+    "PrependedConversationNormalizer",
     "TokenizerTemplateNormalizer",
     "ConversationContextNormalizer",
     "ChatMessageNormalizer",
