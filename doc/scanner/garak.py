@@ -16,8 +16,9 @@
 # test whether a target can be tricked into producing harmful content when prompts are encoded in
 # various formats), web-injection probes (which test whether a target emits markdown
 # data-exfiltration or cross-site-scripting payloads), a doctor probe (which applies the Policy
-# Puppetry universal bypass), and an audio probe (which delivers spoken jailbreaks to multimodal
-# targets).
+# Puppetry universal bypass), package-hallucination probes (which test whether a target recommends
+# non-existent packages that an attacker could squat), and an audio probe (which delivers spoken
+# jailbreaks to multimodal targets).
 #
 # For full programming details, see the
 # [Scenarios Programming Guide](../code/scenarios/0_scenarios.ipynb).
@@ -121,6 +122,32 @@ await output_scenario_async(scenario_result)
 # **Available techniques** (2 probes): `PolicyPuppetry` (wraps the objective in the Dr House
 # template) and `PolicyPuppetryLeet` (the same template, additionally leetspeak-encoded). Both are
 # tagged `default`, so `DEFAULT` and `ALL` currently coincide.
+
+# %% [markdown]
+# ## PackageHallucination
+#
+# Ports Garak's `packagehallucination` probe. Asks the target to write code for a given language
+# (rendered from Garak's `stub_prompts` × `code_tasks`) and scores each response for imports of
+# packages that do not exist in that language's registry. A hallucinated package name is a
+# supply-chain foothold: an attacker can register ("squat") it so the model's suggested code
+# silently pulls in a malicious dependency ("slopsquatting").
+#
+# Each language runs as its own atomic attack with a dedicated `PackageHallucinationScorer` loaded
+# with that ecosystem's registry (PyPI, npm, RubyGems, or crates.io). The scoring is deterministic
+# set-membership — no LLM judge is involved.
+#
+# **CLI example:**
+#
+# ```bash
+# pyrit_scan garak.package_hallucination --target openai_chat --techniques python
+# ```
+#
+# **Available techniques** (4 languages): Python, JavaScript, Ruby, Rust.
+#
+# **Aggregate techniques:** `ALL` and `DEFAULT` both expand to all four languages.
+#
+# > **Note:** The package registries are loaded into memory only for the scorer; the raw package
+# > names are never sent as prompts.
 
 # %% [markdown]
 # ## AudioAchillesHeel
