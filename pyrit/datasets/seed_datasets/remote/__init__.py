@@ -70,12 +70,7 @@ from pyrit.datasets.seed_datasets.remote.llm_latent_adversarial_training_dataset
 )
 from pyrit.datasets.seed_datasets.remote.mask_dataset import (
     MaskQuestionArchetype,
-    _MaskContinuationsDataset,
-    _MaskDisinformationDataset,
-    _MaskDoublingDownKnownFactsDataset,
-    _MaskKnownFactsDataset,
-    _MaskProvidedFactsDataset,
-    _MaskStatisticsDataset,
+    _MaskDataset,
 )
 from pyrit.datasets.seed_datasets.remote.medsafetybench_dataset import _MedSafetyBenchDataset
 from pyrit.datasets.seed_datasets.remote.mlcommons_ailuminate_dataset import _MLCommonsAILuminateDataset
@@ -212,12 +207,7 @@ __all__ = [
     "_JBBBehaviorsDataset",
     "_LibrAIDoNotAnswerDataset",
     "_LLMLatentAdversarialTrainingDataset",
-    "_MaskContinuationsDataset",
-    "_MaskDisinformationDataset",
-    "_MaskDoublingDownKnownFactsDataset",
-    "_MaskKnownFactsDataset",
-    "_MaskProvidedFactsDataset",
-    "_MaskStatisticsDataset",
+    "_MaskDataset",
     "_MedSafetyBenchDataset",
     "_MICDataset",
     "_MLCommonsAILuminateDataset",

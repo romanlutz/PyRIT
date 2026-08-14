@@ -5,15 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from pyrit.datasets import SeedDatasetProvider
 from pyrit.datasets.seed_datasets.remote.mask_dataset import (
     MaskQuestionArchetype,
-    _MaskBaseDataset,
-    _MaskContinuationsDataset,
-    _MaskDisinformationDataset,
-    _MaskDoublingDownKnownFactsDataset,
-    _MaskKnownFactsDataset,
-    _MaskProvidedFactsDataset,
-    _MaskStatisticsDataset,
+    _MaskDataset,
 )
 from pyrit.models import SeedDataset, SeedObjective, SeedPrompt
 
@@ -202,6 +197,25 @@ def mock_statistics_data() -> list[dict]:
     ]
 
 
+@pytest.fixture
+def mock_all_archetype_data(
+    mock_continuations_data,
+    mock_disinformation_data,
+    mock_doubling_down_data,
+    mock_known_facts_data,
+    mock_provided_facts_data,
+    mock_statistics_data,
+) -> dict[str, list[dict]]:
+    return {
+        MaskQuestionArchetype.CONTINUATIONS.value: mock_continuations_data,
+        MaskQuestionArchetype.DISINFORMATION.value: mock_disinformation_data,
+        MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS.value: mock_doubling_down_data,
+        MaskQuestionArchetype.KNOWN_FACTS.value: mock_known_facts_data,
+        MaskQuestionArchetype.PROVIDED_FACTS.value: mock_provided_facts_data,
+        MaskQuestionArchetype.STATISTICS.value: mock_statistics_data,
+    }
+
+
 class TestMaskQuestionArchetype:
     """Tests for the public archetype enum."""
 
@@ -214,59 +228,81 @@ class TestMaskQuestionArchetype:
         assert MaskQuestionArchetype.STATISTICS.value == "statistics"
 
 
-class TestMaskDatasetNames:
-    """Each MASK sibling exposes its own dataset_name."""
+class TestMaskDatasetConfiguration:
+    """The single MASK loader exposes archetype filtering."""
 
-    @pytest.mark.parametrize(
-        "loader_cls, expected_name, expected_archetype",
-        [
-            (_MaskContinuationsDataset, "mask_continuations", MaskQuestionArchetype.CONTINUATIONS),
-            (_MaskDisinformationDataset, "mask_disinformation", MaskQuestionArchetype.DISINFORMATION),
-            (
-                _MaskDoublingDownKnownFactsDataset,
-                "mask_doubling_down_known_facts",
-                MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS,
-            ),
-            (_MaskKnownFactsDataset, "mask_known_facts", MaskQuestionArchetype.KNOWN_FACTS),
-            (_MaskProvidedFactsDataset, "mask_provided_facts", MaskQuestionArchetype.PROVIDED_FACTS),
-            (_MaskStatisticsDataset, "mask_statistics", MaskQuestionArchetype.STATISTICS),
-        ],
-    )
-    def test_dataset_name_and_archetype(self, loader_cls, expected_name, expected_archetype):
-        loader = loader_cls()
-        assert loader.dataset_name == expected_name
-        assert loader.ARCHETYPE is expected_archetype
+    def test_dataset_metadata(self):
+        loader = _MaskDataset()
+
+        assert loader.dataset_name == "mask"
         assert loader.should_register is True
+        assert loader.size == "large"
         assert loader.tags == {"safety", "honesty"}
+        assert loader.archetypes is None
 
-    def test_base_loader_does_not_register(self):
-        assert _MaskBaseDataset.should_register is False
+    def test_selected_archetypes_are_preserved(self):
+        selected = [MaskQuestionArchetype.STATISTICS, MaskQuestionArchetype.KNOWN_FACTS]
+
+        loader = _MaskDataset(archetypes=selected)
+
+        assert loader.archetypes == selected
+
+    def test_empty_archetypes_raises(self):
+        with pytest.raises(ValueError, match="must be a non-empty list"):
+            _MaskDataset(archetypes=[])
+
+    def test_invalid_archetype_raises(self):
+        with pytest.raises(ValueError, match="Expected MaskQuestionArchetype"):
+            _MaskDataset(archetypes=["statistics"])  # type: ignore[list-item]
+
+    async def test_only_one_mask_dataset_is_registered(self):
+        dataset_names = await SeedDatasetProvider.get_all_dataset_names_async()
+
+        assert [name for name in dataset_names if name == "mask" or name.startswith("mask_")] == ["mask"]
 
 
 class TestMaskTokenHandling:
-    """All MASK siblings inherit the HF-gated token plumbing from the base class."""
+    """MASK supports explicit and environment-provided HF tokens."""
 
     def test_token_defaults_to_env_var(self):
         with patch.dict("os.environ", {"HUGGINGFACE_TOKEN": "env-token"}):
-            loader = _MaskContinuationsDataset()
+            loader = _MaskDataset()
             assert loader.token == "env-token"
 
     def test_explicit_token_overrides_env(self):
         with patch.dict("os.environ", {"HUGGINGFACE_TOKEN": "env-token"}):
-            loader = _MaskKnownFactsDataset(token="explicit-token")
+            loader = _MaskDataset(token="explicit-token")
             assert loader.token == "explicit-token"
 
     def test_token_none_when_env_unset(self):
         with patch.dict("os.environ", {}, clear=True):
-            loader = _MaskStatisticsDataset()
+            loader = _MaskDataset()
             assert loader.token is None
 
 
 class TestMaskCommonFetchBehaviour:
-    """Behaviour shared by all non-doubling-down archetypes."""
+    """Shared fetch and row-conversion behavior."""
+
+    async def test_default_loads_all_archetypes(self, mock_all_archetype_data):
+        loader = _MaskDataset()
+        mock_fetch = AsyncMock(side_effect=lambda **kwargs: mock_all_archetype_data[kwargs["config"]])
+
+        with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
+            dataset = await loader.fetch_dataset_async()
+
+        assert dataset.dataset_name == "mask"
+        assert mock_fetch.call_count == len(MaskQuestionArchetype)
+        assert [call.kwargs["config"] for call in mock_fetch.call_args_list] == [
+            archetype.value for archetype in MaskQuestionArchetype
+        ]
+        objectives = [seed for seed in dataset.seeds if isinstance(seed, SeedObjective)]
+        assert len(objectives) == len(MaskQuestionArchetype)
+        assert {objective.metadata["archetype"] for objective in objectives} == {
+            archetype.value for archetype in MaskQuestionArchetype
+        }
 
     async def test_fetch_returns_seed_dataset(self, mock_continuations_data):
-        loader = _MaskContinuationsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.CONTINUATIONS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_continuations_data)):
             dataset = await loader.fetch_dataset_async()
 
@@ -280,7 +316,10 @@ class TestMaskCommonFetchBehaviour:
         assert len({s.prompt_group_id for s in dataset.seeds}) == 1
 
     async def test_fetch_forwards_config_revision_and_token(self, mock_continuations_data):
-        loader = _MaskContinuationsDataset(token="my-token")
+        loader = _MaskDataset(
+            archetypes=[MaskQuestionArchetype.CONTINUATIONS],
+            token="my-token",
+        )
         mock_fetch = AsyncMock(return_value=mock_continuations_data)
         with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async(cache=False)
@@ -292,16 +331,16 @@ class TestMaskCommonFetchBehaviour:
         assert kwargs["split"] == "test"
         assert kwargs["token"] == "my-token"
         assert kwargs["cache"] is False
-        assert kwargs["revision"] == _MaskBaseDataset.HF_REVISION
+        assert kwargs["revision"] == _MaskDataset.HF_REVISION
 
     async def test_fetch_empty_rows_raises(self):
-        loader = _MaskContinuationsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.CONTINUATIONS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=[])):
             with pytest.raises(ValueError, match="returned no rows"):
                 await loader.fetch_dataset_async()
 
     async def test_objective_carries_full_metadata(self, mock_continuations_data):
-        loader = _MaskContinuationsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.CONTINUATIONS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_continuations_data)):
             dataset = await loader.fetch_dataset_async()
 
@@ -311,7 +350,7 @@ class TestMaskCommonFetchBehaviour:
         assert objective.value == row["proposition"]
         assert objective.name == f"MASK continuations - {row['task_id']}"
         assert objective.harm_categories == ["honesty", "continuations"]
-        assert objective.dataset_name == "mask_continuations"
+        assert objective.dataset_name == "mask"
         assert objective.source == "https://huggingface.co/datasets/cais/MASK"
 
         meta = objective.metadata
@@ -326,7 +365,7 @@ class TestMaskCommonFetchBehaviour:
         assert meta["canary"] == _CANARY
 
     async def test_pressured_conversation_pieces_have_correct_roles_and_sequences(self, mock_disinformation_data):
-        loader = _MaskDisinformationDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.DISINFORMATION])
         with patch.object(
             loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_disinformation_data)
         ):
@@ -349,7 +388,7 @@ class TestMaskDoublingDown:
     """Doubling-down rows produce the four-piece interleaved conversation."""
 
     async def test_doubling_down_builds_four_piece_conversation(self, mock_doubling_down_data):
-        loader = _MaskDoublingDownKnownFactsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_doubling_down_data)):
             dataset = await loader.fetch_dataset_async()
 
@@ -374,7 +413,7 @@ class TestMaskDoublingDown:
         assert all(p.prompt_group_id == objective.prompt_group_id for p in prompts)
 
     async def test_doubling_down_uses_correct_config(self, mock_doubling_down_data):
-        loader = _MaskDoublingDownKnownFactsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS])
         mock_fetch = AsyncMock(return_value=mock_doubling_down_data)
         with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async()
@@ -384,7 +423,7 @@ class TestMaskDoublingDown:
 
 class TestMaskKnownFacts:
     async def test_fetch_known_facts(self, mock_known_facts_data):
-        loader = _MaskKnownFactsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.KNOWN_FACTS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_known_facts_data)):
             dataset = await loader.fetch_dataset_async()
 
@@ -399,7 +438,7 @@ class TestMaskProvidedFacts:
     """Provided-facts rows have no belief elicitation prompts."""
 
     async def test_missing_belief_fields_default_to_empty_string(self, mock_provided_facts_data):
-        loader = _MaskProvidedFactsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.PROVIDED_FACTS])
         with patch.object(
             loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_provided_facts_data)
         ):
@@ -412,7 +451,7 @@ class TestMaskProvidedFacts:
         assert objective.metadata["belief_elicit_3"] == ""
 
     async def test_pressured_conversation_still_two_pieces(self, mock_provided_facts_data):
-        loader = _MaskProvidedFactsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.PROVIDED_FACTS])
         with patch.object(
             loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_provided_facts_data)
         ):
@@ -429,7 +468,7 @@ class TestMaskStatistics:
     """Statistics rows carry numeric formatted_ground_truth intervals."""
 
     async def test_numeric_ground_truth_preserved_as_string(self, mock_statistics_data):
-        loader = _MaskStatisticsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.STATISTICS])
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_statistics_data)):
             dataset = await loader.fetch_dataset_async()
 
@@ -442,7 +481,7 @@ class TestMaskStatistics:
         assert objective.metadata["belief_elicit_3"] == ""
 
     async def test_statistics_uses_correct_config(self, mock_statistics_data):
-        loader = _MaskStatisticsDataset()
+        loader = _MaskDataset(archetypes=[MaskQuestionArchetype.STATISTICS])
         mock_fetch = AsyncMock(return_value=mock_statistics_data)
         with patch.object(loader, "_fetch_from_huggingface_async", new=mock_fetch):
             await loader.fetch_dataset_async()

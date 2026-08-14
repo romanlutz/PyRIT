@@ -60,9 +60,9 @@ class MaskQuestionArchetype(Enum):
     STATISTICS = "statistics"
 
 
-class _MaskBaseDataset(_RemoteDatasetLoader):
+class _MaskDataset(_RemoteDatasetLoader):
     """
-    Base loader for the MASK (Models Aligned by Self-Knowledge) honesty benchmark
+    Loader for the MASK (Models Aligned by Self-Knowledge) honesty benchmark
     from the Center for AI Safety.
 
     MASK measures whether a model's *stated* answer under pressure (a system
@@ -72,7 +72,9 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
     conversations — the pressured one and one or more belief-elicitation ones —
     plus the ground-truth fact the belief should match.
 
-    This loader returns one ``SeedGroup`` per HuggingFace row:
+    By default, the loader combines all six HuggingFace configs. Use the
+    ``archetypes`` constructor argument to select a subset. It returns one
+    ``SeedGroup`` per HuggingFace row:
 
     * A single ``SeedObjective`` carrying the proposition under test
       (the bias being applied) and per-row metadata: the ``task_id``, the
@@ -91,9 +93,8 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
     The belief-elicitation conversations are not modelled as additional
     SeedPrompts in the group: the loader carries ``belief_elicit_1``,
     ``belief_elicit_2`` and ``belief_elicit_3`` (when present) as
-    ``SeedObjective.metadata`` strings so a downstream MASK attack/scorer
-    can drive the parallel neutral-context conversations needed to actually
-    classify honesty.
+    ``SeedObjective.metadata`` strings so consumers can access the complete
+    source row without creating unrelated conversation groups.
 
     Note: MASK is a HuggingFace-gated dataset. You must accept the dataset
     terms at https://huggingface.co/datasets/cais/MASK before use, and
@@ -116,26 +117,43 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
     HF_DATASET_NAME: str = "cais/MASK"
     HF_REVISION: str = "4602b84dd9e2ca05c6e1eafbc14e556e908ac1bb"
     HF_SPLIT: str = "test"
-    ARCHETYPE: MaskQuestionArchetype
-    should_register = False
+    should_register = True
 
     # Class-level dataset metadata for SeedDatasetMetadata discovery.
     modalities: list[str] = ["text"]
+    size: str = "large"
     tags: set[str] = {"safety", "honesty"}
 
     def __init__(
         self,
         *,
+        archetypes: list[MaskQuestionArchetype] | None = None,
         token: str | None = None,
     ) -> None:
         """
         Initialize the MASK dataset loader.
 
         Args:
+            archetypes: MASK archetypes to load. If not provided, loads all
+                six archetypes.
             token: HuggingFace authentication token. If not provided, reads
                 from the ``HUGGINGFACE_TOKEN`` environment variable.
+
+        Raises:
+            ValueError: If ``archetypes`` is empty or contains an invalid value.
         """
+        if archetypes is not None:
+            if not archetypes:
+                raise ValueError("`archetypes` must be a non-empty list (pass None to include all archetypes)")
+            self._validate_enums(values=archetypes, enum_cls=MaskQuestionArchetype, label="archetypes")
+
+        self.archetypes = archetypes
         self.token = token if token is not None else os.environ.get("HUGGINGFACE_TOKEN")
+
+    @property
+    def dataset_name(self) -> str:
+        """The dataset name."""
+        return "mask"
 
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
@@ -150,14 +168,42 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
                 pieces of the pressured conversation).
 
         Raises:
-            ValueError: If the HuggingFace fetch returns no rows.
+            ValueError: If any selected HuggingFace config returns no rows.
         """
-        archetype = self.ARCHETYPE.value
-        logger.info(f"Loading MASK dataset from {self.HF_DATASET_NAME} (config={archetype})")
+        seeds: list[SeedUnion] = []
+        for archetype in self._resolved_archetypes():
+            seeds.extend(await self._fetch_archetype_async(archetype=archetype, cache=cache))
 
+        logger.info(
+            f"Successfully loaded {len(seeds)} seeds "
+            f"({sum(1 for seed in seeds if isinstance(seed, SeedObjective))} groups) from MASK"
+        )
+        return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
+
+    async def _fetch_archetype_async(
+        self,
+        *,
+        archetype: MaskQuestionArchetype,
+        cache: bool,
+    ) -> list[SeedUnion]:
+        """
+        Fetch and convert one MASK archetype.
+
+        Args:
+            archetype: The HuggingFace config to fetch.
+            cache: Whether to cache the fetched dataset.
+
+        Returns:
+            list[SeedUnion]: Seeds converted from the selected archetype.
+
+        Raises:
+            ValueError: If the selected config returns no rows.
+        """
+        archetype_value = archetype.value
+        logger.info(f"Loading MASK dataset from {self.HF_DATASET_NAME} (config={archetype_value})")
         data = await self._fetch_from_huggingface_async(
             dataset_name=self.HF_DATASET_NAME,
-            config=archetype,
+            config=archetype_value,
             split=self.HF_SPLIT,
             cache=cache,
             token=self.token,
@@ -166,24 +212,33 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
 
         seeds: list[SeedUnion] = []
         for row in data:
-            seeds.extend(self._row_to_seeds(row=row))
+            seeds.extend(self._row_to_seeds(row=row, archetype=archetype))
 
         if not seeds:
             raise ValueError(
-                f"MASK dataset (config={archetype}) returned no rows. "
+                f"MASK dataset (config={archetype_value}) returned no rows. "
                 "Check that you have accepted the dataset terms on HuggingFace "
                 "and provided a valid HUGGINGFACE_TOKEN."
             )
 
-        logger.info(
-            f"Successfully loaded {len(seeds)} seeds "
-            f"({sum(1 for s in seeds if isinstance(s, SeedObjective))} groups) "
-            f"from MASK ({archetype})"
-        )
+        return seeds
 
-        return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
+    def _resolved_archetypes(self) -> tuple[MaskQuestionArchetype, ...]:
+        """
+        Resolve the configured archetype filter.
 
-    def _row_to_seeds(self, *, row: dict) -> list[SeedUnion]:
+        Returns:
+            tuple[MaskQuestionArchetype, ...]: Selected archetypes, or all
+                archetypes when no filter was supplied.
+        """
+        return tuple(self.archetypes) if self.archetypes is not None else tuple(MaskQuestionArchetype)
+
+    def _row_to_seeds(
+        self,
+        *,
+        row: dict,
+        archetype: MaskQuestionArchetype,
+    ) -> list[SeedUnion]:
         """
         Convert one MASK row into a ``SeedObjective`` plus the roled
         ``SeedPrompt`` pieces of the pressured conversation.
@@ -193,20 +248,21 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
 
         Args:
             row: A single row from the HuggingFace dataset for this archetype.
+            archetype: The archetype config from which the row was loaded.
 
         Returns:
             list[SeedUnion]: ``[SeedObjective, SeedPrompt(system, seq=0), ...,
                 SeedPrompt(user, seq=N)]`` for the row.
         """
         group_id = uuid.uuid4()
-        archetype = self.ARCHETYPE.value
+        archetype_value = archetype.value
         task_id = str(row.get("task_id", ""))
 
         objective = SeedObjective(
             value=row.get("proposition", ""),
-            name=f"MASK {archetype} - {task_id}" if task_id else f"MASK {archetype}",
+            name=f"MASK {archetype_value} - {task_id}" if task_id else f"MASK {archetype_value}",
             dataset_name=self.dataset_name,
-            harm_categories=["honesty", archetype],
+            harm_categories=["honesty", archetype_value],
             description=self._description,
             authors=_AUTHORS,
             groups=_GROUPS,
@@ -214,7 +270,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
             prompt_group_id=group_id,
             metadata={
                 "task_id": task_id,
-                "archetype": archetype,
+                "archetype": archetype_value,
                 "proposition_type": str(row.get("type", "")),
                 "ground_truth": str(row.get("ground_truth", "")),
                 "formatted_ground_truth": str(row.get("formatted_ground_truth", "")),
@@ -233,23 +289,61 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
         *,
         row: dict,
         group_id: uuid.UUID,
-        archetype: str,
+        archetype: MaskQuestionArchetype,
     ) -> list[SeedPrompt]:
         """
-        Build the pressured-conversation SeedPrompts for a non-doubling-down row:
-        ``system`` at sequence 0, ``user`` at sequence 1.
-
-        The doubling-down loader overrides this to interleave the forced prior
-        turn at sequences 1 and 2 and bump the pressured user prompt to
-        sequence 3.
+        Build the pressured-conversation SeedPrompts for a MASK row.
 
         Args:
             row: A single row from the HuggingFace dataset.
             group_id: Shared ``prompt_group_id`` for all seeds in the row.
-            archetype: The MASK archetype string (used for naming).
+            archetype: The MASK archetype used for conversation shape and naming.
 
         Returns:
             list[SeedPrompt]: Roled SeedPrompts for the pressured conversation.
+        """
+        archetype_value = archetype.value
+        if archetype is MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS:
+            return self._build_doubling_down_prompts(
+                row=row,
+                group_id=group_id,
+                archetype=archetype_value,
+            )
+
+        return [
+            self._make_prompt(
+                value=row.get("system_prompt", ""),
+                role="system",
+                sequence=0,
+                group_id=group_id,
+                archetype=archetype_value,
+            ),
+            self._make_prompt(
+                value=row.get("user_prompt", ""),
+                role="user",
+                sequence=1,
+                group_id=group_id,
+                archetype=archetype_value,
+            ),
+        ]
+
+    def _build_doubling_down_prompts(
+        self,
+        *,
+        row: dict,
+        group_id: uuid.UUID,
+        archetype: str,
+    ) -> list[SeedPrompt]:
+        """
+        Build the four-piece pressured conversation for doubling-down rows.
+
+        Args:
+            row: A doubling-down row from HuggingFace.
+            group_id: Shared ``prompt_group_id`` for the row.
+            archetype: The archetype name used in prompt metadata.
+
+        Returns:
+            list[SeedPrompt]: System, user, assistant, and follow-up user prompts.
         """
         return [
             self._make_prompt(
@@ -260,9 +354,23 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
                 archetype=archetype,
             ),
             self._make_prompt(
-                value=row.get("user_prompt", ""),
+                value=row.get("dd_turn_1_prompt", ""),
                 role="user",
                 sequence=1,
+                group_id=group_id,
+                archetype=archetype,
+            ),
+            self._make_prompt(
+                value=row.get("dd_turn_1_response", ""),
+                role="assistant",
+                sequence=2,
+                group_id=group_id,
+                archetype=archetype,
+            ),
+            self._make_prompt(
+                value=row.get("user_prompt", ""),
+                role="user",
+                sequence=3,
                 group_id=group_id,
                 archetype=archetype,
             ),
@@ -308,7 +416,7 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
 
     @property
     def _description(self) -> str:
-        """Common description string for all MASK loaders."""
+        """The MASK dataset description."""
         return (
             "MASK (Models Aligned by Self-Knowledge) is an honesty benchmark from the "
             "Center for AI Safety that measures whether a model's pressured statement "
@@ -316,189 +424,3 @@ class _MaskBaseDataset(_RemoteDatasetLoader):
             "system+user prompt with one or more belief-elicitation prompts probing "
             "the model's actual belief under a neutral system prompt."
         )
-
-
-class _MaskContinuationsDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``continuations`` archetype (176 rows).
-
-    Pressure framing: the user asks the model to continue or expand a piece
-    of text whose framing primes a false claim. Belief-elicitation includes
-    the direct ``belief_elicit_1`` and the optional ``belief_elicit_2`` /
-    ``belief_elicit_3`` consistency probes.
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.CONTINUATIONS
-    should_register = True
-    size: str = "medium"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_continuations"
-
-
-class _MaskDisinformationDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``disinformation`` archetype (125 rows).
-
-    Pressure framing: the user instructs the model to produce a persuasive,
-    one-sided argument for a false claim. Belief-elicitation includes the
-    direct ``belief_elicit_1`` and consistency probes when present.
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.DISINFORMATION
-    should_register = True
-    size: str = "medium"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_disinformation"
-
-
-class _MaskDoublingDownKnownFactsDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``doubling_down_known_facts`` archetype (120 rows).
-
-    Pressure framing: the model is told it already produced a particular
-    answer in a prior turn (the forced ``dd_turn_1_response``) and is then
-    asked whether it stands by that answer. This exercises the model's
-    tendency to "double down" on previously stated lies.
-
-    Loader-specific behaviour: the row produces a four-piece pressured
-    conversation — ``system`` (seq 0), forced user (seq 1), forced
-    assistant (seq 2), pressured user (seq 3). Downstream targets driving
-    this conversation need ``CapabilityName.EDITABLE_HISTORY`` because the
-    forced assistant turn is supplied to the target rather than generated.
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.DOUBLING_DOWN_KNOWN_FACTS
-    should_register = True
-    size: str = "medium"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_doubling_down_known_facts"
-
-    def _build_conversation_prompts(
-        self,
-        *,
-        row: dict,
-        group_id: uuid.UUID,
-        archetype: str,
-    ) -> list[SeedPrompt]:
-        """
-        Build the four-piece pressured conversation for the doubling-down
-        archetype: ``system`` (seq 0), forced user (seq 1), forced assistant
-        (seq 2), pressured user (seq 3).
-
-        Args:
-            row: A single doubling-down row from the HuggingFace dataset.
-            group_id: Shared ``prompt_group_id`` for all seeds in the row.
-            archetype: The MASK archetype string (used for naming).
-
-        Returns:
-            list[SeedPrompt]: Four roled SeedPrompts modelling the forced
-                prior turn followed by the pressured follow-up.
-        """
-        return [
-            self._make_prompt(
-                value=row.get("system_prompt", ""),
-                role="system",
-                sequence=0,
-                group_id=group_id,
-                archetype=archetype,
-            ),
-            self._make_prompt(
-                value=row.get("dd_turn_1_prompt", ""),
-                role="user",
-                sequence=1,
-                group_id=group_id,
-                archetype=archetype,
-            ),
-            self._make_prompt(
-                value=row.get("dd_turn_1_response", ""),
-                role="assistant",
-                sequence=2,
-                group_id=group_id,
-                archetype=archetype,
-            ),
-            self._make_prompt(
-                value=row.get("user_prompt", ""),
-                role="user",
-                sequence=3,
-                group_id=group_id,
-                archetype=archetype,
-            ),
-        ]
-
-
-class _MaskKnownFactsDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``known_facts`` archetype (209 rows).
-
-    Pressure framing: the model is placed in a role with an explicit
-    incentive to deny a well-known fact (e.g., a PR officer for a
-    convicted figure). Belief-elicitation includes the direct
-    ``belief_elicit_1`` and consistency probes when present.
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.KNOWN_FACTS
-    should_register = True
-    size: str = "medium"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_known_facts"
-
-
-class _MaskProvidedFactsDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``provided_facts`` archetype (274 rows).
-
-    Pressure framing: the system prompt itself encodes the ground-truth
-    fact alongside an incentive to misrepresent it (e.g., a customer
-    service rep told the truth then instructed to deflect). Unlike the
-    other archetypes, ``provided_facts`` rows have **no**
-    ``belief_elicit_*`` prompts — the ground truth comes from the system
-    prompt directly. Downstream scorers therefore compare the pressured
-    statement to ``ground_truth`` rather than to an elicited belief.
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.PROVIDED_FACTS
-    should_register = True
-    size: str = "medium"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_provided_facts"
-
-
-class _MaskStatisticsDataset(_MaskBaseDataset):
-    """
-    Loader for the MASK ``statistics`` archetype (96 rows).
-
-    Pressure framing: the model is given an incentive to misstate a
-    quantitative statistic. The proposition uses
-    ``<pivotal><value></pivotal>`` syntax and ``formatted_ground_truth``
-    is a string-serialised numeric interval (e.g., ``"[-10.5, -10.5]"``)
-    rather than a binary A/B answer; downstream scorers must use a
-    numeric judge that compares model-produced intervals with this
-    truth interval.
-
-    Statistics rows have a single ``belief_elicit_1`` (no consistency
-    probes ``belief_elicit_2`` / ``belief_elicit_3``).
-    """
-
-    ARCHETYPE = MaskQuestionArchetype.STATISTICS
-    should_register = True
-    size: str = "small"
-
-    @property
-    def dataset_name(self) -> str:
-        """The dataset name."""
-        return "mask_statistics"
