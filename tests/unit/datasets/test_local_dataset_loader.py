@@ -1,7 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -49,7 +51,36 @@ seeds:
         assert len(dataset.prompts) == 1
         assert dataset.prompts[0].value == "test prompt"
 
+    async def test_async_loaders_offload_blocking_file_io(self, tmp_path: Path, valid_yaml_content: str) -> None:
+        file_path = tmp_path / "test.yaml"
+        file_path.write_text(valid_yaml_content, encoding="utf-8")
+        loader = _LocalDatasetLoader(file_path=file_path)
+        event_loop_thread_id = threading.get_ident()
+        worker_thread_ids: list[int] = []
+        original_from_yaml_file = SeedDataset.from_yaml_file
+        original_read_yaml_file = loader._read_yaml_file
+
+        def load_dataset(path: Path) -> SeedDataset:
+            worker_thread_ids.append(threading.get_ident())
+            return original_from_yaml_file(path)
+
+        def read_yaml_file() -> object:
+            worker_thread_ids.append(threading.get_ident())
+            return original_read_yaml_file()
+
+        with (
+            patch.object(SeedDataset, "from_yaml_file", side_effect=load_dataset),
+            patch.object(loader, "_read_yaml_file", side_effect=read_yaml_file),
+        ):
+            dataset = await loader.fetch_dataset_async()
+            metadata = await loader._parse_metadata_async()
+
+        assert dataset.dataset_name == "test_dataset"
+        assert metadata is None
+        assert len(worker_thread_ids) == 2
+        assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
+
     async def test_fetch_dataset_file_not_found(self):
         loader = _LocalDatasetLoader(file_path=Path("non_existent.yaml"))
-        with pytest.raises(Exception):
+        with pytest.raises(FileNotFoundError):
             await loader.fetch_dataset_async()
