@@ -151,9 +151,48 @@ MLCommons' AI Risk & Reliability group is building a continuously refreshed jail
 
 ### 📚 From the Microsoft AI Red Team
 
-Guidance, methodology, threat models, and tooling references for AI red teaming — straight from the team that builds PyRIT. Browse the full [Microsoft AI Red Team hub on Microsoft Learn](https://learn.microsoft.com/en-us/security/ai-red-team/), the [bibliography](bibliography), or pick a paper:
+Guidance, methodology, threat models, and learning resources for AI red teaming — straight from the team that builds PyRIT. Browse the full [Microsoft AI Red Team hub on Microsoft Learn](https://learn.microsoft.com/en-us/security/ai-red-team/), the [bibliography](bibliography), or explore a featured resource:
 
 :::::{grid} 1 2 3 3
+
+::::{card}
+:link: https://aka.ms/medusa-repo
+
+:::{image} assets/ecosystem/medusa.png
+:alt: Medusa's Memory Heist
+:class: ecosystem-resource-thumb
+:::
+
+**Medusa's Memory Heist** (Microsoft AI Red Team)
+
+Open-source educational game for exploring agentic AI safety and security through interactive challenges.
+::::
+
+::::{card}
+:link: https://arxiv.org/abs/2606.09701
+
+:::{image} assets/ecosystem/papers/advgrpo.png
+:alt: Learning to Attack and Defend
+:class: ecosystem-paper-thumb
+:::
+
+**Learning to Attack and Defend: Adaptive Red Teaming of Language Models via GRPO**
+
+Bullwinkel et al., 2026
+::::
+
+::::{card}
+:link: https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/bade/documents/products-and-services/en-us/security/Taxonomy-of-Failure-Modes-in-Agentic-AI-Systems-v2-0.pdf
+
+:::{image} assets/ecosystem/papers/agentic-taxonomy.png
+:alt: Taxonomy of Failure Modes in Agentic AI Systems
+:class: ecosystem-paper-thumb
+:::
+
+**Taxonomy of Failure Modes in Agentic AI Systems**
+
+Microsoft AI Red Team, 2026 (v2.0)
+::::
 
 ::::{card}
 :link: https://arxiv.org/abs/2501.07238
@@ -179,19 +218,6 @@ Bullwinkel et al., 2025
 **PyRIT: A Framework for Security Risk Identification and Red Teaming in Generative AI Systems**
 
 Lopez et al., 2024
-::::
-
-::::{card}
-:link: https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/microsoft/bade/documents/products-and-services/en-us/security/Taxonomy-of-Failure-Modes-in-Agentic-AI-Systems-v2-0.pdf
-
-:::{image} assets/ecosystem/papers/agentic-taxonomy.png
-:alt: Taxonomy of Failure Modes in Agentic AI Systems
-:class: ecosystem-paper-thumb
-:::
-
-**Taxonomy of Failure Modes in Agentic AI Systems**
-
-Microsoft AI Red Team, 2026 (v2.0)
 ::::
 
 :::::

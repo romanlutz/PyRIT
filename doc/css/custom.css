@@ -153,13 +153,25 @@ html.dark .myst-card > .myst-card-body > img.ecosystem-logo {
   opacity: 0.22 !important;
 }
 
-/* Paper preview cards: thumbnail of first page + brief citation */
+/* AIRT paper cards: thumbnail of first page + brief citation */
 .ecosystem-paper-thumb {
   width: 100%;
   height: auto;
   max-height: 180px;
   object-fit: cover;
   object-position: top center;
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 4px;
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+/* Non-paper AIRT resources use the same card rhythm without cropping their artwork. */
+.ecosystem-resource-thumb {
+  width: 100%;
+  height: 180px;
+  object-fit: contain;
+  background: #fff;
   border: 1px solid rgba(0,0,0,0.08);
   border-radius: 4px;
   display: block;
