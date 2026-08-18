@@ -3,14 +3,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Union, override
+from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 from pyrit.common import verify_and_resolve_path
 from pyrit.common.path import SCORER_SEED_PROMPT_PATH
 from pyrit.models import MessagePiece, Score, SeedPrompt
 from pyrit.prompt_target import CHAT_TARGET_REQUIREMENTS, PromptTarget
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
-from pyrit.score.scorer import Scorer
+from pyrit.score.llm_scoring import _run_llm_scoring_async
+from pyrit.score.response_handler import JsonSchemaResponseHandler
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
 if TYPE_CHECKING:
@@ -63,19 +66,19 @@ class FortressRubricScorer(FloatScaleScorer):
         self,
         *,
         chat_target: PromptTarget,
-        system_prompt_path: Optional[Union[str, Path]] = None,
-        validator: Optional[ScorerPromptValidator] = None,
+        system_prompt_path: str | Path | None = None,
+        validator: ScorerPromptValidator | None = None,
     ) -> None:
         """
         Initialize the FortressRubricScorer.
 
         Args:
             chat_target (PromptTarget): The LLM target used to grade responses.
-            system_prompt_path (Optional[Union[str, Path]]): Path to the YAML system-prompt
+            system_prompt_path (str | Path | None): Path to the YAML system-prompt
                 template. The template must declare ``criteria``, ``num_dim``, and
                 ``original_prompt`` parameters. Defaults to
                 ``pyrit/datasets/score/fortress/rubric_system_prompt.yaml``.
-            validator (Optional[ScorerPromptValidator]): Custom validator. Defaults to one
+            validator (ScorerPromptValidator | None): Custom validator. Defaults to one
                 requiring ``text`` data and ``["rubric", "num_dim"]`` in ``prompt_metadata``.
         """
         super().__init__(validator=validator or self._DEFAULT_VALIDATOR, chat_target=chat_target)
@@ -87,6 +90,7 @@ class FortressRubricScorer(FloatScaleScorer):
         )
         self._system_prompt_path = resolved_path
         self._system_prompt_template: SeedPrompt = SeedPrompt.from_yaml_file(resolved_path)
+        self._response_handler = JsonSchemaResponseHandler()
 
     @override
     def _build_identifier(self) -> ComponentIdentifier:
@@ -100,53 +104,31 @@ class FortressRubricScorer(FloatScaleScorer):
             params={
                 "system_prompt_path": str(self._system_prompt_path),
             },
-            children={
-                "prompt_target": self._prompt_target.get_identifier(),
-            },
+            prompt_target=self._prompt_target.get_identifier(),
         )
 
-    @override
     async def _score_value_with_llm_async(
         self,
         *,
-        prompt_target: PromptTarget,
         system_prompt: str,
         message_value: str,
         message_data_type: PromptDataType,
         scored_prompt_id: str | UUID,
-        prepended_text_message_piece: Optional[str] = None,
-        category: Optional[str | UUID] = None,
-        objective: Optional[str] = None,
-        score_value_output_key: str = "score_value",
-        rationale_output_key: str = "rationale",
-        description_output_key: str = "description",
-        metadata_output_key: str = "metadata",
-        category_output_key: str = "category",
-        attack_identifier: Optional[ComponentIdentifier] = None,
+        objective: str | None = None,
     ) -> UnvalidatedScore:
-        # Bypass FloatScaleScorer's float-validation step: our raw score_value is a
-        # Y/N string (e.g. "YYNNY"), not a float. We compute the float ourselves in
-        # _score_piece_async after validating the string's shape.
-        return await Scorer._score_value_with_llm_async(
-            self,
-            prompt_target=prompt_target,
+        return await _run_llm_scoring_async(
+            chat_target=self._prompt_target,
             system_prompt=system_prompt,
-            message_value=message_value,
-            message_data_type=message_data_type,
+            response_handler=self._response_handler,
+            value=message_value,
+            data_type=message_data_type,
             scored_prompt_id=scored_prompt_id,
-            prepended_text_message_piece=prepended_text_message_piece,
-            category=category,
+            scorer_identifier=self.get_identifier(),
             objective=objective,
-            score_value_output_key=score_value_output_key,
-            rationale_output_key=rationale_output_key,
-            description_output_key=description_output_key,
-            metadata_output_key=metadata_output_key,
-            category_output_key=category_output_key,
-            attack_identifier=attack_identifier,
         )
 
     @override
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         """
         Grade a single message piece against its rubric.
 
@@ -157,7 +139,7 @@ class FortressRubricScorer(FloatScaleScorer):
         Args:
             message_piece (MessagePiece): The response to grade. Must carry ``rubric`` and
                 ``num_dim`` in ``prompt_metadata`` (enforced by the default validator).
-            objective (Optional[str]): Unused.
+            objective (str | None): Objective retained on the resulting score. Defaults to None.
 
         Returns:
             list[Score]: A single-element list containing one float-scale ``Score``.
@@ -171,13 +153,11 @@ class FortressRubricScorer(FloatScaleScorer):
         )
 
         unvalidated = await self._score_value_with_llm_async(
-            prompt_target=self._prompt_target,
             system_prompt=system_prompt,
             message_value=message_piece.converted_value,
             message_data_type=message_piece.converted_value_data_type,
             scored_prompt_id=message_piece.id,
             objective=objective,
-            attack_identifier=message_piece.attack_identifier,
         )
 
         raw_grades = (unvalidated.raw_score_value or "").strip().upper()

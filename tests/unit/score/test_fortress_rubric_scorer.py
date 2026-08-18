@@ -5,15 +5,15 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from unit.mocks import MockPromptTarget
 
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score, UnvalidatedScore
-from pyrit.prompt_target import PromptTarget
 from pyrit.score import FortressRubricScorer
 
 
 @pytest.fixture
 def mock_chat_target(patch_central_database):
-    return MagicMock(spec=PromptTarget)
+    return MockPromptTarget()
 
 
 def _make_message_piece(

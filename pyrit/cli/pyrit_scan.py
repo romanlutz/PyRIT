@@ -14,20 +14,71 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import sys
 from argparse import ArgumentParser, Namespace, RawDescriptionHelpFormatter
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, get_args, get_origin
 
 from pyrit.cli._cli_args import (
     ARG_HELP,
     _parse_initializer_arg,
+    add_results_arguments,
+    build_parameters_from_api,
+    collapse_dataset_filters,
     non_negative_int,
+    parse_dataset_filter,
     positive_int,
     validate_log_level_argparse,
 )
 
-_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from pyrit.models.catalog import (
+        RegisteredScenario,
+        RunScenarioRequest,
+        ScenarioRunSummary,
+    )
+    from pyrit.models.parameter import Parameter
+
+
+def _print_cli_exception(*, exc: BaseException) -> None:
+    """
+    Print a user-facing error line for an exception that bubbled out of the CLI.
+
+    Surfaces the exception class (so callers can tell ``ReadTimeout`` apart from
+    ``HTTPStatusError``) and dumps the traceback when log-level is ``DEBUG``.
+    Adds a specific hint for ``httpx.ReadTimeout`` since that case usually means
+    the server is taking longer than ``--request-timeout`` to respond and the
+    default bare ``str(exc)`` is empty.
+
+    Args:
+        exc (BaseException): The exception caught by the CLI.
+    """
+    import traceback
+
+    try:
+        import httpx
+
+        is_read_timeout = isinstance(exc, httpx.ReadTimeout)
+    except Exception:
+        is_read_timeout = False
+
+    cls_name = type(exc).__name__
+    detail = str(exc) or repr(exc)
+
+    if is_read_timeout:
+        print(
+            "\nError (ReadTimeout): server did not respond in time. "
+            "Pass '--request-timeout <seconds>' to wait longer, or check the "
+            "server logs for a blocked event loop."
+        )
+    else:
+        print(f"\nError ({cls_name}): {detail}")
+
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 _DESCRIPTION = """PyRIT Scanner - Run AI security scenarios from the command line.
@@ -39,22 +90,30 @@ Examples:
   # Start the backend server
   pyrit_scan --start-server
 
-  # List scenarios, initializers, or targets
+  # List scenarios, initializers, targets, or converters
   pyrit_scan --list-scenarios
   pyrit_scan --list-initializers
   pyrit_scan --list-targets
+  pyrit_scan --list-converters
+
+  # List available datasets
+  pyrit_scan --list-datasets
 
   # Run single-turn cyber attacks against a target
-  pyrit_scan airt.cyber --target openai_chat --strategies single_turn
+  pyrit_scan airt.cyber --target openai_chat --techniques single_turn
 
   # Run rapid response with specific datasets and concurrency
   pyrit_scan airt.rapid_response --target openai_chat
-    --strategies role_play --dataset-names airt_hate
+    --techniques role_play_movie_script --dataset-names airt_hate
     --max-dataset-size 5 --max-concurrency 4
+
+  # Attach registered converters to a technique (repeatable, applied in order)
+  pyrit_scan airt.rapid_response --target openai_chat
+    --techniques role_play_movie_script:converter.translation_spanish:converter.leetspeak
 
   # Run multi-turn red team agent with labels for tracking
   pyrit_scan airt.red_team_agent --target openai_chat
-    --strategies crescendo
+    --techniques crescendo
     --memory-labels '{"experiment":"baseline"}'
 
   # Register a custom initializer from a Python script
@@ -66,6 +125,16 @@ Examples:
   # Stop the server
   pyrit_scan --stop-server
 """
+
+
+def _positive_finite_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a number greater than 0, got {value!r}") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a finite number greater than 0, got {value!r}")
+    return parsed
 
 
 def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
@@ -103,6 +172,13 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         help="Stop the backend server and exit",
     )
     server_group.add_argument(
+        "--startup-timeout",
+        type=_positive_finite_float,
+        default=None,
+        metavar="SECONDS",
+        help="Seconds to wait for a local backend to start (default: server.startup_timeout or 120)",
+    )
+    server_group.add_argument(
         "--config-file",
         type=Path,
         help=ARG_HELP["config_file"],
@@ -112,6 +188,16 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         type=validate_log_level_argparse,
         default=logging.WARNING,
         help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: WARNING)",
+    )
+    server_group.add_argument(
+        "--request-timeout",
+        type=float,
+        default=None,
+        help=(
+            "HTTP read timeout in seconds for non-polling server requests "
+            "(catalog/results/cancel/etc). Defaults to 60. Polling a live "
+            "scenario run always waits indefinitely regardless of this value."
+        ),
     )
 
     # -- Discovery --
@@ -130,6 +216,16 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         "--list-targets",
         action="store_true",
         help="List all available targets and exit",
+    )
+    discovery_group.add_argument(
+        "--list-converters",
+        action="store_true",
+        help="List all registered converter instances and exit",
+    )
+    discovery_group.add_argument(
+        "--list-datasets",
+        action="store_true",
+        help="List all available datasets and exit",
     )
     discovery_group.add_argument(
         "--add-initializer",
@@ -159,12 +255,12 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         help=ARG_HELP["initializers"],
     )
     run_group.add_argument(
-        "--strategies",
-        "-s",
+        "--techniques",
+        "-t",
         type=str,
         nargs="+",
-        dest="scenario_strategies",
-        help=ARG_HELP["scenario_strategies"],
+        dest="scenario_techniques",
+        help=ARG_HELP["scenario_techniques"],
     )
     run_group.add_argument(
         "--max-concurrency",
@@ -192,6 +288,16 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
         type=positive_int,
         help=ARG_HELP["max_dataset_size"],
     )
+    run_group.add_argument(
+        "--dataset-filters",
+        type=parse_dataset_filter,
+        nargs="+",
+        metavar="KEY=VALUE",
+        help=ARG_HELP["dataset_filters"],
+    )
+
+    # -- Scenario results (inspect a completed run and exit) --
+    add_results_arguments(parser=parser, include_id_flag=True)
 
     return parser
 
@@ -200,70 +306,94 @@ def _build_base_parser(*, add_help: bool = True) -> ArgumentParser:
 _SCENARIO_DEST_PREFIX = "scenario__"
 
 
-_SCALAR_TYPE_COERCERS: dict[str, Any] = {
-    "int": int,
-    "float": float,
-    "bool": lambda v: str(v).strip().lower() in ("1", "true", "yes", "y", "on"),
-    "str": str,
-}
-
-
-def _scenario_param_kwargs(*, param: dict[str, Any]) -> dict[str, Any]:
+def _scenario_value_coercer(*, name: str, annotation: Any) -> Callable[[Any], Any] | None:
     """
-    Build argparse ``add_argument`` kwargs for a scenario-declared parameter dict.
+    Build an argparse ``type=`` callable that coerces a single CLI token through
+    ``Parameter.coerce_value`` — the same coercion the shell and backend use.
 
-    Uses ``param_type``, ``is_list`` and ``choices`` from the catalog payload
-    so list params accept ``nargs='+'`` and scalar params get client-side
-    type coercion and choice validation.
+    Returns ``None`` when no coercion is needed (a plain ``str`` or an untyped
+    passthrough). Coercion/validation failures (including ``Literal`` choice
+    membership) are re-raised as ``argparse.ArgumentTypeError`` so argparse renders
+    them as a clean CLI error.
 
     Args:
-        param: Single entry from ``RegisteredScenario.supported_parameters``.
+        name: Scenario parameter name (used for the flag in error messages).
+        annotation: Scalar element type to coerce to (e.g. ``int``, ``bool``, or
+            ``Literal[...]`` for choices), or ``None`` / ``str`` for passthrough.
+
+    Returns:
+        Callable[[Any], Any] | None: The coercer, or ``None`` for passthrough.
+    """
+    if annotation is None or annotation is str:
+        return None
+
+    from pyrit.models.parameter import Parameter
+
+    element_param = Parameter(name=name, description="", param_type=annotation)
+
+    def _coerce(raw: Any) -> Any:
+        try:
+            return element_param.coerce_value(raw)
+        except (ValueError, TypeError) as exc:
+            raise argparse.ArgumentTypeError(f"--{name.replace('_', '-')}: invalid value {raw!r} ({exc})") from exc
+
+    return _coerce
+
+
+def _scenario_param_kwargs(*, parameter: Parameter) -> dict[str, Any]:
+    """
+    Build argparse ``add_argument`` kwargs for a scenario-declared ``Parameter``.
+
+    List params get ``nargs='+'`` and coerce per element; scalar params coerce the
+    single token. All coercion — including ``Literal`` choice membership — routes
+    through ``Parameter.coerce_value`` so scan, the shell, and the backend agree on
+    accepted values.
+
+    Args:
+        parameter: Scenario parameter built from the catalog payload via
+            ``build_parameters_from_api``.
 
     Returns:
         dict[str, Any]: kwargs ready to pass to ``ArgumentParser.add_argument``.
     """
     kwargs: dict[str, Any] = {
-        "dest": f"{_SCENARIO_DEST_PREFIX}{param.get('name', '')}",
+        "dest": f"{_SCENARIO_DEST_PREFIX}{parameter.name}",
         "default": argparse.SUPPRESS,
-        "help": param.get("description", ""),
+        "help": parameter.description,
     }
-    if param.get("is_list"):
+    param_type = parameter.param_type
+    element_type: Any
+    if get_origin(param_type) is list:
+        type_args = get_args(param_type)
+        element_type = type_args[0] if type_args else str
         kwargs["nargs"] = "+"
     else:
-        coercer = _SCALAR_TYPE_COERCERS.get(param.get("param_type", ""))
-        if coercer is not None and coercer is not str:
-            param_name = param.get("name", "")
+        element_type = param_type
 
-            def _typed(raw: str) -> Any:
-                try:
-                    return coercer(raw)
-                except (ValueError, TypeError) as exc:
-                    raise argparse.ArgumentTypeError(
-                        f"--{param_name.replace('_', '-')}: invalid value {raw!r} ({exc})"
-                    ) from exc
-
-            kwargs["type"] = _typed
-    choices = param.get("choices")
-    if choices:
-        kwargs["choices"] = list(choices)
+    coercer = _scenario_value_coercer(name=parameter.name, annotation=element_type)
+    if coercer is not None:
+        kwargs["type"] = coercer
     return kwargs
 
 
-def _add_scenario_params_from_api(*, parser: ArgumentParser, params: list[dict[str, Any]]) -> None:
+def _add_scenario_params_from_api(*, parser: ArgumentParser, params: list[Parameter]) -> None:
     """
-    Add scenario-declared parameters (from the API response) as CLI flags.
+    Add scenario-declared parameters as CLI flags.
+
+    Catalog payloads are converted to ``Parameter`` objects via
+    ``build_parameters_from_api`` (shared with the shell) so type coercion and
+    choice handling stay consistent across entry points.
 
     Args:
         parser: Parser to extend.
-        params: List of parameter dicts from ``GET /api/scenarios/catalog/{name}``.
+        params: Scenario-declared parameters from ``GET /api/scenarios/catalog/{name}``.
     """
     seen_flags: set[str] = set(parser._option_string_actions.keys())
-    for p in params:
-        name = p.get("name", "")
-        flag = f"--{name.replace('_', '-')}"
+    for parameter in build_parameters_from_api(api_params=params) or []:
+        flag = f"--{parameter.name.replace('_', '-')}"
         if flag in seen_flags:
             continue
-        parser.add_argument(flag, **_scenario_param_kwargs(param=p))
+        parser.add_argument(flag, **_scenario_param_kwargs(parameter=parameter))
         seen_flags.add(flag)
 
 
@@ -284,7 +414,7 @@ def _extract_scenario_args(*, parsed: Namespace) -> dict[str, Any]:
     }
 
 
-def parse_args(args: Optional[list[str]] = None) -> Namespace:
+def parse_args(args: list[str] | None = None) -> Namespace:
     """
     Parse command-line arguments (pass 1 — tolerant of scenario-declared flags).
 
@@ -323,12 +453,12 @@ async def _resolve_server_url_async(*, parsed_args: Namespace) -> str | None:
     Returns:
         str | None: The server base URL, or ``None`` if unreachable.
     """
-    from pyrit.cli._config_reader import DEFAULT_SERVER_URL, read_server_url
-    from pyrit.cli._server_launcher import ServerLauncher
+    from pyrit.cli._config_reader import DEFAULT_SERVER_URL, read_server_settings
+    from pyrit.cli._server_launcher import ServerLauncher, parse_local_server_address
 
-    base_url = parsed_args.server_url
-    if base_url is None:
-        base_url = read_server_url(config_file=parsed_args.config_file) or DEFAULT_SERVER_URL
+    server_settings = read_server_settings(config_file=parsed_args.config_file)
+    base_url = parsed_args.server_url or server_settings.url or DEFAULT_SERVER_URL
+    startup_timeout = getattr(parsed_args, "startup_timeout", None) or server_settings.startup_timeout
 
     # Probe existing server
     if await ServerLauncher.probe_health_async(base_url=base_url):
@@ -336,21 +466,24 @@ async def _resolve_server_url_async(*, parsed_args: Namespace) -> str | None:
 
     # Auto-start if requested
     if parsed_args.start_server:
-        # The launcher can only bind localhost:8000. If the user explicitly
-        # configured a different URL we can't honor it — refuse rather than
-        # silently start a server the user can't reach.
-        if base_url != DEFAULT_SERVER_URL:
+        local_address = parse_local_server_address(base_url=base_url)
+        if local_address is None:
             print(
                 f"Error: cannot --start-server because the configured server URL ({base_url}) "
-                f"does not match the launcher default ({DEFAULT_SERVER_URL}). "
-                "Either remove --server-url / the server.url config entry, "
-                "or start the backend manually with `pyrit_backend --host ... --port ...`.",
+                "is not a plain local HTTP URL. Use localhost or 127.0.0.1, "
+                "or start a remote backend separately.",
                 file=sys.stderr,
             )
             return None
+        host, port = local_address
         launcher = ServerLauncher()
         try:
-            return await launcher.start_async(config_file=parsed_args.config_file)
+            return await launcher.start_async(
+                host=host,
+                port=port,
+                config_file=parsed_args.config_file,
+                startup_timeout=startup_timeout,
+            )
         except RuntimeError as exc:
             print(f"Error: {exc}")
             return None
@@ -370,7 +503,10 @@ def _is_command_specified(*, parsed_args: Namespace) -> bool:
         parsed_args.list_scenarios
         or parsed_args.list_initializers
         or parsed_args.list_targets
+        or parsed_args.list_converters
+        or parsed_args.list_datasets
         or parsed_args.add_initializer
+        or parsed_args.scenario_results
         or parsed_args.scenario_name
     )
 
@@ -392,23 +528,28 @@ async def _handle_stop_server_async(*, parsed_args: Namespace) -> int:
     Handle ``--stop-server``: probe, then terminate the listening process.
 
     Returns:
-        int: Exit code (always ``0``).
+        int: Zero when no server is running or shutdown succeeds; one otherwise.
     """
-    from urllib.parse import urlparse
-
-    from pyrit.cli._server_launcher import ServerLauncher, stop_server_on_port
+    from pyrit.cli._server_launcher import ServerLauncher, parse_local_server_address, stop_server_on_port
 
     base_url = _resolve_configured_server_url(parsed_args=parsed_args)
+    local_address = parse_local_server_address(base_url=base_url)
+    if local_address is None:
+        print(f"Cannot stop non-local server {base_url}. Stop it on its host instead.", file=sys.stderr)
+        return 1
     if not await ServerLauncher.probe_health_async(base_url=base_url):
         print(f"No server running at {base_url}.")
         return 0
 
-    port = urlparse(base_url).port or 8000
-    if stop_server_on_port(port=port):
-        print(f"Server on port {port} stopped.")
-    else:
-        print(f"Server at {base_url} is running but could not identify the process.")
+    _, port = local_address
+    if not await asyncio.to_thread(stop_server_on_port, port=port):
+        print(f"Server at {base_url} is running but could not be stopped.")
         print(f"Find and kill it manually: look for a process listening on port {port}.")
+        return 1
+    if await ServerLauncher.probe_health_async(base_url=base_url):
+        print(f"Server process exited, but a healthy backend is still responding at {base_url}.")
+        return 1
+    print(f"Server on port {port} stopped.")
     return 0
 
 
@@ -422,16 +563,24 @@ async def _handle_list_commands_async(*, client: Any, parsed_args: Namespace) ->
     from pyrit.cli import _output
 
     if parsed_args.list_scenarios:
-        resp = await client.list_scenarios_async()
-        _output.print_scenario_list(items=resp.get("items", []))
+        scenarios = await client.list_scenarios_async()
+        _output.print_scenario_list(items=scenarios)
         return 0
     if parsed_args.list_initializers:
-        resp = await client.list_initializers_async()
-        _output.print_initializer_list(items=resp.get("items", []))
+        initializers = await client.list_initializers_async()
+        _output.print_initializer_list(items=initializers)
         return 0
     if parsed_args.list_targets:
-        resp = await client.list_targets_async()
-        _output.print_target_list(items=resp.get("items", []))
+        targets = await client.list_targets_async()
+        _output.print_target_list(items=targets)
+        return 0
+    if parsed_args.list_datasets:
+        resp = await client.list_datasets_async()
+        _output.print_dataset_list(items=resp.get("items", []))
+        return 0
+    if parsed_args.list_converters:
+        resp = await client.list_converters_async()
+        _output.print_converter_list(items=resp.get("items", []))
         return 0
     return None
 
@@ -463,9 +612,71 @@ async def _handle_add_initializer_async(*, client: Any, parsed_args: Namespace) 
     return 0
 
 
-def _reparse_with_scenario_params(
-    *, parsed_args: Namespace, supported_params: list[dict[str, Any]]
-) -> Namespace | None:
+def _validate_results_flags(*, parsed_args: Namespace) -> str | None:
+    """
+    Ensure the ``scenario-results`` sub-flags are only used with ``--scenario-results``.
+
+    ``--view`` / ``--attack-result-ids`` / ``--limit`` only mean something when a
+    run is being inspected. Because the flat parser accepts them regardless, this
+    check gives a clear error instead of the generic "no scenario specified"
+    fallthrough.
+
+    Args:
+        parsed_args (Namespace): The parsed CLI arguments.
+
+    Returns:
+        str | None: An error message when a sub-flag is misused, else None.
+    """
+    if parsed_args.scenario_results:
+        return None
+    misused: list[str] = []
+    if parsed_args.view is not None:
+        misused.append("--view")
+    if parsed_args.attack_result_ids:
+        misused.append("--attack-result-ids")
+    if parsed_args.limit is not None:
+        misused.append("--limit")
+    if not misused:
+        return None
+    return f"Error: {', '.join(misused)} require --scenario-results <id>."
+
+
+async def _handle_results_async(*, client: Any, parsed_args: Namespace) -> int:
+    """
+    Handle ``--scenario-results``: fetch a run and render the requested view.
+
+    Returns:
+        int: Exit code (``0`` on success, ``1`` on error).
+    """
+    from pyrit.cli import _output
+    from pyrit.cli._cli_args import ScenarioResultView
+    from pyrit.cli._results import apply_view_limit_policy, build_attacks_table_payload, resolve_view
+
+    scenario_result_id = parsed_args.scenario_results
+    view = resolve_view(view=parsed_args.view)
+    limit = apply_view_limit_policy(view=view, limit=parsed_args.limit)
+
+    try:
+        result = await client.get_scenario_run_results_async(scenario_result_id=scenario_result_id)
+    except Exception as exc:
+        _print_cli_exception(exc=exc)
+        return 1
+
+    if view is ScenarioResultView.OVERVIEW:
+        await _output.print_scenario_result_async(result=result)
+        return 0
+
+    payload = build_attacks_table_payload(
+        result=result,
+        scenario_result_id=scenario_result_id,
+        attack_result_ids=parsed_args.attack_result_ids,
+        limit=limit,
+    )
+    _output.print_attacks_table(payload=payload)
+    return 0
+
+
+def _reparse_with_scenario_params(*, parsed_args: Namespace, supported_params: list[Parameter]) -> Namespace | None:
     """
     Re-parse the original args with scenario-declared flags added to the base parser.
 
@@ -497,16 +708,17 @@ def _reparse_with_scenario_params(
         return None
 
 
-def _build_run_request(*, parsed_args: Namespace, scenario_name: str) -> dict[str, Any]:
+def _build_run_request(*, parsed_args: Namespace, scenario_name: str) -> RunScenarioRequest:
     """
-    Build the ``RunScenarioRequest`` dict from parsed CLI args.
+    Build the ``RunScenarioRequest`` typed object from parsed CLI args.
 
     Returns:
-        dict[str, Any]: The request payload to send to ``POST /api/scenarios/runs``.
+        RunScenarioRequest: The typed request payload to send to ``POST /api/scenarios/runs``.
     """
     from pyrit.cli._cli_args import parse_memory_labels
+    from pyrit.models.catalog import RunScenarioRequest
 
-    request: dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "scenario_name": scenario_name,
         "target_name": parsed_args.target or "",
     }
@@ -522,49 +734,55 @@ def _build_run_request(*, parsed_args: Namespace, scenario_name: str) -> dict[st
                 init_names.append(name)
                 if entry.get("args"):
                     init_args[name] = entry["args"]
-        request["initializers"] = init_names
+        kwargs["initializers"] = init_names
         if init_args:
-            request["initializer_args"] = init_args
+            kwargs["initializer_args"] = init_args
 
-    if parsed_args.scenario_strategies:
-        request["strategies"] = parsed_args.scenario_strategies
+    if parsed_args.scenario_techniques:
+        kwargs["techniques"] = parsed_args.scenario_techniques
     if parsed_args.max_concurrency is not None:
-        request["max_concurrency"] = parsed_args.max_concurrency
+        kwargs["max_concurrency"] = parsed_args.max_concurrency
     if parsed_args.max_retries is not None:
-        request["max_retries"] = parsed_args.max_retries
+        kwargs["max_retries"] = parsed_args.max_retries
     if parsed_args.dataset_names:
-        request["dataset_names"] = parsed_args.dataset_names
+        kwargs["dataset_names"] = parsed_args.dataset_names
     if parsed_args.max_dataset_size is not None:
-        request["max_dataset_size"] = parsed_args.max_dataset_size
+        kwargs["max_dataset_size"] = parsed_args.max_dataset_size
+    if parsed_args.dataset_filters:
+        kwargs["dataset_filters"] = collapse_dataset_filters(parsed_args.dataset_filters)
     if parsed_args.memory_labels:
-        request["labels"] = parse_memory_labels(json_string=parsed_args.memory_labels)
+        kwargs["labels"] = parse_memory_labels(json_string=parsed_args.memory_labels)
 
     scenario_params = _extract_scenario_args(parsed=parsed_args)
     if scenario_params:
-        request["scenario_params"] = scenario_params
+        kwargs["scenario_params"] = scenario_params
 
-    return request
+    return RunScenarioRequest(**kwargs)
 
 
 async def _poll_until_terminal_async(
     *,
     client: Any,
     scenario_result_id: str,
-    total_strategies: int,
-) -> dict[str, Any]:
+    total_techniques: int,
+) -> ScenarioRunSummary:
     """
     Poll the server until the run reaches a terminal status.
 
     Returns:
-        dict[str, Any]: The final run dict.
+        ScenarioRunSummary: The final run summary.
     """
     from pyrit.cli import _output
+    from pyrit.models import ScenarioRunState
 
+    terminal_states = {ScenarioRunState.COMPLETED, ScenarioRunState.FAILED, ScenarioRunState.CANCELLED}
+
+    seen_retry_attack_ids: set[str] = set()
     while True:
         run = await client.get_scenario_run_async(scenario_result_id=scenario_result_id)
-        status = run.get("status", "UNKNOWN")
-        _output.print_scenario_run_progress(run=run, total_strategies=total_strategies)
-        if status in _TERMINAL_STATUSES:
+        _output.print_scenario_retry_warnings(run=run, seen_attack_ids=seen_retry_attack_ids)
+        _output.print_scenario_run_progress(run=run, total_techniques=total_techniques)
+        if run.status in terminal_states:
             return run
         await asyncio.sleep(0.5)
 
@@ -573,7 +791,7 @@ async def _run_scenario_async(
     *,
     client: Any,
     parsed_args: Namespace,
-    scenario_meta: dict[str, Any],
+    scenario_meta: RegisteredScenario,
 ) -> int:
     """
     Start a scenario run, poll for completion, and print results.
@@ -582,11 +800,12 @@ async def _run_scenario_async(
         int: Exit code (``0`` if the run completed successfully, ``1`` otherwise).
     """
     from pyrit.cli import _output
+    from pyrit.models import ScenarioRunState
 
     scenario_name = parsed_args.scenario_name
     request = _build_run_request(parsed_args=parsed_args, scenario_name=scenario_name)
 
-    total_strategies = len(request.get("strategies") or scenario_meta.get("all_strategies") or [])
+    total_techniques = len(request.techniques or scenario_meta.all_techniques or [])
     print(f"\nRunning scenario: {scenario_name}")
     sys.stdout.flush()
 
@@ -596,13 +815,13 @@ async def _run_scenario_async(
         print(f"Error starting scenario: {exc}")
         return 1
 
-    scenario_result_id = run.get("scenario_result_id", "")
+    scenario_result_id = run.scenario_result_id
 
     try:
         run = await _poll_until_terminal_async(
             client=client,
             scenario_result_id=scenario_result_id,
-            total_strategies=total_strategies,
+            total_techniques=total_techniques,
         )
     except KeyboardInterrupt:
         print("\n\nCancelling scenario run...")
@@ -613,16 +832,22 @@ async def _run_scenario_async(
             print("Warning: could not cancel scenario run on server.")
         return 1
 
-    if run.get("status") == "COMPLETED":
+    if run.status == ScenarioRunState.COMPLETED:
         try:
             detail = await client.get_scenario_run_results_async(scenario_result_id=scenario_result_id)
-            await _output.print_scenario_result_async(result_dict=detail)
-        except Exception:
+            await _output.print_scenario_result_async(result=detail)
+        except Exception as exc:
+            print(
+                "\nERROR: The scenario completed, but its detailed results could not be "
+                "retrieved or parsed from the server."
+            )
+            _print_cli_exception(exc=exc)
             _output.print_scenario_run_summary(run=run)
-    else:
-        _output.print_scenario_run_summary(run=run)
+            return 1
+        return 0
 
-    return 0 if run.get("status") == "COMPLETED" else 1
+    _output.print_scenario_run_summary(run=run)
+    return 1
 
 
 async def _dispatch_with_client_async(*, client: Any, parsed_args: Namespace) -> int:
@@ -639,6 +864,9 @@ async def _dispatch_with_client_async(*, client: Any, parsed_args: Namespace) ->
     if parsed_args.add_initializer:
         return await _handle_add_initializer_async(client=client, parsed_args=parsed_args)
 
+    if parsed_args.scenario_results:
+        return await _handle_results_async(client=client, parsed_args=parsed_args)
+
     scenario_name = parsed_args.scenario_name
     if not scenario_name:
         print("Error: No scenario specified. Provide one positionally or use --list-scenarios.")
@@ -647,15 +875,15 @@ async def _dispatch_with_client_async(*, client: Any, parsed_args: Namespace) ->
     scenario_meta = await client.get_scenario_async(scenario_name=scenario_name)
     if scenario_meta is None:
         print(f"Error: Scenario '{scenario_name}' not found on server.")
-        resp = await client.list_scenarios_async()
-        names = [s.get("scenario_name", "") for s in resp.get("items", [])]
+        scenarios = await client.list_scenarios_async()
+        names = [s.scenario_name for s in scenarios]
         if names:
             print(f"Available scenarios: {', '.join(names)}")
         return 1
 
     reparsed = _reparse_with_scenario_params(
         parsed_args=parsed_args,
-        supported_params=scenario_meta.get("supported_parameters") or [],
+        supported_params=scenario_meta.supported_parameters,
     )
     if reparsed is None:
         return 1
@@ -677,6 +905,11 @@ async def _run_async(*, parsed_args: Namespace) -> int:
     if parsed_args.stop_server:
         return await _handle_stop_server_async(parsed_args=parsed_args)
 
+    results_flag_error = _validate_results_flags(parsed_args=parsed_args)
+    if results_flag_error is not None:
+        print(results_flag_error, file=sys.stderr)
+        return 1
+
     if not (parsed_args.start_server or _is_command_specified(parsed_args=parsed_args)):
         _build_base_parser().print_help()
         return 0
@@ -696,7 +929,10 @@ async def _run_async(*, parsed_args: Namespace) -> int:
         return 0
 
     try:
-        async with PyRITApiClient(base_url=base_url_result) as client:
+        async with PyRITApiClient(
+            base_url=base_url_result,
+            request_timeout=getattr(parsed_args, "request_timeout", None),
+        ) as client:
             return await _dispatch_with_client_async(client=client, parsed_args=parsed_args)
     except ServerNotAvailableError as exc:
         _output.print_error_with_hint(
@@ -705,11 +941,11 @@ async def _run_async(*, parsed_args: Namespace) -> int:
         )
         return 1
     except Exception as exc:
-        print(f"\nError: {exc}")
+        _print_cli_exception(exc=exc)
         return 1
 
 
-def main(args: Optional[list[str]] = None) -> int:
+def main(args: list[str] | None = None) -> int:
     """
     Start the PyRIT scanner CLI.
 
@@ -733,13 +969,14 @@ def main(args: Optional[list[str]] = None) -> int:
 
     logging.basicConfig(level=parsed_args.log_level)
 
-    # Surface a one-line deprecation when the layered config contains blocks
-    # the thin CLI no longer reads (e.g. `scenario:`). The server still honors them.
-    from pyrit.cli._config_reader import warn_on_client_ignored_blocks
+    from pyrit.cli._config_reader import ConfigError, validate_client_config
 
-    warn_on_client_ignored_blocks(config_file=parsed_args.config_file)
-
-    return asyncio.run(_run_async(parsed_args=parsed_args))
+    try:
+        validate_client_config(config_file=parsed_args.config_file)
+        return asyncio.run(_run_async(parsed_args=parsed_args))
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

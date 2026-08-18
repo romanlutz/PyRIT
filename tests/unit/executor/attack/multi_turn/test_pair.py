@@ -18,6 +18,7 @@ import pytest
 
 from pyrit.executor.attack import (
     AttackAdversarialConfig,
+    AttackParameters,
     AttackScoringConfig,
     PAIRAttack,
     TreeOfAttacksWithPruningAttack,
@@ -100,10 +101,10 @@ class TestPAIRAttackInit:
             attack_adversarial_config=adversarial_config,
         )
 
-        assert attack._tree_width == 3
-        assert attack._tree_depth == 5
-        assert attack._branching_factor == 1
-        assert attack._on_topic_checking_enabled is False
+        assert attack._configuration.tree_width == 3
+        assert attack._configuration.tree_depth == 5
+        assert attack._configuration.branching_factor == 1
+        assert attack._configuration.on_topic_checking_enabled is False
 
     def test_branching_factor_is_not_exposed_in_signature(self):
         """branching_factor is definitional for PAIR (always 1) and must not be a public init kwarg."""
@@ -125,8 +126,8 @@ class TestPAIRAttackInit:
             attack_adversarial_config=adversarial_config,
             tree_width=7,
         )
-        assert attack._tree_width == 7
-        assert attack._branching_factor == 1
+        assert attack._configuration.tree_width == 7
+        assert attack._configuration.branching_factor == 1
 
     def test_tree_depth_override(self, objective_target, adversarial_config):
         attack = PAIRAttack(
@@ -134,8 +135,8 @@ class TestPAIRAttackInit:
             attack_adversarial_config=adversarial_config,
             tree_depth=12,
         )
-        assert attack._tree_depth == 12
-        assert attack._on_topic_checking_enabled is False
+        assert attack._configuration.tree_depth == 12
+        assert attack._configuration.on_topic_checking_enabled is False
 
     def test_is_subclass_of_tap(self):
         assert issubclass(PAIRAttack, TreeOfAttacksWithPruningAttack)
@@ -147,6 +148,22 @@ class TestPAIRAttackInit:
             attack_adversarial_config=adversarial_config,
         )
         assert attack._context_type is TAPAttackContext
+
+    def test_pair_context_uses_best_objective_target_conversation(self, objective_target, adversarial_config):
+        attack = PAIRAttack(
+            objective_target=objective_target,
+            attack_adversarial_config=adversarial_config,
+        )
+        context = attack._context_type(params=AttackParameters(objective="Test objective"))
+        active_node = MagicMock()
+        active_node.objective_target_conversation_id = "pair-active-conversation"
+        context.nodes = [active_node]
+
+        assert context.conversation_id == "pair-active-conversation"
+
+        context.best_conversation_id = "pair-best-conversation"
+
+        assert context.conversation_id == "pair-best-conversation"
 
     def test_pair_validates_adversarial_target_capabilities(self, objective_target):
         """An adversarial target lacking native MULTI_TURN/SYSTEM_PROMPT must be rejected (inherited from TAP)."""
@@ -185,3 +202,28 @@ class TestPAIRAttackInit:
         result = attack.get_attack_scoring_config()
         assert isinstance(result, TAPAttackScoringConfig)
         assert result.threshold == 0.85
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestPAIRAdversarialIdentity:
+    """PAIR inherits TAP's adversarial identity wiring."""
+
+    def test_get_attack_adversarial_config_includes_target(self, objective_target, adversarial_config):
+        attack = PAIRAttack(
+            objective_target=objective_target,
+            attack_adversarial_config=adversarial_config,
+        )
+        config = attack.get_attack_adversarial_config()
+        assert config is not None
+        assert config.target is adversarial_config.target
+        assert config.system_prompt is attack._adversarial_chat_system_seed_prompt
+        assert config.first_message is None
+
+    def test_identifier_includes_adversarial_chat_child(self, objective_target, adversarial_config):
+        attack = PAIRAttack(
+            objective_target=objective_target,
+            attack_adversarial_config=adversarial_config,
+        )
+        identifier = attack.get_identifier()
+        assert "adversarial_chat" in identifier.children
+        assert identifier.children["adversarial_chat"] == adversarial_config.target.get_identifier.return_value

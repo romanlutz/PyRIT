@@ -1,11 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -50,7 +51,7 @@ class _LocalDatasetLoader(SeedDatasetProvider):
 
     @property
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return self._dataset_name
 
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
@@ -68,7 +69,7 @@ class _LocalDatasetLoader(SeedDatasetProvider):
         """
         try:
             logger.info(f"Loading local dataset from {self.file_path}")
-            dataset = SeedDataset.from_yaml_file(self.file_path)
+            dataset = await asyncio.to_thread(SeedDataset.from_yaml_file, self.file_path)
             if not dataset.dataset_name:
                 dataset.dataset_name = self.dataset_name
             return dataset
@@ -76,7 +77,7 @@ class _LocalDatasetLoader(SeedDatasetProvider):
             logger.error(f"Failed to load local dataset from {self.file_path}: {e}")
             raise
 
-    async def _parse_metadata_async(self) -> Optional[SeedDatasetMetadata]:
+    async def _parse_metadata_async(self) -> SeedDatasetMetadata | None:
         """
         Extract metadata from a local YAML file and coerce raw values into typed schema fields.
 
@@ -84,15 +85,14 @@ class _LocalDatasetLoader(SeedDatasetProvider):
         enum and set types expected by SeedDatasetMetadata before _match_filter can work.
 
         Returns:
-            Optional[SeedDatasetMetadata]: Parsed metadata if available, otherwise None.
+            SeedDatasetMetadata | None: Parsed metadata if available, otherwise None.
 
         Raises:
             Exception: If the dataset file cannot be read.
         """
         valid_fields = [f.name for f in fields(SeedDatasetMetadata)]
         try:
-            with open(self.file_path, encoding="utf-8") as f:
-                dataset = yaml.safe_load(f)
+            dataset = await asyncio.to_thread(self._read_yaml)
         except Exception as e:
             logger.error(f"Failed to load local dataset from {self.file_path}: {e}")
             raise
@@ -110,6 +110,15 @@ class _LocalDatasetLoader(SeedDatasetProvider):
         # _validate_singular_fields needs sets to check cardinality.
         SeedDatasetMetadata._validate_singular_fields(metadata=result)
         return result
+
+    def _read_yaml(self) -> Any:
+        """
+        Read and parse the local dataset YAML file.
+
+        Returns:
+            Any: Parsed YAML content.
+        """
+        return yaml.safe_load(self.file_path.read_text(encoding="utf-8"))
 
 
 def _register_local_datasets() -> None:
