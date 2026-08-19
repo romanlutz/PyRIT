@@ -1,14 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pyrit.datasets.seed_datasets.local.local_dataset_loader import _LocalDatasetLoader
-from pyrit.models import SeedDataset
+from pyrit.models import SeedDataset, SeedPrompt
 
 
 class TestLocalDatasetLoader:
@@ -51,34 +50,58 @@ seeds:
         assert len(dataset.prompts) == 1
         assert dataset.prompts[0].value == "test prompt"
 
-    async def test_async_loaders_offload_blocking_file_io(self, tmp_path: Path, valid_yaml_content: str) -> None:
+    async def test_fetch_dataset_offloads_file_read(self, tmp_path: Path) -> None:
+        """Dataset file loading runs outside the event loop thread."""
         file_path = tmp_path / "test.yaml"
-        file_path.write_text(valid_yaml_content, encoding="utf-8")
-        loader = _LocalDatasetLoader(file_path=file_path)
-        event_loop_thread_id = threading.get_ident()
-        worker_thread_ids: list[int] = []
-        original_from_yaml_file = SeedDataset.from_yaml_file
-        original_read_yaml_file = loader._read_yaml_file
-
-        def load_dataset(path: Path) -> SeedDataset:
-            worker_thread_ids.append(threading.get_ident())
-            return original_from_yaml_file(path)
-
-        def read_yaml_file() -> object:
-            worker_thread_ids.append(threading.get_ident())
-            return original_read_yaml_file()
+        loader = _LocalDatasetLoader.__new__(_LocalDatasetLoader)
+        loader.file_path = file_path
+        loader._dataset_name = "test_dataset"
+        expected = SeedDataset(
+            dataset_name="test_dataset",
+            seeds=[SeedPrompt(value="test prompt", data_type="text")],
+        )
+        to_thread_mock = AsyncMock(return_value=expected)
 
         with (
-            patch.object(SeedDataset, "from_yaml_file", side_effect=load_dataset),
-            patch.object(loader, "_read_yaml_file", side_effect=read_yaml_file),
+            patch.object(SeedDataset, "from_yaml_file") as load_mock,
+            patch(
+                "pyrit.datasets.seed_datasets.local.local_dataset_loader.asyncio.to_thread",
+                new=to_thread_mock,
+            ),
         ):
             dataset = await loader.fetch_dataset_async()
+
+        assert dataset is expected
+        to_thread_mock.assert_awaited_once_with(load_mock, file_path)
+        load_mock.assert_not_called()
+
+    async def test_parse_metadata_offloads_file_read(self, tmp_path: Path) -> None:
+        """Metadata YAML parsing runs outside the event loop thread."""
+        file_path = tmp_path / "test.yaml"
+        loader = _LocalDatasetLoader.__new__(_LocalDatasetLoader)
+        loader.file_path = file_path
+        loader._dataset_name = "test_dataset"
+        read_yaml_mock = MagicMock(
+            return_value={
+                "dataset_name": "test_dataset",
+                "harm_categories": ["violence"],
+            }
+        )
+        to_thread_mock = AsyncMock(return_value=read_yaml_mock.return_value)
+
+        with (
+            patch.object(loader, "_read_yaml", new=read_yaml_mock),
+            patch(
+                "pyrit.datasets.seed_datasets.local.local_dataset_loader.asyncio.to_thread",
+                new=to_thread_mock,
+            ),
+        ):
             metadata = await loader._parse_metadata_async()
 
-        assert dataset.dataset_name == "test_dataset"
-        assert metadata is None
-        assert len(worker_thread_ids) == 2
-        assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
+        assert metadata is not None
+        assert metadata.harm_categories == {"violence"}
+        to_thread_mock.assert_awaited_once_with(read_yaml_mock)
+        read_yaml_mock.assert_not_called()
 
     async def test_fetch_dataset_file_not_found(self):
         loader = _LocalDatasetLoader(file_path=Path("non_existent.yaml"))
