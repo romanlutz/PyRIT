@@ -26,8 +26,8 @@ class PrependedConversationConfig:
     - How targets without editable history format prepended messages on the first live send
 
     Prepended messages remain role-structured in memory. Request converters are applied to
-    configured roles before a target without editable history renders that history into the
-    first live request (via ``message_normalizer``; default: ConversationContextNormalizer).
+    configured roles before a target without editable history renders that history and the
+    first live request together (via ``message_normalizer``; default: ConversationContextNormalizer).
     Those converters must produce text because string normalization cannot preserve converted
     image, audio, or other non-text output.
     """
@@ -36,7 +36,7 @@ class PrependedConversationConfig:
     # simulated target output and must be explicitly opted in with ["assistant"].
     apply_converters_to_roles: list[ChatMessageRole] = field(default_factory=lambda: ["user"])
 
-    # Optional normalizer to format conversation history into a single text block.
+    # Optional normalizer to format prepended history and the first live request as one text block.
     # Must implement MessageStringNormalizer (e.g., TokenizerTemplateNormalizer or ConversationContextNormalizer).
     # When None and adaptation is needed, a default ConversationContextNormalizer is used
     # that produces "Turn N: User/Assistant" format.

@@ -19,7 +19,6 @@ from pyrit.exceptions import (
     get_execution_context,
 )
 from pyrit.memory import CentralMemory, MemoryInterface, set_message_piece_sha256_async
-from pyrit.message_normalizer import MessageStringNormalizer
 from pyrit.models import (
     ComponentIdentifier,
     Conversation,
@@ -30,6 +29,7 @@ from pyrit.models import (
 from pyrit.prompt_normalizer import ConverterConfiguration, NormalizerRequest
 from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_target.batch_helper import batch_task_async
+from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 logger = logging.getLogger(__name__)
 
@@ -63,22 +63,6 @@ class PromptNormalizer:
         self._start_token = start_token
         self._end_token = end_token
         self.id = str(uuid4())
-        self._prepended_conversation_normalizers: dict[str, MessageStringNormalizer] = {}
-
-    def register_prepended_conversation_normalizer(
-        self,
-        *,
-        conversation_id: str,
-        message_normalizer: MessageStringNormalizer,
-    ) -> None:
-        """
-        Register the formatter used to deliver structured prepended history on the next send.
-
-        Args:
-            conversation_id: Conversation whose next request should include prepended history.
-            message_normalizer: Formatter the target should use for that history.
-        """
-        self._prepended_conversation_normalizers[conversation_id] = message_normalizer
 
     async def send_prompt_async(
         self,
@@ -88,6 +72,7 @@ class PromptNormalizer:
         conversation_id: str | None = None,
         request_converter_configurations: list[ConverterConfiguration] | None = None,
         response_converter_configurations: list[ConverterConfiguration] | None = None,
+        target_normalization_context: TargetNormalizationContext | None = None,
     ) -> Message:
         """
         Send a single request to a target.
@@ -100,6 +85,7 @@ class PromptNormalizer:
                 converting the request. Defaults to an empty list.
             response_converter_configurations (list[ConverterConfiguration], optional): Configurations for
                 converting the response. Defaults to an empty list.
+            target_normalization_context: Optional per-conversation target normalization state.
 
         Returns:
             Message: The response received from the target.
@@ -125,10 +111,6 @@ class PromptNormalizer:
         for piece in request.message_pieces:
             piece.conversation_id = conversation_id
 
-        prepended_conversation_normalizer = self._prepended_conversation_normalizers.pop(
-            request.conversation_id,
-            None,
-        )
         await self.convert_values_async(
             converter_configurations=request_converter_configurations,
             message=request,
@@ -139,15 +121,19 @@ class PromptNormalizer:
         responses = None
 
         try:
-            if prepended_conversation_normalizer:
+            if target_normalization_context:
                 responses = await target.send_prompt_async(
                     message=request,
-                    prepended_conversation_normalizer=prepended_conversation_normalizer,
+                    target_normalization_context=target_normalization_context,
                 )
             else:
                 responses = await target.send_prompt_async(message=request)
             self.memory.add_message_to_memory(request=request)
-        except EmptyResponseException:
+        except EmptyResponseException as ex:
+            if target_normalization_context and not target_normalization_context.is_consumed:
+                cid = request.message_pieces[0].conversation_id if request.message_pieces else None
+                raise Exception(f"Error sending prompt with conversation ID: {cid}") from ex
+
             # Empty responses are retried, but we don't want them to stop execution
             self.memory.add_message_to_memory(request=request)
 
@@ -161,6 +147,12 @@ class PromptNormalizer:
             ]
 
         except Exception as ex:
+            if target_normalization_context and not target_normalization_context.is_consumed:
+                # The provider was never invoked, so leave memory unchanged and allow
+                # the same first-turn context to be retried.
+                cid = request.message_pieces[0].conversation_id if request.message_pieces else None
+                raise Exception(f"Error sending prompt with conversation ID: {cid}") from ex
+
             # Ensure request to memory before processing exception
             self.memory.add_message_to_memory(request=request)
 

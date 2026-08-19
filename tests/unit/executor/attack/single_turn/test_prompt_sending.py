@@ -362,8 +362,30 @@ class TestSetupPhase:
         encoded_user = base64.b64encode(prepended_user.encode()).decode()
         encoded_final_request = base64.b64encode(final_request.encode()).decode()
         assert target.prompt_sent == [
-            f"Turn 1:\nuser: {encoded_user}\nassistant: {simulated_response}\n\n{encoded_final_request}"
+            (f"Turn 1:\nuser: {encoded_user}\nassistant: {simulated_response}\nTurn 2:\nuser: {encoded_final_request}")
         ]
+
+    async def test_retry_setup_creates_fresh_first_turn_context(self, basic_context):
+        target = MockPromptTarget()
+        target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+        attack = PromptSendingAttack(objective_target=target)
+        basic_context.prepended_conversation = [
+            Message.from_prompt(prompt="prepended", role="user"),
+        ]
+
+        await attack._setup_async(context=basic_context)
+        first_context = basic_context.target_normalization_context
+        first_conversation_id = basic_context.conversation_id
+        assert first_context is not None
+        assert first_context.begin_normalization(conversation_id=first_conversation_id)
+        first_context.mark_consumed()
+
+        await attack._setup_async(context=basic_context)
+
+        assert basic_context.conversation_id != first_conversation_id
+        assert basic_context.target_normalization_context is not None
+        assert basic_context.target_normalization_context is not first_context
+        assert basic_context.target_normalization_context.is_pending
 
 
 @pytest.mark.usefixtures("patch_central_database")

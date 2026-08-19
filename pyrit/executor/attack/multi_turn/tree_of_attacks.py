@@ -53,7 +53,7 @@ from pyrit.models import (
     SeedPrompt,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
-from pyrit.prompt_target import CapabilityName, PromptTarget
+from pyrit.prompt_target import CapabilityName, PromptTarget, TargetNormalizationContext
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
 from pyrit.score import (
     FloatScaleThresholdScorer,
@@ -409,6 +409,7 @@ class _TreeOfAttacksNode:
         self.last_prompt_sent: str | None = None
         self.last_response: Message | None = None
         self.error_message: str | None = None
+        self._target_normalization_context: TargetNormalizationContext | None = None
 
         # Context from prepended conversation (for adversarial chat system prompt)
         self._conversation_context: str | None = None
@@ -458,6 +459,15 @@ class _TreeOfAttacksNode:
             prompt_normalizer=self._prompt_normalizer,
         )
 
+        valid_message_count = len(
+            conversation_manager.get_persistable_prepended_messages(prepended_conversation=prepended_conversation)
+        )
+        target_normalization_context = conversation_manager.create_target_normalization_context(
+            target=self._objective_target,
+            conversation_id=self.objective_target_conversation_id,
+            prepended_message_count=valid_message_count,
+            prepended_conversation_config=prepended_conversation_config,
+        )
         await conversation_manager.add_prepended_conversation_to_memory_async(
             prepended_conversation=prepended_conversation,
             conversation_id=self.objective_target_conversation_id,
@@ -466,6 +476,7 @@ class _TreeOfAttacksNode:
             target_identifier=self._objective_target.get_identifier(),
             target=self._objective_target,
         )
+        self._target_normalization_context = target_normalization_context
 
         # Build context string for adversarial chat system prompt (like Crescendo)
         # The adversarial chat uses this in its system prompt rather than in conversation history
@@ -600,8 +611,11 @@ class _TreeOfAttacksNode:
         """
         # For single-turn targets, generate a fresh conversation ID before each send
         # to ensure the target always receives a clean conversation without prior history.
-        if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
+        if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN) and not (
+            self._target_normalization_context and self._target_normalization_context.is_pending
+        ):
             self.objective_target_conversation_id = str(uuid.uuid4())
+            self._target_normalization_context = None
 
         # Build the request message via the modality router so prior media (if any)
         # is included when the objective target accepts it.
@@ -625,6 +639,7 @@ class _TreeOfAttacksNode:
                 response_converter_configurations=self._response_converters,
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
+                target_normalization_context=self._target_normalization_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -661,8 +676,11 @@ class _TreeOfAttacksNode:
             raise ValueError("_initial_prompt must be set before calling this method")
 
         # For single-turn targets, generate a fresh conversation ID
-        if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
+        if not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN) and not (
+            self._target_normalization_context and self._target_normalization_context.is_pending
+        ):
             self.objective_target_conversation_id = str(uuid.uuid4())
+            self._target_normalization_context = None
 
         assert self._objective is not None
         initial_prompt = self._initial_prompt
@@ -701,6 +719,7 @@ class _TreeOfAttacksNode:
                 response_converter_configurations=self._response_converters,
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
+                target_normalization_context=self._target_normalization_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.

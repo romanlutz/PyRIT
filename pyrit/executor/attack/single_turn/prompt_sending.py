@@ -325,6 +325,7 @@ class PromptSendingAttack(SingleTurnAttackStrategy):
                 conversation_id=context.conversation_id,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
+                target_normalization_context=context.target_normalization_context,
             )
 
     async def _evaluate_response_async(

@@ -11,7 +11,9 @@ from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     MultiTurnAttackContext,
 )
 from pyrit.memory import CentralMemory
+from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
 from pyrit.models import ConversationType, MessagePiece
+from pyrit.prompt_target import TargetNormalizationContext
 
 
 def _make_context() -> MultiTurnAttackContext:
@@ -82,6 +84,26 @@ class TestRotateConversationForSingleTurnTarget:
         context = _make_context()
         context.executed_turns = 0
         original_id = context.session.conversation_id
+
+        strategy._rotate_conversation_for_single_turn_target(context=context)
+
+        assert context.session.conversation_id == original_id
+        assert len(context.related_conversations) == 0
+
+    def test_pending_first_turn_context_suppresses_rotation_after_prepended_turns(self):
+        strategy = _make_strategy(supports_multi_turn=False)
+        context = _make_context()
+        context.executed_turns = 2
+        original_id = context.session.conversation_id
+        context.target_normalization_context = TargetNormalizationContext(
+            conversation_id=original_id,
+            normalizers=(
+                FirstTurnHistoryNormalizer(
+                    message_normalizer=ConversationContextNormalizer(),
+                    prepended_message_count=4,
+                ),
+            ),
+        )
 
         strategy._rotate_conversation_for_single_turn_target(context=context)
 

@@ -1585,6 +1585,7 @@ class TestTreeOfAttacksNode:
         """Test that duplicate() creates a proper child node."""
         parent_node = _TreeOfAttacksNode(**node_components)
         parent_node.node_id = "parent_node_id"
+        parent_node._target_normalization_context = MagicMock()
 
         # Mock memory duplicate conversation
         with patch.object(parent_node._memory, "duplicate_conversation", return_value="new_conv_id"):
@@ -1593,6 +1594,7 @@ class TestTreeOfAttacksNode:
         assert child_node.node_id != parent_node.node_id
         assert child_node.parent_id == parent_node.node_id
         assert child_node.completed is False
+        assert child_node._target_normalization_context is None
 
     def _node_with_schema(self, node_components, schema):
         """Build a real node whose adversarial system prompt advertises ``schema``.

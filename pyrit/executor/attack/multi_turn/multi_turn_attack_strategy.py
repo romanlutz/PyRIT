@@ -112,13 +112,17 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
 
         For multi-turn targets this method is a no-op.
 
-        This should be called before each turn (except the first) when sending prompts to the
-        objective target.
+        This should be called before each turn when sending prompts to the objective target.
+        A pending first-turn normalization context suppresses rotation even when prepended
+        assistant messages have already increased ``executed_turns``.
 
         Args:
             context: The current attack context.
         """
         if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
+            return
+
+        if context.target_normalization_context and not context.target_normalization_context.is_consumed:
             return
 
         if context.executed_turns == 0:
@@ -150,6 +154,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
             context.session.conversation_id = new_conversation_id
         else:
             context.session.conversation_id = str(uuid.uuid4())
+        context.target_normalization_context = None
 
         self._logger.debug(
             f"Rotated conversation_id for single-turn target: "

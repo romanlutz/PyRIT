@@ -487,6 +487,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 target=self._objective_target,
+                target_normalization_context=context.target_normalization_context,
             )
 
         if response is None:

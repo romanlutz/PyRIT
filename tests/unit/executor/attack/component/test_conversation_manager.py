@@ -35,7 +35,7 @@ from pyrit.executor.attack.component.conversation_manager import (
 )
 from pyrit.executor.attack.core import AttackContext
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
-from pyrit.message_normalizer import ConversationContextNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
@@ -68,6 +68,16 @@ class _ImageOutputConverter(Converter):
     SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        return ConverterResult(output_text="converted.png", output_type="image_path")
+
+
+class _ImageToImageConverter(Converter):
+    """A deterministic image-to-image converter for lossy adaptation tests."""
+
+    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
+    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "image_path") -> ConverterResult:
         return ConverterResult(output_text="converted.png", output_type="image_path")
 
 
@@ -770,7 +780,7 @@ class TestInitializeContext:
         assert context.next_message is next_message
         assert context.next_message.get_value() == "Caller-supplied question"
 
-    async def test_non_editable_target_registers_custom_first_send_formatter(
+    async def test_non_editable_target_sets_custom_first_send_context(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_normalizer: MagicMock,
@@ -791,10 +801,11 @@ class TestInitializeContext:
             prepended_conversation_config=config,
         )
 
-        mock_prompt_normalizer.register_prepended_conversation_normalizer.assert_called_once_with(
-            conversation_id=conversation_id,
-            message_normalizer=message_normalizer,
-        )
+        assert context.target_normalization_context is not None
+        assert context.target_normalization_context.conversation_id == conversation_id
+        normalizer = context.target_normalization_context.normalizers[0]
+        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
+        assert normalizer._message_normalizer is message_normalizer
         message_normalizer.normalize_string_async.assert_not_called()
 
     async def test_returns_turn_count_for_multi_turn_attacks(
@@ -1073,6 +1084,134 @@ class TestPrependedConversationConfigSettings:
 
         assert sample_conversation[0].get_piece().converted_value_data_type == "text"
 
+    async def test_non_editable_target_rejects_same_modality_non_text_output(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = [
+            Message(
+                message_pieces=[
+                    MessagePiece(
+                        role="user",
+                        original_value="original.png",
+                        converted_value="original.png",
+                        original_value_data_type="image_path",
+                        converted_value_data_type="image_path",
+                        conversation_id="seed",
+                    )
+                ]
+            )
+        ]
+        converter_config = ConverterConfiguration.from_converters(converters=[_ImageToImageConverter()])
+
+        with pytest.raises(ValueError, match="non-text output types.*image_path"):
+            await manager.initialize_context_async(
+                context=context,
+                target=mock_prompt_target,
+                conversation_id=str(uuid.uuid4()),
+                request_converters=converter_config,
+            )
+
+    async def test_prepended_conversion_failure_does_not_partially_write_history(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_normalizer: MagicMock,
+        mock_prompt_target: MagicMock,
+        sample_conversation: list[Message],
+    ) -> None:
+        manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+        mock_prompt_normalizer.convert_values_async.side_effect = [None, ValueError("second conversion failed")]
+        config = PrependedConversationConfig(apply_converters_to_roles=["user", "assistant"])
+        conversation_id = str(uuid.uuid4())
+
+        with pytest.raises(ValueError, match="second conversion failed"):
+            await manager.initialize_context_async(
+                context=context,
+                target=mock_prompt_target,
+                conversation_id=conversation_id,
+                request_converters=[ConverterConfiguration(converters=[])],
+                prepended_conversation_config=config,
+            )
+
+        assert manager.get_conversation(conversation_id) == []
+        assert context.target_normalization_context is None
+
+    async def test_non_persisted_prepended_message_is_not_counted_in_context(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        piece = MessagePiece(
+            role="user",
+            original_value="ephemeral",
+            conversation_id="seed",
+        )
+        piece.not_in_memory = True
+        context.prepended_conversation = [Message(message_pieces=[piece])]
+        conversation_id = str(uuid.uuid4())
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=conversation_id,
+        )
+
+        assert manager.get_conversation(conversation_id) == []
+        assert context.target_normalization_context is None
+
+    async def test_non_persisted_piece_does_not_constrain_flattening(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_prompt_target: MagicMock,
+    ) -> None:
+        manager = ConversationManager()
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        ephemeral_piece = MessagePiece(
+            role="user",
+            original_value="ephemeral",
+            conversation_id="seed",
+            sequence=0,
+        )
+        ephemeral_piece.not_in_memory = True
+        context.prepended_conversation = [
+            Message(
+                message_pieces=[
+                    MessagePiece(
+                        role="user",
+                        original_value="persisted",
+                        conversation_id="seed",
+                        sequence=0,
+                    ),
+                    ephemeral_piece,
+                ]
+            )
+        ]
+        conversation_id = str(uuid.uuid4())
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=conversation_id,
+            request_converters=[
+                ConverterConfiguration(
+                    converters=[_ImageOutputConverter()],
+                    indexes_to_apply=[1],
+                )
+            ],
+        )
+
+        stored = manager.get_conversation(conversation_id)
+        assert len(stored) == 1
+        assert [piece.converted_value for piece in stored[0].message_pieces] == ["persisted"]
+        assert context.target_normalization_context is not None
+
     async def test_non_editable_target_preserves_converter_piece_indexes(
         self,
         attack_identifier: ComponentIdentifier,
@@ -1242,7 +1381,7 @@ class TestPrependedConversationConfigSettings:
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that the default formatter is registered for target-side adaptation."""
+        """Test that the default formatter is carried in explicit target-side state."""
         manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
         conversation_id = str(uuid.uuid4())
         context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
@@ -1254,9 +1393,10 @@ class TestPrependedConversationConfigSettings:
             conversation_id=conversation_id,
         )
 
-        registered = mock_prompt_normalizer.register_prepended_conversation_normalizer.call_args.kwargs
-        assert registered["conversation_id"] == conversation_id
-        assert isinstance(registered["message_normalizer"], ConversationContextNormalizer)
+        assert context.target_normalization_context is not None
+        normalizer = context.target_normalization_context.normalizers[0]
+        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
+        assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
 
     # -------------------------------------------------------------------------
     # Chat Target Behavior (Config has no effect)
