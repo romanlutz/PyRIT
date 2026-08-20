@@ -11,7 +11,7 @@ from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     MultiTurnAttackContext,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import ConversationType, Message, MessagePiece
 from pyrit.prompt_target import PromptTarget, TargetNormalizationContext
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
@@ -119,9 +119,9 @@ class TestRotateConversationForSingleTurnTarget:
         context.target_normalization_context = TargetNormalizationContext(
             conversation_id=original_id,
             normalizers=(
-                FirstTurnHistoryNormalizer(
+                HistorySquashNormalizer(
                     message_normalizer=ConversationContextNormalizer(),
-                    prepended_message_count=4,
+                    expected_history_message_count=4,
                 ),
             ),
         )
@@ -233,9 +233,9 @@ class TestSystemPromptCarryoverOnRotation:
         previous_context = TargetNormalizationContext(
             conversation_id=old_id,
             normalizers=(
-                FirstTurnHistoryNormalizer(
+                HistorySquashNormalizer(
                     message_normalizer=ConversationContextNormalizer(),
-                    prepended_message_count=1,
+                    expected_history_message_count=1,
                 ),
             ),
         )

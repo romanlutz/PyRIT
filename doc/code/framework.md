@@ -317,7 +317,17 @@ The below talks about responsibilities of most modules in the PyRIT library
 - **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). It is the single component that writes each request and response to memory; targets never persist on their own. `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply. Prepended history remains role-structured in memory. Attacks pass an ephemeral `TargetNormalizationContext` with the first live send when a target cannot edit history; the target consumes that context immediately before provider invocation.
 - **`message_normalizer`** reshapes multi-message conversation payloads into the structure a given model expects — for example, handling system-message behavior (keep / squash / ignore), history squashing, prepended-history adaptation, and tokenizer chat templates. These target-specific views are ephemeral and do not replace the logical conversation in memory.
 
-For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply first-turn history normalization, run the target's ordinary capability normalizers, then serialize and invoke the provider.
+`supports_multi_turn` and `supports_editable_history` answer different questions. Multi-turn support means the target can continue a conversation across sends. Editable-history support means PyRIT can supply or rewrite earlier turns before sending the current message. The corresponding normalizers therefore have different scopes:
+
+| Target capabilities | Prepended-history behavior |
+| --- | --- |
+| Multi-turn with editable history | The target receives the structured history directly; neither normalizer is needed. |
+| Multi-turn without editable history | A context-scoped `HistorySquashNormalizer` encodes the prepended history and first live message into one initial request. Later turns use the target's own conversation state. No history squasher is added to the ordinary capability pipeline because the target supports multiple turns. |
+| Single-turn without editable history | The context-scoped `HistorySquashNormalizer` encodes the prepended history and first live message. The ordinary capability pipeline contains another use of the same normalizer, but it receives the already combined message and is therefore a no-op for that first request. |
+
+The first-turn distinction is therefore a matter of lifecycle and configuration, not a separate flattening implementation. `TargetNormalizationContext` applies its configured `HistorySquashNormalizer` once to bootstrap prepended history for any target that cannot accept caller-supplied prior turns. A target's ordinary capability pipeline independently applies `HistorySquashNormalizer` whenever the target cannot receive a multi-message conversation. Both uses preserve non-text pieces from the current request while rendering historical content as text.
+
+For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply context-scoped history squashing, run the target's ordinary capability normalizers, then serialize and invoke the provider.
 
 ## [Output](./output/0_output)
 

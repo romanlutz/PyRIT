@@ -318,10 +318,10 @@ class PromptTarget(Identifiable):
         """
         Copy request-lineage metadata from ``source`` onto every piece in ``target_message``.
 
-        Normalizers may create brand-new ``Message`` objects (e.g. ``HistorySquashNormalizer``
-        uses ``Message.from_prompt``) that carry fresh random ``conversation_id`` values and
-        lack request lineage. This method restores the original metadata so that the response
-        built from the normalized message stays part of the correct conversation and retains
+        Normalizers may create brand-new messages or pieces, such as the combined
+        text piece from ``HistorySquashNormalizer``, that lack request lineage.
+        This method restores the original metadata so that the response built from
+        the normalized message stays part of the correct conversation and retains
         traceability.
 
         ``prompt_metadata`` is handled by provenance so that metadata-editing normalizers

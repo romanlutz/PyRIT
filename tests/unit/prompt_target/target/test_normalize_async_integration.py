@@ -19,7 +19,7 @@ from unit.mocks import MockPromptTarget
 from pyrit.memory.memory_interface import MemoryInterface
 from pyrit.message_normalizer import (
     ConversationContextNormalizer,
-    FirstTurnHistoryNormalizer,
+    HistorySquashNormalizer,
     MessageStringNormalizer,
     TokenizerTemplateNormalizer,
 )
@@ -59,9 +59,9 @@ def _make_target_normalization_context(
     return TargetNormalizationContext(
         conversation_id=conversation_id,
         normalizers=(
-            FirstTurnHistoryNormalizer(
+            HistorySquashNormalizer(
                 message_normalizer=formatter or ConversationContextNormalizer(),
-                prepended_message_count=prepended_message_count,
+                expected_history_message_count=prepended_message_count,
             ),
         ),
     )

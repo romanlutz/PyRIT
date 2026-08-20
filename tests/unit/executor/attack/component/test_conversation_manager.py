@@ -35,7 +35,7 @@ from pyrit.executor.attack.component.conversation_manager import (
 )
 from pyrit.executor.attack.core import AttackContext
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import PromptTarget
@@ -804,8 +804,9 @@ class TestInitializeContext:
         assert context.target_normalization_context is not None
         assert context.target_normalization_context.conversation_id == conversation_id
         normalizer = context.target_normalization_context.normalizers[0]
-        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
+        assert isinstance(normalizer, HistorySquashNormalizer)
         assert normalizer._message_normalizer is message_normalizer
+        assert normalizer._expected_history_message_count == len(sample_conversation)
         message_normalizer.normalize_string_async.assert_not_called()
 
     async def test_returns_turn_count_for_multi_turn_attacks(
@@ -1395,7 +1396,7 @@ class TestPrependedConversationConfigSettings:
 
         assert context.target_normalization_context is not None
         normalizer = context.target_normalization_context.normalizers[0]
-        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
+        assert isinstance(normalizer, HistorySquashNormalizer)
         assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
 
     # -------------------------------------------------------------------------

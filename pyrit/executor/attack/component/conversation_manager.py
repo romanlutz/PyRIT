@@ -13,7 +13,7 @@ from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import (
     ChatMessageRole,
     ComponentIdentifier,
@@ -464,9 +464,9 @@ class ConversationManager:
         return TargetNormalizationContext(
             conversation_id=conversation_id,
             normalizers=(
-                FirstTurnHistoryNormalizer(
+                HistorySquashNormalizer(
                     message_normalizer=config.get_message_normalizer(),
-                    prepended_message_count=prepended_message_count,
+                    expected_history_message_count=prepended_message_count,
                 ),
             ),
         )

@@ -25,7 +25,7 @@ from pyrit.exceptions import (
     get_execution_context,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import (
     Message,
     MessagePiece,
@@ -135,9 +135,9 @@ async def test_send_prompt_async_forwards_target_normalization_context(mock_memo
     target_context = TargetNormalizationContext(
         conversation_id=conversation_id,
         normalizers=(
-            FirstTurnHistoryNormalizer(
+            HistorySquashNormalizer(
                 message_normalizer=ConversationContextNormalizer(),
-                prepended_message_count=1,
+                expected_history_message_count=1,
             ),
         ),
     )
@@ -161,9 +161,9 @@ async def test_send_prompt_async_conversion_failure_leaves_context_pending(mock_
     target_context = TargetNormalizationContext(
         conversation_id=conversation_id,
         normalizers=(
-            FirstTurnHistoryNormalizer(
+            HistorySquashNormalizer(
                 message_normalizer=ConversationContextNormalizer(),
-                prepended_message_count=1,
+                expected_history_message_count=1,
             ),
         ),
     )
@@ -191,9 +191,9 @@ async def test_send_prompt_async_pre_provider_failure_is_not_persisted(mock_memo
     target_context = TargetNormalizationContext(
         conversation_id=conversation_id,
         normalizers=(
-            FirstTurnHistoryNormalizer(
+            HistorySquashNormalizer(
                 message_normalizer=ConversationContextNormalizer(),
-                prepended_message_count=1,
+                expected_history_message_count=1,
             ),
         ),
     )
@@ -218,9 +218,9 @@ async def test_send_prompt_async_pre_provider_empty_response_is_not_persisted(mo
     target_context = TargetNormalizationContext(
         conversation_id=conversation_id,
         normalizers=(
-            FirstTurnHistoryNormalizer(
+            HistorySquashNormalizer(
                 message_normalizer=ConversationContextNormalizer(),
-                prepended_message_count=1,
+                expected_history_message_count=1,
             ),
         ),
     )
