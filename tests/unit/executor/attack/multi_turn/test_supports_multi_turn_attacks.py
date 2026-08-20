@@ -12,8 +12,29 @@ from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
 )
 from pyrit.memory import CentralMemory
 from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
-from pyrit.models import ConversationType, MessagePiece
-from pyrit.prompt_target import TargetNormalizationContext
+from pyrit.models import ConversationType, Message, MessagePiece
+from pyrit.prompt_target import PromptTarget, TargetNormalizationContext
+from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
+from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+
+
+class _SingleTurnPromptTarget(PromptTarget):
+    _DEFAULT_CONFIGURATION = TargetConfiguration(capabilities=TargetCapabilities())
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.normalized_conversations: list[list[Message]] = []
+
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        self.normalized_conversations.append(normalized_conversation)
+        request_piece = normalized_conversation[-1].get_piece()
+        return [
+            MessagePiece(
+                role="assistant",
+                original_value="response",
+                conversation_id=request_piece.conversation_id,
+            ).to_message()
+        ]
 
 
 def _make_context() -> MultiTurnAttackContext:
@@ -197,6 +218,49 @@ class TestSystemPromptCarryoverOnRotation:
                 sequence=1,
             )
             memory.add_message_pieces_to_memory(message_pieces=[user_piece])
+
+    async def test_rotated_system_prompt_is_normalized_with_next_request(self):
+        target = _SingleTurnPromptTarget()
+        strategy = _make_strategy(supports_multi_turn=False)
+        strategy._objective_target = target
+        context = _make_context()
+        old_id = context.session.conversation_id
+        _seed_conversation(
+            conversation_id=old_id,
+            system_prompt="You are a helpful assistant.",
+            user_text="First request",
+        )
+        previous_context = TargetNormalizationContext(
+            conversation_id=old_id,
+            normalizers=(
+                FirstTurnHistoryNormalizer(
+                    message_normalizer=ConversationContextNormalizer(),
+                    prepended_message_count=1,
+                ),
+            ),
+        )
+        previous_context.begin_normalization(conversation_id=old_id)
+        previous_context.mark_consumed()
+        context.target_normalization_context = previous_context
+        context.executed_turns = 1
+
+        strategy._rotate_conversation_for_single_turn_target(context=context)
+
+        next_request = Message.from_prompt(prompt="Second request", role="user")
+        next_request.get_piece().conversation_id = context.session.conversation_id
+        await target.send_prompt_async(
+            message=next_request,
+            target_normalization_context=context.target_normalization_context,
+        )
+
+        assert context.target_normalization_context is not None
+        assert context.target_normalization_context.is_consumed
+        assert len(target.normalized_conversations) == 1
+        normalized_conversation = target.normalized_conversations[0]
+        assert len(normalized_conversation) == 1
+        assert normalized_conversation[0].get_value() == (
+            "Turn 1:\nuser: ### Instructions ###\n\nYou are a helpful assistant.\n\n######\n\nSecond request"
+        )
 
     def test_no_system_prompt_yields_fresh_conversation_id(self):
         """When there is no system prompt, rotation still generates a new conversation_id."""

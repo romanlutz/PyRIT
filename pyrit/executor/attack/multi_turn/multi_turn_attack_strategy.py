@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyrit.common.logger import logger
+from pyrit.executor.attack.component.conversation_manager import ConversationManager
 from pyrit.executor.attack.core.attack_parameters import AttackParameters, AttackParamsT
 from pyrit.executor.attack.core.attack_strategy import (
     AttackContext,
@@ -152,9 +153,14 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
             )
             memory.add_message_pieces_to_memory(message_pieces=pieces)
             context.session.conversation_id = new_conversation_id
+            context.target_normalization_context = ConversationManager.create_target_normalization_context(
+                target=self._objective_target,
+                conversation_id=new_conversation_id,
+                prepended_message_count=len(system_messages),
+            )
         else:
             context.session.conversation_id = str(uuid.uuid4())
-        context.target_normalization_context = None
+            context.target_normalization_context = None
 
         self._logger.debug(
             f"Rotated conversation_id for single-turn target: "
