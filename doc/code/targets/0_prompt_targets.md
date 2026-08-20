@@ -9,15 +9,33 @@ Prompt Targets are endpoints for where to send prompts. For example, a target co
 Prompt targets are found [here](https://github.com/microsoft/PyRIT/tree/main/pyrit/prompt_target/) in code.
 
 
-## Send_Prompt_Async
+## `send_prompt_async`
 
-The main entry method follow the following signature:
+The main entry method has the following signature:
 
+```python
+async def send_prompt_async(
+    self,
+    *,
+    message: Message,
+    target_normalization_context: TargetNormalizationContext | None = None,
+) -> list[Message]:
 ```
-async def send_prompt_async(self, *, message: Message) -> Message:
-```
 
-A `Message` object is a normalized object with all the information a target will need to send a prompt, including a way to get a history for that prompt (in the cases that also needs to be sent). This is discussed in more depth [here](../memory/3_memory_data_types.md).
+A `Message` object contains the current request and the identifiers needed to load its conversation
+history. This is discussed in more depth [here](../memory/3_memory_data_types.md).
+
+`target_normalization_context` is an internal, per-conversation handoff used by attacks that prepend
+structured history to a target without editable history. Ordinary callers do not construct it.
+Before the first provider send, `PromptTarget` loads memory history, applies the context's one-shot
+normalizers, and then runs the target's ordinary capability-normalization pipeline. Request
+converters have already run by this point, so role-specific converter choices remain intact even
+when the target must receive one flattened request. The context is ephemeral and does not replace
+the structured messages stored in memory.
+
+`send_prompt_async` is the final public orchestration method. Custom target subclasses implement
+`_send_prompt_to_target_async(*, normalized_conversation: list[Message]) -> list[Message]` instead of
+overriding `send_prompt_async`.
 
 ## Chat-style targets vs general targets
 
