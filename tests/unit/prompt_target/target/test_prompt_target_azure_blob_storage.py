@@ -96,18 +96,23 @@ async def test_azure_blob_storage_validate_prompt_type(
         await azure_blob_storage_target.send_prompt_async(message=request)
 
 
+@patch("azure.storage.blob.aio.ContainerClient.upload_blob")
 async def test_azure_blob_storage_validate_prev_convs(
+    mock_upload_async,
     azure_blob_storage_target: AzureBlobStorageTarget,
     sample_entries: MutableSequence[MessagePiece],
 ):
+    mock_upload_async.return_value = None
     message_piece = sample_entries[0]
     azure_blob_storage_target._memory.add_message_to_memory(request=Message(message_pieces=[message_piece]))
     request = Message(message_pieces=[message_piece])
 
-    normalized = await azure_blob_storage_target._get_normalized_conversation_async(message=request)
-
-    assert len(normalized) == 1
-    assert message_piece.converted_value in normalized[0].get_value()
+    with pytest.raises(
+        ValueError,
+        match="This target only supports a single turn conversation.*If your target does support this, set the"
+        " custom_configuration parameter accordingly",
+    ):
+        await azure_blob_storage_target.send_prompt_async(message=request)
 
 
 @patch.object(AzureBlobStorageTarget, "_create_container_client_async", new_callable=AsyncMock)

@@ -6,7 +6,7 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
-from pyrit.models import Message
+from pyrit.models import ComponentIdentifier, Identifiable, Message
 
 # Type alias for system message handling strategies
 SystemMessageBehavior = Literal["keep", "squash", "ignore"]
@@ -57,7 +57,7 @@ class MessageListNormalizer(abc.ABC, Generic[T]):
         return [item.model_dump(exclude_none=True) for item in normalized]
 
 
-class MessageStringNormalizer(abc.ABC):
+class MessageStringNormalizer(Identifiable, abc.ABC):
     """
     Abstract base class for normalizers that return a string representation.
 
@@ -75,6 +75,18 @@ class MessageStringNormalizer(abc.ABC):
         Returns:
             A string representation of the messages.
         """
+
+    def _build_identifier(self) -> ComponentIdentifier:
+        """
+        Build the formatter's behavioral identifier.
+
+        Stateless custom formatters receive class identity by default. Formatters
+        with behavior-changing configuration should override this method.
+
+        Returns:
+            The formatter's behavioral identifier.
+        """
+        return ComponentIdentifier.of(self)
 
 
 async def apply_system_message_behavior_async(

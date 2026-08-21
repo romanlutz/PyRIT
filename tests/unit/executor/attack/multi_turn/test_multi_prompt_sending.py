@@ -16,6 +16,8 @@ from pyrit.executor.attack import (
     MultiPromptSendingAttackParameters,
     MultiTurnAttackContext,
 )
+from pyrit.executor.attack.component import PrependedConversationConfig
+from pyrit.message_normalizer import HistorySquashNormalizer, MessageStringNormalizer
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
@@ -25,7 +27,13 @@ from pyrit.models import (
     Score,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
-from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target import (
+    CapabilityName,
+    PromptTarget,
+    TargetCapabilities,
+    TargetConfiguration,
+    TargetNormalizationContext,
+)
 from pyrit.score import Scorer, TrueFalseScorer
 
 
@@ -310,6 +318,35 @@ class TestSetupPhase:
 @pytest.mark.usefixtures("patch_central_database")
 class TestPromptSending:
     """Tests for sending prompts to target"""
+
+    async def test_send_prompt_forwards_prepended_formatter_override(
+        self, mock_target, mock_prompt_normalizer, basic_context, sample_response
+    ):
+        mock_target.configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
+        formatter = MagicMock(spec=MessageStringNormalizer)
+        attack = MultiPromptSendingAttack(
+            objective_target=mock_target,
+            prompt_normalizer=mock_prompt_normalizer,
+            prepended_conversation_config=PrependedConversationConfig(message_normalizer=formatter),
+        )
+        target_context = TargetNormalizationContext(
+            conversation_id=basic_context.session.conversation_id,
+            history_message_ids=(uuid.uuid4(),),
+            replay_history_each_send=False,
+        )
+        basic_context.target_normalization_context = target_context
+        mock_prompt_normalizer.send_prompt_async.return_value = sample_response
+
+        await attack._send_prompt_to_objective_target_async(
+            current_message=Message.from_prompt(prompt="test prompt", role="user"),
+            context=basic_context,
+        )
+
+        send_kwargs = mock_prompt_normalizer.send_prompt_async.await_args.kwargs
+        override = send_kwargs["normalizer_overrides"][CapabilityName.EDITABLE_HISTORY]
+        assert isinstance(override, HistorySquashNormalizer)
+        assert override._message_normalizer is formatter
+        assert send_kwargs["target_normalization_context"] is target_context
 
     async def test_send_prompt_to_target_with_all_configurations(
         self, mock_target, mock_prompt_normalizer, basic_context, sample_response

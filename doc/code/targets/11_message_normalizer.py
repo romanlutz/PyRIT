@@ -5,7 +5,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.4
+#       jupytext_version: 1.19.5
 # ---
 
 # %% [markdown]
@@ -27,6 +27,31 @@
 # - **`MessageStringNormalizer`**: Converts `list[Message]` → `str` (e.g., to ChatML format)
 #
 # Some normalizers implement both interfaces.
+
+# %% [markdown]
+# ## Two History-Squashing Scopes
+#
+# PyRIT uses `HistorySquashNormalizer` in two places that adapt different target capabilities:
+#
+# - **Multi-turn support** answers whether the target can continue a conversation across sends.
+# - **Editable-history support** answers whether PyRIT can supply or rewrite earlier turns before
+#   sending the current message.
+#
+# | Target capabilities | Prepended-history behavior |
+# |---|---|
+# | Multi-turn with editable history | Send the structured history directly; no history squashing is needed. |
+# | Multi-turn without editable history | A context-scoped `HistorySquashNormalizer` encodes the prepended history and first live message into the initial request. Later turns use the target's own conversation state. |
+# | Single-turn without editable history | The context-scoped `HistorySquashNormalizer` first produces one message. The target's ordinary use of the same normalizer then sees one message and does nothing. |
+#
+# The first-turn distinction comes from `TargetNormalizationContext`, not from a separate normalizer
+# implementation. The context applies its configured `HistorySquashNormalizer` once to bootstrap
+# prepended history for a target that cannot accept caller-supplied prior turns. Its key use case is a
+# multi-turn, server-managed target without editable history.
+#
+# The target's ordinary capability pipeline independently uses `HistorySquashNormalizer` for a target
+# without multi-turn support. Both scopes preserve original-versus-converted text views and keep
+# non-text pieces from the current request separate. The context-scoped use can supply a custom
+# formatter; the ordinary use defaults to `[Conversation History]` and `[Current Message]` sections.
 
 # %%
 from pyrit.models import Message

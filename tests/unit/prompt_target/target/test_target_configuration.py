@@ -1,12 +1,15 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from pyrit.message_normalizer import (
     GenericSystemSquashNormalizer,
     HistorySquashNormalizer,
     JsonSchemaNormalizer,
+    MessageListNormalizer,
 )
 from pyrit.models import Message, MessagePiece
 from pyrit.models.literals import ChatMessageRole
@@ -170,6 +173,47 @@ def test_init_sparse_policy_missing_json_schema_no_normalizer():
     assert config.pipeline.normalizers == ()
 
 
+def test_default_configuration_does_not_adapt_editable_history():
+    caps = TargetCapabilities(
+        supports_multi_turn=True,
+        supports_editable_history=False,
+        supports_system_prompt=True,
+        supports_json_schema=True,
+    )
+    config = TargetConfiguration(capabilities=caps)
+
+    assert not config.pipeline.has_normalizer_for(capability=CapabilityName.EDITABLE_HISTORY)
+    with pytest.raises(ValueError, match="no handling policy"):
+        config.ensure_can_handle(capability=CapabilityName.EDITABLE_HISTORY)
+
+
+async def test_per_send_override_preserves_construction_overrides_with_sparse_policy(make_message):
+    construction_normalizer = MagicMock(spec=MessageListNormalizer)
+    construction_normalizer.normalize_async = AsyncMock(side_effect=lambda messages: messages)
+    per_send_normalizer = MagicMock(spec=MessageListNormalizer)
+    per_send_normalizer.normalize_async = AsyncMock(side_effect=lambda messages: messages)
+    caps = TargetCapabilities(
+        supports_multi_turn=True,
+        supports_editable_history=False,
+        supports_system_prompt=False,
+        supports_json_schema=True,
+    )
+    sparse_policy = CapabilityHandlingPolicy(behaviors={})
+    config = TargetConfiguration(
+        capabilities=caps,
+        policy=sparse_policy,
+        normalizer_overrides={CapabilityName.SYSTEM_PROMPT: construction_normalizer},
+    )
+
+    await config.normalize_async(
+        messages=[make_message("user", "hello")],
+        normalizer_overrides={CapabilityName.EDITABLE_HISTORY: per_send_normalizer},
+    )
+
+    construction_normalizer.normalize_async.assert_awaited_once()
+    per_send_normalizer.normalize_async.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Properties
 # ---------------------------------------------------------------------------
@@ -243,6 +287,38 @@ def test_ensure_can_handle_raises_when_capability_missing_from_policy():
     config = TargetConfiguration(capabilities=caps, policy=policy)
     with pytest.raises(ValueError, match="no handling policy"):
         config.ensure_can_handle(capability=CapabilityName.JSON_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "behaviors",
+    [
+        {},
+        {CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.RAISE},
+    ],
+)
+def test_ensure_can_handle_explicit_override_precedes_sparse_or_raise_policy(
+    behaviors: dict[CapabilityName, UnsupportedCapabilityBehavior],
+):
+    normalizer = MagicMock(spec=MessageListNormalizer)
+    config = TargetConfiguration(
+        capabilities=TargetCapabilities(supports_editable_history=False),
+        policy=CapabilityHandlingPolicy(behaviors=behaviors),
+        normalizer_overrides={CapabilityName.EDITABLE_HISTORY: normalizer},
+    )
+
+    config.ensure_can_handle(capability=CapabilityName.EDITABLE_HISTORY)
+
+
+def test_ensure_can_handle_adapt_requires_available_normalizer():
+    config = TargetConfiguration(
+        capabilities=TargetCapabilities(supports_editable_history=False),
+        policy=CapabilityHandlingPolicy(
+            behaviors={CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.ADAPT}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="no default or configured normalizer"):
+        config.ensure_can_handle(capability=CapabilityName.EDITABLE_HISTORY)
 
 
 def test_ensure_can_handle_raises_valueerror_for_non_normalizable_capability():

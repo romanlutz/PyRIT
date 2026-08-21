@@ -35,7 +35,7 @@ from pyrit.executor.attack.component.conversation_manager import (
 )
 from pyrit.executor.attack.core import AttackContext
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import CapabilityName, PromptTarget
@@ -801,7 +801,20 @@ class TestInitializeContext:
             prepended_conversation_config=config,
         )
 
-        assert len(manager.get_conversation(conversation_id)) == len(sample_conversation)
+        assert context.target_normalization_context is not None
+        assert context.target_normalization_context.conversation_id == conversation_id
+        stored = manager.get_conversation(conversation_id)
+        assert len(stored) == len(sample_conversation)
+        assert context.target_normalization_context.history_message_ids == tuple(
+            message.get_piece().id for message in stored
+        )
+        normalizer = config.get_normalizer_overrides(
+            target=mock_prompt_target,
+            target_normalization_context=context.target_normalization_context,
+        )[CapabilityName.EDITABLE_HISTORY]
+        assert isinstance(normalizer, HistorySquashNormalizer)
+        assert normalizer._message_normalizer is message_normalizer
+        assert normalizer._expected_history_message_count == len(sample_conversation)
         message_normalizer.normalize_string_async.assert_not_called()
 
     async def test_returns_turn_count_for_multi_turn_attacks(
@@ -1374,10 +1387,24 @@ class TestPrependedConversationConfigSettings:
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that the default configuration creates the history normalizer."""
-        config = PrependedConversationConfig()
-        normalizer = config.get_normalizer_overrides(target=mock_prompt_target)[CapabilityName.EDITABLE_HISTORY]
-        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
+        """Test that default formatting is supplied by an explicit per-send override."""
+        manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
+        conversation_id = str(uuid.uuid4())
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+        context.prepended_conversation = sample_conversation
+
+        await manager.initialize_context_async(
+            context=context,
+            target=mock_prompt_target,
+            conversation_id=conversation_id,
+        )
+
+        assert context.target_normalization_context is not None
+        normalizer = PrependedConversationConfig().get_normalizer_overrides(
+            target=mock_prompt_target,
+            target_normalization_context=context.target_normalization_context,
+        )[CapabilityName.EDITABLE_HISTORY]
+        assert isinstance(normalizer, HistorySquashNormalizer)
         assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
 
     def test_message_normalizer_is_not_overridden_for_editable_target(
@@ -1386,7 +1413,10 @@ class TestPrependedConversationConfigSettings:
     ) -> None:
         mock_chat_target.configuration.includes.return_value = True
 
-        overrides = PrependedConversationConfig().get_normalizer_overrides(target=mock_chat_target)
+        overrides = PrependedConversationConfig().get_normalizer_overrides(
+            target=mock_chat_target,
+            target_normalization_context=None,
+        )
 
         assert overrides == {}
 

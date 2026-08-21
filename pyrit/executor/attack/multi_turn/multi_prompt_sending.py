@@ -372,8 +372,10 @@ class MultiPromptSendingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[An
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target
+                    target=self._objective_target,
+                    target_normalization_context=context.target_normalization_context,
                 ),
+                target_normalization_context=context.target_normalization_context,
             )
 
     async def _evaluate_response_async(self, *, response: Message, objective: str) -> Score | None:

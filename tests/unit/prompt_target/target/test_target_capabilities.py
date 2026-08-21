@@ -35,7 +35,6 @@ class TestCapabilityHandlingPolicy:
         policy = CapabilityHandlingPolicy()
         assert policy.behaviors == {
             CapabilityName.MULTI_TURN: UnsupportedCapabilityBehavior.RAISE,
-            CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.ADAPT,
             CapabilityName.SYSTEM_PROMPT: UnsupportedCapabilityBehavior.RAISE,
             CapabilityName.JSON_SCHEMA: UnsupportedCapabilityBehavior.ADAPT,
         }
@@ -63,7 +62,6 @@ class TestCapabilityHandlingPolicy:
         policy = CapabilityHandlingPolicy()
         expected = {
             CapabilityName.MULTI_TURN: UnsupportedCapabilityBehavior.RAISE,
-            CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.ADAPT,
             CapabilityName.SYSTEM_PROMPT: UnsupportedCapabilityBehavior.RAISE,
             CapabilityName.JSON_SCHEMA: UnsupportedCapabilityBehavior.ADAPT,
         }

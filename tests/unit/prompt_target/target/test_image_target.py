@@ -486,7 +486,7 @@ async def test_validate_piece_type(image_target: OpenAIImageTarget):
             os.remove(audio_piece.original_value)
 
 
-async def test_adapt_previous_conversations(
+async def test_validate_previous_conversations(
     image_target: OpenAIImageTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
     message_piece = sample_conversations[0]
@@ -501,10 +501,12 @@ async def test_adapt_previous_conversations(
 
     request = Message(message_pieces=[message_piece])
 
-    normalized = await image_target._get_normalized_conversation_async(message=request)
-
-    assert len(normalized) == 1
-    assert message_piece.converted_value in normalized[0].get_value()
+    with pytest.raises(
+        ValueError,
+        match="This target only supports a single turn conversation.*If your target does support this, set the"
+        " custom_configuration parameter accordingly",
+    ):
+        await image_target.send_prompt_async(message=request)
 
 
 def test_background_param_stored(patch_central_database):

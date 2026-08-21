@@ -24,6 +24,10 @@ from pyrit.models import (
 )
 from pyrit.prompt_normalizer.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import CapabilityName, PromptTarget
+from pyrit.prompt_target.common.target_normalization_context import (
+    TargetNormalizationContext,
+    filter_non_replayable_messages,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -433,11 +437,35 @@ class ConversationManager:
         Returns:
             list[Message]: Non-empty messages containing at least one persistable piece.
         """
-        return [
+        persistable_messages = [
             message
             for message in prepended_conversation
             if message and message.message_pieces and any(not piece.not_in_memory for piece in message.message_pieces)
         ]
+        return filter_non_replayable_messages(messages=persistable_messages)
+
+    @staticmethod
+    def create_target_normalization_context(
+        *,
+        target: PromptTarget,
+        conversation_id: str,
+        prepended_messages: list[Message],
+    ) -> TargetNormalizationContext | None:
+        """
+        Build persisted-prefix state for a target without editable history.
+
+        Returns:
+            TargetNormalizationContext | None: Per-send state, or ``None`` for
+                editable-history targets or empty prepended history.
+        """
+        if not prepended_messages or target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY):
+            return None
+
+        return TargetNormalizationContext(
+            conversation_id=conversation_id,
+            history_message_ids=tuple(message.get_piece().id for message in prepended_messages),
+            replay_history_each_send=not target.configuration.includes(capability=CapabilityName.MULTI_TURN),
+        )
 
     async def _process_prepended_conversation_async(
         self,
@@ -489,6 +517,12 @@ class ConversationManager:
             max_turns=max_turns,
             target_identifier=target_identifier,
             target=target,
+        )
+        persisted_messages = self.get_conversation(conversation_id)
+        context.target_normalization_context = self.create_target_normalization_context(
+            target=target,
+            conversation_id=conversation_id,
+            prepended_messages=persisted_messages,
         )
         # Update context for multi-turn attacks to reflect prepended_conversation
 

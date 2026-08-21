@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     )
     from pyrit.executor.attack.core.attack_result_attribution import AttackResultAttribution
     from pyrit.prompt_target import PromptTarget
+    from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 AttackStrategyContextT = TypeVar("AttackStrategyContextT", bound="AttackContext[Any]")
 AttackStrategyResultT = TypeVar("AttackStrategyResultT", bound="AttackResult")
@@ -87,6 +88,13 @@ class AttackContext(StrategyContext, ABC, Generic[AttackParamsT]):
     _next_message_override: Message | None | _NextMessageOverrideState = _NextMessageOverrideState.UNSET
     _prepended_conversation_override: list[Message] | None = None
     _memory_labels_override: dict[str, str] | None = None
+
+    # Per-execution target-facing boundary and send lifecycle. Never persisted.
+    target_normalization_context: TargetNormalizationContext | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     # Optional attribution from an upstream orchestrator (e.g. Scenario). When
     # set, the persistence path stamps attribution_parent_id + attribution_data
@@ -477,6 +485,13 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], Id
         merged_params: dict[str, Any] = dict(params) if params else {}
 
         objective_target = TargetIdentifier.from_component_identifier(self.get_objective_target().get_identifier())
+
+        prepended_config = getattr(self, "_prepended_conversation_config", None)
+        if prepended_config is not None:
+            merged_params["prepended_conversation_converter_roles"] = list(prepended_config.apply_converters_to_roles)
+            all_children["prepended_conversation_formatter"] = (
+                prepended_config.get_message_normalizer().get_identifier()
+            )
 
         # Add scorer if present
         objective_scorer: ScorerIdentifier | None = None

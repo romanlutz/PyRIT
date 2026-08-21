@@ -309,6 +309,8 @@ The below talks about responsibilities of most modules in the PyRIT library
 - Models includes `identifiers` which are descriptions of the core components. And along with the registry, can often recreate those components.
 - Models includes types passed around between components, and should be prefered in REST
 - models should never depend on anything except lightweight Python (the standard library and pydantic) and pyrit.common
+- Store metadata on the narrowest model that owns it (for example, request or response data belongs on `MessagePiece`, not `Message`). Use explicit typed fields for stable, core, or independently queried data.
+- For shared metadata, define a lightweight value object in `pyrit.models` that owns its keys and provides symmetric `to_metadata()` and `from_metadata()` methods. Use `JsonResponseConfig` as the pattern for data stored in `MessagePiece.prompt_metadata`.
 
 ## [Normalizers](./targets/11_message_normalizer)
 
@@ -317,7 +319,19 @@ The below talks about responsibilities of most modules in the PyRIT library
 - **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). It is the single component that writes each request and response to memory; targets never persist on their own. `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply. Prepended history remains role-structured in memory. Attacks can pass per-send normalizer overrides from `PrependedConversationConfig`; the target's capability pipeline uses the `EDITABLE_HISTORY` override only when adaptation is required.
 - **`message_normalizer`** reshapes multi-message conversation payloads into the structure a given model expects — for example, handling system-message behavior (keep / squash / ignore), history squashing, prepended-history adaptation, and tokenizer chat templates. These target-specific views are ephemeral and do not replace the logical conversation in memory.
 
-For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply the capability-driven history normalizer, run the remaining target capability normalizers, then serialize and invoke the provider. The history normalizer derives whether a real target reply exists from memory roles; attacks do not store target-normalization lifecycle state.
+`supports_multi_turn` and `supports_editable_history` answer different questions. Multi-turn support means the target can continue a conversation across sends. Editable-history support means PyRIT can supply or rewrite earlier turns before sending the current message. The corresponding normalizers therefore have different scopes:
+
+| Target capabilities | Prepended-history behavior |
+| --- | --- |
+| Multi-turn with editable history | The target receives the structured history directly; neither normalizer is needed. |
+| Multi-turn without editable history | A per-send `HistorySquashNormalizer` override encodes the prepended history and first live message into one initial request. Later turns use the target's own conversation state. |
+| Single-turn without editable history | A per-send `HistorySquashNormalizer` override encodes the original prepended history with each current request. Prior live requests and responses are not replayed. The target's ordinary `MULTI_TURN` policy remains unchanged because the override produces one target-facing message. |
+
+The stateful/stateless distinction is therefore a matter of lifecycle and configuration, not a separate flattening implementation. The prepended-conversation flow records the persisted seed message IDs in a `TargetNormalizationContext` and supplies a per-send `HistorySquashNormalizer` override while that explicit history should be included. A target's ordinary capability pipeline independently applies `HistorySquashNormalizer` only when its `MULTI_TURN` behavior is explicitly configured for adaptation. Both uses preserve non-text pieces from the current request while rendering historical content as text.
+
+For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply the per-send editable-history override, run the target's ordinary capability normalizers, then serialize and invoke the provider. Stateful targets consume the seed boundary when provider invocation begins and send only the current request afterward. Stateless targets replay the original seed with each current request. Pre-provider failures leave the seed reusable, while provider-attempt failures do not replay it for stateful targets. Failed request/error exchanges are excluded from later target-facing history. A concurrent send sharing an active normalization context is rejected so stateful bootstrap context cannot be duplicated.
+
+The prepended-history formatter belongs to the attack configuration rather than the target instance: it affects only sends owned by that attack. Its behavioral identifier is therefore recorded as a child of the attack identifier, including formatter-specific configuration such as tokenizer templates and system-message handling.
 
 ## [Output](./output/0_output)
 

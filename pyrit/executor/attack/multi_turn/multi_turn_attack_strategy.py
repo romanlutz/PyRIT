@@ -10,12 +10,16 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyrit.common.logger import logger
+from pyrit.executor.attack.component.conversation_manager import ConversationManager
 from pyrit.executor.attack.core.attack_parameters import AttackParameters, AttackParamsT
 from pyrit.executor.attack.core.attack_strategy import (
     AttackContext,
     AttackStrategy,
     AttackStrategyResultT,
 )
+from pyrit.memory import CentralMemory
+from pyrit.models import Conversation, ConversationReference, ConversationType
+from pyrit.prompt_target import CapabilityName
 
 if TYPE_CHECKING:
     from pyrit.models import (
@@ -90,4 +94,61 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
             context_type=context_type,
             params_type=params_type,
             logger=logger,
+        )
+
+    def _rotate_conversation_for_single_turn_target(
+        self,
+        *,
+        context: MultiTurnAttackContext[Any],
+    ) -> None:
+        """
+        Rotate an unseeded single-turn target conversation before later sends.
+
+        An explicit target normalization context already selects only the
+        persisted seed plus the current request, so rotating in that case would
+        lose the seed and change the target-facing payload.
+        """
+        if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
+            return
+        if context.target_normalization_context:
+            return
+        if context.executed_turns == 0:
+            return
+
+        old_conversation_id = context.session.conversation_id
+        context.related_conversations.add(
+            ConversationReference(
+                conversation_id=old_conversation_id,
+                conversation_type=ConversationType.PRUNED,
+                description=f"single-turn target prior turn {context.executed_turns}",
+            )
+        )
+
+        memory = CentralMemory.get_memory_instance()
+        messages = memory.get_conversation_messages(conversation_id=old_conversation_id)
+        system_messages = [message for message in messages if message.api_role == "system"]
+
+        if system_messages:
+            new_conversation_id, pieces = memory.duplicate_messages(messages=system_messages)
+            memory.add_conversation_to_memory(
+                conversation=Conversation(
+                    conversation_id=new_conversation_id,
+                    target_identifier=self._objective_target.get_identifier(),
+                )
+            )
+            memory.add_message_pieces_to_memory(message_pieces=pieces)
+            context.session.conversation_id = new_conversation_id
+            persisted_messages = list(memory.get_conversation_messages(conversation_id=new_conversation_id))
+            context.target_normalization_context = ConversationManager.create_target_normalization_context(
+                target=self._objective_target,
+                conversation_id=new_conversation_id,
+                prepended_messages=persisted_messages,
+            )
+        else:
+            context.session.conversation_id = str(uuid.uuid4())
+
+        self._logger.debug(
+            "Rotated conversation_id for single-turn target: %s -> %s",
+            old_conversation_id,
+            context.session.conversation_id,
         )

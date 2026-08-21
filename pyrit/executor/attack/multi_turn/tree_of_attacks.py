@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import enum
 import logging
 import uuid
@@ -68,9 +69,11 @@ from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_inverter_scorer import TrueFalseInverterScorer
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from pyrit.models.literals import PromptDataType
+    from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +155,14 @@ class TAPAttackScoringConfig(AttackScoringConfig):
 
         Returns:
             float: The threshold value from the FloatScaleThresholdScorer.
+
+        Raises:
+            TypeError: If the configured objective scorer has an unexpected type.
         """
-        return self.objective_scorer.threshold  # type: ignore[ty:unresolved-attribute]
+        objective_scorer = self.objective_scorer
+        if not isinstance(objective_scorer, FloatScaleThresholdScorer):
+            raise TypeError("TAP objective scorer must be a FloatScaleThresholdScorer")
+        return objective_scorer.threshold
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +240,8 @@ class TAPAttackResult(AttackResult):
     @property
     def tree_visualization(self) -> Tree | None:
         """The tree visualization from metadata."""
-        return self.metadata.get("tree_visualization", None)
+        tree: Tree | None = self.metadata.get("tree_visualization")
+        return tree
 
     @tree_visualization.setter
     def tree_visualization(self, value: Tree) -> None:
@@ -336,6 +346,7 @@ class _TreeOfAttacksNode:
         attack_id: ComponentIdentifier,
         attack_strategy_name: str,
         modality_router: _ModalityFeedbackRouter,
+        use_score_as_feedback: bool = True,
         memory_labels: dict[str, str] | None = None,
         parent_id: str | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
@@ -363,6 +374,8 @@ class _TreeOfAttacksNode:
                 whether prior media should travel back to the adversarial chat or forward to
                 the objective target, and fills adversarial-placeholder pieces in seed
                 messages. Typically shared across all nodes of the same attack.
+            use_score_as_feedback (bool): Whether subsequent adversarial prompts include
+                the objective score. Defaults to True.
             memory_labels (dict[str, str] | None): Labels for memory storage.
             parent_id (str | None): ID of the parent node, if this is a child node
             prompt_normalizer (PromptNormalizer | None): Normalizer for handling prompts and responses.
@@ -389,6 +402,7 @@ class _TreeOfAttacksNode:
         self._memory_labels = memory_labels or {}
         self._modality_router = modality_router
         self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
+        self._use_score_as_feedback = use_score_as_feedback
 
         # Initialize utilities
         self._memory = CentralMemory.get_memory_instance()
@@ -413,6 +427,7 @@ class _TreeOfAttacksNode:
         self.last_prompt_sent: str | None = None
         self.last_response: Message | None = None
         self.error_message: str | None = None
+        self._target_normalization_context: TargetNormalizationContext | None = None
         # Context from prepended conversation (for adversarial chat system prompt)
         self._conversation_context: str | None = None
 
@@ -470,6 +485,14 @@ class _TreeOfAttacksNode:
             prepended_conversation_config=prepended_conversation_config,
             target_identifier=self._objective_target.get_identifier(),
             target=self._objective_target,
+        )
+        persisted_messages = list(
+            self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id)
+        )
+        self._target_normalization_context = conversation_manager.create_target_normalization_context(
+            target=self._objective_target,
+            conversation_id=self.objective_target_conversation_id,
+            prepended_messages=persisted_messages,
         )
         # Build context string for adversarial chat system prompt (like Crescendo)
         # The adversarial chat uses this in its system prompt rather than in conversation history
@@ -602,6 +625,8 @@ class _TreeOfAttacksNode:
         Side Effects:
             - Sets self.last_response to the target's response text
         """
+        self._rotate_unseeded_single_turn_conversation()
+
         # Build the request message via the modality router so prior media (if any)
         # is included when the objective target accepts it.
         message = self._modality_router.build_objective_input_message(
@@ -625,8 +650,10 @@ class _TreeOfAttacksNode:
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
                 normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target
+                    target=self._objective_target,
+                    target_normalization_context=self._target_normalization_context,
                 ),
+                target_normalization_context=self._target_normalization_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -661,6 +688,8 @@ class _TreeOfAttacksNode:
         """
         if self._initial_prompt is None:
             raise ValueError("_initial_prompt must be set before calling this method")
+
+        self._rotate_unseeded_single_turn_conversation()
 
         assert self._objective is not None
         initial_prompt = self._initial_prompt
@@ -700,8 +729,10 @@ class _TreeOfAttacksNode:
                 conversation_id=self.objective_target_conversation_id,
                 target=self._objective_target,
                 normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target
+                    target=self._objective_target,
+                    target_normalization_context=self._target_normalization_context,
                 ),
+                target_normalization_context=self._target_normalization_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -709,6 +740,27 @@ class _TreeOfAttacksNode:
         logger.debug(f"Node {self.node_id}: Received response from target")
 
         return response
+
+    def _rotate_unseeded_single_turn_conversation(self) -> None:
+        """Isolate unseeded single-turn sends without discarding an explicit branch boundary."""
+        if (
+            not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN)
+            and self._target_normalization_context is None
+        ):
+            self.objective_target_conversation_id = str(uuid.uuid4())
+
+    def _refresh_stateless_branch_boundary(self) -> None:
+        """Use the complete current branch as the next stateless target payload boundary."""
+        if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
+            return
+
+        messages = list(self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id))
+        replayable_messages = ConversationManager.get_persistable_prepended_messages(prepended_conversation=messages)
+        self._target_normalization_context = ConversationManager.create_target_normalization_context(
+            target=self._objective_target,
+            conversation_id=self.objective_target_conversation_id,
+            prepended_messages=replayable_messages,
+        )
 
     async def _score_response_async(self, *, response: Message, objective: str) -> None:
         """
@@ -877,6 +929,7 @@ class _TreeOfAttacksNode:
             attack_id=self._attack_id,
             attack_strategy_name=self._attack_strategy_name,
             modality_router=self._modality_router,
+            use_score_as_feedback=self._use_score_as_feedback,
             memory_labels=self._memory_labels,
             desired_response_prefix=self._desired_response_prefix,
             parent_id=self.node_id,
@@ -884,10 +937,22 @@ class _TreeOfAttacksNode:
             prepended_conversation_config=self._prepended_conversation_config,
         )
 
-        # Duplicate the complete conversation. The capability pipeline adapts the
-        # history when the objective target cannot edit it.
+        # Duplicate the complete logical branch. A non-editable target receives
+        # this explicit branch boundary once (stateful) or on every send
+        # (stateless), without inferring it from assistant/error rows.
         duplicate_node.objective_target_conversation_id = self._memory.duplicate_conversation(
             conversation_id=self.objective_target_conversation_id
+        )
+        duplicated_messages = list(
+            self._memory.get_conversation_messages(conversation_id=duplicate_node.objective_target_conversation_id)
+        )
+        replayable_messages = ConversationManager.get_persistable_prepended_messages(
+            prepended_conversation=duplicated_messages
+        )
+        duplicate_node._target_normalization_context = ConversationManager.create_target_normalization_context(
+            target=self._objective_target,
+            conversation_id=duplicate_node.objective_target_conversation_id,
+            prepended_messages=replayable_messages,
         )
 
         duplicate_node.adversarial_chat_conversation_id = self._memory.duplicate_conversation(
@@ -896,6 +961,7 @@ class _TreeOfAttacksNode:
 
         # Copy conversation context for adversarial chat system prompt
         duplicate_node._conversation_context = self._conversation_context
+        duplicate_node.last_response = copy.deepcopy(self.last_response)
 
         # Copy visualization position so the clone starts from the same tree position
         duplicate_node._vis_node_id = self._vis_node_id
@@ -1155,7 +1221,9 @@ class _TreeOfAttacksNode:
         logger.debug(f"Node {self.node_id}: Using response {target_response_piece.id} for next prompt")
 
         # Get score for the response
-        score = await self._get_response_score_async(str(target_response_piece.id))
+        score = (
+            await self._get_response_score_async(str(target_response_piece.id)) if self._use_score_as_feedback else ""
+        )
 
         # Generate prompt using template
         return self._adversarial_chat_prompt_template.render_template_value(
@@ -1245,6 +1313,72 @@ class _TreeOfAttacksNode:
         )
 
     __repr__ = __str__
+
+
+class _TreeOfAttacksNodeExecutor:
+    """Execute independent tree nodes with bounded concurrency."""
+
+    def __init__(
+        self,
+        *,
+        batch_size: int,
+        logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
+    ) -> None:
+        """
+        Initialize the node executor.
+
+        Args:
+            batch_size (int): Maximum number of nodes to execute concurrently.
+            logger (logging.Logger | logging.LoggerAdapter[logging.Logger]): Logger
+                used for execution progress.
+        """
+        self._batch_size = batch_size
+        self._logger = logger
+
+    async def execute_nodes_async(
+        self,
+        *,
+        nodes: list[_TreeOfAttacksNode],
+        objective: str,
+    ) -> AsyncIterator[tuple[int, list[_TreeOfAttacksNode]]]:
+        """
+        Execute nodes in ordered batches and yield each completed batch.
+
+        Node instances own all branch-specific mutable state. This executor only
+        schedules their existing execution protocol, so failures and cancellation
+        retain ``asyncio.gather`` semantics.
+
+        Args:
+            nodes (list[_TreeOfAttacksNode]): Nodes to execute.
+            objective (str): Objective passed to every node.
+
+        Yields:
+            tuple[int, list[_TreeOfAttacksNode]]: The batch start offset and nodes
+                after every node in that batch has completed.
+        """
+        for batch_start in range(0, len(nodes), self._batch_size):
+            batch_nodes = nodes[batch_start : batch_start + self._batch_size]
+            self._log_batch_start(batch_start=batch_start, batch_nodes=batch_nodes, total_nodes=len(nodes))
+
+            await asyncio.gather(*(node.send_prompt_async(objective=objective) for node in batch_nodes))
+
+            yield batch_start, batch_nodes
+
+    def _log_batch_start(
+        self,
+        *,
+        batch_start: int,
+        batch_nodes: list[_TreeOfAttacksNode],
+        total_nodes: int,
+    ) -> None:
+        """Log the batch and node dispatch order."""
+        batch_end = batch_start + len(batch_nodes)
+        self._logger.debug(
+            f"Processing batch {batch_start // self._batch_size + 1} "
+            f"(nodes {batch_start + 1}-{batch_end} of {total_nodes})"
+        )
+        for node_index in range(batch_start + 1, batch_end + 1):
+            self._logger.debug(f"Preparing prompt for node {node_index}/{total_nodes}")
 
 
 class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackResult]):
@@ -1388,6 +1522,10 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         super().__init__(objective_target=objective_target, logger=logger, context_type=TAPAttackContext)
 
         self._memory = CentralMemory.get_memory_instance()
+        self._node_executor = _TreeOfAttacksNodeExecutor(
+            batch_size=self._configuration.batch_size,
+            logger=self._logger,
+        )
 
         # Initialize adversarial configuration
         self._adversarial_chat = attack_adversarial_config.target
@@ -1833,6 +1971,11 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         cloned_nodes = []
 
         for node in context.nodes:
+            # Stateless targets have no provider-side conversation to retain.
+            # Refresh the original node as well as its clones so every outgoing
+            # branch sees the same complete logical history. This also covers a
+            # branching factor of one, where no clone is created.
+            node._refresh_stateless_branch_boundary()
             for _ in range(self._configuration.branching_factor - 1):
                 cloned_node = node.duplicate()
                 # Add the adversarial chat conversation ID of the duplicated node to the context's tracking
@@ -1871,25 +2014,10 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             context.tree_visualization.create_node(f"{context.executed_turns}: ", vis_id, parent=node._vis_node_id)
             node._vis_node_id = vis_id
 
-        # Process nodes in batches
-        for batch_start in range(0, len(context.nodes), self._configuration.batch_size):
-            batch_end = min(batch_start + self._configuration.batch_size, len(context.nodes))
-            batch_nodes = context.nodes[batch_start:batch_end]
-
-            self._logger.debug(
-                f"Processing batch {batch_start // self._configuration.batch_size + 1} "
-                f"(nodes {batch_start + 1}-{batch_end} of {len(context.nodes)})"
-            )
-
-            # Create tasks for parallel execution
-            tasks = []
-            for node_index, node in enumerate(batch_nodes, start=batch_start + 1):
-                self._logger.debug(f"Preparing prompt for node {node_index}/{len(context.nodes)}")
-                task = node.send_prompt_async(objective=context.objective)
-                tasks.append(task)
-
-            await asyncio.gather(*tasks)
-
+        async for batch_start, batch_nodes in self._node_executor.execute_nodes_async(
+            nodes=context.nodes,
+            objective=context.objective,
+        ):
             # Update visualization with results after batch completes
             for node_index, node in enumerate(batch_nodes, start=batch_start + 1):
                 result_string = self._format_node_result(node)
@@ -2020,6 +2148,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             attack_id=self.get_identifier(),
             attack_strategy_name=self.__class__.__name__,
             modality_router=self._modality_router,
+            use_score_as_feedback=self._attack_scoring_config.use_score_as_feedback,
             memory_labels=context.memory_labels,
             desired_response_prefix=self._configuration.desired_response_prefix,
             parent_id=parent_id,

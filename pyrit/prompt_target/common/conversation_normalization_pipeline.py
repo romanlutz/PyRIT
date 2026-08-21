@@ -6,8 +6,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from pyrit.message_normalizer import (
-    ConversationContextNormalizer,
-    FirstTurnHistoryNormalizer,
     GenericSystemSquashNormalizer,
     HistorySquashNormalizer,
     JsonSchemaNormalizer,
@@ -30,15 +28,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 NormalizerFactory = Callable[[TargetCapabilities], MessageListNormalizer[Message]]
 
-_NORMALIZER_REGISTRY: list[tuple[CapabilityName, NormalizerFactory]] = [
+_NORMALIZER_REGISTRY: list[tuple[CapabilityName, NormalizerFactory | None]] = [
+    # Editable-history adaptation is intentionally per-send only. Prepended
+    # conversation flows provide an explicit HistorySquashNormalizer override
+    # whose boundary comes from persisted message IDs. It must run before
+    # cardinality-changing target normalizers such as system-message squashing.
+    (CapabilityName.EDITABLE_HISTORY, None),
     (CapabilityName.SYSTEM_PROMPT, lambda _: GenericSystemSquashNormalizer()),
-    (
-        CapabilityName.EDITABLE_HISTORY,
-        lambda capabilities: FirstTurnHistoryNormalizer(
-            message_normalizer=ConversationContextNormalizer(),
-            target_supports_multi_turn=capabilities.supports_multi_turn,
-        ),
-    ),
     (CapabilityName.MULTI_TURN, lambda _: HistorySquashNormalizer()),
     (CapabilityName.JSON_SCHEMA, lambda _: JsonSchemaNormalizer()),
 ]
@@ -61,7 +57,12 @@ class ConversationNormalizationPipeline:
     pipeline ordering, and default normalizers are all derived from it.
     """
 
-    def __init__(self, normalizers: tuple[MessageListNormalizer[Message], ...] = ()) -> None:
+    def __init__(
+        self,
+        normalizers: tuple[MessageListNormalizer[Message], ...] = (),
+        *,
+        adapted_capabilities: frozenset[CapabilityName] = frozenset(),
+    ) -> None:
         """
         Initialize the normalization pipeline with an ordered sequence of normalizers.
 
@@ -69,8 +70,10 @@ class ConversationNormalizationPipeline:
             normalizers (tuple[MessageListNormalizer[Message], ...]):
                 Ordered normalizers to apply during ``normalize_async``.
                 Defaults to an empty tuple (pass-through).
+            adapted_capabilities: Capabilities handled by the normalizer sequence.
         """
         self._normalizers = normalizers
+        self._adapted_capabilities = adapted_capabilities
 
     @classmethod
     def from_capabilities(
@@ -86,8 +89,10 @@ class ConversationNormalizationPipeline:
         For each capability in ``_NORMALIZER_REGISTRY`` (in order):
 
         * If the target already supports the capability, no normalizer is added.
-        * If the capability is missing and the policy is ``ADAPT``, the
-          corresponding normalizer (from overrides or defaults) is added.
+        * If the capability is missing and an explicit override exists, that
+          override is added regardless of the target's sparse policy mapping.
+        * Otherwise, if the policy is ``ADAPT``, the default normalizer is added
+          when one exists.
         * If the capability is missing and the policy is ``RAISE``, no
           normalizer is added (validation is deferred to
           ``TargetConfiguration.ensure_can_handle()``).
@@ -105,9 +110,16 @@ class ConversationNormalizationPipeline:
         """
         overrides = normalizer_overrides or {}
         normalizers: list[MessageListNormalizer[Message]] = []
+        adapted_capabilities: set[CapabilityName] = set()
 
         for capability, default_normalizer_factory in _NORMALIZER_REGISTRY:
             if capabilities.includes(capability=capability):
+                continue
+
+            override = overrides.get(capability)
+            if override is not None:
+                normalizers.append(override)
+                adapted_capabilities.add(capability)
                 continue
 
             # ``behaviors`` is treated as a sparse mapping: a missing entry means
@@ -122,11 +134,14 @@ class ConversationNormalizationPipeline:
             # Validation is deferred to TargetConfiguration.ensure_can_handle(),
             # which should be called in the request flow once the full end-to-end
             # workflow is implemented.
-            if behavior == UnsupportedCapabilityBehavior.ADAPT:
-                normalizer = overrides.get(capability) or default_normalizer_factory(capabilities)
-                normalizers.append(normalizer)
+            if behavior == UnsupportedCapabilityBehavior.ADAPT and default_normalizer_factory is not None:
+                normalizers.append(default_normalizer_factory(capabilities))
+                adapted_capabilities.add(capability)
 
-        return cls(normalizers=tuple(normalizers))
+        return cls(
+            normalizers=tuple(normalizers),
+            adapted_capabilities=frozenset(adapted_capabilities),
+        )
 
     async def normalize_async(self, *, messages: list[Message]) -> list[Message]:
         """
@@ -152,3 +167,7 @@ class ConversationNormalizationPipeline:
             tuple[MessageListNormalizer[Message], ...]: The normalizer sequence.
         """
         return self._normalizers
+
+    def has_normalizer_for(self, *, capability: CapabilityName) -> bool:
+        """Return whether this pipeline adapts the specified capability."""
+        return capability in self._adapted_capabilities
