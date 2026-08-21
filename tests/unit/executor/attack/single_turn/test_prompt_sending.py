@@ -18,6 +18,7 @@ from pyrit.executor.attack import (
     SingleTurnAttackContext,
 )
 from pyrit.memory import CentralMemory
+from pyrit.message_normalizer import TokenizerTemplateNormalizer
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
@@ -281,7 +282,7 @@ class TestSetupPhase:
             target=mock_target,
             conversation_id=basic_context.conversation_id,
             request_converters=converter_config,
-            prepended_conversation_config=None,
+            prepended_conversation_config=PrependedConversationConfig(),
             memory_labels={},
         )
 
@@ -365,7 +366,7 @@ class TestSetupPhase:
             (f"Turn 1:\nuser: {encoded_user}\nassistant: {simulated_response}\nTurn 2:\nuser: {encoded_final_request}")
         ]
 
-    async def test_retry_setup_creates_fresh_first_turn_context(self, basic_context):
+    async def test_retry_setup_creates_fresh_conversation(self, basic_context):
         target = MockPromptTarget()
         target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
         attack = PromptSendingAttack(objective_target=target)
@@ -374,18 +375,11 @@ class TestSetupPhase:
         ]
 
         await attack._setup_async(context=basic_context)
-        first_context = basic_context.target_normalization_context
         first_conversation_id = basic_context.conversation_id
-        assert first_context is not None
-        assert first_context.begin_normalization(conversation_id=first_conversation_id)
-        first_context.mark_consumed()
 
         await attack._setup_async(context=basic_context)
 
         assert basic_context.conversation_id != first_conversation_id
-        assert basic_context.target_normalization_context is not None
-        assert basic_context.target_normalization_context is not first_context
-        assert basic_context.target_normalization_context.is_pending
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -1257,6 +1251,34 @@ class TestEdgeCasesAndErrorHandling:
         # Same config produces same identifier
         assert id1.hash == id2.hash
         assert id1.class_name == id2.class_name == "PromptSendingAttack"
+
+    def test_attack_identifier_owns_prepended_formatter_provenance(self, mock_target):
+        tokenizer = MagicMock()
+        tokenizer.name_or_path = "example/tokenizer"
+        tokenizer.chat_template = "{{ messages }}"
+        tokenizer.special_tokens_map = {"bos_token": "<s>"}
+        keep_formatter = TokenizerTemplateNormalizer(
+            tokenizer=tokenizer,
+            system_message_behavior="keep",
+        )
+        ignore_formatter = TokenizerTemplateNormalizer(
+            tokenizer=tokenizer,
+            system_message_behavior="ignore",
+        )
+
+        keep_attack = PromptSendingAttack(
+            objective_target=mock_target,
+            prepended_conversation_config=PrependedConversationConfig(message_normalizer=keep_formatter),
+        )
+        ignore_attack = PromptSendingAttack(
+            objective_target=mock_target,
+            prepended_conversation_config=PrependedConversationConfig(message_normalizer=ignore_formatter),
+        )
+
+        keep_identifier = keep_attack.get_identifier()
+        ignore_identifier = ignore_attack.get_identifier()
+        assert "prepended_conversation_formatter" in keep_identifier.children
+        assert keep_identifier.hash != ignore_identifier.hash
 
     async def test_retry_stores_unsuccessful_conversation_and_updates_id(
         self, mock_target, mock_true_false_scorer, basic_context, sample_response, failure_score

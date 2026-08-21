@@ -3,9 +3,11 @@
 
 import abc
 import logging
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, final
 
 from pyrit.memory import CentralMemory, MemoryInterface
+from pyrit.message_normalizer import MessageListNormalizer
 from pyrit.models import (
     ComponentIdentifier,
     Conversation,
@@ -21,7 +23,10 @@ from pyrit.prompt_target.common.target_capabilities import (
     get_known_capabilities,
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
+from pyrit.prompt_target.common.target_normalization_context import (
+    TargetNormalizationContext,
+    filter_non_replayable_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,7 @@ class PromptTarget(Identifiable):
         self,
         *,
         message: Message,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
         target_normalization_context: TargetNormalizationContext | None = None,
     ) -> list[Message]:
         """
@@ -144,20 +150,19 @@ class PromptTarget(Identifiable):
 
         This is the public entry point called by the prompt normalizer. It:
 
-        1. Validates the message and acquires an optional one-shot target context.
-        2. Loads memory history unless the context was already consumed, applies
-           acquired context normalizers, then runs the target's ordinary pipeline.
+        1. Validates the message.
+        2. Loads memory history and runs the target's normalization pipeline.
         3. Validates the normalized conversation against the target's capabilities.
-        4. Marks the context consumed and delegates to
-           ``_send_prompt_to_target_async`` with the normalized conversation.
+        4. Delegates to ``_send_prompt_to_target_async`` with the normalized conversation.
 
         Subclasses MUST NOT override this method. Override
         ``_send_prompt_to_target_async`` instead.
 
         Args:
             message (Message): The message to send.
-            target_normalization_context: Optional per-conversation normalizers
-                and one-shot lifecycle state.
+            normalizer_overrides: Optional per-send target normalizer overrides.
+            target_normalization_context: Optional explicit persisted-history
+                boundary and send lifecycle state.
 
         Returns:
             list[Message]: Response messages from the target.
@@ -166,32 +171,29 @@ class PromptTarget(Identifiable):
             ValueError: If the message or normalized conversation are empty.
         """
         message.validate()
-        conversation_id = message.message_pieces[0].conversation_id
-        should_apply_context = False
-        if target_normalization_context:
-            should_apply_context = target_normalization_context.begin_normalization(
-                conversation_id=conversation_id or ""
+        conversation_id = message.get_piece().conversation_id or ""
+        if target_normalization_context and target_normalization_context.conversation_id != conversation_id:
+            raise ValueError(
+                "Target normalization context conversation_id does not match the current request conversation_id."
             )
+        if target_normalization_context:
+            target_normalization_context.begin_send()
 
         try:
             normalized_conversation = await self._get_normalized_conversation_async(
                 message=message,
+                normalizer_overrides=normalizer_overrides,
                 target_normalization_context=target_normalization_context,
-                should_apply_context=should_apply_context,
             )
             if not normalized_conversation:
                 raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
             self._validate_request(normalized_conversation=normalized_conversation)
-        except BaseException:
-            if target_normalization_context and should_apply_context:
-                target_normalization_context.restore_pending()
-            raise
-
-        if target_normalization_context and should_apply_context:
-            # Target-level retry decorators reuse this normalized payload. Once
-            # provider invocation starts, attack-level retries must not replay history.
-            target_normalization_context.mark_consumed()
-        return await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+            if target_normalization_context:
+                target_normalization_context.mark_provider_attempted()
+            return await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+        finally:
+            if target_normalization_context:
+                target_normalization_context.finish_send()
 
     @abc.abstractmethod
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
@@ -254,96 +256,51 @@ class PromptTarget(Identifiable):
         self,
         *,
         message: Message,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
         target_normalization_context: TargetNormalizationContext | None = None,
-        should_apply_context: bool = False,
     ) -> list[Message]:
         """
         Build the target-facing conversation and run the normalization pipeline.
 
-        A consumed target context supplies only the current message so retained
-        target history is not replayed. Otherwise, memory history is loaded and the
-        current message is appended before any acquired context normalizers run.
+        Memory history is loaded and the current message is appended before the
+        target normalization pipeline runs.
 
         The original conversation in memory is never mutated. The returned list is an
         ephemeral copy intended only for building the API request body.
 
-        After normalization, the metadata from the original ``message`` is copied
-        onto the last normalized message so that downstream code (e.g.
-        ``construct_response_from_request``) propagates the correct
-        ``conversation_id`` and request lineage to the response.
+        After normalization, every output piece is stamped with the current
+        conversation ID. Normalizers own all other output metadata; removed
+        ``prompt_metadata`` keys are not restored.
 
         Args:
             message (Message): The current message to append.
-            target_normalization_context: Optional per-conversation normalization state.
-            should_apply_context: Whether this send acquired the one-shot context.
+            normalizer_overrides: Optional per-send target normalizer overrides.
+            target_normalization_context: Optional explicit persisted-history boundary.
 
         Returns:
             list[Message]: The normalized conversation (possibly with system prompt squashed,
                 history squashed, etc.).
         """
         conversation_id = message.message_pieces[0].conversation_id
-        if target_normalization_context and not should_apply_context:
-            conversation = [message]
-        else:
-            conversation = (
-                list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
-            )
-            conversation.append(message)
-            if target_normalization_context:
-                conversation = await target_normalization_context.normalize_async(messages=conversation)
-        normalized = await self.configuration.normalize_async(messages=conversation)
+        persisted_messages = (
+            list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
+        )
+        persisted_messages = filter_non_replayable_messages(messages=persisted_messages)
+        conversation = (
+            target_normalization_context.select_history(messages=persisted_messages)
+            if target_normalization_context
+            else persisted_messages
+        )
+        conversation.append(message)
+        normalized = await self.configuration.normalize_async(
+            messages=conversation,
+            normalizer_overrides=normalizer_overrides,
+        )
         if normalized:
-            # Normalizers may create new Message objects (via Message.from_prompt) with
-            # random conversation_ids.  Stamp the correct conversation_id on every
-            # message (idempotent for originals, fixes new ones).  Full lineage is only
-            # propagated to the last message — it's the one targets use to build the
-            # response, and earlier messages carry their own legitimate metadata.
             for msg in normalized:
                 for piece in msg.message_pieces:
                     piece.conversation_id = conversation_id
-            self._propagate_lineage(source=message, target_message=normalized[-1])
-            if len(normalized) > len(conversation):
-                logger.warning(
-                    "Normalization produced more messages than the input conversation "
-                    "(%d → %d). Only the last normalized message has full lineage "
-                    "metadata. Additional new messages have conversation_id set but "
-                    "require manual lineage updates if needed.",
-                    len(conversation),
-                    len(normalized),
-                )
         return normalized
-
-    @staticmethod
-    def _propagate_lineage(*, source: Message, target_message: Message) -> None:
-        """
-        Copy request-lineage metadata from ``source`` onto every piece in ``target_message``.
-
-        Normalizers may create brand-new messages or pieces, such as the combined
-        text piece from ``HistorySquashNormalizer``, that lack request lineage.
-        This method restores the original metadata so that the response built from
-        the normalized message stays part of the correct conversation and retains
-        traceability.
-
-        ``prompt_metadata`` is handled by provenance so that metadata-editing normalizers
-        are honored. A piece that shares the source piece's ``id`` is the same logical piece
-        (possibly a copy whose metadata a normalizer intentionally edited or stripped, e.g.
-        ``JsonSchemaNormalizer``) — its metadata is kept as-is. A piece with a different
-        ``id`` is brand-new (e.g. a squashed message), so the source's request metadata is
-        restored, with any keys the normalizer set on the new piece taking precedence.
-
-        Args:
-            source: The original (pre-normalization) message whose metadata is authoritative.
-            target_message: The normalized message whose pieces will be updated in place.
-        """
-        source_piece = source.message_pieces[0]
-        for piece in target_message.message_pieces:
-            normalized_metadata = dict(piece.prompt_metadata)
-            is_new_piece = piece.id != source_piece.id
-            piece.copy_lineage_from(source=source_piece)
-            if is_new_piece:
-                piece.prompt_metadata = {**dict(source_piece.prompt_metadata), **normalized_metadata}
-            else:
-                piece.prompt_metadata = normalized_metadata
 
     def set_model_name(self, *, model_name: str) -> None:
         """
@@ -499,6 +456,7 @@ class PromptTarget(Identifiable):
         self._configuration = TargetConfiguration(
             capabilities=capabilities,
             policy=self._configuration.policy,
+            normalizer_overrides=self._configuration.normalizer_overrides,
         )
 
     @classmethod

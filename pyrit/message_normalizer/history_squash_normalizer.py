@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import copy
+import logging
 import uuid
 
 from pyrit.message_normalizer._helpers import format_message_piece_for_context
@@ -10,16 +11,18 @@ from pyrit.message_normalizer.generic_system_squash import GenericSystemSquashNo
 from pyrit.message_normalizer.message_normalizer import MessageListNormalizer, MessageStringNormalizer
 from pyrit.models import Message, MessagePiece
 
+logger = logging.getLogger(__name__)
+
 
 class HistorySquashNormalizer(MessageListNormalizer[Message]):
     """
     Combine conversation history and the current request into one message.
 
-    The same implementation serves two normalization scopes. A
-    ``TargetNormalizationContext`` configures it with a string formatter and an
-    expected history count to bootstrap prepended history exactly once for a target
-    without editable history. The ordinary target capability pipeline uses the
-    default formatter whenever a target does not support multiple turns.
+    The same implementation serves two normalization scopes. Prepended-conversation
+    flows create per-send overrides with a string formatter and the explicit history
+    count from ``TargetNormalizationContext``. The ordinary target capability
+    pipeline uses the default formatter whenever a target does not support multiple
+    turns.
 
     The surrounding pipeline controls when the normalizer runs; this class does not
     track turn state. In both scopes, historical content becomes text while non-text
@@ -81,6 +84,7 @@ class HistorySquashNormalizer(MessageListNormalizer[Message]):
         history = messages[:-1]
         live_request = messages[-1]
         self._validate_flattenable_converter_output(messages=history)
+        self._warn_on_non_text_history(messages=history)
 
         original_view = self._build_original_view(messages=messages)
         converted_view = self._build_converted_view(messages=messages)
@@ -217,6 +221,25 @@ class HistorySquashNormalizer(MessageListNormalizer[Message]):
             raise ValueError(
                 "Cannot flatten conversation history after request converters produced "
                 f"non-text output types {sorted(output_types)}. Historical conversion must produce text."
+            )
+
+    @staticmethod
+    def _warn_on_non_text_history(*, messages: list[Message]) -> None:
+        """Warn when native non-text history becomes target-facing text."""
+        flattened_types = sorted(
+            {
+                piece.converted_value_data_type
+                for message in messages
+                for piece in message.message_pieces
+                if piece.converted_value_data_type != "text"
+            }
+        )
+        if flattened_types:
+            logger.warning(
+                "Conversation history contains non-text pieces %s. History squashing "
+                "represents them as text placeholders for the target; memory keeps the "
+                "original pieces.",
+                flattened_types,
             )
 
     @staticmethod

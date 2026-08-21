@@ -38,7 +38,7 @@ from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
-from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target import CapabilityName, PromptTarget
 
 
 def _mock_target_id(name: str = "MockTarget") -> ComponentIdentifier:
@@ -780,7 +780,7 @@ class TestInitializeContext:
         assert context.next_message is next_message
         assert context.next_message.get_value() == "Caller-supplied question"
 
-    async def test_non_editable_target_sets_custom_first_send_context(
+    async def test_non_editable_target_persists_history_without_using_formatter(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_normalizer: MagicMock,
@@ -803,7 +803,15 @@ class TestInitializeContext:
 
         assert context.target_normalization_context is not None
         assert context.target_normalization_context.conversation_id == conversation_id
-        normalizer = context.target_normalization_context.normalizers[0]
+        stored = manager.get_conversation(conversation_id)
+        assert len(stored) == len(sample_conversation)
+        assert context.target_normalization_context.history_message_ids == tuple(
+            message.get_piece().id for message in stored
+        )
+        normalizer = config.get_normalizer_overrides(
+            target=mock_prompt_target,
+            target_normalization_context=context.target_normalization_context,
+        )[CapabilityName.EDITABLE_HISTORY]
         assert isinstance(normalizer, HistorySquashNormalizer)
         assert normalizer._message_normalizer is message_normalizer
         assert normalizer._expected_history_message_count == len(sample_conversation)
@@ -905,6 +913,62 @@ class TestInitializeContext:
         returned_ids = {s.id for s in state.last_assistant_message_scores}
         assert score1.id in returned_ids
         assert score2.id in returned_ids
+
+    async def test_scores_come_only_from_the_last_assistant_turn(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_chat_target: MagicMock,
+    ) -> None:
+        """Only the final assistant turn's scores are surfaced, not every assistant turn."""
+        manager = ConversationManager()
+        conversation_id = str(uuid.uuid4())
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+
+        early_piece = MessagePiece(
+            role="assistant",
+            original_value="early reply",
+            conversation_id=str(uuid.uuid4()),
+        )
+        final_piece = MessagePiece(
+            role="assistant",
+            original_value="final reply",
+            conversation_id=str(uuid.uuid4()),
+        )
+        manager._memory.add_message_pieces_to_memory(message_pieces=[early_piece, final_piece])
+
+        def _false_score(piece: MessagePiece, rationale: str) -> Score:
+            return Score(
+                score_type="true_false",
+                score_value="false",
+                score_category=["test"],
+                score_value_description=rationale,
+                score_rationale=rationale,
+                score_metadata={},
+                message_piece_id=str(piece.id),
+                scorer_class_identifier=get_mock_scorer_identifier(),
+            )
+
+        early_score = _false_score(early_piece, "early")
+        final_score = _false_score(final_piece, "final")
+        manager._memory.add_scores_to_memory(scores=[early_score, final_score])
+
+        context.prepended_conversation = [
+            Message.from_prompt(prompt="first ask", role="user"),
+            Message(message_pieces=[early_piece]),
+            Message.from_prompt(prompt="second ask", role="user"),
+            Message(message_pieces=[final_piece]),
+        ]
+
+        state = await manager.initialize_context_async(
+            context=context,
+            target=mock_chat_target,
+            conversation_id=conversation_id,
+            max_turns=10,
+        )
+
+        assert [score.id for score in state.last_assistant_message_scores] == [final_score.id]
+        assert context.last_score is not None
+        assert context.last_score.id == final_score.id
 
     async def test_prepended_conversation_ignores_true_scores(
         self,
@@ -1140,7 +1204,6 @@ class TestPrependedConversationConfigSettings:
             )
 
         assert manager.get_conversation(conversation_id) == []
-        assert context.target_normalization_context is None
 
     async def test_non_persisted_prepended_message_is_not_counted_in_context(
         self,
@@ -1165,7 +1228,6 @@ class TestPrependedConversationConfigSettings:
         )
 
         assert manager.get_conversation(conversation_id) == []
-        assert context.target_normalization_context is None
 
     async def test_non_persisted_piece_does_not_constrain_flattening(
         self,
@@ -1211,7 +1273,6 @@ class TestPrependedConversationConfigSettings:
         stored = manager.get_conversation(conversation_id)
         assert len(stored) == 1
         assert [piece.converted_value for piece in stored[0].message_pieces] == ["persisted"]
-        assert context.target_normalization_context is not None
 
     async def test_non_editable_target_preserves_converter_piece_indexes(
         self,
@@ -1382,7 +1443,7 @@ class TestPrependedConversationConfigSettings:
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that the default formatter is carried in explicit target-side state."""
+        """Test that default formatting is supplied by an explicit per-send override."""
         manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
         conversation_id = str(uuid.uuid4())
         context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
@@ -1395,9 +1456,25 @@ class TestPrependedConversationConfigSettings:
         )
 
         assert context.target_normalization_context is not None
-        normalizer = context.target_normalization_context.normalizers[0]
+        normalizer = PrependedConversationConfig().get_normalizer_overrides(
+            target=mock_prompt_target,
+            target_normalization_context=context.target_normalization_context,
+        )[CapabilityName.EDITABLE_HISTORY]
         assert isinstance(normalizer, HistorySquashNormalizer)
         assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
+
+    def test_message_normalizer_is_not_overridden_for_editable_target(
+        self,
+        mock_chat_target: MagicMock,
+    ) -> None:
+        mock_chat_target.configuration.includes.return_value = True
+
+        overrides = PrependedConversationConfig().get_normalizer_overrides(
+            target=mock_chat_target,
+            target_normalization_context=None,
+        )
+
+        assert overrides == {}
 
     # -------------------------------------------------------------------------
     # Chat Target Behavior (Config has no effect)

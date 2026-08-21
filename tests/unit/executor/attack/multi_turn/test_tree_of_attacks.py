@@ -1609,7 +1609,6 @@ class TestTreeOfAttacksNode:
         """Test that duplicate() creates a proper child node."""
         parent_node = _TreeOfAttacksNode(**node_components)
         parent_node.node_id = "parent_node_id"
-        parent_node._target_normalization_context = MagicMock()
 
         # Mock memory duplicate conversation
         with patch.object(parent_node._memory, "duplicate_conversation", return_value="new_conv_id"):
@@ -1618,7 +1617,6 @@ class TestTreeOfAttacksNode:
         assert child_node.node_id != parent_node.node_id
         assert child_node.parent_id == parent_node.node_id
         assert child_node.completed is False
-        assert child_node._target_normalization_context is None
 
     def _node_with_schema(self, node_components, schema):
         """Build a real node whose adversarial system prompt advertises ``schema``.
@@ -1926,8 +1924,8 @@ class TestTreeOfAttacksNode:
         assert node.auxiliary_scores["AuxScorer2"].get_value() == 0.6
 
     @pytest.mark.asyncio
-    async def test_node_single_turn_target_generates_new_conv_id(self, node_components):
-        """Test that single-turn targets get a fresh conversation_id before each send."""
+    async def test_node_unseeded_single_turn_target_rotates_conversation_id(self, node_components):
+        """An unseeded single-turn node keeps prior live history out of the next payload."""
         node_components["objective_target"].capabilities.supports_multi_turn = False
         node_components["objective_target"].configuration.includes.side_effect = lambda capability: False
         node = _TreeOfAttacksNode(**node_components)
@@ -1950,8 +1948,10 @@ class TestTreeOfAttacksNode:
             with patch.object(node, "_score_response_async", new_callable=AsyncMock):
                 await node._send_prompt_to_target_async("test prompt")
 
-        # Conversation ID should have changed for single-turn target
         assert node.objective_target_conversation_id != original_conv_id
+        send_kwargs = node._prompt_normalizer.send_prompt_async.await_args.kwargs
+        assert send_kwargs["conversation_id"] == node.objective_target_conversation_id
+        assert send_kwargs["target_normalization_context"] is None
 
     @pytest.mark.asyncio
     async def test_node_multi_turn_target_keeps_conv_id(self, node_components):
