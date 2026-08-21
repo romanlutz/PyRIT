@@ -523,8 +523,9 @@ class TestTAPNodeDuplicateSystemMessages:
 
         dup_messages = memory.get_conversation_messages(conversation_id=duplicate.objective_target_conversation_id)
         assert [message.api_role for message in dup_messages] == ["system", "user", "assistant"]
-        assert duplicate._target_normalization_context is not None
-        assert duplicate._target_normalization_context.history_message_count == 3
+        # No explicit prepended seed was initialized, so copied live turns do not
+        # become a new replay boundary.
+        assert duplicate._target_normalization_context is None
 
     def test_multi_turn_target_duplicates_full_conversation(self):
         """For multi-turn targets, the full conversation is duplicated."""

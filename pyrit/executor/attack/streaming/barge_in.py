@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
-from pyrit.executor.attack.component import PrependedConversationConfig
 from pyrit.executor.attack.component.conversation_manager import ConversationManager
 from pyrit.executor.attack.core.attack_config import AttackConverterConfig
 from pyrit.executor.attack.core.attack_parameters import AttackParameters, AttackParamsT
@@ -29,6 +28,7 @@ from pyrit.prompt_target.common.target_requirements import TargetRequirements
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from pyrit.executor.attack.component import PrependedConversationConfig
     from pyrit.prompt_target import PromptTarget, RealtimeTarget
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,7 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
             objective_target=objective_target,
             context_type=BargeInAttackContext,
             params_type=params_type,
+            prepended_conversation_config=prepended_conversation_config,
             logger=logger,
         )
         self._realtime_target = cast("RealtimeTarget", objective_target)
@@ -103,7 +104,6 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
         self._request_converters = attack_converter_config.request_converters
         self._response_converters = attack_converter_config.response_converters
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
         self._conversation_manager = ConversationManager(
             prompt_normalizer=self._prompt_normalizer,
         )

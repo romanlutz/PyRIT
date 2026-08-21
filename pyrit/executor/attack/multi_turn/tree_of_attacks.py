@@ -1507,7 +1507,12 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         )
 
         # Initialize base class
-        super().__init__(objective_target=objective_target, logger=logger, context_type=TAPAttackContext)
+        super().__init__(
+            objective_target=objective_target,
+            logger=logger,
+            context_type=TAPAttackContext,
+            prepended_conversation_config=prepended_conversation_config,
+        )
 
         self._memory = CentralMemory.get_memory_instance()
         self._node_executor = _TreeOfAttacksNodeExecutor(
@@ -1618,9 +1623,6 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             raise ValueError("On-topic checking is enabled but no scoring target is available.")
 
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-
-        # Store the prepended conversation configuration
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
 
     def _load_adversarial_prompts(self) -> None:
         """Load the adversarial chat prompt template and seed prompt from the default paths."""

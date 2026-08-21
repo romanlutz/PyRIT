@@ -539,7 +539,11 @@ class ConversationManager:
             # true_false scores with score_value=False so attacks can use the rationale for
             # feedback without re-scoring.
             memory_pieces = self._memory.get_message_pieces(conversation_id=conversation_id)
-            assistant_piece_ids = [str(piece.id) for piece in memory_pieces if piece.api_role == "assistant"]
+            assistant_pieces = [piece for piece in memory_pieces if piece.api_role == "assistant"]
+            last_assistant_sequence = max((piece.sequence for piece in assistant_pieces), default=None)
+            assistant_piece_ids = [
+                str(piece.id) for piece in assistant_pieces if piece.sequence == last_assistant_sequence
+            ]
             existing_scores = (
                 self._memory.get_prompt_scores(prompt_ids=assistant_piece_ids) if assistant_piece_ids else []
             )

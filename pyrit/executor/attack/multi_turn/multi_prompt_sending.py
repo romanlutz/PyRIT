@@ -164,6 +164,7 @@ class MultiPromptSendingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[An
             logger=logger,
             context_type=MultiTurnAttackContext,
             params_type=MultiPromptSendingAttackParameters,
+            prepended_conversation_config=prepended_conversation_config,
         )
 
         # Initialize the converter configuration
@@ -179,7 +180,6 @@ class MultiPromptSendingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[An
 
         # Initialize prompt normalizer and conversation manager
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
         self._conversation_manager = ConversationManager(
             prompt_normalizer=self._prompt_normalizer,
         )
@@ -371,8 +371,7 @@ class MultiPromptSendingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[An
                 conversation_id=context.session.conversation_id,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
-                normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target,
+                normalizer_overrides=self._get_prepended_normalizer_overrides(
                     target_normalization_context=context.target_normalization_context,
                 ),
                 target_normalization_context=context.target_normalization_context,

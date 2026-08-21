@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1049,6 +1050,38 @@ async def test_non_editable_target_allows_preexisting_non_text_history_with_conv
     )
 
     assert result[0].get_value() == "Turn 1:\nuser: [Image_path]\nTurn 2:\nuser: live"
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_editable_target_warns_when_non_text_history_becomes_a_placeholder(caplog):
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
+    prepended = Message(
+        message_pieces=[
+            MessagePiece(
+                role="user",
+                original_value="existing.png",
+                converted_value="existing.png",
+                original_value_data_type="image_path",
+                converted_value_data_type="image_path",
+                conversation_id="conv1",
+            )
+        ]
+    )
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = [prepended]
+    target._memory = mock_memory
+    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+
+    with caplog.at_level(logging.WARNING, logger="pyrit.message_normalizer.history_squash_normalizer"):
+        await target._get_normalized_conversation_async(
+            message=_make_message(role="user", content="live"),
+            normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
+            target_normalization_context=target_context,
+        )
+
+    assert "image_path" in caplog.text
+    assert "text placeholders" in caplog.text
 
 
 @pytest.mark.usefixtures("patch_central_database")

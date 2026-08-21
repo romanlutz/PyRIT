@@ -119,7 +119,12 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             ValueError: If objective_scorer is not provided in attack_scoring_config.
         """
         # Initialize base class
-        super().__init__(objective_target=objective_target, logger=logger, context_type=MultiTurnAttackContext)
+        super().__init__(
+            objective_target=objective_target,
+            logger=logger,
+            context_type=MultiTurnAttackContext,
+            prepended_conversation_config=prepended_conversation_config,
+        )
         self._memory = CentralMemory.get_memory_instance()
 
         # Initialize converter configuration
@@ -172,7 +177,6 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         # Initialize utilities
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
 
         self._conversation_manager = ConversationManager(prompt_normalizer=self._prompt_normalizer)
 
@@ -490,8 +494,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 target=self._objective_target,
-                normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target,
+                normalizer_overrides=self._get_prepended_normalizer_overrides(
                     target_normalization_context=context.target_normalization_context,
                 ),
                 target_normalization_context=context.target_normalization_context,

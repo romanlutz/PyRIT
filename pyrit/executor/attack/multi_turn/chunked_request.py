@@ -153,6 +153,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             logger=logger,
             context_type=ChunkedRequestAttackContext,
             params_type=ChunkedRequestAttackParameters,
+            prepended_conversation_config=prepended_conversation_config,
         )
 
         # Store chunk configuration
@@ -174,7 +175,6 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
 
         # Initialize prompt normalizer and conversation manager
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
         self._conversation_manager = ConversationManager(
             prompt_normalizer=self._prompt_normalizer,
         )
@@ -293,8 +293,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
                     conversation_id=context.session.conversation_id,
                     request_converter_configurations=self._request_converters,
                     response_converter_configurations=self._response_converters,
-                    normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                        target=self._objective_target,
+                    normalizer_overrides=self._get_prepended_normalizer_overrides(
                         target_normalization_context=context.target_normalization_context,
                     ),
                     target_normalization_context=context.target_normalization_context,

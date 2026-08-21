@@ -177,7 +177,12 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                 and editable history.
         """
         # Initialize base class
-        super().__init__(objective_target=objective_target, logger=logger, context_type=CrescendoAttackContext)
+        super().__init__(
+            objective_target=objective_target,
+            logger=logger,
+            context_type=CrescendoAttackContext,
+            prepended_conversation_config=prepended_conversation_config,
+        )
 
         self._memory = CentralMemory.get_memory_instance()
 
@@ -260,9 +265,6 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
 
         self._max_backtracks = max_backtracks
         self._max_turns = max_turns
-
-        # Store the prepended conversation configuration
-        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
 
     def get_attack_scoring_config(self) -> AttackScoringConfig | None:
         """
@@ -639,8 +641,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                 conversation_id=context.session.conversation_id,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
-                normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
-                    target=self._objective_target,
+                normalizer_overrides=self._get_prepended_normalizer_overrides(
                     target_normalization_context=context.target_normalization_context,
                 ),
                 target_normalization_context=context.target_normalization_context,
