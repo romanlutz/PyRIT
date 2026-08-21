@@ -288,7 +288,7 @@ describe("messageMapper", () => {
       expect(result.attachments![0].url).toBe("/api/media?path=output%2Fdoc.pdf");
     });
 
-    it("should handle error response", () => {
+    it("should preserve user-facing content for a blocked response", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
@@ -296,8 +296,8 @@ describe("messageMapper", () => {
           {
             id: "p1",
             original_value_data_type: "text",
-            converted_value_data_type: "text",
-            converted_value: "",
+            converted_value_data_type: "error",
+            converted_value: "I cannot help with that request.",
             scores: [],
             response_error: "blocked",
             response_error_description: "Content was filtered",
@@ -311,6 +311,33 @@ describe("messageMapper", () => {
       expect(result.error).toBeDefined();
       expect(result.error!.type).toBe("blocked");
       expect(result.error!.description).toBe("Content was filtered");
+      expect(result.content).toBe("I cannot help with that request.");
+    });
+
+    it("should hide stored processing diagnostics and provide a safe description", () => {
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p-processing",
+            original_value_data_type: "text",
+            converted_value_data_type: "error",
+            converted_value: "RuntimeError: target failed\nTraceback (most recent call last): ...",
+            scores: [],
+            response_error: "processing",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.content).toBe("");
+      expect(result.error).toEqual({
+        type: "processing",
+        description: "The target could not process this message.",
+      });
     });
 
     it("should handle multi-piece message with text + image", () => {
@@ -807,6 +834,20 @@ describe("messageMapper", () => {
       const result = await attachmentToMessagePieceRequest(att);
 
       expect(result.prompt_metadata).toEqual({ video_id: "sora-vid-456" });
+    });
+
+    it("should resubmit the raw backend value for a reconstructed attachment", async () => {
+      const att: MessageAttachment = {
+        type: "file",
+        name: "evidence.txt",
+        url: "/api/media?path=evidence.txt",
+        sourceValue: "stored attachment value",
+        mimeType: "text/plain",
+      };
+
+      const result = await attachmentToMessagePieceRequest(att);
+
+      expect(result.original_value).toBe("stored attachment value");
     });
   });
 

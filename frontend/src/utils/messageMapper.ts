@@ -165,6 +165,7 @@ function pieceToAttachment(
     url,
     mimeType: mime,
     size,
+    sourceValue: value,
     pieceId: piece.id,
     metadata: piece.prompt_metadata || undefined,
   }
@@ -175,9 +176,15 @@ function pieceToAttachment(
  */
 function pieceToError(piece: BackendMessagePiece): MessageError | undefined {
   if (piece.response_error && piece.response_error !== 'none') {
+    const fallbackDescriptions: Record<string, string> = {
+      blocked: 'The target blocked this message.',
+      processing: 'The target could not process this message.',
+      empty: 'The target returned an empty response.',
+      unknown: 'The target returned an unknown error.',
+    }
     return {
       type: piece.response_error,
-      description: piece.response_error_description || undefined,
+      description: piece.response_error_description || fallbackDescriptions[piece.response_error],
     }
   }
   return undefined
@@ -199,6 +206,11 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     const pieceError = pieceToError(piece)
     if (pieceError && !error) {
       error = pieceError
+    }
+    if (pieceError?.type === 'processing') {
+      // Stored processing errors can contain exception tracebacks. Keep those
+      // diagnostics out of the chat transcript and recovery actions.
+      continue
     }
 
     // Extract reasoning summaries from reasoning-type pieces
@@ -271,6 +283,8 @@ export async function attachmentToMessagePieceRequest(att: MessageAttachment): P
   let base64Value: string
   if (att.file) {
     base64Value = await fileToBase64(att.file)
+  } else if (att.sourceValue != null) {
+    base64Value = att.sourceValue
   } else if (att.url.startsWith('data:')) {
     base64Value = att.url.split(',')[1] || ''
   } else {
