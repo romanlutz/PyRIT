@@ -18,20 +18,21 @@ async def send_prompt_async(
     self,
     *,
     message: Message,
-    target_normalization_context: TargetNormalizationContext | None = None,
+    send_context: TargetSendContext | None = None,
 ) -> list[Message]:
 ```
 
 A `Message` object contains the current request and the identifiers needed to load its conversation
 history. This is discussed in more depth [here](../memory/3_memory_data_types.md).
 
-`target_normalization_context` is an internal, per-conversation handoff used by attacks that prepend
-structured history to a target without editable history. Ordinary callers do not construct it.
-Before the first provider send, `PromptTarget` loads memory history, applies the context's one-shot
-normalizers, and then runs the target's ordinary capability-normalization pipeline. Request
-converters have already run by this point, so role-specific converter choices remain intact even
-when the target must receive one flattened request. The context is ephemeral and does not replace
-the structured messages stored in memory.
+`send_context` is an internal protocol that lets caller-owned execution state select persisted history
+and observe the provider-attempt boundary. Attacks with prepended history own the concrete
+`PrependedHistorySendContext`; targets do not construct it, clone it, or decide whether its seed should
+be replayed. Before a provider send, `PromptTarget` loads memory history, asks the protocol for the
+caller-approved target view, and then runs the target's capability-normalization pipeline. Request
+converters have already run by this point, so role-specific converter choices remain intact even when
+the target must receive one flattened request. The context is ephemeral and does not replace the
+structured messages stored in memory.
 
 `send_prompt_async` is the final public orchestration method. Custom target subclasses implement
 `_send_prompt_to_target_async(*, normalized_conversation: list[Message]) -> list[Message]` instead of

@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyrit.executor.attack.component import PrependedConversationConfig
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     ConversationSession,
@@ -14,7 +17,7 @@ from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
 )
 from pyrit.memory import CentralMemory
 from pyrit.models import ConversationType, Message, MessagePiece
-from pyrit.prompt_target import PromptTarget, TargetNormalizationContext
+from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -117,10 +120,10 @@ class TestRotateConversationForSingleTurnTarget:
         context = _make_context()
         context.executed_turns = 2
         original_id = context.session.conversation_id
-        context.target_normalization_context = TargetNormalizationContext(
+        context.prepended_history_send_context = PrependedHistorySendContext(
             conversation_id=original_id,
-            history_message_ids=(uuid.uuid4(),),
-            replay_history_each_send=True,
+            seed_message_ids=(uuid.uuid4(),),
+            replay_seed_each_send=True,
         )
 
         strategy._rotate_conversation_for_single_turn_target(context=context)
@@ -238,13 +241,13 @@ class TestSystemPromptCarryoverOnRotation:
             message=next_request,
             normalizer_overrides=config.get_normalizer_overrides(
                 target=target,
-                target_normalization_context=context.target_normalization_context,
+                prepended_history_send_context=context.prepended_history_send_context,
             ),
-            target_normalization_context=context.target_normalization_context,
+            send_context=context.prepended_history_send_context,
         )
 
-        assert context.target_normalization_context is not None
-        assert not context.target_normalization_context.is_consumed
+        assert context.prepended_history_send_context is not None
+        assert not context.prepended_history_send_context.is_seed_consumed
         assert len(target.normalized_conversations) == 1
         normalized_conversation = target.normalized_conversations[0]
         assert len(normalized_conversation) == 1
@@ -525,7 +528,7 @@ class TestTAPNodeDuplicateSystemMessages:
         assert [message.api_role for message in dup_messages] == ["system", "user", "assistant"]
         # No explicit prepended seed was initialized, so copied live turns do not
         # become a new replay boundary.
-        assert duplicate._target_normalization_context is None
+        assert duplicate._prepended_history_send_context is None
 
     def test_multi_turn_target_duplicates_full_conversation(self):
         """For multi-turn targets, the full conversation is duplicated."""

@@ -44,8 +44,10 @@
 # 4. Applies the target's remaining capability normalizers.
 # 5. Serializes the normalized view and invokes the provider.
 #
-# `TargetNormalizationContext` records the persisted prepended-message boundary. Stateful targets
-# consume it after the first provider attempt; stateless targets reuse it for each current request.
+# The attack-owned `PrependedHistorySendContext` records the persisted prepended-message boundary.
+# Stateful targets consume it after the first provider attempt; stateless targets reuse it for each
+# current request. Targets interact with that state only through an internal `TargetSendContext`
+# protocol at the send boundary.
 #
 # ## Base Classes
 #
@@ -70,10 +72,10 @@
 # | Multi-turn without editable history | A context-scoped `HistorySquashNormalizer` encodes the prepended history and first live message into the initial request. Later turns use the target's own conversation state. |
 # | Single-turn without editable history | The context-scoped `HistorySquashNormalizer` first produces one message. The target's ordinary use of the same normalizer then sees one message and does nothing. |
 #
-# The first-turn distinction comes from `TargetNormalizationContext`, not from a separate normalizer
-# implementation. The context applies its configured `HistorySquashNormalizer` once to bootstrap
-# prepended history for a target that cannot accept caller-supplied prior turns. Its key use case is a
-# multi-turn, server-managed target without editable history.
+# The first-turn distinction comes from the attack-owned prepended-history send context, not from a
+# separate normalizer implementation. The context applies its configured `HistorySquashNormalizer`
+# once to bootstrap prepended history for a target that cannot accept caller-supplied prior turns.
+# Its key use case is a multi-turn, server-managed target without editable history.
 #
 # The target's ordinary capability pipeline independently uses `HistorySquashNormalizer` for a target
 # without multi-turn support. Both scopes preserve original-versus-converted text views and keep

@@ -990,7 +990,7 @@ class TestObjectiveTargetSending:
                 ),
             ]
         )
-        basic_context.target_normalization_context = ConversationManager.create_target_normalization_context(
+        basic_context.prepended_history_send_context = ConversationManager.create_prepended_history_send_context(
             target=objective_target,
             conversation_id=old_conversation_id,
             prepended_messages=[system_piece.to_message()],

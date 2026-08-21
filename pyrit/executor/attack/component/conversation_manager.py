@@ -12,6 +12,9 @@ from pyrit.common.utils import combine_dict
 from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.memory import CentralMemory
 from pyrit.message_normalizer import ConversationContextNormalizer
 from pyrit.models import (
@@ -24,10 +27,7 @@ from pyrit.models import (
 )
 from pyrit.prompt_normalizer.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import CapabilityName, PromptTarget
-from pyrit.prompt_target.common.target_normalization_context import (
-    TargetNormalizationContext,
-    filter_non_replayable_messages,
-)
+from pyrit.prompt_target.common.target_history import filter_non_replayable_messages
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -445,26 +445,26 @@ class ConversationManager:
         return filter_non_replayable_messages(messages=persistable_messages)
 
     @staticmethod
-    def create_target_normalization_context(
+    def create_prepended_history_send_context(
         *,
         target: PromptTarget,
         conversation_id: str,
         prepended_messages: list[Message],
-    ) -> TargetNormalizationContext | None:
+    ) -> PrependedHistorySendContext | None:
         """
         Build persisted-prefix state for a target without editable history.
 
         Returns:
-            TargetNormalizationContext | None: Per-send state, or ``None`` for
+            PrependedHistorySendContext | None: Per-send state, or ``None`` for
                 editable-history targets or empty prepended history.
         """
         if not prepended_messages or target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY):
             return None
 
-        return TargetNormalizationContext(
+        return PrependedHistorySendContext(
             conversation_id=conversation_id,
-            history_message_ids=tuple(message.get_piece().id for message in prepended_messages),
-            replay_history_each_send=not target.configuration.includes(capability=CapabilityName.MULTI_TURN),
+            seed_message_ids=tuple(message.get_piece().id for message in prepended_messages),
+            replay_seed_each_send=not target.configuration.includes(capability=CapabilityName.MULTI_TURN),
         )
 
     async def _process_prepended_conversation_async(
@@ -519,7 +519,7 @@ class ConversationManager:
             target=target,
         )
         persisted_messages = self.get_conversation(conversation_id)
-        context.target_normalization_context = self.create_target_normalization_context(
+        context.prepended_history_send_context = self.create_prepended_history_send_context(
             target=target,
             conversation_id=conversation_id,
             prepended_messages=persisted_messages,

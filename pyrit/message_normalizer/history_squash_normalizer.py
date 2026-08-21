@@ -20,7 +20,7 @@ class HistorySquashNormalizer(MessageListNormalizer[Message]):
 
     The same implementation serves two normalization scopes. Prepended-conversation
     flows create per-send overrides with a string formatter and the explicit history
-    count from ``TargetNormalizationContext``. The ordinary target capability
+    count from the caller-owned prepended-history send context. The ordinary target capability
     pipeline uses the default formatter whenever a target does not support multiple
     turns.
 

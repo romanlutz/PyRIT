@@ -495,9 +495,9 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 response_converter_configurations=self._response_converters,
                 target=self._objective_target,
                 normalizer_overrides=self._get_prepended_normalizer_overrides(
-                    target_normalization_context=context.target_normalization_context,
+                    prepended_history_send_context=context.prepended_history_send_context,
                 ),
-                target_normalization_context=context.target_normalization_context,
+                send_context=context.prepended_history_send_context,
             )
 
         if response is None:

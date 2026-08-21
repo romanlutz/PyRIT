@@ -15,9 +15,11 @@ from pyrit.message_normalizer import (
 from pyrit.prompt_target.common.target_capabilities import CapabilityName
 
 if TYPE_CHECKING:
+    from pyrit.executor.attack.component.prepended_history_send_context import (
+        PrependedHistorySendContext,
+    )
     from pyrit.models import ChatMessageRole, Message
     from pyrit.prompt_target.common.prompt_target import PromptTarget
-    from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 
 @dataclass
@@ -61,14 +63,14 @@ class PrependedConversationConfig:
         self,
         *,
         target: PromptTarget,
-        target_normalization_context: TargetNormalizationContext | None,
+        prepended_history_send_context: PrependedHistorySendContext | None,
     ) -> dict[CapabilityName, MessageListNormalizer[Message]]:
         """
         Build per-send target normalizer overrides for prepended history.
 
         Args:
             target: Target that receives the live request.
-            target_normalization_context: Explicit persisted history boundary for
+            prepended_history_send_context: Explicit persisted seed boundary for
                 this attack execution.
 
         Returns:
@@ -76,14 +78,14 @@ class PrependedConversationConfig:
         """
         if (
             target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
-            or target_normalization_context is None
-            or not target_normalization_context.should_include_history
+            or prepended_history_send_context is None
+            or not prepended_history_send_context.should_include_seed
         ):
             return {}
 
         return {
             CapabilityName.EDITABLE_HISTORY: HistorySquashNormalizer(
-                expected_history_message_count=target_normalization_context.history_message_count,
+                expected_history_message_count=prepended_history_send_context.seed_message_count,
                 message_normalizer=self.get_message_normalizer(),
             )
         }

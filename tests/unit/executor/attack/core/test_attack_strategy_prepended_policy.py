@@ -10,6 +10,9 @@ from typing import Any
 import pytest
 
 from pyrit.executor.attack.component import PrependedConversationConfig
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.executor.attack.core import AttackStrategy
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.multi_turn.chunked_request import ChunkedRequestAttack
@@ -23,7 +26,6 @@ from pyrit.executor.attack.single_turn.skeleton_key import SkeletonKeyAttack
 from pyrit.message_normalizer import HistorySquashNormalizer
 from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import CapabilityName, PromptTarget, TargetCapabilities, TargetConfiguration
-from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 
 
@@ -58,13 +60,13 @@ def test_attack_strategy_owns_prepended_policy_and_identifier() -> None:
 @pytest.mark.usefixtures("patch_central_database")
 def test_attack_strategy_resolves_per_send_history_override() -> None:
     attack = PromptSendingAttack(objective_target=_NonEditableHistoryTarget())
-    context = TargetNormalizationContext(
+    context = PrependedHistorySendContext(
         conversation_id="conversation",
-        history_message_ids=(uuid.uuid4(),),
-        replay_history_each_send=False,
+        seed_message_ids=(uuid.uuid4(),),
+        replay_seed_each_send=False,
     )
 
-    overrides = attack._get_prepended_normalizer_overrides(target_normalization_context=context)
+    overrides = attack._get_prepended_normalizer_overrides(prepended_history_send_context=context)
 
     assert isinstance(overrides[CapabilityName.EDITABLE_HISTORY], HistorySquashNormalizer)
 

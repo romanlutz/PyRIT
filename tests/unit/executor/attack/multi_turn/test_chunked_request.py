@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pyrit.executor.attack.component import PrependedConversationConfig
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.multi_turn import (
     ChunkedRequestAttack,
@@ -24,7 +27,6 @@ from pyrit.prompt_target import (
     PromptTarget,
     TargetCapabilities,
     TargetConfiguration,
-    TargetNormalizationContext,
 )
 
 
@@ -283,12 +285,12 @@ class TestChunkedRequestAttackExecution:
             total_length=100,
         )
         context = ChunkedRequestAttackContext(params=AttackParameters(objective="Extract the secret"))
-        target_context = TargetNormalizationContext(
+        target_context = PrependedHistorySendContext(
             conversation_id=context.session.conversation_id,
-            history_message_ids=(uuid.uuid4(),),
-            replay_history_each_send=False,
+            seed_message_ids=(uuid.uuid4(),),
+            replay_seed_each_send=False,
         )
-        context.target_normalization_context = target_context
+        context.prepended_history_send_context = target_context
 
         await attack._perform_async(context=context)
 
@@ -296,7 +298,7 @@ class TestChunkedRequestAttackExecution:
         override = send_kwargs["normalizer_overrides"][CapabilityName.EDITABLE_HISTORY]
         assert isinstance(override, HistorySquashNormalizer)
         assert override._message_normalizer is formatter
-        assert send_kwargs["target_normalization_context"] is target_context
+        assert send_kwargs["send_context"] is target_context
 
     async def test_perform_async_sets_atomic_attack_identifier(self):
         """Test that _perform_async sets atomic_attack_identifier in the correct AtomicAttack format."""

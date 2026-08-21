@@ -1951,7 +1951,7 @@ class TestTreeOfAttacksNode:
         assert node.objective_target_conversation_id != original_conv_id
         send_kwargs = node._prompt_normalizer.send_prompt_async.await_args.kwargs
         assert send_kwargs["conversation_id"] == node.objective_target_conversation_id
-        assert send_kwargs["target_normalization_context"] is None
+        assert send_kwargs["send_context"] is None
 
     @pytest.mark.asyncio
     async def test_node_multi_turn_target_keeps_conv_id(self, node_components):

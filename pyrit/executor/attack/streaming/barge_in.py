@@ -145,7 +145,7 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
             request_converters=self._request_converters,
             prepended_conversation_config=self._prepended_conversation_config,
         )
-        context.target_normalization_context = None
+        context.prepended_history_send_context = None
 
     async def _teardown_async(self, *, context: BargeInAttackContext[Any]) -> None:
         """No-op teardown — connection / dispatcher are closed inside the session's ``run_async``."""

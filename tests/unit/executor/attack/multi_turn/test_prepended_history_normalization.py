@@ -144,7 +144,7 @@ async def test_single_turn_target_replays_seed_without_rotation():
         target=target,
     )
     persisted = manager.get_conversation(conversation_id)
-    target_context = manager.create_target_normalization_context(
+    target_context = manager.create_prepended_history_send_context(
         target=target,
         conversation_id=conversation_id,
         prepended_messages=persisted,
@@ -158,9 +158,9 @@ async def test_single_turn_target_replays_seed_without_rotation():
             conversation_id=conversation_id,
             normalizer_overrides=config.get_normalizer_overrides(
                 target=target,
-                target_normalization_context=target_context,
+                prepended_history_send_context=target_context,
             ),
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
     assert target.prompt_sent == [
@@ -189,7 +189,7 @@ def test_rotation_is_noop_for_seeded_single_turn_target():
     context.executed_turns = 2
     original_id = context.session.conversation_id
     seed = Message.from_prompt(prompt="seed", role="user")
-    context.target_normalization_context = ConversationManager.create_target_normalization_context(
+    context.prepended_history_send_context = ConversationManager.create_prepended_history_send_context(
         target=target,
         conversation_id=original_id,
         prepended_messages=[seed],
@@ -238,7 +238,7 @@ async def test_rotation_preserves_system_payload_for_later_single_turn_send():
 
     _rotate(target=target, context=context)
 
-    assert context.target_normalization_context is not None
+    assert context.prepended_history_send_context is not None
     config = PrependedConversationConfig()
     await PromptNormalizer().send_prompt_async(
         message=Message.from_prompt(prompt="current request", role="user"),
@@ -246,9 +246,9 @@ async def test_rotation_preserves_system_payload_for_later_single_turn_send():
         conversation_id=context.session.conversation_id,
         normalizer_overrides=config.get_normalizer_overrides(
             target=target,
-            target_normalization_context=context.target_normalization_context,
+            prepended_history_send_context=context.prepended_history_send_context,
         ),
-        target_normalization_context=context.target_normalization_context,
+        send_context=context.prepended_history_send_context,
     )
     assert target.prompt_sent == ["Turn 1:\nuser: ### Instructions ###\n\nsystem\n\n######\n\ncurrent request"]
 
@@ -302,12 +302,12 @@ def _set_tap_seed_boundary(
         target=target,
         messages=seed_messages,
     )
-    node._target_normalization_context = ConversationManager.create_target_normalization_context(
+    node._prepended_history_send_context = ConversationManager.create_prepended_history_send_context(
         target=target,
         conversation_id=node.objective_target_conversation_id,
         prepended_messages=seed_messages,
     )
-    assert node._target_normalization_context is not None
+    assert node._prepended_history_send_context is not None
 
 
 def _branch_tap_node(
@@ -339,19 +339,19 @@ async def test_tap_seeded_stateless_retained_and_cloned_branches_replay_only_ori
     _set_tap_seed_boundary(node=node, target=target, seed_messages=[seed])
     node._objective = "objective"
     await node._send_prompt_to_target_async("depth one")
-    original_context = node._target_normalization_context
+    original_context = node._prepended_history_send_context
     assert original_context is not None
 
     retained, cloned = _branch_tap_node(node=node, branching_factor=2)
     assert retained is node
-    assert retained._target_normalization_context is original_context
-    assert cloned._target_normalization_context is not None
-    assert cloned._target_normalization_context.history_message_count == 1
+    assert retained._prepended_history_send_context is original_context
+    assert cloned._prepended_history_send_context is not None
+    assert cloned._prepended_history_send_context.seed_message_count == 1
     cloned_messages = CentralMemory.get_memory_instance().get_conversation_messages(
         conversation_id=cloned.objective_target_conversation_id
     )
-    assert cloned._target_normalization_context.history_message_ids == (cloned_messages[0].get_piece().id,)
-    assert cloned._target_normalization_context.history_message_ids != original_context.history_message_ids
+    assert cloned._prepended_history_send_context.seed_message_ids == (cloned_messages[0].get_piece().id,)
+    assert cloned._prepended_history_send_context.seed_message_ids != original_context.seed_message_ids
 
     for branch, prompt in [(retained, "depth two retained"), (cloned, "depth two cloned")]:
         branch._objective = "objective"
@@ -398,15 +398,15 @@ async def test_tap_stateful_clone_replays_seed_once_for_new_conversation():
     parent_conversation_id = node.objective_target_conversation_id
 
     await node._send_prompt_to_target_async("parent first")
-    assert node._target_normalization_context
-    assert node._target_normalization_context.is_consumed
+    assert node._prepended_history_send_context
+    assert node._prepended_history_send_context.is_seed_consumed
 
     cloned = node.duplicate()
     cloned._objective = "objective"
     cloned_conversation_id = cloned.objective_target_conversation_id
     assert cloned_conversation_id != parent_conversation_id
-    assert cloned._target_normalization_context
-    assert not cloned._target_normalization_context.is_consumed
+    assert cloned._prepended_history_send_context
+    assert not cloned._prepended_history_send_context.is_seed_consumed
 
     await node._send_prompt_to_target_async("parent second")
     await cloned._send_prompt_to_target_async("clone first")
@@ -469,8 +469,8 @@ async def test_tap_unseeded_stateless_retained_and_cloned_branches_send_current_
     await node._send_prompt_to_target_async("depth one")
 
     retained, cloned = _branch_tap_node(node=node, branching_factor=2)
-    assert retained._target_normalization_context is None
-    assert cloned._target_normalization_context is None
+    assert retained._prepended_history_send_context is None
+    assert cloned._prepended_history_send_context is None
     for branch, prompt in [(retained, "depth two retained"), (cloned, "depth two cloned")]:
         branch._objective = "objective"
         await branch._send_prompt_to_target_async(prompt)
@@ -505,15 +505,15 @@ async def test_tap_branching_factor_one_preserves_retained_seed_boundary():
     )
     node._objective = "objective"
     await node._send_prompt_to_target_async("depth one")
-    original_context = node._target_normalization_context
-    original_boundary = original_context.history_message_ids if original_context else ()
+    original_context = node._prepended_history_send_context
+    original_boundary = original_context.seed_message_ids if original_context else ()
 
     branches = _branch_tap_node(node=node, branching_factor=1)
 
     assert branches == [node]
-    assert node._target_normalization_context is original_context
-    assert node._target_normalization_context is not None
-    assert node._target_normalization_context.history_message_ids == original_boundary
+    assert node._prepended_history_send_context is original_context
+    assert node._prepended_history_send_context is not None
+    assert node._prepended_history_send_context.seed_message_ids == original_boundary
     await node._send_prompt_to_target_async("depth two retained")
     assert target.prompt_sent == [
         "original seed|depth one",

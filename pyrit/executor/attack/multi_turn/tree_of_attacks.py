@@ -72,8 +72,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from pyrit.executor.attack.component.prepended_history_send_context import (
+        PrependedHistorySendContext,
+    )
     from pyrit.models.literals import PromptDataType
-    from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +429,7 @@ class _TreeOfAttacksNode:
         self.last_prompt_sent: str | None = None
         self.last_response: Message | None = None
         self.error_message: str | None = None
-        self._target_normalization_context: TargetNormalizationContext | None = None
+        self._prepended_history_send_context: PrependedHistorySendContext | None = None
         # Context from prepended conversation (for adversarial chat system prompt)
         self._conversation_context: str | None = None
 
@@ -489,7 +491,7 @@ class _TreeOfAttacksNode:
         persisted_messages = list(
             self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id)
         )
-        self._target_normalization_context = conversation_manager.create_target_normalization_context(
+        self._prepended_history_send_context = conversation_manager.create_prepended_history_send_context(
             target=self._objective_target,
             conversation_id=self.objective_target_conversation_id,
             prepended_messages=persisted_messages,
@@ -651,9 +653,9 @@ class _TreeOfAttacksNode:
                 target=self._objective_target,
                 normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
                     target=self._objective_target,
-                    target_normalization_context=self._target_normalization_context,
+                    prepended_history_send_context=self._prepended_history_send_context,
                 ),
-                target_normalization_context=self._target_normalization_context,
+                send_context=self._prepended_history_send_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -730,9 +732,9 @@ class _TreeOfAttacksNode:
                 target=self._objective_target,
                 normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
                     target=self._objective_target,
-                    target_normalization_context=self._target_normalization_context,
+                    prepended_history_send_context=self._prepended_history_send_context,
                 ),
-                target_normalization_context=self._target_normalization_context,
+                send_context=self._prepended_history_send_context,
             )
 
         # Store the full response so subsequent turns can forward media when supported.
@@ -745,7 +747,7 @@ class _TreeOfAttacksNode:
         """Isolate unseeded single-turn sends without discarding an explicit branch boundary."""
         if (
             not self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN)
-            and self._target_normalization_context is None
+            and self._prepended_history_send_context is None
         ):
             self.objective_target_conversation_id = str(uuid.uuid4())
 
@@ -933,13 +935,13 @@ class _TreeOfAttacksNode:
         duplicated_messages = list(
             self._memory.get_conversation_messages(conversation_id=duplicate_node.objective_target_conversation_id)
         )
-        duplicate_node._target_normalization_context = (
-            self._target_normalization_context.remap_for_duplicate_conversation(
+        duplicate_node._prepended_history_send_context = (
+            self._prepended_history_send_context.remap_for_duplicate_conversation(
                 conversation_id=duplicate_node.objective_target_conversation_id,
                 source_messages=source_messages,
                 duplicated_messages=duplicated_messages,
             )
-            if self._target_normalization_context
+            if self._prepended_history_send_context
             else None
         )
 

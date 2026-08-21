@@ -25,6 +25,9 @@ from pyrit.exceptions import (
     execution_context,
     get_execution_context,
 )
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.memory import CentralMemory
 from pyrit.message_normalizer import MessageListNormalizer
 from pyrit.models import (
@@ -38,7 +41,7 @@ from pyrit.prompt_normalizer import NormalizerRequest, PromptNormalizer
 from pyrit.prompt_normalizer.converter_configuration import (
     ConverterConfiguration,
 )
-from pyrit.prompt_target import CapabilityName, PromptTarget, TargetNormalizationContext
+from pyrit.prompt_target import CapabilityName, PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -137,10 +140,10 @@ async def test_send_prompt_async_forwards_normalizer_overrides_and_context(mock_
     conversation_id = "prepended-conversation"
     message_normalizer = MagicMock(spec=MessageListNormalizer)
     normalizer_overrides = {CapabilityName.EDITABLE_HISTORY: message_normalizer}
-    target_context = TargetNormalizationContext(
+    target_context = PrependedHistorySendContext(
         conversation_id=conversation_id,
-        history_message_ids=(uuid4(),),
-        replay_history_each_send=False,
+        seed_message_ids=(uuid4(),),
+        replay_seed_each_send=False,
     )
 
     await normalizer.send_prompt_async(
@@ -148,12 +151,12 @@ async def test_send_prompt_async_forwards_normalizer_overrides_and_context(mock_
         target=prompt_target,
         conversation_id=conversation_id,
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     call = prompt_target.send_prompt_async.await_args
     assert call.kwargs["normalizer_overrides"] == normalizer_overrides
-    assert call.kwargs["target_normalization_context"] is target_context
+    assert call.kwargs["send_context"] is target_context
 
 
 async def test_send_prompt_async_conversion_failure_does_not_call_target(mock_memory_instance):
@@ -161,10 +164,10 @@ async def test_send_prompt_async_conversion_failure_does_not_call_target(mock_me
     prompt_target.get_identifier.return_value = get_mock_target_identifier("MockTarget")
     prompt_target.send_prompt_async = AsyncMock()
     conversation_id = "prepended-conversation"
-    target_context = TargetNormalizationContext(
+    target_context = PrependedHistorySendContext(
         conversation_id=conversation_id,
-        history_message_ids=(uuid4(),),
-        replay_history_each_send=False,
+        seed_message_ids=(uuid4(),),
+        replay_seed_each_send=False,
     )
     converter_config = ConverterConfiguration.from_converters(converters=[ContextFailingConverter()])
 
@@ -174,7 +177,7 @@ async def test_send_prompt_async_conversion_failure_does_not_call_target(mock_me
             target=prompt_target,
             conversation_id=conversation_id,
             request_converter_configurations=converter_config,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
     prompt_target.send_prompt_async.assert_not_awaited()
@@ -186,10 +189,10 @@ async def test_send_prompt_async_target_failure_is_persisted(mock_memory_instanc
     prompt_target.get_identifier.return_value = get_mock_target_identifier("MockTarget")
     prompt_target.send_prompt_async = AsyncMock(side_effect=ValueError("normalization failed"))
     conversation_id = "prepended-conversation"
-    target_context = TargetNormalizationContext(
+    target_context = PrependedHistorySendContext(
         conversation_id=conversation_id,
-        history_message_ids=(uuid4(),),
-        replay_history_each_send=False,
+        seed_message_ids=(uuid4(),),
+        replay_seed_each_send=False,
     )
 
     with pytest.raises(Exception, match="Error normalizing prompt with conversation ID"):
@@ -197,7 +200,7 @@ async def test_send_prompt_async_target_failure_is_persisted(mock_memory_instanc
             message=Message.from_prompt(prompt="request", role="user"),
             target=prompt_target,
             conversation_id=conversation_id,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
     assert target_context.provider_attempt_count == 0
@@ -220,10 +223,10 @@ async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(moc
         raise RuntimeError("provider failed")
 
     target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_provider)  # type: ignore[method-assign]
-    target_context = TargetNormalizationContext(
+    target_context = PrependedHistorySendContext(
         conversation_id=conversation_id,
-        history_message_ids=(seed.get_piece().id,),
-        replay_history_each_send=False,
+        seed_message_ids=(seed.get_piece().id,),
+        replay_seed_each_send=False,
     )
     normalizer = PromptNormalizer()
     first_send = asyncio.create_task(
@@ -231,7 +234,7 @@ async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(moc
             message=Message.from_prompt(prompt="first request", role="user"),
             target=target,
             conversation_id=conversation_id,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
     )
     await provider_started.wait()
@@ -241,7 +244,7 @@ async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(moc
             message=Message.from_prompt(prompt="concurrent request", role="user"),
             target=target,
             conversation_id=conversation_id,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
     mock_memory_instance.add_message_to_memory.assert_not_called()

@@ -45,6 +45,9 @@ if TYPE_CHECKING:
     from pyrit.executor.attack.component.prepended_conversation_config import (
         PrependedConversationConfig,
     )
+    from pyrit.executor.attack.component.prepended_history_send_context import (
+        PrependedHistorySendContext,
+    )
     from pyrit.executor.attack.core.attack_config import (
         AttackAdversarialConfig,
         AttackScoringConfig,
@@ -53,7 +56,6 @@ if TYPE_CHECKING:
     from pyrit.message_normalizer import MessageListNormalizer
     from pyrit.prompt_target import PromptTarget
     from pyrit.prompt_target.common.target_capabilities import CapabilityName
-    from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 AttackStrategyContextT = TypeVar("AttackStrategyContextT", bound="AttackContext[Any]")
 AttackStrategyResultT = TypeVar("AttackStrategyResultT", bound="AttackResult")
@@ -94,8 +96,8 @@ class AttackContext(StrategyContext, ABC, Generic[AttackParamsT]):
     _prepended_conversation_override: list[Message] | None = None
     _memory_labels_override: dict[str, str] | None = None
 
-    # Per-execution target-facing boundary and send lifecycle. Never persisted.
-    target_normalization_context: TargetNormalizationContext | None = field(
+    # Per-execution prepended-history boundary and send lifecycle. Never persisted.
+    prepended_history_send_context: PrependedHistorySendContext | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -477,20 +479,20 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], Id
     def _get_prepended_normalizer_overrides(
         self,
         *,
-        target_normalization_context: TargetNormalizationContext | None,
+        prepended_history_send_context: PrependedHistorySendContext | None,
     ) -> dict[CapabilityName, MessageListNormalizer[Message]]:
         """
         Resolve prepended-history overrides for one target send.
 
         Args:
-            target_normalization_context: Persisted seed boundary for this execution.
+            prepended_history_send_context: Persisted seed boundary for this execution.
 
         Returns:
             Overrides keyed by the capability they adapt.
         """
         return self._prepended_conversation_config.get_normalizer_overrides(
             target=self._objective_target,
-            target_normalization_context=target_normalization_context,
+            prepended_history_send_context=prepended_history_send_context,
         )
 
     def _create_identifier(

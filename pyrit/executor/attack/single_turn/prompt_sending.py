@@ -324,9 +324,9 @@ class PromptSendingAttack(SingleTurnAttackStrategy):
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 normalizer_overrides=self._get_prepended_normalizer_overrides(
-                    target_normalization_context=context.target_normalization_context,
+                    prepended_history_send_context=context.prepended_history_send_context,
                 ),
-                target_normalization_context=context.target_normalization_context,
+                send_context=context.prepended_history_send_context,
             )
 
     async def _evaluate_response_async(

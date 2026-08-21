@@ -27,7 +27,6 @@ from pyrit.prompt_target.common.target_capabilities import (
     get_known_capabilities,
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 from pyrit.prompt_target.common.target_requirements import CHAT_TARGET_REQUIREMENTS, TargetRequirements
 from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.gandalf_target import GandalfLevel, GandalfTarget
@@ -108,7 +107,6 @@ __all__ = [
     "RoundRobinTarget",
     "TargetCapabilities",
     "TargetConfiguration",
-    "TargetNormalizationContext",
     "TargetRequirements",
     "UnsupportedCapabilityBehavior",
     "TextTarget",

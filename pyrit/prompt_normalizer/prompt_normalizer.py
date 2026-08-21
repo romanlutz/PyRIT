@@ -31,7 +31,7 @@ from pyrit.models import (
 from pyrit.prompt_normalizer import ConverterConfiguration, NormalizerRequest
 from pyrit.prompt_target import CapabilityName, PromptTarget
 from pyrit.prompt_target.batch_helper import batch_task_async
-from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class PromptNormalizer:
         request_converter_configurations: list[ConverterConfiguration] | None = None,
         response_converter_configurations: list[ConverterConfiguration] | None = None,
         normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
-        target_normalization_context: TargetNormalizationContext | None = None,
+        send_context: TargetSendContext | None = None,
     ) -> Message:
         """
         Send a single request to a target.
@@ -89,8 +89,8 @@ class PromptNormalizer:
             response_converter_configurations (list[ConverterConfiguration], optional): Configurations for
                 converting the response. Defaults to an empty list.
             normalizer_overrides: Optional per-send target normalizer overrides.
-            target_normalization_context: Optional explicit persisted-history
-                boundary and send lifecycle state.
+            send_context: Optional internal coordination contract for caller-owned
+                history selection and send lifecycle state.
 
         Returns:
             Message: The response received from the target.
@@ -128,11 +128,11 @@ class PromptNormalizer:
             responses = await target.send_prompt_async(
                 message=request,
                 normalizer_overrides=normalizer_overrides,
-                target_normalization_context=target_normalization_context,
+                send_context=send_context,
             )
             self.memory.add_message_to_memory(request=request)
         except EmptyResponseException as ex:
-            if target_normalization_context and not target_normalization_context.provider_attempted_by_current_task:
+            if send_context and not send_context.provider_attempted_by_current_task:
                 cid = request.message_pieces[0].conversation_id if request.message_pieces else None
                 raise Exception(f"Error normalizing prompt with conversation ID: {cid}") from ex
 
@@ -149,7 +149,7 @@ class PromptNormalizer:
             ]
 
         except Exception as ex:
-            if target_normalization_context and not target_normalization_context.provider_attempted_by_current_task:
+            if send_context and not send_context.provider_attempted_by_current_task:
                 cid = request.message_pieces[0].conversation_id if request.message_pieces else None
                 raise Exception(f"Error normalizing prompt with conversation ID: {cid}") from ex
 
@@ -229,7 +229,7 @@ class PromptNormalizer:
             [request.response_converter_configurations for request in requests],
             [request.conversation_id for request in requests],
             [request.normalizer_overrides for request in requests],
-            [request.target_normalization_context for request in requests],
+            [request.send_context for request in requests],
         ]
 
         batch_item_keys = [
@@ -238,7 +238,7 @@ class PromptNormalizer:
             "response_converter_configurations",
             "conversation_id",
             "normalizer_overrides",
-            "target_normalization_context",
+            "send_context",
         ]
 
         responses: list[Message] = await batch_task_async(

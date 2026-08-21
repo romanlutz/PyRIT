@@ -801,16 +801,16 @@ class TestInitializeContext:
             prepended_conversation_config=config,
         )
 
-        assert context.target_normalization_context is not None
-        assert context.target_normalization_context.conversation_id == conversation_id
+        assert context.prepended_history_send_context is not None
+        assert context.prepended_history_send_context.conversation_id == conversation_id
         stored = manager.get_conversation(conversation_id)
         assert len(stored) == len(sample_conversation)
-        assert context.target_normalization_context.history_message_ids == tuple(
+        assert context.prepended_history_send_context.seed_message_ids == tuple(
             message.get_piece().id for message in stored
         )
         normalizer = config.get_normalizer_overrides(
             target=mock_prompt_target,
-            target_normalization_context=context.target_normalization_context,
+            prepended_history_send_context=context.prepended_history_send_context,
         )[CapabilityName.EDITABLE_HISTORY]
         assert isinstance(normalizer, HistorySquashNormalizer)
         assert normalizer._message_normalizer is message_normalizer
@@ -1455,10 +1455,10 @@ class TestPrependedConversationConfigSettings:
             conversation_id=conversation_id,
         )
 
-        assert context.target_normalization_context is not None
+        assert context.prepended_history_send_context is not None
         normalizer = PrependedConversationConfig().get_normalizer_overrides(
             target=mock_prompt_target,
-            target_normalization_context=context.target_normalization_context,
+            prepended_history_send_context=context.prepended_history_send_context,
         )[CapabilityName.EDITABLE_HISTORY]
         assert isinstance(normalizer, HistorySquashNormalizer)
         assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
@@ -1471,7 +1471,7 @@ class TestPrependedConversationConfigSettings:
 
         overrides = PrependedConversationConfig().get_normalizer_overrides(
             target=mock_chat_target,
-            target_normalization_context=None,
+            prepended_history_send_context=None,
         )
 
         assert overrides == {}

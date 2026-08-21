@@ -17,6 +17,9 @@ from openai.types.chat import ChatCompletion
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from unit.mocks import MockPromptTarget
 
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
 from pyrit.message_normalizer import (
@@ -28,7 +31,7 @@ from pyrit.message_normalizer import (
 )
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptResponseError
 from pyrit.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import AzureMLChatTarget, OpenAIChatTarget, TargetNormalizationContext
+from pyrit.prompt_target import AzureMLChatTarget, OpenAIChatTarget
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityHandlingPolicy,
     CapabilityName,
@@ -56,29 +59,29 @@ def _make_message(*, role: str, content: str, conversation_id: str = "conv1") ->
 
 def _make_normalizer_overrides(
     *,
-    target_normalization_context: TargetNormalizationContext,
+    send_context: PrependedHistorySendContext,
     formatter: MessageStringNormalizer | None = None,
 ) -> dict[CapabilityName, HistorySquashNormalizer]:
-    if not target_normalization_context.should_include_history:
+    if not send_context.should_include_seed:
         return {}
     return {
         CapabilityName.EDITABLE_HISTORY: HistorySquashNormalizer(
             message_normalizer=formatter or ConversationContextNormalizer(),
-            expected_history_message_count=target_normalization_context.history_message_count,
+            expected_history_message_count=send_context.seed_message_count,
         )
     }
 
 
-def _make_target_normalization_context(
+def _make_prepended_history_send_context(
     *,
     prepended_messages: list[Message],
     target_supports_multi_turn: bool = False,
     conversation_id: str = "conv1",
-) -> TargetNormalizationContext:
-    return TargetNormalizationContext(
+) -> PrependedHistorySendContext:
+    return PrependedHistorySendContext(
         conversation_id=conversation_id,
-        history_message_ids=tuple(message.get_piece().id for message in prepended_messages),
-        replay_history_each_send=not target_supports_multi_turn,
+        seed_message_ids=tuple(message.get_piece().id for message in prepended_messages),
+        replay_seed_each_send=not target_supports_multi_turn,
     )
 
 
@@ -554,13 +557,13 @@ async def test_non_editable_target_adapts_prepended_history_without_mutating_mem
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = memory_messages
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=list(memory_messages))
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=list(memory_messages))
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     result = await target._get_normalized_conversation_async(
         message=live_request,
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     assert len(result) == 1
@@ -599,13 +602,13 @@ async def test_non_editable_target_preserves_system_history_and_multimodal_live_
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [system_message]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[system_message])
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=[system_message])
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     result = await target._get_normalized_conversation_async(
         message=live_request,
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     assert len(result) == 1
@@ -636,15 +639,15 @@ async def test_editable_history_override_runs_before_system_prompt_adaptation():
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
 
     result = await target._get_normalized_conversation_async(
         message=live_request,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     assert [message.get_value() for message in result] == [
@@ -689,13 +692,13 @@ async def test_first_turn_normalization_preserves_live_multimodal_piece_order():
     prepended = _make_message(role="user", content="prepended")
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     result = await target._get_normalized_conversation_async(
         message=live_request,
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     assert [piece.converted_value_data_type for piece in result[0].message_pieces] == ["image_path", "text"]
@@ -742,12 +745,12 @@ async def test_history_squash_does_not_restore_adapted_json_schema_metadata():
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
 
     result = await target._get_normalized_conversation_async(
         message=live_request,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     image_piece, text_piece = result[0].message_pieces
@@ -804,20 +807,20 @@ async def test_prepended_history_adapter_is_used_only_when_explicitly_passed():
         [prepended, prior_live, prior_response],
     ]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
 
     await target.send_prompt_async(
         message=prior_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
     await target.send_prompt_async(
         message=second_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     assert target.prompt_sent == ["Turn 1:\nuser: prepended\nTurn 2:\nuser: first live", "second live"]
@@ -845,20 +848,20 @@ async def test_non_editable_multi_turn_target_sends_only_current_request_after_r
     target._send_prompt_to_target_async = AsyncMock(  # type: ignore[method-assign]
         return_value=[_make_message(role="assistant", content="response")]
     )
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
 
     await target.send_prompt_async(
         message=first_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
     await target.send_prompt_async(
         message=second_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     first_payload, second_payload = target._send_prompt_to_target_async.await_args_list
@@ -881,17 +884,17 @@ async def test_stateless_target_replays_only_seed_and_current_request():
         [prepended, first_live, first_response],
     ]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
 
     await target.send_prompt_async(
         message=first_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
     await target.send_prompt_async(
         message=second_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     assert target.prompt_sent == [
@@ -919,20 +922,20 @@ async def test_stateful_target_consumes_seed_after_provider_outcome(response_err
     target._send_prompt_to_target_async = AsyncMock(  # type: ignore[method-assign]
         side_effect=[[provider_response], [_make_message(role="assistant", content="second response")]]
     )
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
 
     await target.send_prompt_async(
         message=first_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
     await target.send_prompt_async(
         message=second_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
 
     first_payload, second_payload = target._send_prompt_to_target_async.await_args_list
@@ -950,16 +953,16 @@ async def test_non_editable_target_uses_custom_prepended_formatter():
     target._memory = mock_memory
     formatter = MagicMock(spec=MessageStringNormalizer)
     formatter.normalize_string_async = AsyncMock(return_value="CUSTOM HISTORY")
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
     normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
+        send_context=target_context,
         formatter=formatter,
     )
 
     result = await target._get_normalized_conversation_async(
         message=_make_message(role="user", content="live"),
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     assert result[0].get_value() == "CUSTOM HISTORY"
@@ -979,14 +982,14 @@ async def test_non_editable_target_rejects_non_text_converted_prepended_history(
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     with pytest.raises(ValueError, match="non-text output types.*image_path"):
         await target.send_prompt_async(
             message=_make_message(role="user", content="live"),
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
 
@@ -1009,14 +1012,14 @@ async def test_non_editable_target_rejects_same_modality_non_text_conversion():
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     with pytest.raises(ValueError, match="non-text output types.*image_path"):
         await target.send_prompt_async(
             message=_make_message(role="user", content="live"),
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
 
@@ -1040,13 +1043,13 @@ async def test_non_editable_target_allows_preexisting_non_text_history_with_conv
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     result = await target._get_normalized_conversation_async(
         message=_make_message(role="user", content="live"),
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     assert result[0].get_value() == "Turn 1:\nuser: [Image_path]\nTurn 2:\nuser: live"
@@ -1073,13 +1076,13 @@ async def test_non_editable_target_warns_when_non_text_history_becomes_a_placeho
     mock_memory = MagicMock(spec=MemoryInterface)
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
 
     with caplog.at_level(logging.WARNING, logger="pyrit.message_normalizer.history_squash_normalizer"):
         await target._get_normalized_conversation_async(
             message=_make_message(role="user", content="live"),
-            normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-            target_normalization_context=target_context,
+            normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+            send_context=target_context,
         )
 
     assert "image_path" in caplog.text
@@ -1096,9 +1099,9 @@ async def test_target_normalization_failure_can_be_retried():
     target._memory = mock_memory
     formatter = MagicMock(spec=MessageStringNormalizer)
     formatter.normalize_string_async = AsyncMock(side_effect=[ValueError("format failed"), "formatted request"])
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
     normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
+        send_context=target_context,
         formatter=formatter,
     )
     live_request = _make_message(role="user", content="live")
@@ -1107,13 +1110,13 @@ async def test_target_normalization_failure_can_be_retried():
         await target.send_prompt_async(
             message=live_request,
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
 
     await target.send_prompt_async(
         message=live_request,
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
     assert target.prompt_sent == ["formatted request"]
 
@@ -1227,9 +1230,9 @@ async def test_target_normalization_cancellation_propagates():
     target._memory = mock_memory
     formatter = MagicMock(spec=MessageStringNormalizer)
     formatter.normalize_string_async = AsyncMock(side_effect=asyncio.CancelledError())
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
     normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
+        send_context=target_context,
         formatter=formatter,
     )
 
@@ -1237,10 +1240,10 @@ async def test_target_normalization_cancellation_propagates():
         await target.send_prompt_async(
             message=_make_message(role="user", content="live"),
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
     assert target_context.provider_attempt_count == 0
-    assert not target_context.is_consumed
+    assert not target_context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -1252,20 +1255,20 @@ async def test_provider_failure_propagates_after_normalization():
     mock_memory.get_conversation_messages.return_value = [prepended]
     target._memory = mock_memory
     target._send_prompt_to_target_async = AsyncMock(side_effect=RuntimeError("provider failed"))  # type: ignore[method-assign]
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
-    normalizer_overrides = _make_normalizer_overrides(target_normalization_context=target_context)
+    normalizer_overrides = _make_normalizer_overrides(send_context=target_context)
 
     with pytest.raises(RuntimeError, match="provider failed"):
         await target.send_prompt_async(
             message=_make_message(role="user", content="live"),
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
     assert target_context.provider_attempt_count == 1
-    assert target_context.is_consumed
+    assert target_context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -1290,15 +1293,15 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
         return [_make_message(role="assistant", content="response")]
 
     target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_provider)  # type: ignore[method-assign]
-    target_context = _make_target_normalization_context(
+    target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
     )
     first_send = asyncio.create_task(
         target.send_prompt_async(
             message=first_live,
-            normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-            target_normalization_context=target_context,
+            normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+            send_context=target_context,
         )
     )
     await provider_started.wait()
@@ -1306,7 +1309,7 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
     with pytest.raises(asyncio.CancelledError):
         await first_send
 
-    assert target_context.is_consumed
+    assert target_context.is_seed_consumed
     assert target_context.provider_attempt_count == 1
 
     target._send_prompt_to_target_async = AsyncMock(  # type: ignore[method-assign]
@@ -1314,8 +1317,8 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
     )
     await target.send_prompt_async(
         message=second_live,
-        normalizer_overrides=_make_normalizer_overrides(target_normalization_context=target_context),
-        target_normalization_context=target_context,
+        normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+        send_context=target_context,
     )
     payload = target._send_prompt_to_target_async.await_args.kwargs["normalized_conversation"]
     assert [message.get_value() for message in payload] == ["second live"]
@@ -1339,16 +1342,16 @@ async def test_concurrent_sends_with_one_context_are_rejected():
 
     formatter = MagicMock(spec=MessageStringNormalizer)
     formatter.normalize_string_async = AsyncMock(side_effect=wait_to_format)
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
     normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
+        send_context=target_context,
         formatter=formatter,
     )
     first_send = asyncio.create_task(
         target.send_prompt_async(
             message=_make_message(role="user", content="first"),
             normalizer_overrides=normalizer_overrides,
-            target_normalization_context=target_context,
+            send_context=target_context,
         )
     )
     await started.wait()
@@ -1357,7 +1360,7 @@ async def test_concurrent_sends_with_one_context_are_rejected():
             await target.send_prompt_async(
                 message=_make_message(role="user", content="second"),
                 normalizer_overrides=normalizer_overrides,
-                target_normalization_context=target_context,
+                send_context=target_context,
             )
     finally:
         release.set()
@@ -1378,16 +1381,16 @@ async def test_tokenizer_formatter_receives_live_request_before_generation_promp
     tokenizer = MagicMock()
     tokenizer.apply_chat_template.return_value = "TOKENIZED REQUEST"
     formatter = TokenizerTemplateNormalizer(tokenizer=tokenizer)
-    target_context = _make_target_normalization_context(prepended_messages=[prepended])
+    target_context = _make_prepended_history_send_context(prepended_messages=[prepended])
     normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
+        send_context=target_context,
         formatter=formatter,
     )
 
     result = await target._get_normalized_conversation_async(
         message=_make_message(role="user", content="live"),
         normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
+        send_context=target_context,
     )
 
     tokenizer_messages = tokenizer.apply_chat_template.call_args.args[0]

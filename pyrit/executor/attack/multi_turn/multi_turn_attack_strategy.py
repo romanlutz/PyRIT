@@ -117,7 +117,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
         """
         if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
             return
-        if context.target_normalization_context:
+        if context.prepended_history_send_context:
             return
         if context.executed_turns == 0:
             return
@@ -146,7 +146,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
             memory.add_message_pieces_to_memory(message_pieces=pieces)
             context.session.conversation_id = new_conversation_id
             persisted_messages = list(memory.get_conversation_messages(conversation_id=new_conversation_id))
-            context.target_normalization_context = ConversationManager.create_target_normalization_context(
+            context.prepended_history_send_context = ConversationManager.create_prepended_history_send_context(
                 target=self._objective_target,
                 conversation_id=new_conversation_id,
                 prepended_messages=persisted_messages,
