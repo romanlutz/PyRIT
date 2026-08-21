@@ -128,7 +128,22 @@ from pyrit.score.true_false.true_false_score_aggregator import TrueFalseAggregat
 from pyrit.score.true_false.true_false_scorer import TrueFalseScorer
 
 if TYPE_CHECKING:
+    from pyrit.score.embedding_harm_model import (
+        BgeEmbeddingProvider,
+        EmbeddingHarmModel,
+        HarmPrediction,
+        HarmScorerTrainingExample,
+        TextEmbeddingProvider,
+        split_harm_sentences,
+    )
     from pyrit.score.float_scale.audio_float_scale_scorer import AudioFloatScaleScorer
+    from pyrit.score.float_scale.embedding_harm_scorer import (
+        EmbeddingHarmScorer,
+        EmptyResponseRule,
+        HarmRule,
+        HarmRuleResult,
+        RegexHarmRule,
+    )
     from pyrit.score.float_scale.video_float_scale_scorer import VideoFloatScaleScorer
     from pyrit.score.scorer_evaluation.human_labeled_dataset import (
         HarmHumanLabeledEntry,
@@ -149,6 +164,17 @@ if TYPE_CHECKING:
 # Audio/video scorers import `av` (~1.9s), human_labeled_dataset imports `pandas` (~1.6s),
 # scorer_evaluator imports `scipy.stats` (~1s).
 _LAZY_IMPORTS: dict[str, str] = {
+    "BgeEmbeddingProvider": "pyrit.score.embedding_harm_model",
+    "EmbeddingHarmModel": "pyrit.score.embedding_harm_model",
+    "EmbeddingHarmScorer": "pyrit.score.float_scale.embedding_harm_scorer",
+    "EmptyResponseRule": "pyrit.score.float_scale.embedding_harm_scorer",
+    "HarmPrediction": "pyrit.score.embedding_harm_model",
+    "HarmRule": "pyrit.score.float_scale.embedding_harm_scorer",
+    "HarmRuleResult": "pyrit.score.float_scale.embedding_harm_scorer",
+    "HarmScorerTrainingExample": "pyrit.score.embedding_harm_model",
+    "RegexHarmRule": "pyrit.score.float_scale.embedding_harm_scorer",
+    "TextEmbeddingProvider": "pyrit.score.embedding_harm_model",
+    "split_harm_sentences": "pyrit.score.embedding_harm_model",
     "AudioFloatScaleScorer": "pyrit.score.float_scale.audio_float_scale_scorer",
     "AudioTrueFalseScorer": "pyrit.score.true_false.audio_true_false_scorer",
     "VideoFloatScaleScorer": "pyrit.score.float_scale.video_float_scale_scorer",
@@ -187,6 +213,10 @@ __all__ = [
     "ConversationScorer",
     "CredentialLeakScorer",
     "DecodingScorer",
+    "BgeEmbeddingProvider",
+    "EmbeddingHarmModel",
+    "EmbeddingHarmScorer",
+    "EmptyResponseRule",
     "FentanylKeywordScorer",
     "create_conversation_scorer",
     "FloatScaleScoreAggregator",
@@ -196,6 +226,10 @@ __all__ = [
     "FloatScaleThresholdScorer",
     "GandalfScorer",
     "HarmHumanLabeledEntry",
+    "HarmPrediction",
+    "HarmRule",
+    "HarmRuleResult",
+    "HarmScorerTrainingExample",
     "HarmScorerEvaluator",
     "HarmScorerMetrics",
     "HumanLabeledDataset",
@@ -236,6 +270,7 @@ __all__ = [
     "PromptShieldScorer",
     "QuestionAnswerScorer",
     "RegexScorer",
+    "RegexHarmRule",
     "RegistryUpdateBehavior",
     "render_category_system_prompt",
     "render_insecure_code_system_prompt",
@@ -276,6 +311,7 @@ __all__ = [
     "SSRFOutputScorer",
     "SSTIOutputScorer",
     "StaticPromptInjectionScorer",
+    "split_harm_sentences",
     "SubStringScorer",
     "SystemPromptExtractionScorer",
     "TrueFalseCompositeScorer",
@@ -285,6 +321,7 @@ __all__ = [
     "TrueFalseScoreAggregator",
     "TrueFalseAggregatorFunc",
     "TrueFalseScorer",
+    "TextEmbeddingProvider",
     "VideoFloatScaleScorer",
     "VideoTrueFalseScorer",
     "XSSOutputScorer",

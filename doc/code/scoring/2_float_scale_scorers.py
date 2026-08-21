@@ -164,6 +164,20 @@ print(f"[insecure code] risk={scored.get_value()}")
 print(f"rationale: {scored.score_rationale}")
 
 # %% [markdown]
+# ### EmbeddingHarmScorer
+#
+# `EmbeddingHarmScorer` runs without a scoring LLM. It combines terminal deterministic rules
+# (including an empty-response rule) with a calibrated `EmbeddingHarmModel`: one logistic
+# classifier scores sentence-level BGE embeddings, and a second combines the full-response
+# embedding with sentence-score summaries. The score metadata includes the strongest sentence,
+# a bootstrap interval, a conformal prediction set, and an embedding-space OOD signal.
+#
+# Fit with separate training and calibration sets using `EmbeddingHarmModel.fit()`. Harmful
+# training responses need sentence labels; safe response labels imply safe sentences. Save the
+# fitted model as JSON and construct the scorer with a matching `BgeEmbeddingProvider`. Train one
+# model per harm category when category-specific scores are required.
+
+# %% [markdown]
 # ### Other self-ask float-scale scorers
 #
 # - **`SelfAskScaleScorer`** — rate against a custom `NumericRubric` constructed in memory or
