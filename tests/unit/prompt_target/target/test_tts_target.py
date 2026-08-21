@@ -82,7 +82,7 @@ async def test_tts_validate_prompt_type(tts_target: OpenAITTSTarget):
         await tts_target.send_prompt_async(message=request)
 
 
-async def test_tts_validate_previous_conversations(
+async def test_tts_adapts_previous_conversations(
     tts_target: OpenAITTSTarget, sample_conversations: MutableSequence[MessagePiece]
 ):
     message_piece = sample_conversations[0]
@@ -97,14 +97,10 @@ async def test_tts_validate_previous_conversations(
 
     request = Message(message_pieces=[message_piece])
 
-    with patch("pyrit.common.net_utility.make_request_and_raise_if_error_async") as mock_request:
-        mock_request.return_value = MagicMock(content=b"audio data")
-        with pytest.raises(
-            ValueError,
-            match="This target only supports a single turn conversation.*If your target does support this, set the"
-            " custom_configuration parameter accordingly",
-        ):
-            await tts_target.send_prompt_async(message=request)
+    normalized = await tts_target._get_normalized_conversation_async(message=request)
+
+    assert len(normalized) == 1
+    assert message_piece.converted_value in normalized[0].get_value()
 
 
 @pytest.mark.parametrize("response_format", ["mp3", "ogg"])

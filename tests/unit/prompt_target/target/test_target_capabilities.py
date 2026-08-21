@@ -35,6 +35,7 @@ class TestCapabilityHandlingPolicy:
         policy = CapabilityHandlingPolicy()
         assert policy.behaviors == {
             CapabilityName.MULTI_TURN: UnsupportedCapabilityBehavior.RAISE,
+            CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.ADAPT,
             CapabilityName.SYSTEM_PROMPT: UnsupportedCapabilityBehavior.RAISE,
             CapabilityName.JSON_SCHEMA: UnsupportedCapabilityBehavior.ADAPT,
         }
@@ -62,6 +63,7 @@ class TestCapabilityHandlingPolicy:
         policy = CapabilityHandlingPolicy()
         expected = {
             CapabilityName.MULTI_TURN: UnsupportedCapabilityBehavior.RAISE,
+            CapabilityName.EDITABLE_HISTORY: UnsupportedCapabilityBehavior.ADAPT,
             CapabilityName.SYSTEM_PROMPT: UnsupportedCapabilityBehavior.RAISE,
             CapabilityName.JSON_SCHEMA: UnsupportedCapabilityBehavior.ADAPT,
         }
@@ -71,11 +73,11 @@ class TestCapabilityHandlingPolicy:
     def test_capability_handling_policy_rejects_capability_without_policy(self):
         policy = CapabilityHandlingPolicy()
 
-        with pytest.raises(KeyError, match="No policy for capability 'supports_editable_history'"):
-            policy.get_behavior(capability=CapabilityName.EDITABLE_HISTORY)
+        with pytest.raises(KeyError, match="No policy for capability 'supports_multi_message_pieces'"):
+            policy.get_behavior(capability=CapabilityName.MULTI_MESSAGE_PIECES)
 
-        with pytest.raises(AttributeError, match="supports_editable_history"):
-            _ = policy.supports_editable_history
+        with pytest.raises(AttributeError, match="supports_multi_message_pieces"):
+            _ = policy.supports_multi_message_pieces
 
     def test_capability_handling_policy_rejects_unknown_attribute(self):
         policy = CapabilityHandlingPolicy()
@@ -88,6 +90,7 @@ class TestCapabilityHandlingPolicy:
             frozenset(
                 {
                     CapabilityName.MULTI_TURN,
+                    CapabilityName.EDITABLE_HISTORY,
                     CapabilityName.SYSTEM_PROMPT,
                     CapabilityName.JSON_SCHEMA,
                 }

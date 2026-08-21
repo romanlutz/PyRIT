@@ -953,13 +953,13 @@ class TestPromptGeneration:
 class TestObjectiveTargetSending:
     """Tests for sending prompts to the objective target."""
 
-    async def test_second_turn_rotation_uses_configured_message_normalizer(
+    async def test_second_turn_uses_configured_message_normalizer_without_rotation(
         self,
         mock_objective_scorer: MagicMock,
         mock_adversarial_chat: MagicMock,
         basic_context: MultiTurnAttackContext,
     ) -> None:
-        """A rotated request must keep the configured prepended-history formatter."""
+        """A stateless target must reuse formatting without attack-specific rotation."""
         objective_target = MockPromptTarget()
         objective_target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
         message_normalizer = MagicMock(spec=MessageStringNormalizer)
@@ -996,9 +996,7 @@ class TestObjectiveTargetSending:
             message=Message.from_prompt(prompt="Second request", role="user"),
         )
 
-        assert basic_context.session.conversation_id != old_conversation_id
-        assert basic_context.target_normalization_context is not None
-        assert basic_context.target_normalization_context.is_consumed
+        assert basic_context.session.conversation_id == old_conversation_id
         assert objective_target.prompt_sent == ["custom formatted request"]
         message_normalizer.normalize_string_async.assert_awaited_once()
 

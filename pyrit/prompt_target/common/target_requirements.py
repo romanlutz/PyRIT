@@ -123,12 +123,12 @@ def _build_chat_target_requirements() -> TargetRequirements:
     Returns:
         TargetRequirements: The requirements for a chat-style target.
     """
-    return TargetRequirements(required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.EDITABLE_HISTORY}))
+    return TargetRequirements(native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.EDITABLE_HISTORY}))
 
 
 CHAT_TARGET_REQUIREMENTS: TargetRequirements = _build_chat_target_requirements()
 """
-Standard requirements for a chat-style target: must support multi-turn conversations
-with an editable history. Consumers validate their target against
+Standard requirements for a chat-style target: must natively support multi-turn
+conversations with editable history. Consumers validate their target against
 these requirements at construction time.
 """

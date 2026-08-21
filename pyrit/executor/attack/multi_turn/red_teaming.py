@@ -174,7 +174,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         # Initialize utilities
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
-        self._prepended_conversation_config = prepended_conversation_config
+        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
 
         self._conversation_manager = ConversationManager(prompt_normalizer=self._prompt_normalizer)
 
@@ -476,12 +476,6 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         """
         logger.info(f"Sending prompt to target: {message.get_value()[:50]}...")
 
-        # For single-turn targets, rotate conversation_id so each turn starts fresh
-        self._rotate_conversation_for_single_turn_target(
-            context=context,
-            prepended_conversation_config=self._prepended_conversation_config,
-        )
-
         with execution_context(
             component_role=ComponentRole.OBJECTIVE_TARGET,
             attack_strategy_name=self.__class__.__name__,
@@ -496,7 +490,9 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
                 target=self._objective_target,
-                target_normalization_context=context.target_normalization_context,
+                normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
+                    target=self._objective_target
+                ),
             )
 
         if response is None:

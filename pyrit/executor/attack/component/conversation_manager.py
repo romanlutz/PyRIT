@@ -13,7 +13,7 @@ from pyrit.executor.attack.component.prepended_conversation_config import (
     PrependedConversationConfig,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import ConversationContextNormalizer
 from pyrit.models import (
     ChatMessageRole,
     ComponentIdentifier,
@@ -23,7 +23,7 @@ from pyrit.models import (
     Score,
 )
 from pyrit.prompt_normalizer.prompt_normalizer import PromptNormalizer
-from pyrit.prompt_target import CapabilityName, PromptTarget, TargetNormalizationContext
+from pyrit.prompt_target import CapabilityName, PromptTarget
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -279,8 +279,7 @@ class ConversationManager:
         3. Updates context.executed_turns for multi-turn attacks
 
         For all PromptTarget types, prepended messages are added to memory with
-        simulated_assistant roles and new UUIDs. Targets without editable history receive
-        explicit one-shot normalization state on the attack context.
+        simulated_assistant roles and new UUIDs.
 
         Args:
             context: The attack context to initialize.
@@ -302,8 +301,6 @@ class ConversationManager:
 
         # Merge memory labels: attack strategy labels + context labels
         context.memory_labels = combine_dict(existing_dict=memory_labels, new_dict=context.memory_labels)
-        context.target_normalization_context = None
-
         state = ConversationState()
         prepended_conversation = context.prepended_conversation
 
@@ -442,35 +439,6 @@ class ConversationManager:
             if message and message.message_pieces and any(not piece.not_in_memory for piece in message.message_pieces)
         ]
 
-    @staticmethod
-    def create_target_normalization_context(
-        *,
-        target: PromptTarget,
-        conversation_id: str,
-        prepended_message_count: int,
-        prepended_conversation_config: PrependedConversationConfig | None = None,
-    ) -> TargetNormalizationContext | None:
-        """
-        Build first-send normalization state for a target without editable history.
-
-        Returns:
-            TargetNormalizationContext | None: First-send state, or ``None`` for
-                editable-history targets or empty prepended history.
-        """
-        if prepended_message_count < 1 or target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY):
-            return None
-
-        config = prepended_conversation_config or PrependedConversationConfig()
-        return TargetNormalizationContext(
-            conversation_id=conversation_id,
-            normalizers=(
-                FirstTurnHistoryNormalizer(
-                    message_normalizer=config.get_message_normalizer(),
-                    prepended_message_count=prepended_message_count,
-                ),
-            ),
-        )
-
     async def _process_prepended_conversation_async(
         self,
         *,
@@ -512,13 +480,6 @@ class ConversationManager:
         if not valid_messages:
             return state
 
-        target_normalization_context = self.create_target_normalization_context(
-            target=target,
-            conversation_id=conversation_id,
-            prepended_message_count=len(valid_messages),
-            prepended_conversation_config=prepended_conversation_config,
-        )
-
         # Use the lower-level method to add messages to memory
         state.turn_count = await self.add_prepended_conversation_to_memory_async(
             prepended_conversation=prepended_conversation,
@@ -529,8 +490,6 @@ class ConversationManager:
             target_identifier=target_identifier,
             target=target,
         )
-        context.target_normalization_context = target_normalization_context
-
         # Update context for multi-turn attacks to reflect prepended_conversation
 
         final_prepended_message = valid_messages[-1]

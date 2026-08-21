@@ -181,10 +181,10 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
             max_turns (int): Maximum number of turns allowed.
             prepended_conversation_config (PrependedConversationConfiguration | None):
                 Configuration for how to process prepended conversations. Controls converter
-                application by role and first-send formatting for targets without editable history.
+                application by role and request formatting for targets without editable history.
 
         Raises:
-            ValueError: If objective_target does not natively support editable history.
+            ValueError: If the objective target does not natively support multi-turn conversations.
         """
         # Initialize base class
         super().__init__(objective_target=objective_target, logger=logger, context_type=CrescendoAttackContext)
@@ -272,7 +272,7 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
         self._max_turns = max_turns
 
         # Store the prepended conversation configuration
-        self._prepended_conversation_config = prepended_conversation_config
+        self._prepended_conversation_config = prepended_conversation_config or PrependedConversationConfig()
 
     def get_attack_scoring_config(self) -> AttackScoringConfig | None:
         """
@@ -648,7 +648,9 @@ class CrescendoAttack(MultiTurnAttackStrategy[CrescendoAttackContext, CrescendoA
                 conversation_id=context.session.conversation_id,
                 request_converter_configurations=self._request_converters,
                 response_converter_configurations=self._response_converters,
-                target_normalization_context=context.target_normalization_context,
+                normalizer_overrides=self._prepended_conversation_config.get_normalizer_overrides(
+                    target=self._objective_target
+                ),
             )
 
         if not response:

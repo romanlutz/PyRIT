@@ -36,7 +36,8 @@ def test_construction_from_frozenset():
 
 
 def test_chat_target_requirements_shape():
-    assert CHAT_TARGET_REQUIREMENTS.required == {
+    assert CHAT_TARGET_REQUIREMENTS.required == set()
+    assert CHAT_TARGET_REQUIREMENTS.native_required == {
         CapabilityName.EDITABLE_HISTORY,
         CapabilityName.MULTI_TURN,
     }
@@ -62,8 +63,7 @@ def test_validate_passes_on_native_support():
 
 
 def test_validate_passes_when_policy_is_adapt():
-    # Note: EDITABLE_HISTORY is not adaptable, so this test uses a custom
-    # requirement over capabilities that the policy can adapt.
+    # Use a custom requirement over capabilities that the policy can adapt.
     reqs = TargetRequirements(required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}))
     target = _make_target(
         configuration=TargetConfiguration(

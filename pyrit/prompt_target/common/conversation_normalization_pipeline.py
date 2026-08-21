@@ -2,10 +2,12 @@
 # Licensed under the MIT license.
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pyrit.message_normalizer import (
+    ConversationContextNormalizer,
+    FirstTurnHistoryNormalizer,
     GenericSystemSquashNormalizer,
     HistorySquashNormalizer,
     JsonSchemaNormalizer,
@@ -26,10 +28,19 @@ logger = logging.getLogger(__name__)
 # Single registry: add new normalizable capabilities here and nowhere else.
 # Order in the list determines pipeline execution order.
 # ---------------------------------------------------------------------------
-_NORMALIZER_REGISTRY: list[tuple[CapabilityName, MessageListNormalizer[Message]]] = [
-    (CapabilityName.SYSTEM_PROMPT, GenericSystemSquashNormalizer()),
-    (CapabilityName.MULTI_TURN, HistorySquashNormalizer()),
-    (CapabilityName.JSON_SCHEMA, JsonSchemaNormalizer()),
+NormalizerFactory = Callable[[TargetCapabilities], MessageListNormalizer[Message]]
+
+_NORMALIZER_REGISTRY: list[tuple[CapabilityName, NormalizerFactory]] = [
+    (CapabilityName.SYSTEM_PROMPT, lambda _: GenericSystemSquashNormalizer()),
+    (
+        CapabilityName.EDITABLE_HISTORY,
+        lambda capabilities: FirstTurnHistoryNormalizer(
+            message_normalizer=ConversationContextNormalizer(),
+            target_supports_multi_turn=capabilities.supports_multi_turn,
+        ),
+    ),
+    (CapabilityName.MULTI_TURN, lambda _: HistorySquashNormalizer()),
+    (CapabilityName.JSON_SCHEMA, lambda _: JsonSchemaNormalizer()),
 ]
 
 # Derived constant — no manual maintenance required.
@@ -95,7 +106,7 @@ class ConversationNormalizationPipeline:
         overrides = normalizer_overrides or {}
         normalizers: list[MessageListNormalizer[Message]] = []
 
-        for capability, default_normalizer in _NORMALIZER_REGISTRY:
+        for capability, default_normalizer_factory in _NORMALIZER_REGISTRY:
             if capabilities.includes(capability=capability):
                 continue
 
@@ -112,7 +123,7 @@ class ConversationNormalizationPipeline:
             # which should be called in the request flow once the full end-to-end
             # workflow is implemented.
             if behavior == UnsupportedCapabilityBehavior.ADAPT:
-                normalizer = overrides.get(capability, default_normalizer)
+                normalizer = overrides.get(capability) or default_normalizer_factory(capabilities)
                 normalizers.append(normalizer)
 
         return cls(normalizers=tuple(normalizers))

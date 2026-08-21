@@ -3,9 +3,11 @@
 
 import abc
 import logging
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, final
 
 from pyrit.memory import CentralMemory, MemoryInterface
+from pyrit.message_normalizer import MessageListNormalizer
 from pyrit.models import (
     ComponentIdentifier,
     Conversation,
@@ -21,7 +23,6 @@ from pyrit.prompt_target.common.target_capabilities import (
     get_known_capabilities,
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.target_normalization_context import TargetNormalizationContext
 
 logger = logging.getLogger(__name__)
 
@@ -137,27 +138,24 @@ class PromptTarget(Identifiable):
         self,
         *,
         message: Message,
-        target_normalization_context: TargetNormalizationContext | None = None,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
     ) -> list[Message]:
         """
         Validate, normalize, and send a prompt to the target.
 
         This is the public entry point called by the prompt normalizer. It:
 
-        1. Validates the message and acquires an optional one-shot target context.
-        2. Loads memory history unless the context was already consumed, applies
-           acquired context normalizers, then runs the target's ordinary pipeline.
+        1. Validates the message.
+        2. Loads memory history and runs the target's normalization pipeline.
         3. Validates the normalized conversation against the target's capabilities.
-        4. Marks the context consumed and delegates to
-           ``_send_prompt_to_target_async`` with the normalized conversation.
+        4. Delegates to ``_send_prompt_to_target_async`` with the normalized conversation.
 
         Subclasses MUST NOT override this method. Override
         ``_send_prompt_to_target_async`` instead.
 
         Args:
             message (Message): The message to send.
-            target_normalization_context: Optional per-conversation normalizers
-                and one-shot lifecycle state.
+            normalizer_overrides: Optional per-send target normalizer overrides.
 
         Returns:
             list[Message]: Response messages from the target.
@@ -166,31 +164,13 @@ class PromptTarget(Identifiable):
             ValueError: If the message or normalized conversation are empty.
         """
         message.validate()
-        conversation_id = message.message_pieces[0].conversation_id
-        should_apply_context = False
-        if target_normalization_context:
-            should_apply_context = target_normalization_context.begin_normalization(
-                conversation_id=conversation_id or ""
-            )
-
-        try:
-            normalized_conversation = await self._get_normalized_conversation_async(
-                message=message,
-                target_normalization_context=target_normalization_context,
-                should_apply_context=should_apply_context,
-            )
-            if not normalized_conversation:
-                raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
-            self._validate_request(normalized_conversation=normalized_conversation)
-        except BaseException:
-            if target_normalization_context and should_apply_context:
-                target_normalization_context.restore_pending()
-            raise
-
-        if target_normalization_context and should_apply_context:
-            # Target-level retry decorators reuse this normalized payload. Once
-            # provider invocation starts, attack-level retries must not replay history.
-            target_normalization_context.mark_consumed()
+        normalized_conversation = await self._get_normalized_conversation_async(
+            message=message,
+            normalizer_overrides=normalizer_overrides,
+        )
+        if not normalized_conversation:
+            raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
+        self._validate_request(normalized_conversation=normalized_conversation)
         return await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
 
     @abc.abstractmethod
@@ -254,15 +234,13 @@ class PromptTarget(Identifiable):
         self,
         *,
         message: Message,
-        target_normalization_context: TargetNormalizationContext | None = None,
-        should_apply_context: bool = False,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
     ) -> list[Message]:
         """
         Build the target-facing conversation and run the normalization pipeline.
 
-        A consumed target context supplies only the current message so retained
-        target history is not replayed. Otherwise, memory history is loaded and the
-        current message is appended before any acquired context normalizers run.
+        Memory history is loaded and the current message is appended before the
+        target normalization pipeline runs.
 
         The original conversation in memory is never mutated. The returned list is an
         ephemeral copy intended only for building the API request body.
@@ -274,24 +252,21 @@ class PromptTarget(Identifiable):
 
         Args:
             message (Message): The current message to append.
-            target_normalization_context: Optional per-conversation normalization state.
-            should_apply_context: Whether this send acquired the one-shot context.
+            normalizer_overrides: Optional per-send target normalizer overrides.
 
         Returns:
             list[Message]: The normalized conversation (possibly with system prompt squashed,
                 history squashed, etc.).
         """
         conversation_id = message.message_pieces[0].conversation_id
-        if target_normalization_context and not should_apply_context:
-            conversation = [message]
-        else:
-            conversation = (
-                list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
-            )
-            conversation.append(message)
-            if target_normalization_context:
-                conversation = await target_normalization_context.normalize_async(messages=conversation)
-        normalized = await self.configuration.normalize_async(messages=conversation)
+        conversation = (
+            list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
+        )
+        conversation.append(message)
+        normalized = await self.configuration.normalize_async(
+            messages=conversation,
+            normalizer_overrides=normalizer_overrides,
+        )
         if normalized:
             # Normalizers may create new Message objects (via Message.from_prompt) with
             # random conversation_ids.  Stamp the correct conversation_id on every

@@ -47,14 +47,22 @@ def make_message():
 
 
 def test_init_with_defaults_uses_raise_policy():
-    caps = TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True)
+    caps = TargetCapabilities(
+        supports_multi_turn=True,
+        supports_editable_history=True,
+        supports_system_prompt=True,
+    )
     config = TargetConfiguration(capabilities=caps)
     # Default policy is RAISE for all adaptable capabilities
     assert config.policy.get_behavior(capability=CapabilityName.MULTI_TURN) == UnsupportedCapabilityBehavior.RAISE
 
 
 def test_init_with_explicit_policy(adapt_all_policy):
-    caps = TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True)
+    caps = TargetCapabilities(
+        supports_multi_turn=True,
+        supports_editable_history=True,
+        supports_system_prompt=True,
+    )
     config = TargetConfiguration(capabilities=caps, policy=adapt_all_policy)
     assert config.policy is adapt_all_policy
 
@@ -92,7 +100,11 @@ def test_init_missing_capability_raise_policy_skips_normalizer():
 
 def test_init_missing_json_schema_default_policy_adds_normalizer():
     # Default policy adapts JSON_SCHEMA; a target lacking native support gets the JSON-schema normalizer.
-    caps = TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True)
+    caps = TargetCapabilities(
+        supports_multi_turn=True,
+        supports_editable_history=True,
+        supports_system_prompt=True,
+    )
     config = TargetConfiguration(capabilities=caps)
     assert len(config.pipeline.normalizers) == 1
     assert isinstance(config.pipeline.normalizers[0], JsonSchemaNormalizer)
@@ -101,6 +113,7 @@ def test_init_missing_json_schema_default_policy_adds_normalizer():
 def test_init_supports_json_schema_no_normalizer():
     caps = TargetCapabilities(
         supports_multi_turn=True,
+        supports_editable_history=True,
         supports_system_prompt=True,
         supports_json_schema=True,
     )
@@ -233,10 +246,10 @@ def test_ensure_can_handle_raises_when_capability_missing_from_policy():
 
 
 def test_ensure_can_handle_raises_valueerror_for_non_normalizable_capability():
-    caps = TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True, supports_editable_history=False)
+    caps = TargetCapabilities(supports_multi_turn=True, supports_system_prompt=True)
     config = TargetConfiguration(capabilities=caps)
     with pytest.raises(ValueError, match="no handling policy"):
-        config.ensure_can_handle(capability=CapabilityName.EDITABLE_HISTORY)
+        config.ensure_can_handle(capability=CapabilityName.MULTI_MESSAGE_PIECES)
 
 
 # ---------------------------------------------------------------------------

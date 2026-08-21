@@ -281,7 +281,7 @@ class TestSetupPhase:
             target=mock_target,
             conversation_id=basic_context.conversation_id,
             request_converters=converter_config,
-            prepended_conversation_config=None,
+            prepended_conversation_config=PrependedConversationConfig(),
             memory_labels={},
         )
 
@@ -365,7 +365,7 @@ class TestSetupPhase:
             (f"Turn 1:\nuser: {encoded_user}\nassistant: {simulated_response}\nTurn 2:\nuser: {encoded_final_request}")
         ]
 
-    async def test_retry_setup_creates_fresh_first_turn_context(self, basic_context):
+    async def test_retry_setup_creates_fresh_conversation(self, basic_context):
         target = MockPromptTarget()
         target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
         attack = PromptSendingAttack(objective_target=target)
@@ -374,18 +374,11 @@ class TestSetupPhase:
         ]
 
         await attack._setup_async(context=basic_context)
-        first_context = basic_context.target_normalization_context
         first_conversation_id = basic_context.conversation_id
-        assert first_context is not None
-        assert first_context.begin_normalization(conversation_id=first_conversation_id)
-        first_context.mark_consumed()
 
         await attack._setup_async(context=basic_context)
 
         assert basic_context.conversation_id != first_conversation_id
-        assert basic_context.target_normalization_context is not None
-        assert basic_context.target_normalization_context is not first_context
-        assert basic_context.target_normalization_context.is_pending
 
 
 @pytest.mark.usefixtures("patch_central_database")

@@ -314,10 +314,10 @@ The below talks about responsibilities of most modules in the PyRIT library
 
 **Responsibility**: Reshape prompts and conversations so components and targets can interoperate. There are two distinct modules:
 
-- **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). It is the single component that writes each request and response to memory; targets never persist on their own. `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply. Prepended history remains role-structured in memory. Attacks pass an ephemeral `TargetNormalizationContext` with the first live send when a target cannot edit history; the target consumes that context immediately before provider invocation.
+- **`prompt_normalizer`** applies converters and dispatches individual prompts to a `PromptTarget` (handling batching and memory persistence). It is the single component that writes each request and response to memory; targets never persist on their own. `NormalizerRequest` and `ConverterConfiguration` describe what to send and which converters to apply. Prepended history remains role-structured in memory. Attacks can pass per-send normalizer overrides from `PrependedConversationConfig`; the target's capability pipeline uses the `EDITABLE_HISTORY` override only when adaptation is required.
 - **`message_normalizer`** reshapes multi-message conversation payloads into the structure a given model expects — for example, handling system-message behavior (keep / squash / ignore), history squashing, prepended-history adaptation, and tokenizer chat templates. These target-specific views are ephemeral and do not replace the logical conversation in memory.
 
-For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply first-turn history normalization, run the target's ordinary capability normalizers, then serialize and invoke the provider.
+For prepended history on a target without editable history, processing order is: convert and persist the structured prepended messages, convert the live request, apply the capability-driven history normalizer, run the remaining target capability normalizers, then serialize and invoke the provider. The history normalizer derives whether a real target reply exists from memory roles; attacks do not store target-normalization lifecycle state.
 
 ## [Output](./output/0_output)
 

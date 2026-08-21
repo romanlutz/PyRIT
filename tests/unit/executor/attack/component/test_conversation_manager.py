@@ -38,7 +38,7 @@ from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptDataType, Score
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
-from pyrit.prompt_target import PromptTarget
+from pyrit.prompt_target import CapabilityName, PromptTarget
 
 
 def _mock_target_id(name: str = "MockTarget") -> ComponentIdentifier:
@@ -780,7 +780,7 @@ class TestInitializeContext:
         assert context.next_message is next_message
         assert context.next_message.get_value() == "Caller-supplied question"
 
-    async def test_non_editable_target_sets_custom_first_send_context(
+    async def test_non_editable_target_persists_history_without_using_formatter(
         self,
         attack_identifier: ComponentIdentifier,
         mock_prompt_normalizer: MagicMock,
@@ -801,11 +801,7 @@ class TestInitializeContext:
             prepended_conversation_config=config,
         )
 
-        assert context.target_normalization_context is not None
-        assert context.target_normalization_context.conversation_id == conversation_id
-        normalizer = context.target_normalization_context.normalizers[0]
-        assert isinstance(normalizer, FirstTurnHistoryNormalizer)
-        assert normalizer._message_normalizer is message_normalizer
+        assert len(manager.get_conversation(conversation_id)) == len(sample_conversation)
         message_normalizer.normalize_string_async.assert_not_called()
 
     async def test_returns_turn_count_for_multi_turn_attacks(
@@ -1139,7 +1135,6 @@ class TestPrependedConversationConfigSettings:
             )
 
         assert manager.get_conversation(conversation_id) == []
-        assert context.target_normalization_context is None
 
     async def test_non_persisted_prepended_message_is_not_counted_in_context(
         self,
@@ -1164,7 +1159,6 @@ class TestPrependedConversationConfigSettings:
         )
 
         assert manager.get_conversation(conversation_id) == []
-        assert context.target_normalization_context is None
 
     async def test_non_persisted_piece_does_not_constrain_flattening(
         self,
@@ -1210,7 +1204,6 @@ class TestPrependedConversationConfigSettings:
         stored = manager.get_conversation(conversation_id)
         assert len(stored) == 1
         assert [piece.converted_value for piece in stored[0].message_pieces] == ["persisted"]
-        assert context.target_normalization_context is not None
 
     async def test_non_editable_target_preserves_converter_piece_indexes(
         self,
@@ -1381,22 +1374,21 @@ class TestPrependedConversationConfigSettings:
         mock_prompt_target: MagicMock,
         sample_conversation: list[Message],
     ) -> None:
-        """Test that the default formatter is carried in explicit target-side state."""
-        manager = ConversationManager(prompt_normalizer=mock_prompt_normalizer)
-        conversation_id = str(uuid.uuid4())
-        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
-        context.prepended_conversation = sample_conversation
-
-        await manager.initialize_context_async(
-            context=context,
-            target=mock_prompt_target,
-            conversation_id=conversation_id,
-        )
-
-        assert context.target_normalization_context is not None
-        normalizer = context.target_normalization_context.normalizers[0]
+        """Test that the default configuration creates the history normalizer."""
+        config = PrependedConversationConfig()
+        normalizer = config.get_normalizer_overrides(target=mock_prompt_target)[CapabilityName.EDITABLE_HISTORY]
         assert isinstance(normalizer, FirstTurnHistoryNormalizer)
         assert isinstance(normalizer._message_normalizer, ConversationContextNormalizer)
+
+    def test_message_normalizer_is_not_overridden_for_editable_target(
+        self,
+        mock_chat_target: MagicMock,
+    ) -> None:
+        mock_chat_target.configuration.includes.return_value = True
+
+        overrides = PrependedConversationConfig().get_normalizer_overrides(target=mock_chat_target)
+
+        assert overrides == {}
 
     # -------------------------------------------------------------------------
     # Chat Target Behavior (Config has no effect)

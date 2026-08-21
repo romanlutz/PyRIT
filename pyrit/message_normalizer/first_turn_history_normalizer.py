@@ -23,57 +23,71 @@ class FirstTurnHistoryNormalizer(MessageListNormalizer[Message]):
         self,
         *,
         message_normalizer: MessageStringNormalizer,
-        prepended_message_count: int,
+        target_supports_multi_turn: bool,
     ) -> None:
         """
         Initialize the normalizer.
 
         Args:
             message_normalizer: Formatter for the target-facing text.
-            prepended_message_count: Number of leading messages that belong to
-                the prepended conversation.
-
-        Raises:
-            ValueError: If prepended_message_count is less than one.
+            target_supports_multi_turn: Whether the target retains state across
+                live requests.
         """
-        if prepended_message_count < 1:
-            raise ValueError("prepended_message_count must be at least 1")
         self._message_normalizer = message_normalizer
-        self._prepended_message_count = prepended_message_count
+        self._target_supports_multi_turn = target_supports_multi_turn
 
     async def normalize_async(self, messages: list[Message]) -> list[Message]:
         """
-        Return one target-facing request containing the prepended history.
+        Adapt memory-backed history for a target whose history is not editable.
+
+        Before the target has replied, persisted prepended history is formatted
+        with the first live request. Failed live request/error pairs are excluded.
+        After a real target reply, a stateful target receives only the current
+        request. A stateless target receives the original prepended prefix plus
+        the current request on every send.
 
         Args:
-            messages: Prepended history followed by exactly one live request.
+            messages: Persisted conversation history followed by the current request.
 
         Returns:
             A single request message with formatted text and preserved live
             non-text pieces.
 
         Raises:
-            ValueError: If the input does not contain the configured prepended
-                message count followed by one live request, or if converted
-                prepended history cannot be represented as text.
+            ValueError: If messages is empty or converted prepended history
+                cannot be represented as text.
         """
-        expected_count = self._prepended_message_count + 1
-        if len(messages) != expected_count:
-            raise ValueError(
-                "First-turn history normalization expected "
-                f"{self._prepended_message_count} prepended messages and one live request, "
-                f"but received {len(messages)} messages."
-            )
+        if not messages:
+            raise ValueError("Messages list cannot be empty")
+        if len(messages) == 1:
+            return list(messages)
 
-        prepended_messages = messages[: self._prepended_message_count]
-        live_request = messages[-1]
+        history = self._remove_failed_live_requests(messages=messages[:-1])
+        messages = [*history, messages[-1]]
+        if len(messages) == 1:
+            return messages
+
+        first_response_index = self._find_first_target_response_index(messages=history)
+        if first_response_index is None:
+            messages_to_format = messages
+        elif self._target_supports_multi_turn:
+            return [messages[-1]]
+        else:
+            prepended_end = max(first_response_index - 1, 0)
+            prepended_messages = messages[:prepended_end]
+            if not prepended_messages:
+                return [messages[-1]]
+            messages_to_format = [*prepended_messages, messages[-1]]
+
+        prepended_messages = messages_to_format[:-1]
+        live_request = messages_to_format[-1]
         self._validate_flattenable_converter_output(messages=prepended_messages)
 
-        original_view = self._build_original_view(messages=messages)
-        converted_view = self._build_converted_view(messages=messages)
+        original_view = self._build_original_view(messages=messages_to_format)
+        converted_view = self._build_converted_view(messages=messages_to_format)
         original_text = await self._normalize_context_async(messages=original_view)
         converted_text = original_text
-        if self._contains_converted_values(messages=messages):
+        if self._contains_converted_values(messages=messages_to_format):
             converted_text = await self._normalize_context_async(messages=converted_view)
 
         return [
@@ -83,6 +97,22 @@ class FirstTurnHistoryNormalizer(MessageListNormalizer[Message]):
                 converted_text=converted_text,
             )
         ]
+
+    @staticmethod
+    def _find_first_target_response_index(*, messages: list[Message]) -> int | None:
+        for index, message in enumerate(messages):
+            if any(piece.role == "assistant" and piece.response_error == "none" for piece in message.message_pieces):
+                return index
+        return None
+
+    @staticmethod
+    def _remove_failed_live_requests(*, messages: list[Message]) -> list[Message]:
+        history = list(messages)
+        while len(history) >= 2 and any(
+            piece.role == "assistant" and piece.response_error != "none" for piece in history[-1].message_pieces
+        ):
+            history = history[:-2]
+        return history
 
     async def _normalize_context_async(self, *, messages: list[Message]) -> str:
         messages_to_normalize = self._filter_live_non_text_pieces(messages=messages)

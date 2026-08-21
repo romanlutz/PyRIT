@@ -119,17 +119,30 @@ class TargetConfiguration:
         if behavior == UnsupportedCapabilityBehavior.RAISE:
             raise ValueError(f"Target does not support '{capability.value}' and the handling policy is RAISE.")
 
-    async def normalize_async(self, *, messages: list[Message]) -> list[Message]:
+    async def normalize_async(
+        self,
+        *,
+        messages: list[Message],
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Any]] | None = None,
+    ) -> list[Message]:
         """
         Run the normalization pipeline over the given messages.
 
         Args:
             messages (list[Message]): The full conversation to normalize.
+            normalizer_overrides: Per-send replacements for capability normalizers.
 
         Returns:
             list[Message]: The (possibly adapted) message list.
         """
-        return await self._pipeline.normalize_async(messages=messages)
+        pipeline = self._pipeline
+        if normalizer_overrides:
+            pipeline = ConversationNormalizationPipeline.from_capabilities(
+                capabilities=self._capabilities,
+                policy=self._policy,
+                normalizer_overrides=normalizer_overrides,
+            )
+        return await pipeline.normalize_async(messages=messages)
 
     def as_identifier_params(self) -> dict[str, Any]:
         """

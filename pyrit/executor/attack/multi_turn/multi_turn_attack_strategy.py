@@ -10,19 +10,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyrit.common.logger import logger
-from pyrit.executor.attack.component.conversation_manager import ConversationManager
 from pyrit.executor.attack.core.attack_parameters import AttackParameters, AttackParamsT
 from pyrit.executor.attack.core.attack_strategy import (
     AttackContext,
     AttackStrategy,
     AttackStrategyResultT,
 )
-from pyrit.memory import CentralMemory
-from pyrit.models import Conversation, ConversationReference, ConversationType
-from pyrit.prompt_target import CapabilityName
 
 if TYPE_CHECKING:
-    from pyrit.executor.attack.component import PrependedConversationConfig
     from pyrit.models import (
         Message,
         Score,
@@ -95,79 +90,4 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
             context_type=context_type,
             params_type=params_type,
             logger=logger,
-        )
-
-    def _rotate_conversation_for_single_turn_target(
-        self,
-        *,
-        context: MultiTurnAttackContext[Any],
-        prepended_conversation_config: PrependedConversationConfig | None = None,
-    ) -> None:
-        """
-        Create a fresh conversation_id for the objective target if it is a single-turn target.
-
-        For single-turn targets, each turn must use a separate conversation_id because the target
-        rejects conversations with prior messages. The prior turn's conversation_id is recorded
-        as a PRUNED related conversation on the attack context.
-
-        System messages (e.g., from prepended conversation) are duplicated into the new
-        conversation so that the target retains its system prompt context.
-
-        For multi-turn targets this method is a no-op.
-
-        This should be called before each turn when sending prompts to the objective target.
-        A pending first-turn normalization context suppresses rotation even when prepended
-        assistant messages have already increased ``executed_turns``.
-
-        Args:
-            context: The current attack context.
-            prepended_conversation_config: Configuration that controls target-facing
-                formatting for the carried system messages.
-        """
-        if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
-            return
-
-        if context.target_normalization_context and not context.target_normalization_context.is_consumed:
-            return
-
-        if context.executed_turns == 0:
-            return
-
-        old_conversation_id = context.session.conversation_id
-        context.related_conversations.add(
-            ConversationReference(
-                conversation_id=old_conversation_id,
-                conversation_type=ConversationType.PRUNED,
-                description=f"single-turn target prior turn {context.executed_turns}",
-            )
-        )
-
-        # Duplicate system messages (e.g., system prompt from prepended conversation)
-        # into the new conversation so the target retains its configuration.
-        memory = CentralMemory.get_memory_instance()
-        messages = memory.get_conversation_messages(conversation_id=old_conversation_id)
-        system_messages = [m for m in messages if m.api_role == "system"]
-
-        if system_messages:
-            new_conversation_id, pieces = memory.duplicate_messages(messages=system_messages)
-            memory.add_conversation_to_memory(
-                conversation=Conversation(
-                    conversation_id=new_conversation_id, target_identifier=self._objective_target.get_identifier()
-                )
-            )
-            memory.add_message_pieces_to_memory(message_pieces=pieces)
-            context.session.conversation_id = new_conversation_id
-            context.target_normalization_context = ConversationManager.create_target_normalization_context(
-                target=self._objective_target,
-                conversation_id=new_conversation_id,
-                prepended_message_count=len(system_messages),
-                prepended_conversation_config=prepended_conversation_config,
-            )
-        else:
-            context.session.conversation_id = str(uuid.uuid4())
-            context.target_normalization_context = None
-
-        self._logger.debug(
-            f"Rotated conversation_id for single-turn target: "
-            f"{old_conversation_id} -> {context.session.conversation_id}"
         )
