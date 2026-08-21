@@ -22,6 +22,7 @@ from pyrit.models import Conversation, ConversationReference, ConversationType
 from pyrit.prompt_target import CapabilityName
 
 if TYPE_CHECKING:
+    from pyrit.executor.attack.component import PrependedConversationConfig
     from pyrit.models import (
         Message,
         Score,
@@ -100,6 +101,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
         self,
         *,
         context: MultiTurnAttackContext[Any],
+        prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
         Create a fresh conversation_id for the objective target if it is a single-turn target.
@@ -119,6 +121,8 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
 
         Args:
             context: The current attack context.
+            prepended_conversation_config: Configuration that controls target-facing
+                formatting for the carried system messages.
         """
         if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
             return
@@ -157,6 +161,7 @@ class MultiTurnAttackStrategy(AttackStrategy[MultiTurnAttackStrategyContextT, At
                 target=self._objective_target,
                 conversation_id=new_conversation_id,
                 prepended_message_count=len(system_messages),
+                prepended_conversation_config=prepended_conversation_config,
             )
         else:
             context.session.conversation_id = str(uuid.uuid4())

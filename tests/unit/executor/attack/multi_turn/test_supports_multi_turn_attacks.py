@@ -1,17 +1,23 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pyrit.executor.attack.component import PrependedConversationConfig
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     ConversationSession,
     MultiTurnAttackContext,
 )
 from pyrit.memory import CentralMemory
-from pyrit.message_normalizer import ConversationContextNormalizer, FirstTurnHistoryNormalizer
+from pyrit.message_normalizer import (
+    ConversationContextNormalizer,
+    FirstTurnHistoryNormalizer,
+    MessageStringNormalizer,
+)
 from pyrit.models import ConversationType, Message, MessagePiece
 from pyrit.prompt_target import PromptTarget, TargetNormalizationContext
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
@@ -261,6 +267,49 @@ class TestSystemPromptCarryoverOnRotation:
         assert normalized_conversation[0].get_value() == (
             "Turn 1:\nuser: ### Instructions ###\n\nYou are a helpful assistant.\n\n######\n\nSecond request"
         )
+
+    async def test_rotation_preserves_configured_message_normalizer(self):
+        """Rotation must retain the formatter used for carried system messages."""
+        target = _SingleTurnPromptTarget()
+        strategy = _make_strategy(supports_multi_turn=False)
+        strategy._objective_target = target
+        context = _make_context()
+        old_id = context.session.conversation_id
+        _seed_conversation(
+            conversation_id=old_id,
+            system_prompt="You are a helpful assistant.",
+            user_text="First request",
+        )
+        previous_context = TargetNormalizationContext(
+            conversation_id=old_id,
+            normalizers=(
+                FirstTurnHistoryNormalizer(
+                    message_normalizer=ConversationContextNormalizer(),
+                    prepended_message_count=1,
+                ),
+            ),
+        )
+        previous_context.begin_normalization(conversation_id=old_id)
+        previous_context.mark_consumed()
+        context.target_normalization_context = previous_context
+        context.executed_turns = 1
+        message_normalizer = MagicMock(spec=MessageStringNormalizer)
+        message_normalizer.normalize_string_async = AsyncMock(return_value="custom formatted request")
+
+        strategy._rotate_conversation_for_single_turn_target(
+            context=context,
+            prepended_conversation_config=PrependedConversationConfig(message_normalizer=message_normalizer),
+        )
+
+        next_request = Message.from_prompt(prompt="Second request", role="user")
+        next_request.get_piece().conversation_id = context.session.conversation_id
+        await target.send_prompt_async(
+            message=next_request,
+            target_normalization_context=context.target_normalization_context,
+        )
+
+        assert target.normalized_conversations[0][0].get_value() == "custom formatted request"
+        message_normalizer.normalize_string_async.assert_awaited_once()
 
     def test_no_system_prompt_yields_fresh_conversation_id(self):
         """When there is no system prompt, rotation still generates a new conversation_id."""
@@ -840,17 +889,24 @@ class TestValueErrorGuards:
 class TestTAPBranchingPreservesSystemPrompts:
     """Integration test: TAP branching with real memory verifies system prompt carryover."""
 
-    def _make_tap_node(self, *, supports_multi_turn: bool):
+    def _make_tap_node(
+        self,
+        *,
+        supports_multi_turn: bool,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
+        objective_target: PromptTarget | None = None,
+    ) -> Any:
         """Create a _TreeOfAttacksNode with real memory."""
         from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
         from pyrit.executor.attack.multi_turn.tree_of_attacks import _TreeOfAttacksNode
 
-        target = MagicMock()
-        target.capabilities.supports_multi_turn = supports_multi_turn
-        target.configuration.includes.return_value = supports_multi_turn
-        target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
-        target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
-        target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
+        target = objective_target or MagicMock()
+        if objective_target is None:
+            target.capabilities.supports_multi_turn = supports_multi_turn
+            target.configuration.includes.return_value = supports_multi_turn
+            target.configuration.capabilities.input_modalities = frozenset({frozenset({"text"})})
+            target.configuration.capabilities.output_modalities = frozenset({frozenset({"text"})})
+            target.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
 
         adversarial_chat = MagicMock()
         adversarial_chat.get_identifier.return_value = {"__type__": "MockTarget", "__module__": "test", "id": "mock-id"}
@@ -881,6 +937,7 @@ class TestTAPBranchingPreservesSystemPrompts:
                 adversarial_chat=adversarial_chat,
                 objective_target=target,
             ),
+            prepended_conversation_config=prepended_conversation_config,
         )
 
     def test_branching_single_turn_target_preserves_system_across_depths(self):
@@ -950,6 +1007,39 @@ class TestTAPBranchingPreservesSystemPrompts:
         assert len(branch2_msgs) == 1
         assert branch2_msgs[0].api_role == "system"
         assert branch2_msgs[0].get_value() == "You are a red team assistant."
+
+    async def test_branching_single_turn_target_retains_pending_normalization_context(self):
+        """A TAP child must send copied system context with the next request."""
+        message_normalizer = MagicMock(spec=MessageStringNormalizer)
+        message_normalizer.normalize_string_async = AsyncMock(return_value="custom formatted request")
+        target = _SingleTurnPromptTarget()
+        node = self._make_tap_node(
+            supports_multi_turn=False,
+            prepended_conversation_config=PrependedConversationConfig(message_normalizer=message_normalizer),
+            objective_target=target,
+        )
+        memory = CentralMemory.get_memory_instance()
+        memory.add_message_pieces_to_memory(
+            message_pieces=[
+                MessagePiece(
+                    original_value="You are a red team assistant.",
+                    role="system",
+                    conversation_id=node.objective_target_conversation_id,
+                    sequence=0,
+                )
+            ]
+        )
+
+        branch = node.duplicate()
+        branch_conversation_id = branch.objective_target_conversation_id
+
+        await branch._send_prompt_to_target_async("next request")
+
+        assert branch.objective_target_conversation_id == branch_conversation_id
+        assert branch._target_normalization_context is not None
+        assert branch._target_normalization_context.is_consumed
+        assert target.normalized_conversations[0][0].get_value() == "custom formatted request"
+        message_normalizer.normalize_string_async.assert_awaited_once()
 
     def test_branching_multi_turn_target_preserves_full_history(self):
         """For multi-turn targets, branching should preserve the full conversation."""

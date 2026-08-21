@@ -341,6 +341,7 @@ class _TreeOfAttacksNode:
         parent_id: str | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
         initial_prompt: Message | None = None,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
         Initialize a tree node.
@@ -368,6 +369,9 @@ class _TreeOfAttacksNode:
             prompt_normalizer (PromptNormalizer | None): Normalizer for handling prompts and responses.
             initial_prompt (Message | None): Initial message to send for the first turn,
                 bypassing adversarial chat generation. Supports multimodal messages.
+            prepended_conversation_config (PrependedConversationConfig | None):
+                Configuration for prepended-conversation converter roles and
+                target-facing formatting.
         """
         # Store configuration
         self._objective_target = objective_target
@@ -385,6 +389,7 @@ class _TreeOfAttacksNode:
         self._attack_strategy_name = attack_strategy_name
         self._memory_labels = memory_labels or {}
         self._modality_router = modality_router
+        self._prepended_conversation_config = prepended_conversation_config
 
         # Initialize utilities
         self._memory = CentralMemory.get_memory_instance()
@@ -453,6 +458,7 @@ class _TreeOfAttacksNode:
         """
         if not prepended_conversation:
             return
+        self._prepended_conversation_config = prepended_conversation_config
 
         # Use ConversationManager to add messages to memory
         conversation_manager = ConversationManager(
@@ -899,6 +905,7 @@ class _TreeOfAttacksNode:
             desired_response_prefix=self._desired_response_prefix,
             parent_id=self.node_id,
             prompt_normalizer=self._prompt_normalizer,
+            prepended_conversation_config=self._prepended_conversation_config,
         )
 
         # Duplicate the conversations to preserve history
@@ -921,6 +928,12 @@ class _TreeOfAttacksNode:
                 )
                 self._memory.add_message_pieces_to_memory(message_pieces=pieces)
                 duplicate_node.objective_target_conversation_id = new_id
+                duplicate_node._target_normalization_context = ConversationManager.create_target_normalization_context(
+                    target=self._objective_target,
+                    conversation_id=new_id,
+                    prepended_message_count=len(system_messages),
+                    prepended_conversation_config=self._prepended_conversation_config,
+                )
             else:
                 duplicate_node.objective_target_conversation_id = str(uuid.uuid4())
 
@@ -2059,6 +2072,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             parent_id=parent_id,
             prompt_normalizer=self._prompt_normalizer,
             initial_prompt=initial_prompt,
+            prepended_conversation_config=self._prepended_conversation_config,
         )
 
         # Add the adversarial chat conversation ID to the context's tracking (ensuring uniqueness)
