@@ -1053,7 +1053,9 @@ async def test_non_editable_target_allows_preexisting_non_text_history_with_conv
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_non_editable_target_warns_when_non_text_history_becomes_a_placeholder(caplog):
+async def test_non_editable_target_warns_when_non_text_history_becomes_a_placeholder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities())
     prepended = Message(

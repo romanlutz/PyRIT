@@ -5,10 +5,12 @@
 
 import inspect
 import uuid
+from typing import Any
 
 import pytest
 
 from pyrit.executor.attack.component import PrependedConversationConfig
+from pyrit.executor.attack.core import AttackStrategy
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.multi_turn.chunked_request import ChunkedRequestAttack
 from pyrit.executor.attack.multi_turn.crescendo import CrescendoAttack
@@ -40,7 +42,7 @@ class _NonEditableHistoryTarget(PromptTarget):
 
 
 @pytest.mark.usefixtures("patch_central_database")
-def test_attack_strategy_owns_prepended_policy_and_identifier():
+def test_attack_strategy_owns_prepended_policy_and_identifier() -> None:
     config = PrependedConversationConfig(apply_converters_to_roles=["user", "assistant"])
     attack = PromptSendingAttack(
         objective_target=_NonEditableHistoryTarget(),
@@ -54,7 +56,7 @@ def test_attack_strategy_owns_prepended_policy_and_identifier():
 
 
 @pytest.mark.usefixtures("patch_central_database")
-def test_attack_strategy_resolves_per_send_history_override():
+def test_attack_strategy_resolves_per_send_history_override() -> None:
     attack = PromptSendingAttack(objective_target=_NonEditableHistoryTarget())
     context = TargetNormalizationContext(
         conversation_id="conversation",
@@ -80,7 +82,7 @@ def test_attack_strategy_resolves_per_send_history_override():
         TreeOfAttacksWithPruningAttack,
     ],
 )
-def test_techniques_can_specify_prepended_policy(attack_class):
+def test_techniques_can_specify_prepended_policy(attack_class: type[AttackStrategy[Any, Any]]) -> None:
     """Each attack that creates or accepts prepended history exposes the policy."""
     parameter = inspect.signature(attack_class.__init__).parameters.get("prepended_conversation_config")
 
@@ -89,7 +91,7 @@ def test_techniques_can_specify_prepended_policy(attack_class):
 
 
 @pytest.mark.usefixtures("patch_central_database")
-def test_technique_factory_forwards_prepended_policy():
+def test_technique_factory_forwards_prepended_policy() -> None:
     config = PrependedConversationConfig(apply_converters_to_roles=["user", "assistant"])
     factory = AttackTechniqueFactory(
         name="policy_test",
