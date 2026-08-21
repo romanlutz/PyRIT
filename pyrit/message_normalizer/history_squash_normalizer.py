@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import copy
+import logging
 import uuid
 
 from pyrit.message_normalizer._helpers import format_message_piece_for_context
@@ -9,6 +10,8 @@ from pyrit.message_normalizer.conversation_context_normalizer import Conversatio
 from pyrit.message_normalizer.generic_system_squash import GenericSystemSquashNormalizer
 from pyrit.message_normalizer.message_normalizer import MessageListNormalizer, MessageStringNormalizer
 from pyrit.models import Message, MessagePiece
+
+logger = logging.getLogger(__name__)
 
 
 class HistorySquashNormalizer(MessageListNormalizer[Message]):
@@ -81,6 +84,7 @@ class HistorySquashNormalizer(MessageListNormalizer[Message]):
         history = messages[:-1]
         live_request = messages[-1]
         self._validate_flattenable_converter_output(messages=history)
+        self._warn_on_non_text_history(messages=history)
 
         original_view = self._build_original_view(messages=messages)
         converted_view = self._build_converted_view(messages=messages)
@@ -217,6 +221,25 @@ class HistorySquashNormalizer(MessageListNormalizer[Message]):
             raise ValueError(
                 "Cannot flatten conversation history after request converters produced "
                 f"non-text output types {sorted(output_types)}. Historical conversion must produce text."
+            )
+
+    @staticmethod
+    def _warn_on_non_text_history(*, messages: list[Message]) -> None:
+        """Warn when native non-text history becomes target-facing text."""
+        flattened_types = sorted(
+            {
+                piece.converted_value_data_type
+                for message in messages
+                for piece in message.message_pieces
+                if piece.converted_value_data_type != "text"
+            }
+        )
+        if flattened_types:
+            logger.warning(
+                "Conversation history contains non-text pieces %s. History squashing "
+                "represents them as text placeholders for the target; memory keeps the "
+                "original pieces.",
+                flattened_types,
             )
 
     @staticmethod

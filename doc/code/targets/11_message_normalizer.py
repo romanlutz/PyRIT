@@ -20,6 +20,33 @@
 #
 # The `MessageNormalizer` classes handle these conversions, making it easy to work with any target regardless of its expected input format.
 #
+# ## Memory is canonical, the normalized payload is not
+#
+# A normalizer builds a **target-facing view at send time**. It is never written back to memory.
+#
+# This matters most for a target that cannot accept editable history. If you prepend eight
+# structured turns to a conversation, memory keeps eight structured turns, and the UI, scorers,
+# resume, and exports all see eight turns. `HistorySquashNormalizer` flattens those turns into
+# a single prompt only for the wire, then discards the flattened copy. The two representations
+# are expected to differ.
+#
+# Flattening the conversation in memory instead would break scoring, resume, and evaluation for
+# the sake of one target's wire format. If a prepended piece is not text (an image, for example),
+# the flattened view holds a text placeholder and the normalizer logs a warning, because the
+# target receives a description instead of the media.
+#
+# For prepended history on a target without editable history, PyRIT:
+#
+# 1. Converts and persists the structured prepended messages.
+# 2. Converts the live request.
+# 3. Applies the per-send `EDITABLE_HISTORY` normalizer selected by
+#    `PrependedConversationConfig`.
+# 4. Applies the target's remaining capability normalizers.
+# 5. Serializes the normalized view and invokes the provider.
+#
+# `TargetNormalizationContext` records the persisted prepended-message boundary. Stateful targets
+# consume it after the first provider attempt; stateless targets reuse it for each current request.
+#
 # ## Base Classes
 #
 # There are two base normalizer types:

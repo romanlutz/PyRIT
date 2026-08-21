@@ -188,9 +188,11 @@ class TargetConfiguration:
                 for capability, behavior in self._policy.behaviors.items()
                 if not caps.includes(capability=capability)
             },
-            # Stable, ordered representation of the resolved normalization
-            # pipeline. Captures the effect of ``normalizer_overrides`` since
-            # the pipeline is built from defaults + overrides.
+            # Stable, ordered representation of the pipeline this configuration was
+            # built with. Per-send ``normalizer_overrides`` are NOT reflected here:
+            # ``normalize_async`` builds a throwaway pipeline and never mutates
+            # ``self._pipeline``. Attack-owned overrides are represented by the
+            # attack identifier instead.
             "normalization_pipeline": [
                 f"{type(normalizer).__module__}.{type(normalizer).__qualname__}"
                 for normalizer in self._pipeline.normalizers

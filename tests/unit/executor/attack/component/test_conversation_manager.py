@@ -914,6 +914,62 @@ class TestInitializeContext:
         assert score1.id in returned_ids
         assert score2.id in returned_ids
 
+    async def test_scores_come_only_from_the_last_assistant_turn(
+        self,
+        attack_identifier: ComponentIdentifier,
+        mock_chat_target: MagicMock,
+    ) -> None:
+        """Only the final assistant turn's scores are surfaced, not every assistant turn."""
+        manager = ConversationManager()
+        conversation_id = str(uuid.uuid4())
+        context = _TestAttackContext(params=AttackParameters(objective="Test objective"))
+
+        early_piece = MessagePiece(
+            role="assistant",
+            original_value="early reply",
+            conversation_id=str(uuid.uuid4()),
+        )
+        final_piece = MessagePiece(
+            role="assistant",
+            original_value="final reply",
+            conversation_id=str(uuid.uuid4()),
+        )
+        manager._memory.add_message_pieces_to_memory(message_pieces=[early_piece, final_piece])
+
+        def _false_score(piece: MessagePiece, rationale: str) -> Score:
+            return Score(
+                score_type="true_false",
+                score_value="false",
+                score_category=["test"],
+                score_value_description=rationale,
+                score_rationale=rationale,
+                score_metadata={},
+                message_piece_id=str(piece.id),
+                scorer_class_identifier=get_mock_scorer_identifier(),
+            )
+
+        early_score = _false_score(early_piece, "early")
+        final_score = _false_score(final_piece, "final")
+        manager._memory.add_scores_to_memory(scores=[early_score, final_score])
+
+        context.prepended_conversation = [
+            Message.from_prompt(prompt="first ask", role="user"),
+            Message(message_pieces=[early_piece]),
+            Message.from_prompt(prompt="second ask", role="user"),
+            Message(message_pieces=[final_piece]),
+        ]
+
+        state = await manager.initialize_context_async(
+            context=context,
+            target=mock_chat_target,
+            conversation_id=conversation_id,
+            max_turns=10,
+        )
+
+        assert [score.id for score in state.last_assistant_message_scores] == [final_score.id]
+        assert context.last_score is not None
+        assert context.last_score.id == final_score.id
+
     async def test_prepended_conversation_ignores_true_scores(
         self,
         attack_identifier: ComponentIdentifier,
