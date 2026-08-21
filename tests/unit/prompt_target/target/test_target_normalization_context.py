@@ -205,7 +205,7 @@ def test_context_remaps_only_explicit_history_for_duplicate_conversation():
     assert duplicate.select_history(messages=duplicated_messages) == [duplicated_messages[0]]
 
 
-def test_context_remap_preserves_consumed_state():
+def test_context_remap_resets_consumed_state_for_new_conversation():
     seed = _message(role="user", value="seed", sequence=0)
     duplicated_seed = seed.duplicate()
     duplicated_seed.get_piece().conversation_id = "duplicate"
@@ -224,5 +224,5 @@ def test_context_remap_preserves_consumed_state():
         duplicated_messages=[duplicated_seed],
     )
 
-    assert duplicate.is_consumed
-    assert duplicate.select_history(messages=[duplicated_seed]) == []
+    assert not duplicate.is_consumed
+    assert duplicate.select_history(messages=[duplicated_seed]) == [duplicated_seed]

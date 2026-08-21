@@ -68,6 +68,19 @@ class _RecordingTarget(PromptTarget):
         ]
 
 
+class _ConversationKeyedRecordingTarget(_RecordingTarget):
+    def __init__(self) -> None:
+        super().__init__(supports_multi_turn=True)
+        self.prompts_by_conversation: dict[str, list[str]] = {}
+
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        request = normalized_conversation[-1]
+        conversation_id = request.get_piece().conversation_id
+        assert conversation_id
+        self.prompts_by_conversation.setdefault(conversation_id, []).append(request.get_value())
+        return await super()._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+
+
 class _ImageOutputConverter(Converter):
     SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
     SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
@@ -363,6 +376,46 @@ async def test_tap_seeded_stateless_retained_and_cloned_branches_replay_only_ori
         ["original seed", "depth two cloned"],
         ["original seed", "depth three cloned"],
     ]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_stateful_clone_replays_seed_once_for_new_conversation():
+    target = _ConversationKeyedRecordingTarget()
+    formatter = MagicMock(spec=MessageStringNormalizer)
+
+    async def format_messages(messages: list[Message]) -> str:
+        return "|".join(message.get_value() for message in messages)
+
+    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
+    node = _make_tap_node(target=target)
+    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
+    _set_tap_seed_boundary(
+        node=node,
+        target=target,
+        seed_messages=[Message.from_prompt(prompt="original seed", role="user")],
+    )
+    node._objective = "objective"
+    parent_conversation_id = node.objective_target_conversation_id
+
+    await node._send_prompt_to_target_async("parent first")
+    assert node._target_normalization_context
+    assert node._target_normalization_context.is_consumed
+
+    cloned = node.duplicate()
+    cloned._objective = "objective"
+    cloned_conversation_id = cloned.objective_target_conversation_id
+    assert cloned_conversation_id != parent_conversation_id
+    assert cloned._target_normalization_context
+    assert not cloned._target_normalization_context.is_consumed
+
+    await node._send_prompt_to_target_async("parent second")
+    await cloned._send_prompt_to_target_async("clone first")
+    await cloned._send_prompt_to_target_async("clone second")
+
+    assert target.prompts_by_conversation == {
+        parent_conversation_id: ["original seed|parent first", "parent second"],
+        cloned_conversation_id: ["original seed|clone first", "clone second"],
+    }
 
 
 @pytest.mark.usefixtures("patch_central_database")

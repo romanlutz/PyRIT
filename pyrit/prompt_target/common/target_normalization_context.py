@@ -206,6 +206,7 @@ class TargetNormalizationContext:
 
         Returns:
             A new context with boundary IDs from the duplicated conversation.
+            A new logical conversation starts with an unconsumed boundary.
 
         Raises:
             ValueError: If the duplicated messages do not match the source structure
@@ -249,5 +250,7 @@ class TargetNormalizationContext:
             ),
             replay_history_each_send=self.replay_history_each_send,
         )
-        duplicated_context._history_consumed = self._history_consumed
+        # Provider bootstrap consumption belongs to the logical conversation, not copied memory.
+        if conversation_id == self.conversation_id:
+            duplicated_context._history_consumed = self._history_consumed
         return duplicated_context
