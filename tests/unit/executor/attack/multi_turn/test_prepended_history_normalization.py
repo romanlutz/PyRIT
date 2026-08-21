@@ -3,10 +3,12 @@
 
 """Focused regression tests for prepended-history target normalization."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from pyrit.converter import Converter, ConverterResult
 from pyrit.executor.attack.component import ConversationManager, PrependedConversationConfig
 from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
 from pyrit.executor.attack.core import AttackAdversarialConfig, AttackScoringConfig
@@ -28,8 +30,9 @@ from pyrit.models import (
     ConversationType,
     Message,
     MessagePiece,
+    PromptDataType,
 )
-from pyrit.prompt_normalizer import PromptNormalizer
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import (
     CapabilityName,
     PromptTarget,
@@ -50,10 +53,12 @@ class _RecordingTarget(PromptTarget):
             )
         )
         self.prompt_sent: list[str] = []
+        self.normalized_requests: list[Message] = []
 
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         request = normalized_conversation[-1]
         self.prompt_sent.append(request.get_value())
+        self.normalized_requests.append(request)
         return [
             MessagePiece(
                 role="assistant",
@@ -61,6 +66,18 @@ class _RecordingTarget(PromptTarget):
                 conversation_id=request.get_piece().conversation_id,
             ).to_message()
         ]
+
+
+class _ImageOutputConverter(Converter):
+    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
+    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
+
+    def __init__(self, *, output_path: str) -> None:
+        super().__init__()
+        self._output_path = output_path
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        return ConverterResult(output_text=self._output_path, output_type="image_path")
 
 
 def _make_context() -> MultiTurnAttackContext[AttackParameters]:
@@ -261,30 +278,91 @@ def _make_tap_node(*, target: PromptTarget) -> _TreeOfAttacksNode:
     )
 
 
-@pytest.mark.parametrize("supports_multi_turn", [False, True])
-@pytest.mark.usefixtures("patch_central_database")
-def test_tap_branch_duplicates_full_history_with_explicit_boundary(supports_multi_turn: bool):
-    target = _RecordingTarget(supports_multi_turn=supports_multi_turn)
-    node = _make_tap_node(target=target)
+def _set_tap_seed_boundary(
+    *,
+    node: _TreeOfAttacksNode,
+    target: PromptTarget,
+    seed_messages: list[Message],
+) -> None:
     _seed_conversation(
         conversation_id=node.objective_target_conversation_id,
         target=target,
-        messages=[
-            Message.from_system_prompt("system"),
-            Message.from_prompt(prompt="request", role="user"),
-            Message.from_prompt(prompt="response", role="assistant"),
-        ],
+        messages=seed_messages,
     )
-
-    duplicate = node.duplicate()
-
-    messages = CentralMemory.get_memory_instance().get_conversation_messages(
-        conversation_id=duplicate.objective_target_conversation_id
+    node._target_normalization_context = ConversationManager.create_target_normalization_context(
+        target=target,
+        conversation_id=node.objective_target_conversation_id,
+        prepended_messages=seed_messages,
     )
-    assert [message.api_role for message in messages] == ["system", "user", "assistant"]
-    assert duplicate._target_normalization_context is not None
-    assert duplicate._target_normalization_context.history_message_count == 3
-    assert duplicate._target_normalization_context.replay_history_each_send is not supports_multi_turn
+    assert node._target_normalization_context is not None
+
+
+def _branch_tap_node(
+    *,
+    node: _TreeOfAttacksNode,
+    branching_factor: int,
+) -> list[_TreeOfAttacksNode]:
+    context = MagicMock()
+    context.nodes = [node]
+    context.related_conversations = set()
+    attack = MagicMock()
+    attack._configuration.branching_factor = branching_factor
+    TreeOfAttacksWithPruningAttack._branch_existing_nodes(attack, context)
+    return context.nodes
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_seeded_stateless_retained_and_cloned_branches_replay_only_original_seed():
+    target = _RecordingTarget()
+    formatter = MagicMock(spec=MessageStringNormalizer)
+
+    async def format_messages(messages: list[Message]) -> str:
+        return "|".join(message.get_value() for message in messages)
+
+    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
+    node = _make_tap_node(target=target)
+    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
+    seed = Message.from_prompt(prompt="original seed", role="user")
+    _set_tap_seed_boundary(node=node, target=target, seed_messages=[seed])
+    node._objective = "objective"
+    await node._send_prompt_to_target_async("depth one")
+    original_context = node._target_normalization_context
+    assert original_context is not None
+
+    retained, cloned = _branch_tap_node(node=node, branching_factor=2)
+    assert retained is node
+    assert retained._target_normalization_context is original_context
+    assert cloned._target_normalization_context is not None
+    assert cloned._target_normalization_context.history_message_count == 1
+    cloned_messages = CentralMemory.get_memory_instance().get_conversation_messages(
+        conversation_id=cloned.objective_target_conversation_id
+    )
+    assert cloned._target_normalization_context.history_message_ids == (cloned_messages[0].get_piece().id,)
+    assert cloned._target_normalization_context.history_message_ids != original_context.history_message_ids
+
+    for branch, prompt in [(retained, "depth two retained"), (cloned, "depth two cloned")]:
+        branch._objective = "objective"
+        await branch._send_prompt_to_target_async(prompt)
+
+    deep_clone = cloned.duplicate()
+    deep_clone._objective = "objective"
+    await deep_clone._send_prompt_to_target_async("depth three cloned")
+
+    assert target.prompt_sent == [
+        "original seed|depth one",
+        "original seed|depth two retained",
+        "original seed|depth two cloned",
+        "original seed|depth three cloned",
+    ]
+    formatted_values = [
+        [message.get_value() for message in call.args[0]] for call in formatter.normalize_string_async.await_args_list
+    ]
+    assert formatted_values == [
+        ["original seed", "depth one"],
+        ["original seed", "depth two retained"],
+        ["original seed", "depth two cloned"],
+        ["original seed", "depth three cloned"],
+    ]
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -331,7 +409,33 @@ async def test_tap_unseeded_stateless_send_retains_current_only_payload():
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_tap_stateless_branch_sends_original_boundary_plus_each_current_request():
+async def test_tap_unseeded_stateless_retained_and_cloned_branches_send_current_only():
+    target = _RecordingTarget()
+    node = _make_tap_node(target=target)
+    node._objective = "objective"
+    await node._send_prompt_to_target_async("depth one")
+
+    retained, cloned = _branch_tap_node(node=node, branching_factor=2)
+    assert retained._target_normalization_context is None
+    assert cloned._target_normalization_context is None
+    for branch, prompt in [(retained, "depth two retained"), (cloned, "depth two cloned")]:
+        branch._objective = "objective"
+        await branch._send_prompt_to_target_async(prompt)
+
+    deep_clone = cloned.duplicate()
+    deep_clone._objective = "objective"
+    await deep_clone._send_prompt_to_target_async("depth three cloned")
+
+    assert target.prompt_sent == [
+        "depth one",
+        "depth two retained",
+        "depth two cloned",
+        "depth three cloned",
+    ]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_branching_factor_one_preserves_retained_seed_boundary():
     target = _RecordingTarget()
     formatter = MagicMock(spec=MessageStringNormalizer)
 
@@ -341,66 +445,83 @@ async def test_tap_stateless_branch_sends_original_boundary_plus_each_current_re
     formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
     node = _make_tap_node(target=target)
     node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
-    _seed_conversation(
-        conversation_id=node.objective_target_conversation_id,
+    _set_tap_seed_boundary(
+        node=node,
         target=target,
-        messages=[
-            Message.from_prompt(prompt="branch request", role="user"),
-            Message.from_prompt(prompt="branch response", role="assistant"),
-        ],
+        seed_messages=[Message.from_prompt(prompt="original seed", role="user")],
     )
-    duplicate = node.duplicate()
-    duplicate._objective = "objective"
+    node._objective = "objective"
+    await node._send_prompt_to_target_async("depth one")
+    original_context = node._target_normalization_context
+    original_boundary = original_context.history_message_ids if original_context else ()
 
-    await duplicate._send_prompt_to_target_async("first current")
-    await duplicate._send_prompt_to_target_async("second current")
+    branches = _branch_tap_node(node=node, branching_factor=1)
 
+    assert branches == [node]
+    assert node._target_normalization_context is original_context
+    assert node._target_normalization_context is not None
+    assert node._target_normalization_context.history_message_ids == original_boundary
+    await node._send_prompt_to_target_async("depth two retained")
     assert target.prompt_sent == [
-        "branch request|branch response|first current",
-        "branch request|branch response|second current",
+        "original seed|depth one",
+        "original seed|depth two retained",
     ]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_clone_does_not_replay_non_text_live_converter_output(tmp_path: Path):
+    image_path = tmp_path / "converted.png"
+    image_path.write_bytes(b"test image")
+    target = _RecordingTarget()
+    target._configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_message_pieces=True,
+            input_modalities=frozenset(
+                {
+                    frozenset({"text"}),
+                    frozenset({"image_path"}),
+                    frozenset({"text", "image_path"}),
+                }
+            ),
+        )
+    )
+    formatter = MagicMock(spec=MessageStringNormalizer)
+
+    async def format_messages(messages: list[Message]) -> str:
+        return "|".join(message.get_value() for message in messages)
+
+    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
+    node = _make_tap_node(target=target)
+    node._request_converters = ConverterConfiguration.from_converters(
+        converters=[_ImageOutputConverter(output_path=str(image_path))]
+    )
+    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
+    _set_tap_seed_boundary(
+        node=node,
+        target=target,
+        seed_messages=[Message.from_prompt(prompt="original seed", role="user")],
+    )
+    node._objective = "objective"
+
+    await node._send_prompt_to_target_async("depth one")
+    cloned = node.duplicate()
+    cloned._objective = "objective"
+    await cloned._send_prompt_to_target_async("depth two")
+
+    assert [piece.converted_value_data_type for piece in target.normalized_requests[-1].message_pieces] == [
+        "text",
+        "image_path",
+    ]
+    assert target.normalized_requests[-1].get_values() == ["original seed", str(image_path)]
     formatted_values = [
         [message.get_value() for message in call.args[0]] for call in formatter.normalize_string_async.await_args_list
     ]
     assert formatted_values == [
-        ["branch request", "branch response", "first current"],
-        ["branch request", "branch response", "second current"],
+        ["original seed", "depth one"],
+        ["original seed"],
+        ["original seed", "depth two"],
+        ["original seed"],
     ]
-
-
-@pytest.mark.parametrize("branching_factor", [1, 2])
-@pytest.mark.usefixtures("patch_central_database")
-async def test_tap_retained_and_cloned_stateless_branches_replay_same_full_history(branching_factor: int):
-    target = _RecordingTarget()
-    formatter = MagicMock(spec=MessageStringNormalizer)
-
-    async def format_messages(messages: list[Message]) -> str:
-        return "|".join(message.get_value() for message in messages)
-
-    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
-    node = _make_tap_node(target=target)
-    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
-    _seed_conversation(
-        conversation_id=node.objective_target_conversation_id,
-        target=target,
-        messages=[
-            Message.from_prompt(prompt="branch request", role="user"),
-            Message.from_prompt(prompt="branch response", role="assistant"),
-        ],
-    )
-    context = MagicMock()
-    context.nodes = [node]
-    context.related_conversations = set()
-    attack = MagicMock()
-    attack._configuration.branching_factor = branching_factor
-
-    TreeOfAttacksWithPruningAttack._branch_existing_nodes(attack, context)
-
-    assert len(context.nodes) == branching_factor
-    for branch in context.nodes:
-        branch._objective = "objective"
-        await branch._send_prompt_to_target_async("current request")
-    assert target.prompt_sent == ["branch request|branch response|current request"] * branching_factor
 
 
 @pytest.fixture

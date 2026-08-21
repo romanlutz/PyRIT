@@ -268,10 +268,9 @@ class PromptTarget(Identifiable):
         The original conversation in memory is never mutated. The returned list is an
         ephemeral copy intended only for building the API request body.
 
-        After normalization, the metadata from the original ``message`` is copied
-        onto the last normalized message so that downstream code (e.g.
-        ``construct_response_from_request``) propagates the correct
-        ``conversation_id`` and request lineage to the response.
+        After normalization, every output piece is stamped with the current
+        conversation ID. Normalizers own all other output metadata; removed
+        ``prompt_metadata`` keys are not restored.
 
         Args:
             message (Message): The current message to append.
@@ -298,48 +297,10 @@ class PromptTarget(Identifiable):
             normalizer_overrides=normalizer_overrides,
         )
         if normalized:
-            # Normalizers may create new Message objects (via Message.from_prompt) with
-            # random conversation_ids.  Stamp the correct conversation_id on every
-            # message (idempotent for originals, fixes new ones).  Full lineage is only
-            # propagated to the last message — it's the one targets use to build the
-            # response, and earlier messages carry their own legitimate metadata.
             for msg in normalized:
                 for piece in msg.message_pieces:
                     piece.conversation_id = conversation_id
-            self._propagate_lineage(source=message, target_message=normalized[-1])
-            if len(normalized) > len(conversation):
-                logger.warning(
-                    "Normalization produced more messages than the input conversation "
-                    "(%d → %d). Only the last normalized message has full lineage "
-                    "metadata. Additional new messages have conversation_id set but "
-                    "require manual lineage updates if needed.",
-                    len(conversation),
-                    len(normalized),
-                )
         return normalized
-
-    @staticmethod
-    def _propagate_lineage(*, source: Message, target_message: Message) -> None:
-        """
-        Copy request-lineage metadata from ``source`` onto every piece in ``target_message``.
-
-        Normalizers may create brand-new messages or pieces, such as the combined
-        text piece from ``HistorySquashNormalizer``, that lack request lineage.
-        This method restores the original metadata so that the response built from
-        the normalized message stays part of the correct conversation and retains
-        traceability.
-
-        Normalizers own ``prompt_metadata`` on their output. The final metadata is
-        authoritative so a later normalizer can intentionally remove keys such as
-        ``json_schema`` without lineage propagation restoring them.
-
-        Args:
-            source: The original (pre-normalization) message whose metadata is authoritative.
-            target_message: The normalized message whose pieces will be updated in place.
-        """
-        conversation_id = source.get_piece().conversation_id
-        for piece in target_message.message_pieces:
-            piece.conversation_id = conversation_id
 
     def set_model_name(self, *, model_name: str) -> None:
         """

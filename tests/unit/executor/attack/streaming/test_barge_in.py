@@ -13,7 +13,7 @@ import pytest
 from pyrit.executor.attack import BargeInAttack, BargeInAttackContext
 from pyrit.executor.attack.core import AttackParameters
 from pyrit.models import AttackOutcome, Message, MessagePiece
-from pyrit.prompt_target import RealtimeTarget
+from pyrit.prompt_target import RealtimeTarget, TargetNormalizationContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -156,14 +156,20 @@ async def test_setup_async_persists_prepended_conversation_to_memory(vad_target)
     # All three messages share the context's conversation_id post-setup.
     for m in add_calls:
         assert m.message_pieces[0].conversation_id == ctx.conversation_id
+    assert ctx.target_normalization_context is None
 
 
-async def test_setup_async_no_op_when_prepended_conversation_empty(vad_target):
-    """Empty prepended_conversation: no memory writes, no crash."""
+async def test_setup_async_clears_unused_normalization_context_when_prepended_empty(vad_target):
+    """The direct streaming path does not retain target normalization state."""
     attack = BargeInAttack(objective_target=vad_target)
     ctx = BargeInAttackContext(
         params=AttackParameters(objective="o"),  # no prepended_conversation
         audio_chunks=_aiter([b"\x00" * 96]),
+    )
+    ctx.target_normalization_context = TargetNormalizationContext(
+        conversation_id=ctx.conversation_id,
+        history_message_ids=(Message.from_prompt(prompt="unused", role="user").get_piece().id,),
+        replay_history_each_send=True,
     )
 
     add_calls: list[Any] = []
@@ -172,6 +178,7 @@ async def test_setup_async_no_op_when_prepended_conversation_empty(vad_target):
         await attack._setup_async(context=ctx)
 
     assert add_calls == []
+    assert ctx.target_normalization_context is None
 
 
 # ---- _perform_async: session factory passthrough ----------------------------------------------

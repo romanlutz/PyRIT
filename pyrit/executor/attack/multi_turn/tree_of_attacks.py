@@ -749,19 +749,6 @@ class _TreeOfAttacksNode:
         ):
             self.objective_target_conversation_id = str(uuid.uuid4())
 
-    def _refresh_stateless_branch_boundary(self) -> None:
-        """Use the complete current branch as the next stateless target payload boundary."""
-        if self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN):
-            return
-
-        messages = list(self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id))
-        replayable_messages = ConversationManager.get_persistable_prepended_messages(prepended_conversation=messages)
-        self._target_normalization_context = ConversationManager.create_target_normalization_context(
-            target=self._objective_target,
-            conversation_id=self.objective_target_conversation_id,
-            prepended_messages=replayable_messages,
-        )
-
     async def _score_response_async(self, *, response: Message, objective: str) -> None:
         """
         Score the response from the objective target using the configured scorers.
@@ -937,22 +924,23 @@ class _TreeOfAttacksNode:
             prepended_conversation_config=self._prepended_conversation_config,
         )
 
-        # Duplicate the complete logical branch. A non-editable target receives
-        # this explicit branch boundary once (stateful) or on every send
-        # (stateless), without inferring it from assistant/error rows.
+        source_messages = list(
+            self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id)
+        )
         duplicate_node.objective_target_conversation_id = self._memory.duplicate_conversation(
             conversation_id=self.objective_target_conversation_id
         )
         duplicated_messages = list(
             self._memory.get_conversation_messages(conversation_id=duplicate_node.objective_target_conversation_id)
         )
-        replayable_messages = ConversationManager.get_persistable_prepended_messages(
-            prepended_conversation=duplicated_messages
-        )
-        duplicate_node._target_normalization_context = ConversationManager.create_target_normalization_context(
-            target=self._objective_target,
-            conversation_id=duplicate_node.objective_target_conversation_id,
-            prepended_messages=replayable_messages,
+        duplicate_node._target_normalization_context = (
+            self._target_normalization_context.remap_for_duplicate_conversation(
+                conversation_id=duplicate_node.objective_target_conversation_id,
+                source_messages=source_messages,
+                duplicated_messages=duplicated_messages,
+            )
+            if self._target_normalization_context
+            else None
         )
 
         duplicate_node.adversarial_chat_conversation_id = self._memory.duplicate_conversation(
@@ -1971,11 +1959,6 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         cloned_nodes = []
 
         for node in context.nodes:
-            # Stateless targets have no provider-side conversation to retain.
-            # Refresh the original node as well as its clones so every outgoing
-            # branch sees the same complete logical history. This also covers a
-            # branching factor of one, where no clone is created.
-            node._refresh_stateless_branch_boundary()
             for _ in range(self._configuration.branching_factor - 1):
                 cloned_node = node.duplicate()
                 # Add the adversarial chat conversation ID of the duplicated node to the context's tracking

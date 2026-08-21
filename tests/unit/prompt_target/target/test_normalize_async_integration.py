@@ -16,14 +16,17 @@ from openai.types.chat import ChatCompletion
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from unit.mocks import MockPromptTarget
 
+from pyrit.memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
 from pyrit.message_normalizer import (
     ConversationContextNormalizer,
     HistorySquashNormalizer,
+    MessageListNormalizer,
     MessageStringNormalizer,
     TokenizerTemplateNormalizer,
 )
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, PromptResponseError
+from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import AzureMLChatTarget, OpenAIChatTarget, TargetNormalizationContext
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityHandlingPolicy,
@@ -753,6 +756,34 @@ async def test_history_squash_does_not_restore_adapted_json_schema_metadata():
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_custom_normalizer_output_metadata_is_authoritative():
+    target = MockPromptTarget()
+    target._configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_multi_message_pieces=True,
+            supports_system_prompt=True,
+        )
+    )
+    source = _make_message(role="user", content="source")
+    source.get_piece().prompt_metadata = {"source-only": "must not be restored"}
+    replacement = Message.from_prompt(prompt="replacement", role="user")
+    normalizer = MagicMock(spec=MessageListNormalizer)
+    normalizer.normalize_async = AsyncMock(return_value=[replacement])
+    mock_memory = MagicMock(spec=MemoryInterface)
+    mock_memory.get_conversation_messages.return_value = []
+    target._memory = mock_memory
+
+    result = await target._get_normalized_conversation_async(
+        message=source,
+        normalizer_overrides={CapabilityName.EDITABLE_HISTORY: normalizer},
+    )
+
+    assert result[0].get_piece().conversation_id == "conv1"
+    assert result[0].get_piece().prompt_metadata == {}
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_prepended_history_adapter_is_used_only_when_explicitly_passed():
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(
@@ -1053,81 +1084,101 @@ async def test_target_normalization_failure_can_be_retried():
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_retry_ignores_persisted_failed_request_and_error_response():
+async def test_prompt_normalizer_retry_excludes_persisted_processing_exchange():
     target = MockPromptTarget()
-    target._configuration = TargetConfiguration(
-        capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_system_prompt=True,
-        )
-    )
-    prepended = _make_message(role="user", content="prepended")
-    failed_request = _make_message(role="user", content="failed request")
-    error_response = _make_message(role="assistant", content="processing error")
-    error_response.get_piece().response_error = "processing"
-    mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation_messages.return_value = [prepended, failed_request, error_response]
-    target._memory = mock_memory
-    formatter = MagicMock(spec=MessageStringNormalizer)
-    formatter.normalize_string_async = AsyncMock(return_value="formatted retry")
-    target_context = _make_target_normalization_context(
-        prepended_messages=[prepended],
-        target_supports_multi_turn=True,
-    )
-    normalizer_overrides = _make_normalizer_overrides(
-        target_normalization_context=target_context,
-        formatter=formatter,
-    )
-
-    result = await target._get_normalized_conversation_async(
-        message=_make_message(role="user", content="retry"),
-        normalizer_overrides=normalizer_overrides,
-        target_normalization_context=target_context,
-    )
-
-    assert result[0].get_value() == "formatted retry"
-    formatted_messages = formatter.normalize_string_async.await_args.args[0]
-    assert [message.get_value() for message in formatted_messages] == ["prepended", "retry"]
-
-
-@pytest.mark.usefixtures("patch_central_database")
-async def test_ordinary_history_excludes_processing_exchange_and_traceback():
-    target = MockPromptTarget()
-    target._configuration = TargetConfiguration(
-        capabilities=TargetCapabilities(
-            supports_multi_turn=True,
-            supports_editable_history=True,
-        )
-    )
-    successful_request = _make_message(role="user", content="successful request")
-    successful_request.get_piece().sequence = 0
+    prompt_normalizer = PromptNormalizer()
+    conversation_id = "processing-retry"
     successful_response = _make_message(role="assistant", content="successful response")
-    successful_response.get_piece().sequence = 1
-    failed_request = _make_message(role="user", content="failed request")
-    failed_request.get_piece().sequence = 2
-    processing_response = _make_message(
-        role="assistant",
-        content="RuntimeError\nTraceback (most recent call last): secret stack",
-    )
-    processing_response.get_piece().sequence = 3
-    processing_response.get_piece().response_error = "processing"
-    mock_memory = MagicMock(spec=MemoryInterface)
-    mock_memory.get_conversation_messages.return_value = [
-        successful_request,
-        successful_response,
-        failed_request,
-        processing_response,
-    ]
-    target._memory = mock_memory
+    retry_response = _make_message(role="assistant", content="retry response")
 
-    result = await target._get_normalized_conversation_async(
-        message=_make_message(role="user", content="retry"),
-    )
+    with patch.object(target, "_send_prompt_to_target_async", new_callable=AsyncMock) as send:
+        send.side_effect = [[successful_response], RuntimeError("private provider failure"), [retry_response]]
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="successful request"),
+            target=target,
+            conversation_id=conversation_id,
+        )
+        with pytest.raises(Exception, match="Error sending prompt"):
+            await prompt_normalizer.send_prompt_async(
+                message=_make_message(role="user", content="failed request"),
+                target=target,
+                conversation_id=conversation_id,
+            )
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="retry"),
+            target=target,
+            conversation_id=conversation_id,
+        )
 
-    assert [message.get_value() for message in result] == [
+    retry_payload = send.await_args_list[2].kwargs["normalized_conversation"]
+    assert [message.get_value() for message in retry_payload] == [
         "successful request",
         "successful response",
         "retry",
+    ]
+    persisted = list(CentralMemory.get_memory_instance().get_conversation_messages(conversation_id=conversation_id))
+    processing_index = next(
+        index for index, message in enumerate(persisted) if message.get_piece().response_error == "processing"
+    )
+    failed_request = persisted[processing_index - 1].get_piece()
+    processing_error = persisted[processing_index].get_piece()
+    assert failed_request.api_role == "user"
+    assert processing_error.original_prompt_id != failed_request.id
+    assert processing_error.sequence == failed_request.sequence + 1
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_prompt_normalizer_retry_excludes_persisted_unknown_exchange():
+    target = MockPromptTarget()
+    prompt_normalizer = PromptNormalizer()
+    unknown_response = _make_message(role="assistant", content="unknown provider failure")
+    unknown_response.get_piece().response_error = "unknown"
+    retry_response = _make_message(role="assistant", content="retry response")
+
+    with patch.object(target, "_send_prompt_to_target_async", new_callable=AsyncMock) as send:
+        send.side_effect = [[unknown_response], [retry_response]]
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="failed request"),
+            target=target,
+            conversation_id="unknown-retry",
+        )
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="retry"),
+            target=target,
+            conversation_id="unknown-retry",
+        )
+
+    retry_payload = send.await_args_list[1].kwargs["normalized_conversation"]
+    assert [message.get_value() for message in retry_payload] == ["retry"]
+
+
+@pytest.mark.parametrize("response_error", ["blocked", "empty"])
+@pytest.mark.usefixtures("patch_central_database")
+async def test_prompt_normalizer_retains_provider_round_trip(response_error: PromptResponseError):
+    target = MockPromptTarget()
+    prompt_normalizer = PromptNormalizer()
+    provider_response = _make_message(role="assistant", content=f"{response_error} response")
+    provider_response.get_piece().response_error = response_error
+    next_response = _make_message(role="assistant", content="next response")
+
+    with patch.object(target, "_send_prompt_to_target_async", new_callable=AsyncMock) as send:
+        send.side_effect = [[provider_response], [next_response]]
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="first request"),
+            target=target,
+            conversation_id=f"{response_error}-round-trip",
+        )
+        await prompt_normalizer.send_prompt_async(
+            message=_make_message(role="user", content="second request"),
+            target=target,
+            conversation_id=f"{response_error}-round-trip",
+        )
+
+    second_payload = send.await_args_list[1].kwargs["normalized_conversation"]
+    assert [message.get_value() for message in second_payload] == [
+        "first request",
+        f"{response_error} response",
+        "second request",
     ]
 
 

@@ -29,26 +29,31 @@ def filter_non_replayable_messages(*, messages: list[Message]) -> list[Message]:
         Messages that are safe to include in a later target-facing payload.
     """
     non_replayable_errors = {"processing", "unknown"}
-    failed_request_piece_ids = {
-        piece.original_prompt_id
-        for message in messages
-        for piece in message.message_pieces
-        if piece.response_error in non_replayable_errors and piece.original_prompt_id is not None
-    }
-    failed_request_sequences = {
-        piece.sequence - 1
-        for message in messages
-        for piece in message.message_pieces
-        if piece.response_error in non_replayable_errors and piece.sequence > 0
-    }
+    excluded_indexes: set[int] = set()
 
-    return [
-        message
-        for message in messages
-        if not any(piece.response_error in non_replayable_errors for piece in message.message_pieces)
-        and not any(piece.id in failed_request_piece_ids for piece in message.message_pieces)
-        and not any(piece.sequence in failed_request_sequences for piece in message.message_pieces)
-    ]
+    for index, error_response in enumerate(messages):
+        if not any(piece.response_error in non_replayable_errors for piece in error_response.message_pieces):
+            continue
+
+        excluded_indexes.add(index)
+        if index == 0:
+            continue
+
+        request = messages[index - 1]
+        request_piece = request.get_piece()
+        error_piece = error_response.get_piece()
+        is_adjacent_request = (
+            request.api_role == "user"
+            and error_response.api_role == "assistant"
+            and bool(request_piece.conversation_id)
+            and request_piece.conversation_id == error_piece.conversation_id
+            and request_piece.sequence >= 0
+            and error_piece.sequence == request_piece.sequence + 1
+        )
+        if is_adjacent_request:
+            excluded_indexes.add(index - 1)
+
+    return [message for index, message in enumerate(messages) if index not in excluded_indexes]
 
 
 @dataclass(slots=True)
@@ -180,3 +185,69 @@ class TargetNormalizationContext:
                 f"Missing {len(missing_ids)} message(s)."
             )
         return [messages_by_id[message_id] for message_id in self.history_message_ids]
+
+    def remap_for_duplicate_conversation(
+        self,
+        *,
+        conversation_id: str,
+        source_messages: list[Message],
+        duplicated_messages: list[Message],
+    ) -> TargetNormalizationContext:
+        """
+        Remap this explicit boundary to a duplicated conversation.
+
+        Only message pieces already identified as history are remapped. Live turns
+        copied into the new memory conversation never become part of the boundary.
+
+        Args:
+            conversation_id: Conversation ID assigned to the duplicated messages.
+            source_messages: Messages from the source conversation in persisted order.
+            duplicated_messages: Their duplicates in the same persisted order.
+
+        Returns:
+            A new context with boundary IDs from the duplicated conversation.
+
+        Raises:
+            ValueError: If the duplicated messages do not match the source structure
+                or an explicit history piece cannot be remapped.
+        """
+        if len(source_messages) != len(duplicated_messages):
+            raise ValueError("Duplicated conversation does not match the source message count.")
+
+        duplicated_ids_by_source_id: dict[uuid.UUID, uuid.UUID] = {}
+        for source_message, duplicated_message in zip(source_messages, duplicated_messages, strict=True):
+            if (
+                source_message.api_role != duplicated_message.api_role
+                or source_message.sequence != duplicated_message.sequence
+                or len(source_message.message_pieces) != len(duplicated_message.message_pieces)
+            ):
+                raise ValueError("Duplicated conversation does not preserve the source message structure.")
+
+            for source_piece, duplicated_piece in zip(
+                source_message.message_pieces,
+                duplicated_message.message_pieces,
+                strict=True,
+            ):
+                if (
+                    source_piece.api_role != duplicated_piece.api_role
+                    or source_piece.sequence != duplicated_piece.sequence
+                    or duplicated_piece.conversation_id != conversation_id
+                ):
+                    raise ValueError("Duplicated conversation does not preserve the source piece structure.")
+                duplicated_ids_by_source_id[source_piece.id] = duplicated_piece.id
+
+        missing_ids = [
+            message_id for message_id in self.history_message_ids if message_id not in duplicated_ids_by_source_id
+        ]
+        if missing_ids:
+            raise ValueError(f"Could not remap {len(missing_ids)} explicit history message(s).")
+
+        duplicated_context = TargetNormalizationContext(
+            conversation_id=conversation_id,
+            history_message_ids=tuple(
+                duplicated_ids_by_source_id[message_id] for message_id in self.history_message_ids
+            ),
+            replay_history_each_send=self.replay_history_each_send,
+        )
+        duplicated_context._history_consumed = self._history_consumed
+        return duplicated_context

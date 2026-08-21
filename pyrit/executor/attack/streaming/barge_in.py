@@ -85,7 +85,8 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
                 Defaults to a fresh ``PromptNormalizer``.
             params_type: Attack parameter dataclass type.
             prepended_conversation_config: Configuration for prepended-conversation
-                conversion and formatting.
+                converter-role selection. Its message formatter is not used by the
+                direct realtime streaming path.
 
         Raises:
             ValueError: If ``objective_target`` does not declare the ``STREAMING_AUDIO``
@@ -131,7 +132,9 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
 
         Prepended messages are recorded in memory but are NOT pushed into the live realtime
         session beyond the system prompt — the model only conditions on the system message
-        and live audio chunks.
+        and live audio chunks. The direct streaming path does not call
+        ``PromptTarget.send_prompt_async``, so it cannot consume a target-normalization
+        context or a prepended-history formatter.
         """
         if not context.conversation_id:
             context.conversation_id = str(uuid.uuid4())
@@ -142,6 +145,7 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
             request_converters=self._request_converters,
             prepended_conversation_config=self._prepended_conversation_config,
         )
+        context.target_normalization_context = None
 
     async def _teardown_async(self, *, context: BargeInAttackContext[Any]) -> None:
         """No-op teardown — connection / dispatcher are closed inside the session's ``run_async``."""

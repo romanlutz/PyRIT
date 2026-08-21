@@ -38,6 +38,12 @@ class MessageListNormalizer(abc.ABC, Generic[T]):
 
         Returns:
             A list of normalized items of type T.
+
+        Note:
+            Output metadata is authoritative. A normalizer that creates replacement
+            ``Message`` or ``MessagePiece`` objects must preserve any
+            ``prompt_metadata`` required by downstream consumers. The target stamps
+            the active conversation ID but does not merge removed metadata back in.
         """
 
     async def normalize_to_dicts_async(self, messages: list[Message]) -> list[dict[str, Any]]:
