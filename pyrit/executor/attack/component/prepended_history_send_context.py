@@ -3,13 +3,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import uuid
-    from typing import Any
 
     from pyrit.models import Message
 
@@ -34,7 +32,6 @@ class PrependedHistorySendContext:
     _seed_consumed: bool = field(default=False, init=False, repr=False)
     _send_in_progress: bool = field(default=False, init=False, repr=False)
     _provider_attempt_marked: bool = field(default=False, init=False, repr=False)
-    _provider_attempted_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _provider_attempt_count: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -83,15 +80,6 @@ class PrependedHistorySendContext:
         """Number of sends that reached provider invocation."""
         return self._provider_attempt_count
 
-    @property
-    def provider_attempted_by_current_task(self) -> bool:
-        """Whether the current send task reached provider invocation."""
-        try:
-            current_task = asyncio.current_task()
-        except RuntimeError:
-            return False
-        return current_task is not None and current_task is self._provider_attempted_task
-
     def begin_send(self) -> None:
         """
         Acquire this context for one complete send.
@@ -106,7 +94,6 @@ class PrependedHistorySendContext:
             )
         self._send_in_progress = True
         self._provider_attempt_marked = False
-        self._provider_attempted_task = None
 
     def mark_provider_attempted(self) -> None:
         """
@@ -122,12 +109,7 @@ class PrependedHistorySendContext:
             raise RuntimeError("Cannot mark a provider attempt without an active send.")
         if self._provider_attempt_marked:
             return
-        try:
-            current_task = asyncio.current_task()
-        except RuntimeError:
-            current_task = None
         self._provider_attempt_marked = True
-        self._provider_attempted_task = current_task
         self._provider_attempt_count += 1
         if not self.replay_seed_each_send:
             self._seed_consumed = True

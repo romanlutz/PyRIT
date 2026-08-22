@@ -117,7 +117,7 @@ def test_context_rejects_provider_attempt_without_active_send() -> None:
         context.mark_provider_attempted()
 
 
-def test_context_counts_one_provider_attempt_per_send_task() -> None:
+def test_context_counts_one_provider_attempt_per_send() -> None:
     context = PrependedHistorySendContext(
         conversation_id="conversation",
         seed_message_ids=(uuid.uuid4(),),

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Single registry: add new normalizable capabilities here and nowhere else.
 # Order in the list determines pipeline execution order.
 # ---------------------------------------------------------------------------
-NormalizerFactory = Callable[[TargetCapabilities], MessageListNormalizer[Message]]
+NormalizerFactory = Callable[[], MessageListNormalizer[Message]]
 
 _NORMALIZER_REGISTRY: list[tuple[CapabilityName, NormalizerFactory | None]] = [
     # Editable-history adaptation is intentionally per-send only. Prepended
@@ -34,9 +34,9 @@ _NORMALIZER_REGISTRY: list[tuple[CapabilityName, NormalizerFactory | None]] = [
     # whose boundary comes from persisted message IDs. It must run before
     # cardinality-changing target normalizers such as system-message squashing.
     (CapabilityName.EDITABLE_HISTORY, None),
-    (CapabilityName.SYSTEM_PROMPT, lambda _: GenericSystemSquashNormalizer()),
-    (CapabilityName.MULTI_TURN, lambda _: HistorySquashNormalizer()),
-    (CapabilityName.JSON_SCHEMA, lambda _: JsonSchemaNormalizer()),
+    (CapabilityName.SYSTEM_PROMPT, GenericSystemSquashNormalizer),
+    (CapabilityName.MULTI_TURN, HistorySquashNormalizer),
+    (CapabilityName.JSON_SCHEMA, JsonSchemaNormalizer),
 ]
 
 # Derived constant — no manual maintenance required.
@@ -135,7 +135,7 @@ class ConversationNormalizationPipeline:
             # which should be called in the request flow once the full end-to-end
             # workflow is implemented.
             if behavior == UnsupportedCapabilityBehavior.ADAPT and default_normalizer_factory is not None:
-                normalizers.append(default_normalizer_factory(capabilities))
+                normalizers.append(default_normalizer_factory())
                 adapted_capabilities.add(capability)
 
         return cls(
