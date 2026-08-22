@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -296,11 +297,13 @@ class TestPlaywrightCopilotTarget:
 
         mock_page.expect_file_chooser = MagicMock(return_value=MockFileChooserContextManager(mock_file_chooser))
 
-        await target._upload_image_async("/path/to/image.jpg")
+        with patch.object(target, "_mark_provider_attempted") as mark_provider_attempted:
+            await target._upload_image_async("/path/to/image.jpg")
 
         dropdown_locator.click.assert_awaited_once()
         file_picker_locator.wait_for.assert_awaited_once_with(state="visible", timeout=5000)
         file_picker_locator.click.assert_awaited_once()
+        mark_provider_attempted.assert_called_once_with()
         mock_file_chooser.set_files.assert_awaited_once_with("/path/to/image.jpg")
 
     async def test_wait_for_response_async_success(self, mock_page):
@@ -314,10 +317,14 @@ class TestPlaywrightCopilotTarget:
         mock_page.query_selector_all.return_value = [AsyncMock()]
 
         # Mock response extraction
-        with patch.object(target, "_extract_multimodal_content_async", return_value="Response text") as mock_extract:
+        with (
+            patch.object(target, "_extract_multimodal_content_async", return_value="Response text") as mock_extract,
+            patch.object(target, "_mark_provider_attempted") as mark_provider_attempted,
+        ):
             result = await target._wait_for_response_async(selectors)
 
         assert result == "Response text"
+        mark_provider_attempted.assert_called_once_with()
         mock_page.click.assert_awaited_once_with(selectors.send_button_selector)
         mock_extract.assert_awaited_once()
 
@@ -372,6 +379,7 @@ class TestPlaywrightCopilotTarget:
 
         # Mock the helper methods
         with (
+            patch.object(target, "_clear_text_input_async") as mock_clear_text,
             patch.object(target, "_send_text_async") as mock_send_text,
             patch.object(target, "_upload_image_async") as mock_upload_image,
             patch.object(target, "_wait_for_response_async", return_value="AI response") as mock_wait,
@@ -379,10 +387,35 @@ class TestPlaywrightCopilotTarget:
             result = await target._interact_with_copilot_async(multimodal_request)
 
         # Verify text and image handling
+        mock_clear_text.assert_awaited_once()
         mock_send_text.assert_awaited_once()
         mock_upload_image.assert_awaited_once_with("/path/to/image.jpg")
         mock_wait.assert_awaited_once()
         assert result == "AI response"
+
+    async def test_interact_cancellation_while_staging_text_does_not_mark_provider_attempt(
+        self, mock_page, text_request_piece
+    ):
+        target = PlaywrightCopilotTarget(page=mock_page)
+        request = Message(message_pieces=[text_request_piece])
+        staging_started = asyncio.Event()
+
+        async def stage_text(*, text: str, input_selector: str) -> None:
+            staging_started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(target, "_clear_text_input_async"),
+            patch.object(target, "_send_text_async", side_effect=stage_text),
+            patch.object(target, "_mark_provider_attempted") as mark_provider_attempted,
+        ):
+            task = asyncio.create_task(target._interact_with_copilot_async(request))
+            await staging_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mark_provider_attempted.assert_not_called()
 
     def test_constants(self, mock_page):
         """Test that class constants are defined correctly."""

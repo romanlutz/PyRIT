@@ -93,6 +93,14 @@ class _ImageOutputConverter(Converter):
         return ConverterResult(output_text=self._output_path, output_type="image_path")
 
 
+class _TextOutputConverter(Converter):
+    SUPPORTED_INPUT_TYPES: tuple[PromptDataType, ...] = ("image_path",)
+    SUPPORTED_OUTPUT_TYPES: tuple[PromptDataType, ...] = ("text",)
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        return ConverterResult(output_text="converted text", output_type="text")
+
+
 def _make_context() -> MultiTurnAttackContext[AttackParameters]:
     return MultiTurnAttackContext(params=AttackParameters(objective="test objective"))
 
@@ -379,7 +387,7 @@ async def test_tap_seeded_stateless_retained_and_cloned_branches_replay_only_ori
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_tap_stateful_clone_replays_seed_once_for_new_conversation():
+async def test_tap_stateful_clone_bootstraps_duplicated_branch_once():
     target = _ConversationKeyedRecordingTarget()
     formatter = MagicMock(spec=MessageStringNormalizer)
 
@@ -414,7 +422,41 @@ async def test_tap_stateful_clone_replays_seed_once_for_new_conversation():
 
     assert target.prompts_by_conversation == {
         parent_conversation_id: ["original seed|parent first", "parent second"],
-        cloned_conversation_id: ["original seed|clone first", "clone second"],
+        cloned_conversation_id: ["original seed|parent first|response|clone first", "clone second"],
+    }
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_unseeded_stateful_clone_bootstraps_duplicated_branch_once():
+    target = _ConversationKeyedRecordingTarget()
+    formatter = MagicMock(spec=MessageStringNormalizer)
+
+    async def format_messages(messages: list[Message]) -> str:
+        return "|".join(message.get_value() for message in messages)
+
+    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
+    node = _make_tap_node(target=target)
+    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
+    node._objective = "objective"
+    parent_conversation_id = node.objective_target_conversation_id
+
+    await node._send_prompt_to_target_async("parent first")
+    assert node._prepended_history_send_context is None
+
+    cloned = node.duplicate()
+    cloned._objective = "objective"
+    cloned_conversation_id = cloned.objective_target_conversation_id
+    assert cloned._prepended_history_send_context
+    assert cloned._prepended_history_send_context.seed_message_count == 0
+    assert cloned._prepended_history_send_context.bootstrap_message_count == 2
+
+    await node._send_prompt_to_target_async("parent second")
+    await cloned._send_prompt_to_target_async("clone first")
+    await cloned._send_prompt_to_target_async("clone second")
+
+    assert target.prompts_by_conversation == {
+        parent_conversation_id: ["parent first", "parent second"],
+        cloned_conversation_id: ["parent first|response|clone first", "clone second"],
     }
 
 
@@ -575,6 +617,67 @@ async def test_tap_clone_does_not_replay_non_text_live_converter_output(tmp_path
         ["original seed", "depth two"],
         ["original seed"],
     ]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_stateful_clone_rejects_non_text_converter_history(tmp_path: Path):
+    image_path = tmp_path / "converted.png"
+    image_path.write_bytes(b"test image")
+    target = _RecordingTarget()
+    target._configuration = TargetConfiguration(
+        capabilities=TargetCapabilities(
+            supports_multi_turn=True,
+            supports_multi_message_pieces=True,
+            input_modalities=frozenset(
+                {
+                    frozenset({"text"}),
+                    frozenset({"image_path"}),
+                    frozenset({"text", "image_path"}),
+                }
+            ),
+        )
+    )
+    node = _make_tap_node(target=target)
+    node._request_converters = ConverterConfiguration.from_converters(
+        converters=[_ImageOutputConverter(output_path=str(image_path))]
+    )
+    node._objective = "objective"
+
+    await node._send_prompt_to_target_async("depth one")
+
+    with pytest.raises(ValueError, match="cannot clone.*non-text output.*image_path"):
+        node.duplicate()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_tap_stateful_clone_accepts_converter_pipeline_with_final_text_output(tmp_path: Path):
+    image_path = tmp_path / "converted.png"
+    image_path.write_bytes(b"test image")
+    target = _ConversationKeyedRecordingTarget()
+    formatter = MagicMock(spec=MessageStringNormalizer)
+
+    async def format_messages(messages: list[Message]) -> str:
+        return "|".join(message.get_value() for message in messages)
+
+    formatter.normalize_string_async = AsyncMock(side_effect=format_messages)
+    node = _make_tap_node(target=target)
+    node._request_converters = ConverterConfiguration.from_converters(
+        converters=[
+            _ImageOutputConverter(output_path=str(image_path)),
+            _TextOutputConverter(),
+        ]
+    )
+    node._prepended_conversation_config = PrependedConversationConfig(message_normalizer=formatter)
+    node._objective = "objective"
+
+    await node._send_prompt_to_target_async("depth one")
+    cloned = node.duplicate()
+    cloned._objective = "objective"
+    await cloned._send_prompt_to_target_async("depth two")
+
+    assert cloned._prepended_history_send_context
+    assert cloned._prepended_history_send_context.is_seed_consumed
+    assert target.normalized_requests[-1].get_piece().converted_value == "converted text|response|converted text"
 
 
 @pytest.fixture

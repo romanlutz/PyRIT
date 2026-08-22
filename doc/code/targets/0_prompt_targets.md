@@ -34,6 +34,21 @@ converters have already run by this point, so role-specific converter choices re
 the target must receive one flattened request. The context is ephemeral and does not replace the
 structured messages stored in memory.
 
+For a stateful target without editable history, the initial bootstrap is flattened once. Later sends
+retain replayable memory history in the normalized view so a target such as `WebsocketTarget` can
+restore a replaced provider session, while the existing provider session still receives only the
+current request. A stateful TAP clone bootstraps its new provider session with the complete replayable
+duplicated branch, even when the attack started without an explicit prepended seed. Stateless targets
+continue to receive only the explicit prepended seed plus each current request, never prior live branch
+turns. A stateful TAP target without editable history can flatten only text converter output when
+branching; non-text converter output requires an editable-history target, a stateless target, or
+`branching_factor=1` so copied media is never replayed under a different role.
+
+The provider-attempt signal is emitted after shared target-side rate limiting. Targets that need more
+precise setup, such as WebSocket, Playwright, or conversation-keyed HTTP targets, emit it immediately
+before the irreversible provider operation. Cancellation before that point leaves a one-time
+bootstrap available for retry.
+
 `send_prompt_async` is the final public orchestration method. Custom target subclasses implement
 `_send_prompt_to_target_async(*, normalized_conversation: list[Message]) -> list[Message]` instead of
 overriding `send_prompt_async`.

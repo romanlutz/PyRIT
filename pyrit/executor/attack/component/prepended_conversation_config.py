@@ -85,7 +85,7 @@ class PrependedConversationConfig:
 
         return {
             CapabilityName.EDITABLE_HISTORY: HistorySquashNormalizer(
-                expected_history_message_count=prepended_history_send_context.seed_message_count,
+                expected_history_message_count=prepended_history_send_context.bootstrap_message_count,
                 message_normalizer=self.get_message_normalizer(),
             )
         }

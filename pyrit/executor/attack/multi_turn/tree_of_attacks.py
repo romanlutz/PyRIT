@@ -32,6 +32,9 @@ from pyrit.executor.attack.component.conversation_manager import (
     build_conversation_context_string_async,
 )
 from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.executor.attack.core.attack_config import (
     AttackAdversarialConfig,
     AttackConverterConfig,
@@ -54,6 +57,7 @@ from pyrit.models import (
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target import CapabilityName, PromptTarget
+from pyrit.prompt_target.common.target_history import filter_non_replayable_messages
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
 from pyrit.score import (
     FloatScaleThresholdScorer,
@@ -72,9 +76,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from pyrit.executor.attack.component.prepended_history_send_context import (
-        PrependedHistorySendContext,
-    )
     from pyrit.models.literals import PromptDataType
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,42 @@ class TAPSystemPromptPaths(enum.Enum):
 _ADVERSARIAL_REQUIREMENTS = TargetRequirements(
     native_required=frozenset({CapabilityName.MULTI_TURN, CapabilityName.SYSTEM_PROMPT}),
 )
+
+
+def _validate_stateful_clone_history_compatibility(
+    *,
+    objective_target: PromptTarget,
+    messages: list[Message],
+) -> None:
+    """
+    Reject converted history that cannot be replayed into a cloned provider session.
+
+    Raises:
+        ValueError: If a stateful target cannot preserve converted media while cloning.
+    """
+    if not objective_target.configuration.includes(
+        capability=CapabilityName.MULTI_TURN
+    ) or objective_target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY):
+        return
+
+    non_text_output_types = {
+        piece.converted_value_data_type
+        for message in messages
+        for piece in message.message_pieces
+        if piece.converted_value_data_type != "text"
+        and (
+            piece.original_value != piece.converted_value
+            or piece.original_value_data_type != piece.converted_value_data_type
+        )
+    }
+    if non_text_output_types:
+        raise ValueError(
+            "Tree of Attacks cannot clone a stateful objective-target conversation without editable history "
+            "when persisted request or response history contains converted non-text output "
+            f"{sorted(non_text_output_types)}. Copied media cannot be flattened without changing converter "
+            "role scoping. Use an editable-history target, text-output converters, a stateless target, "
+            "or branching_factor=1."
+        )
 
 
 class TAPAttackScoringConfig(AttackScoringConfig):
@@ -904,6 +941,13 @@ class _TreeOfAttacksNode:
             of multiple attack variations from promising nodes. The tree expands by
             duplicating successful nodes and pruning unsuccessful ones.
         """
+        source_messages = filter_non_replayable_messages(
+            messages=list(self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id))
+        )
+        _validate_stateful_clone_history_compatibility(
+            objective_target=self._objective_target,
+            messages=source_messages,
+        )
         duplicate_node = _TreeOfAttacksNode(
             objective_target=self._objective_target,
             adversarial_chat=self._adversarial_chat,
@@ -926,24 +970,33 @@ class _TreeOfAttacksNode:
             prepended_conversation_config=self._prepended_conversation_config,
         )
 
-        source_messages = list(
-            self._memory.get_conversation_messages(conversation_id=self.objective_target_conversation_id)
-        )
         duplicate_node.objective_target_conversation_id = self._memory.duplicate_conversation(
             conversation_id=self.objective_target_conversation_id
         )
-        duplicated_messages = list(
-            self._memory.get_conversation_messages(conversation_id=duplicate_node.objective_target_conversation_id)
-        )
-        duplicate_node._prepended_history_send_context = (
-            self._prepended_history_send_context.remap_for_duplicate_conversation(
-                conversation_id=duplicate_node.objective_target_conversation_id,
-                source_messages=source_messages,
-                duplicated_messages=duplicated_messages,
+        duplicated_messages = filter_non_replayable_messages(
+            messages=list(
+                self._memory.get_conversation_messages(conversation_id=duplicate_node.objective_target_conversation_id)
             )
-            if self._prepended_history_send_context
-            else None
         )
+        if self._prepended_history_send_context:
+            duplicate_node._prepended_history_send_context = (
+                self._prepended_history_send_context.remap_for_duplicate_conversation(
+                    conversation_id=duplicate_node.objective_target_conversation_id,
+                    source_messages=source_messages,
+                    duplicated_messages=duplicated_messages,
+                )
+            )
+        elif (
+            duplicated_messages
+            and self._objective_target.configuration.includes(capability=CapabilityName.MULTI_TURN)
+            and not self._objective_target.configuration.includes(capability=CapabilityName.EDITABLE_HISTORY)
+        ):
+            duplicate_node._prepended_history_send_context = PrependedHistorySendContext(
+                conversation_id=duplicate_node.objective_target_conversation_id,
+                seed_message_ids=(),
+                replay_seed_each_send=False,
+                bootstrap_message_ids=tuple(message.get_piece().id for message in duplicated_messages),
+            )
 
         duplicate_node.adversarial_chat_conversation_id = self._memory.duplicate_conversation(
             conversation_id=self.adversarial_chat_conversation_id

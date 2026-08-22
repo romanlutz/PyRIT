@@ -17,19 +17,23 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class PrependedHistorySendContext:
     """
-    Per-execution state for delivering an explicit persisted seed prefix.
+    Per-execution state for delivering persisted bootstrap history.
 
-    The seed is identified by persisted message-piece IDs instead of inferred
-    from response roles or error codes. A context may be used by only one send
-    at a time. Stateful targets consume the seed when provider invocation begins;
-    stateless targets replay it for every send.
+    An explicit seed is identified by persisted message-piece IDs instead of
+    inferred from response roles or error codes. A stateful cloned conversation
+    may instead have an empty seed plus copied branch messages to bootstrap its
+    new provider session. A context may be used by only one send at a time.
+    Stateful targets consume the bootstrap when provider invocation begins;
+    stateless targets replay their explicit seed for every send.
     """
 
     conversation_id: str
     seed_message_ids: tuple[uuid.UUID, ...]
     replay_seed_each_send: bool
+    bootstrap_message_ids: tuple[uuid.UUID, ...] | None = None
     _seed_consumed: bool = field(default=False, init=False, repr=False)
     _send_in_progress: bool = field(default=False, init=False, repr=False)
+    _provider_attempt_marked: bool = field(default=False, init=False, repr=False)
     _provider_attempted_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _provider_attempt_count: int = field(default=0, init=False, repr=False)
 
@@ -42,15 +46,27 @@ class PrependedHistorySendContext:
         """
         if not self.conversation_id:
             raise ValueError("conversation_id must not be empty")
-        if not self.seed_message_ids:
-            raise ValueError("seed_message_ids must not be empty")
+        if not self.seed_message_ids and not self.bootstrap_message_ids:
+            raise ValueError("seed_message_ids must not be empty unless bootstrap_message_ids are provided")
         if len(set(self.seed_message_ids)) != len(self.seed_message_ids):
             raise ValueError("seed_message_ids must be unique")
+        if self.bootstrap_message_ids is not None:
+            if not self.bootstrap_message_ids:
+                raise ValueError("bootstrap_message_ids must not be empty")
+            if len(set(self.bootstrap_message_ids)) != len(self.bootstrap_message_ids):
+                raise ValueError("bootstrap_message_ids must be unique")
+            if not set(self.seed_message_ids).issubset(self.bootstrap_message_ids):
+                raise ValueError("bootstrap_message_ids must include every seed message")
 
     @property
     def seed_message_count(self) -> int:
         """Number of messages in the explicit seed prefix."""
         return len(self.seed_message_ids)
+
+    @property
+    def bootstrap_message_count(self) -> int:
+        """Number of historical messages needed to bootstrap the next provider session."""
+        return len(self.bootstrap_message_ids or self.seed_message_ids)
 
     @property
     def should_include_seed(self) -> bool:
@@ -89,6 +105,7 @@ class PrependedHistorySendContext:
                 "Wait for the active send to finish before sending another request."
             )
         self._send_in_progress = True
+        self._provider_attempt_marked = False
         self._provider_attempted_task = None
 
     def mark_provider_attempted(self) -> None:
@@ -103,10 +120,14 @@ class PrependedHistorySendContext:
         """
         if not self._send_in_progress:
             raise RuntimeError("Cannot mark a provider attempt without an active send.")
+        if self._provider_attempt_marked:
+            return
         try:
-            self._provider_attempted_task = asyncio.current_task()
+            current_task = asyncio.current_task()
         except RuntimeError:
-            self._provider_attempted_task = None
+            current_task = None
+        self._provider_attempt_marked = True
+        self._provider_attempted_task = current_task
         self._provider_attempt_count += 1
         if not self.replay_seed_each_send:
             self._seed_consumed = True
@@ -119,30 +140,32 @@ class PrependedHistorySendContext:
 
     def select_history(self, *, messages: list[Message]) -> list[Message]:
         """
-        Select the explicit persisted seed prefix from conversation history.
+        Select history needed for delivery or provider-session restoration.
 
         Args:
             messages: Persisted conversation messages after failed exchanges
                 have been removed.
 
         Returns:
-            The seed messages in their original persisted order, or an empty
-            list after a stateful target has consumed the seed.
+            The pending bootstrap messages before a stateful target consumes
+            them, the explicit seed for a stateless target, or all replayable
+            persisted history after a stateful target has been bootstrapped.
 
         Raises:
             ValueError: If an expected persisted seed message is missing.
         """
         if not self.should_include_seed:
-            return []
+            return list(messages)
 
         messages_by_id = {message.get_piece().id: message for message in messages}
-        missing_ids = [message_id for message_id in self.seed_message_ids if message_id not in messages_by_id]
+        selected_message_ids = self.bootstrap_message_ids or self.seed_message_ids
+        missing_ids = [message_id for message_id in selected_message_ids if message_id not in messages_by_id]
         if missing_ids:
             raise ValueError(
                 "The persisted prepended history no longer matches the prepended history send context. "
                 f"Missing {len(missing_ids)} message(s)."
             )
-        return [messages_by_id[message_id] for message_id in self.seed_message_ids]
+        return [messages_by_id[message_id] for message_id in selected_message_ids]
 
     def remap_for_duplicate_conversation(
         self,
@@ -154,8 +177,10 @@ class PrependedHistorySendContext:
         """
         Remap this explicit seed boundary to a duplicated conversation.
 
-        Only message pieces already identified as seed history are remapped. Live
-        turns copied into the new memory conversation never become part of the boundary.
+        The explicit prepended seed identity is always remapped. A stateless clone
+        continues to replay only that seed. A stateful clone opens a new provider
+        session, so every replayable duplicated branch message becomes its one-time
+        bootstrap boundary.
 
         Args:
             conversation_id: Conversation ID assigned to the duplicated messages.
@@ -195,16 +220,25 @@ class PrependedHistorySendContext:
                     raise ValueError("Duplicated conversation does not preserve the source piece structure.")
                 duplicated_ids_by_source_id[source_piece.id] = duplicated_piece.id
 
-        missing_ids = [
-            message_id for message_id in self.seed_message_ids if message_id not in duplicated_ids_by_source_id
-        ]
+        current_bootstrap_ids = self.bootstrap_message_ids or self.seed_message_ids
+        ids_to_remap = set(self.seed_message_ids) | set(current_bootstrap_ids)
+        missing_ids = [message_id for message_id in ids_to_remap if message_id not in duplicated_ids_by_source_id]
         if missing_ids:
-            raise ValueError(f"Could not remap {len(missing_ids)} explicit seed message(s).")
+            raise ValueError(f"Could not remap {len(missing_ids)} bootstrap message(s).")
+
+        remapped_seed_ids = tuple(duplicated_ids_by_source_id[message_id] for message_id in self.seed_message_ids)
+        if conversation_id != self.conversation_id and not self.replay_seed_each_send:
+            remapped_bootstrap_ids = tuple(message.get_piece().id for message in duplicated_messages)
+        else:
+            remapped_bootstrap_ids = tuple(
+                duplicated_ids_by_source_id[message_id] for message_id in current_bootstrap_ids
+            )
 
         duplicated_context = PrependedHistorySendContext(
             conversation_id=conversation_id,
-            seed_message_ids=tuple(duplicated_ids_by_source_id[message_id] for message_id in self.seed_message_ids),
+            seed_message_ids=remapped_seed_ids,
             replay_seed_each_send=self.replay_seed_each_send,
+            bootstrap_message_ids=remapped_bootstrap_ids,
         )
         # Provider bootstrap consumption belongs to the logical conversation, not copied memory.
         if conversation_id == self.conversation_id:

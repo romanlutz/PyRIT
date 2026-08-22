@@ -138,6 +138,10 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
         """
         if not context.conversation_id:
             context.conversation_id = str(uuid.uuid4())
+        existing_message_ids = {
+            message.get_piece().id for message in self._conversation_manager.get_conversation(context.conversation_id)
+        }
+        context.prepended_history_send_context = None
         await self._conversation_manager.initialize_context_async(
             context=context,
             target=self._objective_target,
@@ -145,6 +149,10 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
             request_converters=self._request_converters,
             prepended_conversation_config=self._prepended_conversation_config,
         )
+        persisted_messages = self._conversation_manager.get_conversation(context.conversation_id)
+        context.prepended_conversation = [
+            message for message in persisted_messages if message.get_piece().id not in existing_message_ids
+        ]
         context.prepended_history_send_context = None
 
     async def _teardown_async(self, *, context: BargeInAttackContext[Any]) -> None:

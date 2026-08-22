@@ -4,6 +4,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from pyrit.exceptions import PyritException
@@ -14,8 +15,16 @@ from pyrit.models import (
     TokenUsage,
     construct_response_from_request,
 )
+from pyrit.prompt_target.common.target_send_context import _mark_active_provider_attempted
 
 logger = logging.getLogger(__name__)
+
+_PROVIDER_ATTEMPT_MARKING_WRAPPERS: set[Callable[..., Any]] = set()
+
+
+def _marks_provider_attempt(func: Callable[..., Any]) -> bool:
+    unbound_func = getattr(func, "__func__", func)
+    return unbound_func in _PROVIDER_ATTEMPT_MARKING_WRAPPERS
 
 
 def validate_temperature(temperature: float | None) -> None:
@@ -58,14 +67,18 @@ def limit_requests_per_minute(func: Callable[..., Any]) -> Callable[..., Any]:
         Callable: The decorated function with a sleep introduced.
     """
 
+    @wraps(func)
     async def set_max_rpm_async(*args: Any, **kwargs: Any) -> Any:
         self = args[0]
         rpm = getattr(self, "_max_requests_per_minute", None)
         if rpm and rpm > 0:
             await asyncio.sleep(60 / rpm)
 
+        if not getattr(self, "_MANAGES_PROVIDER_ATTEMPT_BOUNDARY", False):
+            _mark_active_provider_attempted()
         return await func(*args, **kwargs)
 
+    _PROVIDER_ATTEMPT_MARKING_WRAPPERS.add(set_max_rpm_async)
     return set_max_rpm_async
 
 

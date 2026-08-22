@@ -827,7 +827,7 @@ async def test_prepended_history_adapter_is_used_only_when_explicitly_passed():
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_non_editable_multi_turn_target_sends_only_current_request_after_response():
+async def test_non_editable_multi_turn_target_retains_history_after_response():
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(
         capabilities=TargetCapabilities(
@@ -866,8 +866,12 @@ async def test_non_editable_multi_turn_target_sends_only_current_request_after_r
 
     first_payload, second_payload = target._send_prompt_to_target_async.await_args_list
     assert len(first_payload.kwargs["normalized_conversation"]) == 1
-    assert len(second_payload.kwargs["normalized_conversation"]) == 1
-    assert second_payload.kwargs["normalized_conversation"][0].get_value() == "second live"
+    assert [message.get_value() for message in second_payload.kwargs["normalized_conversation"]] == [
+        "prepended",
+        "first live",
+        "first response",
+        "second live",
+    ]
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -940,7 +944,7 @@ async def test_stateful_target_consumes_seed_after_provider_outcome(response_err
 
     first_payload, second_payload = target._send_prompt_to_target_async.await_args_list
     assert "prepended" in first_payload.kwargs["normalized_conversation"][0].get_value()
-    assert [message.get_value() for message in second_payload.kwargs["normalized_conversation"]] == ["second live"]
+    assert second_payload.kwargs["normalized_conversation"][-1].get_value() == "second live"
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -1247,6 +1251,42 @@ async def test_target_normalization_cancellation_propagates():
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_rate_limit_cancellation_does_not_consume_stateful_seed():
+    target = MockPromptTarget(rpm=1)
+    target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
+    mock_memory = MagicMock(spec=MemoryInterface)
+    prepended = _make_message(role="user", content="prepended")
+    mock_memory.get_conversation_messages.return_value = [prepended]
+    target._memory = mock_memory
+    target_context = _make_prepended_history_send_context(
+        prepended_messages=[prepended],
+        target_supports_multi_turn=True,
+    )
+    sleep_started = asyncio.Event()
+    sleep_release = asyncio.Event()
+
+    async def wait_for_rate_limit(delay: float) -> None:
+        sleep_started.set()
+        await sleep_release.wait()
+
+    with patch("pyrit.prompt_target.common.utils.asyncio.sleep", side_effect=wait_for_rate_limit):
+        send_task = asyncio.create_task(
+            target.send_prompt_async(
+                message=_make_message(role="user", content="live"),
+                normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
+                send_context=target_context,
+            )
+        )
+        await sleep_started.wait()
+        send_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await send_task
+
+    assert target_context.provider_attempt_count == 0
+    assert not target_context.is_seed_consumed
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_provider_failure_propagates_after_normalization():
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
@@ -1321,7 +1361,7 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
         send_context=target_context,
     )
     payload = target._send_prompt_to_target_async.await_args.kwargs["normalized_conversation"]
-    assert [message.get_value() for message in payload] == ["second live"]
+    assert [message.get_value() for message in payload] == ["prepended", "first live", "second live"]
 
 
 @pytest.mark.usefixtures("patch_central_database")

@@ -508,6 +508,10 @@ class ConversationManager:
         if not valid_messages:
             return state
 
+        existing_message_ids = {
+            message.get_piece().id for message in self.get_conversation(conversation_id=conversation_id)
+        }
+
         # Use the lower-level method to add messages to memory
         state.turn_count = await self.add_prepended_conversation_to_memory_async(
             prepended_conversation=prepended_conversation,
@@ -518,7 +522,11 @@ class ConversationManager:
             target_identifier=target_identifier,
             target=target,
         )
-        persisted_messages = self.get_conversation(conversation_id)
+        persisted_messages = [
+            message
+            for message in self.get_conversation(conversation_id)
+            if message.get_piece().id not in existing_message_ids
+        ]
         context.prepended_history_send_context = self.create_prepended_history_send_context(
             target=target,
             conversation_id=conversation_id,

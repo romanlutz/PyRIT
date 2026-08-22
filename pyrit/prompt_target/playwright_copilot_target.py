@@ -94,6 +94,7 @@ class PlaywrightCopilotTarget(PromptTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     # Placeholder text constants
     PLACEHOLDER_GENERATING_RESPONSE: str = "generating response"
@@ -258,6 +259,8 @@ class PlaywrightCopilotTarget(PromptTarget):
                 either as a single text string or a list of (data, data_type) tuples.
         """
         selectors = self._get_selectors()
+        if any(piece.converted_value_data_type == "text" for piece in message.message_pieces):
+            await self._clear_text_input_async(input_selector=selectors.input_selector)
 
         # Handle multimodal input - process all pieces in the request
         for piece in message.message_pieces:
@@ -290,6 +293,7 @@ class PlaywrightCopilotTarget(PromptTarget):
         initial_group_count = len(initial_ai_message_groups)
         logger.debug(f"Initial message group count before sending: {initial_group_count}")
 
+        self._mark_provider_attempted()
         await self._page.click(selectors.send_button_selector)
 
         # Wait for the next AI message to appear
@@ -797,6 +801,13 @@ class PlaywrightCopilotTarget(PromptTarget):
         await self._page.locator(input_selector).click()  # Focus first
         await self._page.locator(input_selector).type(text)
 
+    async def _clear_text_input_async(self, *, input_selector: str) -> None:
+        """Clear locally staged text so a cancelled send can be retried safely."""
+        input_locator = self._page.locator(input_selector)
+        await input_locator.click()
+        await input_locator.press("ControlOrMeta+A")
+        await input_locator.press("Backspace")
+
     async def _upload_image_async(self, image_path: str) -> None:
         """
         Handle image upload through Copilot's dropdown interface.
@@ -817,6 +828,7 @@ class PlaywrightCopilotTarget(PromptTarget):
         async with self._page.expect_file_chooser() as fc_info:
             await add_files_button.click()
         file_chooser = await fc_info.value
+        self._mark_provider_attempted()
         await file_chooser.set_files(image_path)
 
         # Check for login requirement in Consumer Copilot

@@ -50,6 +50,7 @@ class HTTPXAPITarget(HTTPTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -166,6 +167,7 @@ class HTTPXAPITarget(HTTPTarget):
 
                     logger.info(f"HTTPXApiTarget: uploading file={filename} via {self.method} to {self.http_url}")
 
+                    self._mark_provider_attempted()
                     response = await client.request(
                         method=self.method,
                         url=self.http_url,
@@ -177,6 +179,7 @@ class HTTPXAPITarget(HTTPTarget):
                 else:
                     # No file upload, handle based on HTTP method
                     logger.info(f"HTTPXApiTarget: sending {self.method} to {self.http_url} with possible JSON/form.")
+                    self._mark_provider_attempted()
                     response = await client.request(
                         method=self.method,
                         url=self.http_url,
