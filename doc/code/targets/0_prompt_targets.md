@@ -34,6 +34,9 @@ converters have already run by this point, so role-specific converter choices re
 the target must receive one flattened request. The context is ephemeral and does not replace the
 structured messages stored in memory.
 
+Prepended request converters apply only to `user` messages by default. Every other role, including
+`system`, `developer`, `tool`, and `assistant` / `simulated_assistant`, requires explicit opt-in.
+
 For a stateful target without editable history, the initial bootstrap is flattened once. Later sends
 retain replayable memory history in the normalized view so a target such as `WebsocketTarget` can
 restore a replaced provider session, while the existing provider session still receives only the

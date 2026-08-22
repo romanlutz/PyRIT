@@ -141,7 +141,6 @@ class BargeInAttack(AttackStrategy["BargeInAttackContext[Any]", AttackResult]):
         existing_message_ids = {
             message.get_piece().id for message in self._conversation_manager.get_conversation(context.conversation_id)
         }
-        context.prepended_history_send_context = None
         await self._conversation_manager.initialize_context_async(
             context=context,
             target=self._objective_target,

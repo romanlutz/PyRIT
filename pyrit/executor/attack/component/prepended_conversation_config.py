@@ -39,8 +39,8 @@ class PrependedConversationConfig:
     image, audio, or other non-text output.
     """
 
-    # Request converters default to prepended user messages only. Assistant history is
-    # simulated target output and must be explicitly opted in with ["assistant"].
+    # Request converters default to prepended user messages only. Every non-user role,
+    # including system and simulated assistant history, requires explicit opt-in.
     apply_converters_to_roles: list[ChatMessageRole] = field(default_factory=lambda: ["user"])
 
     # Optional normalizer to format prepended history and a live request as one text block.
@@ -48,6 +48,12 @@ class PrependedConversationConfig:
     # When None and adaptation is needed, a default ConversationContextNormalizer is used
     # that produces "Turn N: User/Assistant" format.
     message_normalizer: MessageStringNormalizer | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize simulated assistant opt-in to its API-compatible role."""
+        self.apply_converters_to_roles = [
+            "assistant" if role == "simulated_assistant" else role for role in self.apply_converters_to_roles
+        ]
 
     def get_message_normalizer(self) -> MessageStringNormalizer:
         """

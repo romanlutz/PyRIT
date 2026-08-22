@@ -176,9 +176,10 @@ await output_attack_async(result)
 # only applies to attacks that drive a conversation. Below builds a converter config — it's just a
 # plain object you hand to the attack constructor.
 #
-# Request converters apply to prepended `user` messages by default. Prepended `assistant` messages
-# represent simulated target output, so PyRIT leaves them unchanged unless the attack explicitly
-# opts in. For example:
+# Request converters apply only to prepended `user` messages by default. PyRIT leaves every other
+# role, including `system`, `developer`, `tool`, and `assistant` / `simulated_assistant`, unchanged
+# unless the attack explicitly opts in. `simulated_assistant` is accepted as an alias for
+# `assistant`. For example:
 #
 # ```python
 # from pyrit.executor.attack import PrependedConversationConfig

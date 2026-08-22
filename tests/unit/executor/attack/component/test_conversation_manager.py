@@ -33,6 +33,9 @@ from pyrit.executor.attack.component.conversation_manager import (
     get_prepended_turn_count,
     mark_messages_as_simulated,
 )
+from pyrit.executor.attack.component.prepended_history_send_context import (
+    PrependedHistorySendContext,
+)
 from pyrit.executor.attack.core import AttackContext
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
 from pyrit.message_normalizer import ConversationContextNormalizer, HistorySquashNormalizer
@@ -653,6 +656,11 @@ class TestInitializeContext:
         """Test that no prepended conversation returns default state."""
         manager = ConversationManager()
         conversation_id = str(uuid.uuid4())
+        mock_attack_context.prepended_history_send_context = PrependedHistorySendContext(
+            conversation_id="stale-conversation",
+            seed_message_ids=(uuid.uuid4(),),
+            replay_seed_each_send=False,
+        )
 
         state = await manager.initialize_context_async(
             context=mock_attack_context,
@@ -663,6 +671,7 @@ class TestInitializeContext:
         assert isinstance(state, ConversationState)
         assert state.turn_count == 0
         assert state.last_assistant_message_scores == []
+        assert mock_attack_context.prepended_history_send_context is None
 
     async def test_merges_memory_labels(
         self,

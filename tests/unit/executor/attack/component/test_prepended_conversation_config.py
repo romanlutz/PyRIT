@@ -12,6 +12,11 @@ def test_default_init_apply_converters_to_user_role():
     assert config.apply_converters_to_roles == ["user"]
 
 
+def test_simulated_assistant_converter_role_normalizes_to_assistant():
+    config = PrependedConversationConfig(apply_converters_to_roles=["simulated_assistant"])
+    assert config.apply_converters_to_roles == ["assistant"]
+
+
 def test_default_init_message_normalizer_is_none():
     config = PrependedConversationConfig()
     assert config.message_normalizer is None

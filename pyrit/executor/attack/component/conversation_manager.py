@@ -307,6 +307,7 @@ class ConversationManager:
         context.memory_labels = combine_dict(existing_dict=memory_labels, new_dict=context.memory_labels)
         state = ConversationState()
         prepended_conversation = context.prepended_conversation
+        context.prepended_history_send_context = None
 
         if not prepended_conversation:
             logger.debug(f"No prepended conversation for context initialization: {conversation_id}")
