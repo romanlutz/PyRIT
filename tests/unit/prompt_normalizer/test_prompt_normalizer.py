@@ -207,6 +207,44 @@ async def test_send_prompt_async_target_failure_is_persisted(mock_memory_instanc
     mock_memory_instance.add_message_to_memory.assert_not_called()
 
 
+async def test_child_task_provider_failure_is_persisted(mock_memory_instance):
+    class ChildTaskTarget(MockPromptTarget):
+        _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
+
+        async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+            async def fail_after_provider_attempt_async() -> list[Message]:
+                self._mark_provider_attempted()
+                raise RuntimeError("provider failed")
+
+            return await asyncio.create_task(fail_after_provider_attempt_async())
+
+    conversation_id = "prepended-conversation"
+    seed = Message.from_prompt(prompt="seed", role="user")
+    seed.get_piece().conversation_id = conversation_id
+    mock_memory_instance.get_conversation_messages.return_value = [seed]
+    target_context = PrependedHistorySendContext(
+        conversation_id=conversation_id,
+        seed_message_ids=(seed.get_piece().id,),
+        replay_seed_each_send=False,
+    )
+
+    with pytest.raises(Exception, match="Error sending prompt with conversation ID"):
+        await PromptNormalizer().send_prompt_async(
+            message=Message.from_prompt(prompt="request", role="user"),
+            target=ChildTaskTarget(),
+            conversation_id=conversation_id,
+            send_context=target_context,
+        )
+
+    assert target_context.provider_attempt_count == 1
+    assert target_context.is_seed_consumed
+    assert mock_memory_instance.add_message_to_memory.call_count == 2
+    persisted_values = [
+        call.kwargs["request"].get_value() for call in mock_memory_instance.add_message_to_memory.call_args_list
+    ]
+    assert "request" in persisted_values
+
+
 async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(mock_memory_instance):
     conversation_id = "prepended-conversation"
     seed = Message.from_prompt(prompt="seed", role="user")

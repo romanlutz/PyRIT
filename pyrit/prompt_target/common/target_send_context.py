@@ -16,8 +16,8 @@ class TargetSendContext(Protocol):
     conversation_id: str
 
     @property
-    def provider_attempted_by_current_task(self) -> bool:
-        """Whether the current task reached provider invocation."""
+    def provider_attempt_count(self) -> int:
+        """Number of sends that reached provider invocation."""
         ...
 
     def begin_send(self) -> None:
