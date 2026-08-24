@@ -541,11 +541,14 @@ class TestCrescendoSeededModalityTransitions:
             ("user", "question-2", "text"),
         ]
 
-        refusal_inputs = [call.kwargs["message"] for call in refusal_scorer.score_async.await_args_list]
+        refusal_inputs = [
+            MessageScorableResolver().resolve(scorable=call.kwargs["scorable"], memory=attack._memory)
+            for call in refusal_scorer.score_async.await_args_list
+        ]
         objective_inputs = [call.kwargs["response"] for call in score_response.await_args_list]
         assert [message.get_value() for message in refusal_inputs] == ["first text response", "final text response"]
         assert [message.get_value() for message in objective_inputs] == ["first text response", "final text response"]
-        assert [call.kwargs["objective"] for call in refusal_scorer.score_async.await_args_list] == [
+        assert [call.kwargs["expectation"].objective for call in refusal_scorer.score_async.await_args_list] == [
             "question-1",
             "question-2",
         ]
@@ -705,14 +708,17 @@ class TestCrescendoSeededModalityTransitions:
             if reference.conversation_type is ConversationType.PRUNED
         } == {first_conversation_id}
 
-        refusal_inputs = [call.kwargs["message"] for call in refusal_scorer.score_async.await_args_list]
+        refusal_inputs = [
+            MessageScorableResolver().resolve(scorable=call.kwargs["scorable"], memory=attack._memory)
+            for call in refusal_scorer.score_async.await_args_list
+        ]
         assert [message.get_value() for message in refusal_inputs] == [
             "first response content filtered",
             "accepted retry response",
             "final response",
         ]
         assert refusal_inputs[0].get_piece().response_error == "blocked"
-        assert [call.kwargs["objective"] for call in refusal_scorer.score_async.await_args_list] == [
+        assert [call.kwargs["expectation"].objective for call in refusal_scorer.score_async.await_args_list] == [
             "question-1",
             "question-2",
             "question-3",
