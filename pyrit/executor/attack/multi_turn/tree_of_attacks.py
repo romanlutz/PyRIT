@@ -154,8 +154,14 @@ class TAPAttackScoringConfig(AttackScoringConfig):
 
         Returns:
             float: The threshold value from the FloatScaleThresholdScorer.
+
+        Raises:
+            TypeError: If the configured objective scorer has an unexpected type.
         """
-        return self.objective_scorer.threshold  # type: ignore[ty:unresolved-attribute]
+        objective_scorer = self.objective_scorer
+        if not isinstance(objective_scorer, FloatScaleThresholdScorer):
+            raise TypeError("TAP objective scorer must be a FloatScaleThresholdScorer")
+        return objective_scorer.threshold
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +239,8 @@ class TAPAttackResult(AttackResult):
     @property
     def tree_visualization(self) -> Tree | None:
         """The tree visualization from metadata."""
-        return self.metadata.get("tree_visualization", None)
+        tree: Tree | None = self.metadata.get("tree_visualization")
+        return tree
 
     @tree_visualization.setter
     def tree_visualization(self, value: Tree) -> None:
@@ -338,6 +345,7 @@ class _TreeOfAttacksNode:
         attack_id: ComponentIdentifier,
         attack_strategy_name: str,
         modality_router: _ModalityFeedbackRouter,
+        use_score_as_feedback: bool = True,
         memory_labels: dict[str, str] | None = None,
         parent_id: str | None = None,
         prompt_normalizer: PromptNormalizer | None = None,
@@ -364,6 +372,8 @@ class _TreeOfAttacksNode:
                 whether prior media should travel back to the adversarial chat or forward to
                 the objective target, and fills adversarial-placeholder pieces in seed
                 messages. Typically shared across all nodes of the same attack.
+            use_score_as_feedback (bool): Whether subsequent adversarial prompts include
+                the objective score. Defaults to True.
             memory_labels (dict[str, str] | None): Labels for memory storage.
             parent_id (str | None): ID of the parent node, if this is a child node
             prompt_normalizer (PromptNormalizer | None): Normalizer for handling prompts and responses.
@@ -386,6 +396,7 @@ class _TreeOfAttacksNode:
         self._attack_strategy_name = attack_strategy_name
         self._memory_labels = memory_labels or {}
         self._modality_router = modality_router
+        self._use_score_as_feedback = use_score_as_feedback
 
         # Initialize utilities
         self._memory = CentralMemory.get_memory_instance()
@@ -504,6 +515,14 @@ class _TreeOfAttacksNode:
             - `off_topic`: `True` if the prompt was deemed off-topic after all retries
             - `error_message`: Set if an error occurred during execution
         """
+        # Clear the previous turn's outcome before reusing this branch.
+        self.completed = False
+        self.off_topic = False
+        self.objective_score = None
+        self.auxiliary_scores = {}
+        self.last_prompt_sent = None
+        self.error_message = None
+
         # Store objective for use in execution context
         self._objective = objective
 
@@ -731,6 +750,9 @@ class _TreeOfAttacksNode:
             objective (str): The attack objective describing what the attacker wants to achieve.
                 This is passed to scorers as context for evaluation.
 
+        Raises:
+            RuntimeError: If the scoring process returns no objective score.
+
         Side Effects:
             - Sets self.objective_score to the primary scorer's result (if available)
             - Updates self.auxiliary_scores dictionary with results from auxiliary scorers
@@ -759,9 +781,11 @@ class _TreeOfAttacksNode:
 
         # Extract objective score
         objective_scores = scoring_results["objective_scores"]
-        if objective_scores:
-            self.objective_score = objective_scores[0]
-            logger.debug(f"Node {self.node_id}: Objective score: {normalize_score_to_float(self.objective_score)}")
+        if not objective_scores:
+            raise RuntimeError("No objective scores returned from scoring process.")
+
+        self.objective_score = objective_scores[0]
+        logger.debug(f"Node {self.node_id}: Objective score: {normalize_score_to_float(self.objective_score)}")
 
         # Extract auxiliary scores
         auxiliary_scores = scoring_results["auxiliary_scores"]
@@ -876,6 +900,7 @@ class _TreeOfAttacksNode:
             attack_id=self._attack_id,
             attack_strategy_name=self._attack_strategy_name,
             modality_router=self._modality_router,
+            use_score_as_feedback=self._use_score_as_feedback,
             memory_labels=self._memory_labels,
             desired_response_prefix=self._desired_response_prefix,
             parent_id=self.node_id,
@@ -1170,7 +1195,9 @@ class _TreeOfAttacksNode:
         logger.debug(f"Node {self.node_id}: Using response {target_response_piece.id} for next prompt")
 
         # Get score for the response
-        score = await self._get_response_score_async(str(target_response_piece.id))
+        score = (
+            await self._get_response_score_async(str(target_response_piece.id)) if self._use_score_as_feedback else ""
+        )
 
         # Generate prompt using template
         return self._adversarial_chat_prompt_template.render_template_value(
@@ -2016,12 +2043,17 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
 
     def _update_best_performing_node(self, context: TAPAttackContext) -> None:
         """
-        Update the best conversation ID and score from the top-performing node.
+        Select the highest-scoring eligible node on the current TAP frontier.
 
-        This method finds and extracts the best conversation ID and score from the
-        highest-scoring node among the current nodes. It sorts the nodes internally
-        to ensure robustness and doesn't rely on any pre-sorting assumptions.
-        The best conversation represents the most promising attack path found so far.
+        This method chooses among the completed, on-topic nodes that survived the
+        current iteration. It does not calculate a lifetime maximum across every
+        response generated by the attack. A later eligible frontier therefore replaces
+        the previous selection even when its highest score is lower.
+
+        If the current frontier has no eligible node, an existing selection is retained.
+        This preserves the last valid scored response when a later iteration fails
+        completely. Before any valid selection exists, a conversation from an incomplete
+        node may be retained for result reporting without an objective score.
 
         Args:
             context (TAPAttackContext): The attack context containing the current state of nodes.
@@ -2090,6 +2122,7 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
             attack_id=self.get_identifier(),
             attack_strategy_name=self.__class__.__name__,
             modality_router=self._modality_router,
+            use_score_as_feedback=self._attack_scoring_config.use_score_as_feedback,
             memory_labels=context.memory_labels,
             desired_response_prefix=self._configuration.desired_response_prefix,
             parent_id=parent_id,
@@ -2285,8 +2318,10 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
                 about the attack execution, including conversation ID, objective, outcome,
                 outcome reason, executed turns, last response, last score, and additional metadata.
         """
-        # Get the last response from the best conversation if available
-        last_response = self._get_last_response_from_conversation(context.best_conversation_id)
+        last_response = self._get_result_response(
+            conversation_id=context.best_conversation_id,
+            score=context.best_objective_score,
+        )
 
         # Get auxiliary scores from the best node if available
         auxiliary_scores_summary = self._get_auxiliary_scores_summary(context.nodes)
@@ -2317,6 +2352,60 @@ class TreeOfAttacksWithPruningAttack(AttackStrategy[TAPAttackContext, TAPAttackR
         result.best_adversarial_conversation_id = context.best_adversarial_conversation_id
 
         return result
+
+    def _get_result_response(
+        self,
+        *,
+        conversation_id: str | None,
+        score: Score | None,
+    ) -> MessagePiece | None:
+        """
+        Resolve the response associated with TAP's already-selected score.
+
+        This method does not compare scores or decide which node is best. The caller
+        supplies the conversation and score selected by `_update_best_performing_node`.
+        When a score exists, its message piece ID is used to find the corresponding
+        assistant response in that conversation, keeping `last_response` and
+        `last_score` aligned even when a later response was not scored.
+
+        Duplicated TAP branches preserve lineage through `original_prompt_id`, and
+        memory may attach the score to that original ID rather than the branch-local
+        message ID. Matching either ID resolves the same logical response. If no score
+        exists, the final conversation message is returned only as an unscored
+        reporting fallback.
+
+        Args:
+            conversation_id (str | None): The selected TAP conversation ID.
+            score (Score | None): The selected objective score.
+
+        Returns:
+            MessagePiece | None: The response associated with the selected score, the
+                final unscored message when no score exists, or `None` when it cannot
+                be resolved.
+        """
+        if not conversation_id:
+            return None
+
+        if score:
+            message_piece_id = getattr(score, "message_piece_id", None)
+            if not message_piece_id:
+                return None
+
+            responses = self._memory.get_message_pieces(
+                conversation_id=conversation_id,
+                role="assistant",
+            )
+            return next(
+                (
+                    response
+                    for response in responses
+                    if str(response.id) == str(message_piece_id)
+                    or str(response.original_prompt_id) == str(message_piece_id)
+                ),
+                None,
+            )
+
+        return self._get_last_response_from_conversation(conversation_id)
 
     def _get_last_response_from_conversation(self, conversation_id: str | None) -> MessagePiece | None:
         """
