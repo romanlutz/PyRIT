@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import ChatWindow from "./ChatWindow";
 import { makeTarget } from "@/test-utils/targetFixtures";
-import { Message, MessageAttachment, TargetCapabilities, TargetInfo, TargetInstance } from "../../types";
+import {
+  BackendMessage,
+  Message,
+  MessageAttachment,
+  TargetCapabilities,
+  TargetInfo,
+  TargetInstance,
+} from "../../types";
 import { attacksApi, convertersApi } from "../../services/api";
 import * as messageMapper from "../../utils/messageMapper";
 
@@ -49,12 +56,16 @@ jest.mock("../../services/api", () => ({
 jest.mock("../../utils/messageMapper", () => ({
   buildMessagePieces: jest.fn(),
   backendMessageToFrontend: jest.fn(),
+  backendMessageToOriginalDraft: jest.fn(),
   backendMessagesToFrontend: jest.fn(),
 }));
 
 const mockedAttacksApi = attacksApi as jest.Mocked<typeof attacksApi>;
 const mockedConvertersApi = convertersApi as jest.Mocked<typeof convertersApi>;
 const mockedMapper = messageMapper as jest.Mocked<typeof messageMapper>;
+const actualMessageMapper = jest.requireActual<typeof import("../../utils/messageMapper")>(
+  "../../utils/messageMapper"
+);
 const MARKDOWN_PREFERENCE_STORAGE_KEY = "pyrit.chatMarkdownMode";
 
 const TestWrapper: React.FC<{ children: React.ReactNode }> = ({
@@ -302,6 +313,10 @@ describe("ChatWindow Integration", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockedMapper.backendMessageToFrontend.mockReset();
+    mockedMapper.backendMessageToOriginalDraft.mockReset();
+    mockedMapper.backendMessageToOriginalDraft.mockImplementation(
+      actualMessageMapper.backendMessageToOriginalDraft
+    );
     window.localStorage.clear();
     mockMatchMedia(false);
     // Default: panel API returns empty conversations
@@ -1609,36 +1624,73 @@ describe("ChatWindow Integration", () => {
   it("should reconstruct recovery when loading a persisted processing error", async () => {
     const user = userEvent.setup();
     const onSelectConversation = jest.fn();
-    const persistedResponse = makeErrorResponse(
-      "processing",
-      "The target could not process this message.",
-      2,
-      true
-    );
-    const restoredAttachment: Message["attachments"] = [
+    const persistedMessages: BackendMessage[] = [
       {
-        type: "file",
-        name: "evidence.txt",
-        url: "/api/media?path=evidence.txt",
-        mimeType: "text/plain",
-        sourceValue: "stored attachment value",
+        turn_number: 2,
+        role: "user",
+        message_pieces: [
+          {
+            id: "p-text-to-pdf",
+            original_value_data_type: "text",
+            converted_value_data_type: "binary_path",
+            original_value: "original persisted prompt",
+            converted_value: "/converted/report.pdf",
+            converted_value_mime_type: "application/pdf",
+            converted_filename: "converted.pdf",
+            converter_identifiers: [{ type: "PDFConverter" }],
+            scores: [],
+            response_error: "none",
+          },
+          {
+            id: "p-image-to-text",
+            original_value_data_type: "image_path",
+            converted_value_data_type: "text",
+            original_value: "/original/evidence.png",
+            original_value_url: "/api/media?path=%2Foriginal%2Fevidence.png",
+            original_value_mime_type: "image/png",
+            original_filename: "evidence.png",
+            converted_value: "converted image description",
+            converter_identifiers: [{ type: "ImageToTextConverter" }],
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        turn_number: 3,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p-processing-error",
+            original_value_data_type: "text",
+            converted_value_data_type: "text",
+            original_value: "",
+            converted_value: "",
+            scores: [],
+            response_error: "processing",
+            response_error_description: "The target could not process this message.",
+          },
+        ],
+        created_at: "2026-01-01T00:00:01Z",
       },
     ];
 
     mockedAttacksApi.getMessages.mockResolvedValue({
-      messages: persistedResponse.messages.messages,
+      messages: persistedMessages,
     } as never);
-    mockedMapper.backendMessageToFrontend.mockReturnValue({
-      role: "user",
-      content: "converted prompt",
-      originalContent: "original persisted prompt",
-      attachments: restoredAttachment,
-      timestamp: "2026-01-01T00:00:00Z",
-    });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "user",
-        content: "converted prompt",
+        content: "",
+        attachments: [
+          {
+            type: "file",
+            name: "converted.pdf",
+            url: "/converted/report.pdf",
+            mimeType: "application/pdf",
+          },
+        ],
         timestamp: "2026-01-01T00:00:00Z",
       },
       {
@@ -1702,7 +1754,8 @@ describe("ChatWindow Integration", () => {
 
     const restoredInput = await screen.findByRole("textbox");
     expect(restoredInput).toHaveValue("original persisted prompt");
-    expect(screen.getByText("evidence.txt", { exact: false })).toBeInTheDocument();
+    expect(screen.getAllByText("evidence.png", { exact: false })).toHaveLength(1);
+    expect(screen.queryByText(/converted\.pdf/i)).not.toBeInTheDocument();
   });
 
   it("should clear an unchanged submitted draft after switching conversations", async () => {

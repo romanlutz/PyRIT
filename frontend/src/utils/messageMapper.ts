@@ -172,6 +172,32 @@ function pieceToAttachment(
 }
 
 /**
+ * Rebuild editable input using only a persisted message's original values.
+ */
+export function backendMessageToOriginalDraft(
+  msg: BackendMessage,
+): Pick<Message, 'content' | 'attachments'> {
+  const textParts: string[] = []
+  const attachments: MessageAttachment[] = []
+
+  for (const piece of msg.message_pieces) {
+    if (piece.original_value && !isMediaDataType(piece.original_value_data_type)) {
+      textParts.push(piece.original_value)
+    }
+
+    const attachment = pieceToAttachment(piece, 'original')
+    if (attachment) {
+      attachments.push(attachment)
+    }
+  }
+
+  return {
+    content: textParts.join('\n'),
+    attachments: attachments.length > 0 ? attachments : undefined,
+  }
+}
+
+/**
  * Extract an error from a backend message piece, if any.
  */
 function pieceToError(piece: BackendMessagePiece): MessageError | undefined {

@@ -4,6 +4,7 @@ import {
   dataTypeToAttachmentType,
   buildDataUri,
   backendMessageToFrontend,
+  backendMessageToOriginalDraft,
   backendMessagesToFrontend,
   attachmentToMessagePieceRequest,
   buildMessagePieces,
@@ -91,6 +92,57 @@ describe("messageMapper", () => {
     it("should build audio data URI", () => {
       const result = buildDataUri("YXVkaW8=", "audio/wav");
       expect(result).toBe("data:audio/wav;base64,YXVkaW8=");
+    });
+  });
+
+  describe("backendMessageToOriginalDraft", () => {
+    it("restores only original text and media without converted output", () => {
+      const msg: BackendMessage = {
+        turn_number: 2,
+        role: "user",
+        message_pieces: [
+          {
+            id: "text-to-pdf",
+            original_value_data_type: "text",
+            converted_value_data_type: "binary_path",
+            original_value: "original persisted prompt",
+            converted_value: "/converted/report.pdf",
+            converted_value_mime_type: "application/pdf",
+            converted_filename: "converted.pdf",
+            scores: [],
+            response_error: "none",
+          },
+          {
+            id: "image-to-text",
+            original_value_data_type: "image_path",
+            converted_value_data_type: "text",
+            original_value: "/original/evidence.png",
+            original_value_url: "/api/media?path=%2Foriginal%2Fevidence.png",
+            original_value_mime_type: "image/png",
+            original_filename: "evidence.png",
+            converted_value: "converted image description",
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-01-01T00:00:00Z",
+      };
+
+      const result = backendMessageToOriginalDraft(msg);
+
+      expect(result.content).toBe("original persisted prompt");
+      expect(result.attachments).toEqual([
+        expect.objectContaining({
+          name: "evidence.png",
+          url: "/api/media?path=%2Foriginal%2Fevidence.png",
+          sourceValue: "/original/evidence.png",
+        }),
+      ]);
+      expect(result.attachments).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "converted.pdf" }),
+        ])
+      );
     });
   });
 

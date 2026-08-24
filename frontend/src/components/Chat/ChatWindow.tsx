@@ -29,7 +29,11 @@ import LabelsBar from '../Labels/LabelsBar'
 import type { ChatInputAreaHandle } from './ChatInputArea'
 import { attacksApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
-import { buildMessagePieces, backendMessageToFrontend, backendMessagesToFrontend } from '../../utils/messageMapper'
+import {
+  buildMessagePieces,
+  backendMessageToOriginalDraft,
+  backendMessagesToFrontend,
+} from '../../utils/messageMapper'
 import { exportConversation } from '../../utils/conversationExport'
 import type { ExportFormat } from '../../utils/conversationExport'
 import type {
@@ -49,6 +53,8 @@ import { useChatWindowStyles } from './ChatWindow.styles'
 const NARROW_SCREEN_QUERY = '(max-width: 600px)'
 const MARKDOWN_PREFERENCE_STORAGE_KEY = 'pyrit.chatMarkdownMode'
 const RETRYABLE_TARGET_RESPONSE_ERROR = 'processing'
+const CLEAN_CONVERSATION_MESSAGE =
+  'Continue in a clean conversation so the stored error is not sent back to the target.'
 
 interface RecoverableSendDraft {
   conversationId: string
@@ -64,6 +70,20 @@ interface TargetResponseFailure {
   type: string
   errorTurnNumber: number
   failedRequestTurnNumber?: number
+}
+
+function getRecoveryDescription(draft: RecoverableSendDraft): string {
+  if (draft.source === 'live') {
+    return `${CLEAN_CONVERSATION_MESSAGE} Your prompt, attachments, and converter choices are preserved for editing.`
+  }
+
+  const restored = 'Your prompt and attachments were restored from conversation history.'
+
+  if (draft.missingConverterSelections) {
+    return `${CLEAN_CONVERSATION_MESSAGE} ${restored} Converter choices could not be restored, so review them before sending.`
+  }
+
+  return `${CLEAN_CONVERSATION_MESSAGE} ${restored} Review them before sending.`
 }
 
 function findPrecedingUserMessage(
@@ -123,13 +143,12 @@ function getPersistedProcessingRecovery(
       return undefined
     }
 
-    const mappedRequest = backendMessageToFrontend(failedRequest)
-    const attachments = mappedRequest.originalAttachments ?? mappedRequest.attachments ?? []
+    const originalDraft = backendMessageToOriginalDraft(failedRequest)
     return {
       conversationId,
       failedRequestTurnNumber: failedRequest.turn_number,
-      originalValue: mappedRequest.originalContent ?? mappedRequest.content,
-      attachments: attachments.map((attachment) => ({ ...attachment })),
+      originalValue: originalDraft.content,
+      attachments: (originalDraft.attachments ?? []).map((attachment) => ({ ...attachment })),
       conversions: {},
       source: 'persisted',
       missingConverterSelections: failedRequest.message_pieces.some(
@@ -953,15 +972,9 @@ export default function ChatWindow({
   const recoverableProcessingErrorIndex = recoverableSend?.conversationId === viewedConversationId
     ? findLastProcessingErrorIndex(messages)
     : undefined
-  const processingRecoveryDescription = recoverableSend?.source === 'persisted'
-    ? recoverableSend.missingConverterSelections
-      ? 'Continue in a clean conversation so the stored error is not sent back to the target. '
-        + 'Your prompt and attachments were restored from conversation history. '
-        + 'Converter choices could not be restored, so review them before sending.'
-      : 'Continue in a clean conversation so the stored error is not sent back to the target. '
-        + 'Your prompt and attachments were restored from conversation history for editing.'
-    : 'Continue in a clean conversation so the stored error is not sent back to the target. '
-      + 'Your prompt, attachments, and converter choices are preserved for editing.'
+  const processingRecoveryDescription = recoverableSend
+    ? getRecoveryDescription(recoverableSend)
+    : undefined
 
   // "Continue with your target" — clone the current conversation into a new attack
   const handleUseAsTemplate = useCallback(async () => {
@@ -1114,6 +1127,7 @@ export default function ChatWindow({
           noTargetSelected={!activeTarget}
           globalMarkdown={globalMarkdown}
           processingErrorRecovery={recoverableProcessingErrorIndex === undefined
+            || processingRecoveryDescription === undefined
             ? undefined
             : {
                 messageIndex: recoverableProcessingErrorIndex,
