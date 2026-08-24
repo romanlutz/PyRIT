@@ -193,6 +193,7 @@ export const useMessageListStyles = makeStyles({
     alignItems: 'flex-start',
     gap: tokens.spacingVerticalS,
     marginTop: tokens.spacingVerticalS,
+    paddingBottom: tokens.spacingVerticalS,
   },
   errorRecoveryButton: {
     ...mobileTouchTarget,
