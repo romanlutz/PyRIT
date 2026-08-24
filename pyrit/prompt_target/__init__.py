@@ -18,6 +18,7 @@ from pyrit.prompt_target.common.discover_target_capabilities import (
     discover_target_capabilities_async,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.provider_attempt import ProviderAttempt
 from pyrit.prompt_target.common.realtime_audio import ServerVadConfig
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityHandlingPolicy,
@@ -102,6 +103,7 @@ __all__ = [
     "PlaywrightCopilotTarget",
     "PromptShieldTarget",
     "PromptTarget",
+    "ProviderAttempt",
     "RealtimeTarget",
     "ServerVadConfig",
     "RoundRobinTarget",

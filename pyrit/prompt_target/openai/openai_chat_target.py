@@ -30,11 +30,14 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     detect_response_content,
     save_audio_response_async,
 )
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
     build_empty_truncated_response,
-    limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
 )
@@ -216,9 +219,13 @@ class OpenAIChatTarget(OpenAITarget):
             "generativelanguage.googleapis.com": "https://generativelanguage.googleapis.com/v1beta/openai",
         }
 
-    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Asynchronously sends a message and handles the response within a managed conversation context.
 
@@ -226,10 +233,12 @@ class OpenAIChatTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         message_piece: MessagePiece = message.message_pieces[0]
         json_config = self._get_json_response_config(message_piece=message_piece)
@@ -240,7 +249,7 @@ class OpenAIChatTarget(OpenAITarget):
 
         # Use unified error handling - automatically detects ChatCompletion and validates
         response = await self._handle_openai_request_async(
-            api_call=lambda: self._client.chat.completions.create(**body),
+            api_call=lambda: provider_attempt.run_async(operation=lambda: self._client.chat.completions.create(**body)),
             request=message,
         )
         return [response]

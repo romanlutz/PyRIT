@@ -502,6 +502,7 @@ class TestBuildPromptMessage:
             mock_process.assert_called_once_with(
                 image_path="/path/to/image.png",
                 copilot_conversation_id="conv_456",
+                provider_attempt=None,
             )
             assert annotation["messageAnnotationMetadata"]["@type"] == "File"
             assert annotation["messageAnnotationMetadata"]["annotationType"] == "File"

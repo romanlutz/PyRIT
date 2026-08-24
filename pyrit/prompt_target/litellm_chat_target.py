@@ -37,13 +37,16 @@ from pyrit.prompt_target.common.chat_completions_response_parser import (
     validate_chat_completion_response,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import (
     TargetCapabilities,
     get_known_capabilities,
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
-    limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
 )
@@ -359,8 +362,13 @@ class LiteLLMChatTarget(PromptTarget):
 
     # Not decorated with ``pyrit_target_retry``: LiteLLM owns transient/rate-limit retry via
     # ``num_retries`` (see ``__init__``). Stacking both would multiply the retry count.
-    @limit_requests_per_minute
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         litellm = self._import_litellm()
 
         message = normalized_conversation[-1]
@@ -374,7 +382,7 @@ class LiteLLMChatTarget(PromptTarget):
         body = self._construct_request_body(messages=messages, json_config=json_config, api_key=api_key)
 
         try:
-            response = await litellm.acompletion(**body)
+            response = await provider_attempt.run_async(operation=lambda: litellm.acompletion(**body))
         except Exception as exc:
             return self._handle_litellm_exception(exc=exc, request=request_piece)
 

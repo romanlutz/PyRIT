@@ -1,12 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import asyncio
 import logging
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
+from pyrit.common.deprecation import print_deprecation_message
 from pyrit.exceptions import PyritException
 from pyrit.models import (
     TOKEN_USAGE_METADATA_PREFIX,
@@ -15,16 +15,8 @@ from pyrit.models import (
     TokenUsage,
     construct_response_from_request,
 )
-from pyrit.prompt_target.common.target_send_context import _mark_active_provider_attempted
 
 logger = logging.getLogger(__name__)
-
-_PROVIDER_ATTEMPT_MARKING_WRAPPERS: set[Callable[..., Any]] = set()
-
-
-def _marks_provider_attempt(func: Callable[..., Any]) -> bool:
-    unbound_func = getattr(func, "__func__", func)
-    return unbound_func in _PROVIDER_ATTEMPT_MARKING_WRAPPERS
 
 
 def validate_temperature(temperature: float | None) -> None:
@@ -57,28 +49,27 @@ def validate_top_p(top_p: float | None) -> None:
 
 def limit_requests_per_minute(func: Callable[..., Any]) -> Callable[..., Any]:
     """
-    Enforce rate limit of the target through setting requests per minute.
-    This should be applied to all send_prompt_async() functions on PromptTarget.
+    Retain the former target rate-limit decorator as a compatibility shim.
+
+    ``PromptTarget`` now applies the shared rate-limit wait through the explicit
+    ``ProviderAttempt`` token. This decorator no longer waits or marks an attempt.
 
     Args:
         func (Callable): The function to be decorated.
 
     Returns:
-        Callable: The decorated function with a sleep introduced.
+        Callable: The decorated function.
     """
 
     @wraps(func)
     async def set_max_rpm_async(*args: Any, **kwargs: Any) -> Any:
-        self = args[0]
-        rpm = getattr(self, "_max_requests_per_minute", None)
-        if rpm and rpm > 0:
-            await asyncio.sleep(60 / rpm)
-
-        if not getattr(self, "_MANAGES_PROVIDER_ATTEMPT_BOUNDARY", False):
-            _mark_active_provider_attempted()
+        print_deprecation_message(
+            old_item="pyrit.prompt_target.limit_requests_per_minute",
+            new_item="ProviderAttempt passed by PromptTarget.send_prompt_async",
+            removed_in="1.3.0",
+        )
         return await func(*args, **kwargs)
 
-    _PROVIDER_ATTEMPT_MARKING_WRAPPERS.add(set_max_rpm_async)
     return set_max_rpm_async
 
 

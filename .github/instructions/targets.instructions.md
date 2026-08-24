@@ -15,7 +15,7 @@ subclasses such as ``OpenAITarget`` / ``HTTPTarget``) and implement
 ``_send_prompt_to_target_async``:
 
 ```python
-from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target import PromptTarget, ProviderAttempt
 
 
 class MyTarget(PromptTarget):
@@ -35,13 +35,51 @@ class MyTarget(PromptTarget):
         self._api_key = api_key
 
     async def _send_prompt_to_target_async(
-        self, *, normalized_conversation: list[Message]
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt,
     ) -> list[Message]:
-        ...
+        body = await self._build_request_body_async(
+            normalized_conversation=normalized_conversation,
+        )
+        response = await provider_attempt.run_async(
+            operation=lambda: self._client.send_async(body=body),
+        )
+        return self._parse_response(response=response)
 ```
 
 ``send_prompt_async`` (the public entry point) is ``@final`` and MUST NOT
 be overridden. Override ``_send_prompt_to_target_async`` instead.
+
+## Provider-attempt boundary
+
+``PromptTarget.send_prompt_async`` constructs a one-shot ``ProviderAttempt`` for
+each concrete target invocation. It owns the shared requests-per-minute wait and
+the caller lifecycle notification without exposing attack-owned history state to
+the target.
+
+Provider-backed targets MUST call ``provider_attempt.start_async()`` immediately
+before their first irreversible operation that may deliver the current request,
+or wrap that operation with ``provider_attempt.run_async(...)``. Perform
+cancellable setup first, including validation, body construction, authentication,
+local file reads, model loading and tokenization, connection/session setup,
+history restoration, and browser DOM staging. Repeated starts are idempotent, so
+retries and multi-operation sends reuse the same token. Providerless targets do
+not start it.
+
+For one compatibility window, ``PromptTarget`` inspects the most-derived
+protected method signature. Existing overrides that do not accept
+``provider_attempt`` are called with their legacy signature after the token is
+started conservatively at method entry. Migrated built-ins accept
+``provider_attempt: ProviderAttempt | None = None`` only so a legacy subclass can
+call ``super()._send_prompt_to_target_async(normalized_conversation=...)`` without
+a second wait or mark. New targets must require the token. Direct calls to
+``_send_prompt_to_target_async`` are unsupported.
+
+``limit_requests_per_minute`` remains exported temporarily as a deprecated no-op
+decorator. Rate limiting is applied by ``ProviderAttempt`` when a target is
+invoked through ``send_prompt_async``.
 
 ## Keyword-only ``__init__`` is enforced
 

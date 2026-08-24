@@ -12,6 +12,10 @@ from pyrit.models import (
     Message,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_requirements import CHAT_TARGET_REQUIREMENTS
 
 logger = logging.getLogger(__name__)
@@ -156,7 +160,12 @@ class RoundRobinTarget(PromptTarget):
         self._counter += 1
         return self._targets[idx]
 
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Select the next inner target and delegate the send, with fallback.
 
@@ -172,6 +181,7 @@ class RoundRobinTarget(PromptTarget):
 
         Args:
             normalized_conversation: The normalized conversation from the pipeline.
+            provider_attempt: One-shot provider boundary shared with inner target attempts.
 
         Returns:
             list[Message]: Response messages from the inner target.
@@ -180,13 +190,18 @@ class RoundRobinTarget(PromptTarget):
             Exception: If all unique inner targets fail.
             RuntimeError: If no targets are available to try (should be unreachable).
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         first_target = self._next_target()
         targets_to_try = [first_target] + [t for t in self._targets if t is not first_target]
         last_exception: BaseException | None = None
 
         for target in targets_to_try:
             try:
-                responses = await target._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+                inner_attempt = provider_attempt._derive(wait_for_start_async=target._wait_for_rate_limit_async)
+                responses = await target._send_normalized_prompt_async(
+                    normalized_conversation=normalized_conversation,
+                    provider_attempt=inner_attempt,
+                )
 
                 inner_id_hash = target.get_identifier().hash
                 if inner_id_hash is not None:
@@ -226,12 +241,11 @@ def _validate_configuration_consistency(targets: list[PromptTarget]) -> None:
     """
     Validate that all inner targets have identical TargetConfigurations.
 
-    Since RoundRobinTarget calls ``_send_prompt_to_target_async`` directly on
-    inner targets (bypassing ``send_prompt_async``), the inner targets'
-    normalization pipelines and policies never run. Only the round-robin's own
-    pipeline runs. We adopt the first target's configuration so the pipeline
-    matches what the user configured — but that is only valid if every inner
-    target has the same configuration.
+    RoundRobinTarget normalizes once and invokes each selected inner target
+    through the base class's internal normalized-send path. The inner targets'
+    normalization pipelines and policies do not run again. We adopt the first
+    target's configuration so the pipeline matches what the user configured,
+    which is valid only if every inner target has the same configuration.
 
     Uses ``as_identifier_params()`` for comparison: two configurations that
     behave identically produce equal dicts.
