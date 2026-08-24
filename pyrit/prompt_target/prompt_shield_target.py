@@ -18,8 +18,11 @@ from pyrit.models import (
     construct_response_from_request,
 )
 from pyrit.prompt_target.common.prompt_target import AuthMode, PromptTarget
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
 
@@ -150,8 +153,12 @@ class PromptShieldTarget(PromptTarget):
             },
         )
 
-    @limit_requests_per_minute
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Parse the text in message to separate the userPrompt and documents contents,
         then send an HTTP request to the endpoint and obtain a response in JSON. For more info, visit
@@ -160,6 +167,7 @@ class PromptShieldTarget(PromptTarget):
         Returns:
             list[Message]: A list containing the response object with generated text pieces.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         request = message.message_pieces[0]
 
@@ -179,12 +187,14 @@ class PromptShieldTarget(PromptTarget):
 
         body = {"userPrompt": parsed_prompt["userPrompt"], "documents": parsed_prompt["documents"]}
 
-        response = await net_utility.make_request_and_raise_if_error_async(
-            endpoint_uri=f"{self._endpoint}/contentsafety/text:shieldPrompt",
-            method="POST",
-            extra_url_parameters=params,
-            headers=headers,
-            request_body=body,
+        response = await provider_attempt.run_async(
+            operation=lambda: net_utility.make_request_and_raise_if_error_async(
+                endpoint_uri=f"{self._endpoint}/contentsafety/text:shieldPrompt",
+                method="POST",
+                extra_url_parameters=params,
+                headers=headers,
+                request_body=body,
+            )
         )
 
         analysis = response.content.decode("utf-8")

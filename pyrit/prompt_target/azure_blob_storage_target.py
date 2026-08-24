@@ -15,9 +15,12 @@ from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
 from pyrit.common import default_values
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import AuthMode, PromptTarget
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +168,14 @@ class AzureBlobStorageTarget(PromptTarget):
             if credential:
                 await credential.close()
 
-    async def _upload_blob_async(self, file_name: str, data: bytes, content_type: str) -> None:
+    async def _upload_blob_async(
+        self,
+        file_name: str,
+        data: bytes,
+        content_type: str,
+        *,
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> None:
         """
         (Async) Handles uploading blob to given storage container.
 
@@ -173,10 +183,12 @@ class AzureBlobStorageTarget(PromptTarget):
             file_name (str): File name to assign to uploaded blob.
             data (bytes): Byte representation of content to upload to container.
             content_type (str): Content type to upload.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Raises:
             RuntimeError: If blob storage client is not initialized.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         content_settings = ContentSettings(content_type=f"{content_type}")
         logger.info(msg="\nUploading to Azure Storage as blob:\n\t" + file_name)
 
@@ -195,7 +207,9 @@ class AzureBlobStorageTarget(PromptTarget):
                 logger.info(msg=f"Blob {blob_path} already exists. Deleting it before uploading a new version.")
                 await blob_client.delete_blob()
             logger.info(msg=f"Uploading new blob to {blob_path}")
-            await blob_client.upload_blob(data=data, content_settings=content_settings)
+            await provider_attempt.run_async(
+                operation=lambda: blob_client.upload_blob(data=data, content_settings=content_settings)
+            )
         except Exception as exc:
             if isinstance(exc, ClientAuthenticationError):
                 logger.exception(
@@ -232,8 +246,12 @@ class AzureBlobStorageTarget(PromptTarget):
         container_url = f"https://{parsed_url.netloc}/{container_name}"
         return container_url, blob_prefix
 
-    @limit_requests_per_minute
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         (Async) Sends prompt to target, which creates a file and uploads it as a blob
         to the provided storage container.
@@ -242,10 +260,12 @@ class AzureBlobStorageTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response with the Blob URL.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         request = message.message_pieces[0]
 
@@ -257,7 +277,12 @@ class AzureBlobStorageTarget(PromptTarget):
         data = str.encode(request.converted_value)
         blob_url = self._container_url + "/" + file_name
 
-        await self._upload_blob_async(file_name=file_name, data=data, content_type=self._blob_content_type)
+        await self._upload_blob_async(
+            file_name=file_name,
+            data=data,
+            content_type=self._blob_content_type,
+            provider_attempt=provider_attempt,
+        )
 
         response = construct_response_from_request(
             request=request, response_text_pieces=[blob_url], response_type="url"

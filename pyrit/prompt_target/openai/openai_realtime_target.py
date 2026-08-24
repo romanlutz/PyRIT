@@ -17,13 +17,16 @@ from pyrit.exceptions import (
 from pyrit.exceptions.exception_classes import ServerErrorException
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.realtime_audio import (
     RealtimeTargetResult,
     ServerVadConfig,
 )
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.openai._openai_realtime_event_router import (
     _OpenAIRealtimeEventKind,
     _OpenAIRealtimeEventRouter,
@@ -386,9 +389,13 @@ class RealtimeTarget(OpenAITarget):
         # Return default system prompt if none found in conversation
         return "You are a helpful AI assistant"
 
-    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI realtime target.
 
@@ -400,6 +407,7 @@ class RealtimeTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
@@ -407,6 +415,7 @@ class RealtimeTarget(OpenAITarget):
         Raises:
             ValueError: If the message piece type is unsupported.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         conversation_id = message.message_pieces[0].conversation_id
         request = message.message_pieces[0]
@@ -418,10 +427,14 @@ class RealtimeTarget(OpenAITarget):
             connection = await self._connect_async(conversation_id=conversation_id)
             self._existing_conversation[conversation_id] = connection
 
-            # Only send config when creating a new connection
-            await self.send_config_async(conversation_id=conversation_id, conversation=normalized_conversation)
-            # Give the server a moment to process the session update
-            await asyncio.sleep(0.5)
+            try:
+                # Only send config when creating a new connection
+                await self.send_config_async(conversation_id=conversation_id, conversation=normalized_conversation)
+                # Give the server a moment to process the session update
+                await asyncio.sleep(0.5)
+            except BaseException:
+                await self.cleanup_conversation_async(conversation_id)
+                raise
 
         response_type = request.converted_value_data_type
 
@@ -430,12 +443,14 @@ class RealtimeTarget(OpenAITarget):
             output_audio_path, result = await self.send_audio_async(
                 filename=request.converted_value,
                 conversation_id=conversation_id,
+                provider_attempt=provider_attempt,
             )
 
         elif response_type == "text":
             output_audio_path, result = await self.send_text_async(
                 text=request.converted_value,
                 conversation_id=conversation_id,
+                provider_attempt=provider_attempt,
             )
         else:
             raise ValueError(f"Unsupported response type: {response_type}")
@@ -486,14 +501,13 @@ class RealtimeTarget(OpenAITarget):
         Args:
             conversation_id (str): The conversation ID to disconnect from.
         """
-        connection = self._existing_conversation.get(conversation_id)
+        connection = self._existing_conversation.pop(conversation_id, None)
         if connection:
             try:
                 await connection.close()
                 logger.info(f"Disconnected from {self._endpoint} with conversation ID: {conversation_id}")
             except Exception as e:
                 logger.warning(f"Error closing connection for {conversation_id}: {e}")
-            del self._existing_conversation[conversation_id]
 
     async def _connect_async(self, *, conversation_id: str) -> Any:
         """
@@ -760,6 +774,7 @@ class RealtimeTarget(OpenAITarget):
         *,
         text: str,
         conversation_id: str,
+        provider_attempt: ProviderAttempt | None = None,
     ) -> tuple[str, RealtimeTargetResult]:
         """
         Send text prompt using OpenAI Realtime API client.
@@ -767,6 +782,7 @@ class RealtimeTarget(OpenAITarget):
         Args:
             text: prompt to send.
             conversation_id: conversation ID
+            provider_attempt: One-shot provider boundary.
 
         Returns:
             tuple[str, RealtimeTargetResult]: Path to saved audio file and the RealtimeTargetResult
@@ -774,27 +790,30 @@ class RealtimeTarget(OpenAITarget):
         Raises:
             RuntimeError: If no audio is received from the server.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         connection = self._get_connection(conversation_id=conversation_id)
 
         # Start listening for responses
-        receive_tasks = asyncio.create_task(self.receive_events_async(conversation_id=conversation_id))
+        receive_task = asyncio.create_task(self.receive_events_async(conversation_id=conversation_id))
 
         logger.info(f"Sending text message: {text}")
 
-        # Send conversation item
-        await connection.conversation.item.create(
-            item={
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            }
-        )
+        try:
+            await provider_attempt.start_async()
+            await connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }
+            )
+            # Request response from model
+            await self.send_response_create_async(conversation_id=conversation_id)
 
-        # Request response from model
-        await self.send_response_create_async(conversation_id=conversation_id)
-
-        # Wait for response - receive_events has its own soft-finish logic
-        result = await receive_tasks
+            # Wait for response - receive_events has its own soft-finish logic
+            result = await receive_task
+        finally:
+            await self._cancel_receive_task_async(receive_task=receive_task)
 
         if not result.audio_bytes:
             raise RuntimeError("No audio received from the server.")
@@ -808,6 +827,7 @@ class RealtimeTarget(OpenAITarget):
         *,
         filename: str,
         conversation_id: str,
+        provider_attempt: ProviderAttempt | None = None,
     ) -> tuple[str, RealtimeTargetResult]:
         """
         Send an audio message using OpenAI Realtime API client.
@@ -815,6 +835,7 @@ class RealtimeTarget(OpenAITarget):
         Args:
             filename (str): The path to the audio file.
             conversation_id (str): Conversation ID
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             tuple[str, RealtimeTargetResult]: Path to saved audio file and the RealtimeTargetResult
@@ -823,17 +844,19 @@ class RealtimeTarget(OpenAITarget):
             Exception: If sending audio fails.
             RuntimeError: If no audio is received from the server.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         connection = self._get_connection(conversation_id=conversation_id)
 
         audio_content, num_channels, sample_width, frame_rate = await asyncio.to_thread(self._read_wav_file, filename)
 
-        receive_tasks = asyncio.create_task(self.receive_events_async(conversation_id=conversation_id))
+        receive_task = asyncio.create_task(self.receive_events_async(conversation_id=conversation_id))
 
         try:
             audio_base64 = base64.b64encode(audio_content).decode("utf-8")
 
             # Use conversation.item.create with input_audio (like Azure sample)
             logger.info(f"Sending audio message via conversation.item.create with {len(audio_base64)} bytes")
+            await provider_attempt.start_async()
             await connection.conversation.item.create(
                 item={
                     "type": "message",
@@ -842,21 +865,30 @@ class RealtimeTarget(OpenAITarget):
                 }
             )
 
+            logger.debug("Sending response.create")
+            await self.send_response_create_async(conversation_id=conversation_id)
+
+            logger.debug("Waiting for response events...")
+            # Wait for response - receive_events has its own soft-finish logic
+            result = await receive_task
         except Exception as e:
             logger.error(f"Error sending audio: {e}")
             raise
+        finally:
+            await self._cancel_receive_task_async(receive_task=receive_task)
 
-        logger.debug("Sending response.create")
-        await self.send_response_create_async(conversation_id=conversation_id)
-
-        logger.debug("Waiting for response events...")
-        # Wait for response - receive_events has its own soft-finish logic
-        result = await receive_tasks
         if not result.audio_bytes:
             raise RuntimeError("No audio received from the server.")
 
         output_audio_path = await self.save_audio_async(result.audio_bytes, num_channels, sample_width, frame_rate)
         return output_audio_path, result
+
+    async def _cancel_receive_task_async(self, *, receive_task: asyncio.Task[RealtimeTargetResult]) -> None:
+        """Cancel and retrieve an unfinished Realtime receive task."""
+        if receive_task.done():
+            return
+        receive_task.cancel()
+        await asyncio.gather(receive_task, return_exceptions=True)
 
     async def _construct_message_from_response_async(self, response: Any, request: Any) -> Message:
         """

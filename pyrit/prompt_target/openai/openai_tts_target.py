@@ -10,9 +10,12 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
 logger = logging.getLogger(__name__)
@@ -106,9 +109,13 @@ class OpenAITTSTarget(OpenAITarget):
             },
         )
 
-    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI TTS target.
 
@@ -116,10 +123,12 @@ class OpenAITTSTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the audio response from the prompt target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         message_piece = message.message_pieces[0]
 
@@ -139,12 +148,14 @@ class OpenAITTSTarget(OpenAITarget):
 
         # Use unified error handler for consistent error handling
         response = await self._handle_openai_request_async(
-            api_call=lambda: self._client.audio.speech.create(
-                model=str(body_parameters["model"]),
-                voice=str(body_parameters["voice"]),
-                input=str(body_parameters["input"]),
-                response_format=body_parameters.get("response_format"),  # type: ignore[ty:invalid-argument-type]
-                speed=body_parameters.get("speed"),  # type: ignore[ty:invalid-argument-type]
+            api_call=lambda: provider_attempt.run_async(
+                operation=lambda: self._client.audio.speech.create(
+                    model=str(body_parameters["model"]),
+                    voice=str(body_parameters["voice"]),
+                    input=str(body_parameters["input"]),
+                    response_format=body_parameters.get("response_format"),  # type: ignore[ty:invalid-argument-type]
+                    speed=body_parameters.get("speed"),  # type: ignore[ty:invalid-argument-type]
+                )
             ),
             request=message,
         )

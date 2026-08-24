@@ -11,9 +11,12 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
 logger = logging.getLogger(__name__)
@@ -141,12 +144,12 @@ class OpenAIImageTarget(OpenAITarget):
             },
         )
 
-    @limit_requests_per_minute
     @pyrit_target_retry
     async def _send_prompt_to_target_async(
         self,
         *,
         normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
     ) -> list[Message]:
         """
         Send a prompt to the OpenAI image target and return the response.
@@ -156,10 +159,12 @@ class OpenAIImageTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the image target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
 
         logger.info(f"Sending the following prompt to the prompt target: {message}")
@@ -169,22 +174,29 @@ class OpenAIImageTarget(OpenAITarget):
         is_editing_request = len(message.message_pieces) >= 2
 
         if is_editing_request:
-            response = await self._send_edit_request_async(message)
+            response = await self._send_edit_request_async(message, provider_attempt=provider_attempt)
         else:
-            response = await self._send_generate_request_async(message)
+            response = await self._send_generate_request_async(message, provider_attempt=provider_attempt)
 
         return [response]
 
-    async def _send_generate_request_async(self, message: Message) -> Message:
+    async def _send_generate_request_async(
+        self,
+        message: Message,
+        *,
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> Message:
         """
         Send a text-only prompt to generate a new image.
 
         Args:
             message (Message): The text message to send.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             Message: The response from the image target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         prompt = message.message_pieces[0].converted_value
 
         # Construct request parameters
@@ -203,16 +215,24 @@ class OpenAIImageTarget(OpenAITarget):
 
         # Use unified error handler for consistent error handling
         return await self._handle_openai_request_async(
-            api_call=lambda: self._client.images.generate(**image_generation_args),
+            api_call=lambda: provider_attempt.run_async(
+                operation=lambda: self._client.images.generate(**image_generation_args)
+            ),
             request=message,
         )
 
-    async def _send_edit_request_async(self, message: Message) -> Message:
+    async def _send_edit_request_async(
+        self,
+        message: Message,
+        *,
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> Message:
         """
         Send a multimodal prompt (text + images) to edit an existing image.
 
         Args:
             message (Message): The text + images message to send.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             Message: The response from the image target.
@@ -220,6 +240,7 @@ class OpenAIImageTarget(OpenAITarget):
         Raises:
             ValueError: If at least one image file cannot be opened.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         # Extract text and images from message pieces
         text_pieces = [p for p in message.message_pieces if p.converted_value_data_type == "text"]
         text_prompt = text_pieces[0].converted_value
@@ -255,7 +276,7 @@ class OpenAIImageTarget(OpenAITarget):
             image_edit_args["background"] = self.background
 
         return await self._handle_openai_request_async(
-            api_call=lambda: self._client.images.edit(**image_edit_args),
+            api_call=lambda: provider_attempt.run_async(operation=lambda: self._client.images.edit(**image_edit_args)),
             request=message,
         )
 

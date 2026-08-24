@@ -8,8 +8,11 @@ import logging
 from pyrit.common import net_utility
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +80,12 @@ class GandalfTarget(PromptTarget):
             },
         )
 
-    @limit_requests_per_minute
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Asynchronously send a message to the Gandalf target.
 
@@ -86,16 +93,18 @@ class GandalfTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         request = message.message_pieces[0]
 
         logger.info(f"Sending the following prompt to the prompt target: {request}")
 
-        response = await self._complete_text_async(request.converted_value)
+        response = await self._complete_text_async(request.converted_value, provider_attempt=provider_attempt)
 
         response_entry = construct_response_from_request(request=request, response_text_pieces=[response])
 
@@ -126,14 +135,25 @@ class GandalfTarget(PromptTarget):
         json_response = resp.json()
         return bool(json_response["success"])
 
-    async def _complete_text_async(self, text: str) -> str:
+    async def _complete_text_async(
+        self,
+        text: str,
+        *,
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> str:
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         payload: dict[str, object] = {
             "defender": self._defender,
             "prompt": text,
         }
 
-        resp = await net_utility.make_request_and_raise_if_error_async(
-            endpoint_uri=self._endpoint, method="POST", request_body=payload, post_type="data"
+        resp = await provider_attempt.run_async(
+            operation=lambda: net_utility.make_request_and_raise_if_error_async(
+                endpoint_uri=self._endpoint,
+                method="POST",
+                request_body=payload,
+                post_type="data",
+            )
         )
 
         if not resp.text:

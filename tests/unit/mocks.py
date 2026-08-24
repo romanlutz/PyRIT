@@ -19,7 +19,7 @@ from pyrit.models import (
     ScenarioResult,
     flatten_to_message_pieces,
 )
-from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration, limit_requests_per_minute
+from pyrit.prompt_target import PromptTarget, TargetCapabilities, TargetConfiguration
 
 
 def make_scenario_identifier(
@@ -229,7 +229,6 @@ class MockPromptTarget(PromptTarget):
                 ).to_message()
             )
 
-    @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         message = normalized_conversation[-1]
         self.prompt_sent.append(message.get_value())

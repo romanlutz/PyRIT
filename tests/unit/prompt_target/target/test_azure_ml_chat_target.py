@@ -13,6 +13,7 @@ from unit.mocks import get_sample_conversations
 from pyrit.exceptions import EmptyResponseException, RateLimitException
 from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
 from pyrit.prompt_target import AzureMLChatTarget
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 
 
 @pytest.fixture
@@ -340,6 +341,24 @@ async def test_get_headers_async_falls_back_to_static_key(patch_central_database
         "Content-Type": "application/json",
         "Authorization": "Bearer static-key",
     }
+
+
+async def test_token_provider_failure_does_not_start_provider_attempt(patch_central_database):
+    token_provider = AsyncMock(side_effect=RuntimeError("auth failed"))
+    target = AzureMLChatTarget(
+        endpoint="http://aml-test-endpoint.com",
+        api_key=token_provider,
+    )
+    message = Message.from_prompt(prompt="hello", role="user")
+    message.get_piece().conversation_id = "auth-failure"
+    send_context = MagicMock(spec=TargetSendContext)
+    send_context.conversation_id = "auth-failure"
+    send_context.select_history.return_value = []
+
+    with pytest.raises(RuntimeError, match="auth failed"):
+        await target.send_prompt_async(message=message, send_context=send_context)
+
+    send_context.mark_provider_attempted.assert_not_called()
 
 
 async def test_complete_chat_async_uses_token_provider_per_request(patch_central_database):

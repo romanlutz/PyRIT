@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from pyrit.models import Message, MessagePiece
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 from pyrit.prompt_target.http_target.http_target import HTTPTarget
 from pyrit.prompt_target.http_target.http_target_callback_functions import (
     get_http_target_json_response_callback_function,
@@ -127,6 +128,22 @@ async def test_send_prompt_async_uses_data_for_dict_body(mock_request, mock_http
         data={"prompt": "test_prompt"},
         follow_redirects=True,
     )
+
+
+async def test_parse_failure_does_not_start_provider_attempt(mock_http_target, patch_central_database):
+    message = Message.from_prompt(prompt="test", role="user")
+    message.get_piece().conversation_id = "parse-failure"
+    send_context = MagicMock(spec=TargetSendContext)
+    send_context.conversation_id = "parse-failure"
+    send_context.select_history.return_value = []
+
+    with (
+        patch.object(mock_http_target, "parse_raw_http_request", side_effect=ValueError("invalid request")),
+        pytest.raises(ValueError, match="invalid request"),
+    ):
+        await mock_http_target.send_prompt_async(message=message, send_context=send_context)
+
+    send_context.mark_provider_attempted.assert_not_called()
 
 
 def test_parse_raw_http_request_ignores_content_length(patch_central_database):

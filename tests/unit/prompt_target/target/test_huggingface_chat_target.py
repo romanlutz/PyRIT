@@ -16,6 +16,7 @@ from pyrit.models import (
     MessagePiece,
 )
 from pyrit.prompt_target import HuggingFaceChatTarget
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 
 
 def is_torch_installed():
@@ -25,6 +26,50 @@ def is_torch_installed():
         return True
     except ModuleNotFoundError:
         return False
+
+
+@pytest.mark.skipif(not is_torch_installed(), reason="torch is not installed")
+async def test_model_load_failure_does_not_start_provider_attempt(patch_central_database):
+    target = HuggingFaceChatTarget(model_id="test_model", use_cuda=False)
+    await target.load_model_and_tokenizer_task
+    failed_load = asyncio.get_running_loop().create_future()
+    failed_load.set_exception(RuntimeError("model load failed"))
+    target.load_model_and_tokenizer_task = failed_load
+    message = Message.from_prompt(prompt="hello", role="user")
+    message.get_piece().conversation_id = "model-load-failure"
+    send_context = MagicMock(spec=TargetSendContext)
+    send_context.conversation_id = "model-load-failure"
+    send_context.select_history.return_value = []
+
+    with pytest.raises(RuntimeError, match="model load failed"):
+        await target.send_prompt_async(message=message, send_context=send_context)
+
+    send_context.mark_provider_attempted.assert_not_called()
+
+
+@pytest.mark.skipif(not is_torch_installed(), reason="torch is not installed")
+async def test_send_cancellation_does_not_cancel_shared_model_load(patch_central_database):
+    target = HuggingFaceChatTarget(model_id="test_model", use_cuda=False)
+    load_started = asyncio.Event()
+    load_release = asyncio.Event()
+
+    async def load_model_async() -> None:
+        load_started.set()
+        await load_release.wait()
+
+    shared_load = asyncio.ensure_future(load_model_async())
+    target.load_model_and_tokenizer_task = shared_load
+    wait_task = asyncio.ensure_future(target._wait_for_model_and_tokenizer_async())
+    await load_started.wait()
+
+    wait_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+
+    assert not shared_load.cancelled()
+    load_release.set()
+    await shared_load
+    await target._wait_for_model_and_tokenizer_async()
 
 
 # Fixture to mock get_required_value

@@ -9,9 +9,12 @@ from pyrit.exceptions.exception_classes import (
     pyrit_target_retry,
 )
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.openai._response_adapter import CompletionsResponseAdapter
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
@@ -116,9 +119,13 @@ class OpenAICompletionTarget(OpenAITarget):
             "api.openai.com": "https://api.openai.com/v1",
         }
 
-    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI completion target.
 
@@ -126,10 +133,12 @@ class OpenAICompletionTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         message_piece = message.message_pieces[0]
 
@@ -152,7 +161,9 @@ class OpenAICompletionTarget(OpenAITarget):
 
         # Use unified error handler - automatically detects Completion and validates
         response = await self._handle_openai_request_async(
-            api_call=lambda: self._client.completions.create(**request_params),
+            api_call=lambda: provider_attempt.run_async(
+                operation=lambda: self._client.completions.create(**request_params)
+            ),
             request=message,
         )
         return [response]

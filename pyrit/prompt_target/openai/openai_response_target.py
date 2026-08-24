@@ -31,11 +31,14 @@ from pyrit.models import (
     PromptDataType,
     PromptResponseError,
 )
+from pyrit.prompt_target.common.provider_attempt import (
+    ProviderAttempt,
+    _get_provider_attempt_or_legacy_noop,
+)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.utils import (
     build_empty_truncated_response,
-    limit_requests_per_minute,
     validate_temperature,
     validate_top_p,
 )
@@ -516,9 +519,13 @@ class OpenAIResponseTarget(OpenAITarget):
 
         return Message(message_pieces=extracted_response_pieces)
 
-    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+    async def _send_prompt_to_target_async(
+        self,
+        *,
+        normalized_conversation: list[Message],
+        provider_attempt: ProviderAttempt | None = None,
+    ) -> list[Message]:
         """
         Send prompt, handle agentic tool calls (function_call), return all messages.
 
@@ -530,11 +537,13 @@ class OpenAIResponseTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
+            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             List of messages generated during the interaction (assistant responses and tool messages).
             The normalizer will persist all of these to memory.
         """
+        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         message_piece: MessagePiece = message.message_pieces[0]
         last_piece = message.message_pieces[-1]
@@ -555,7 +564,9 @@ class OpenAIResponseTarget(OpenAITarget):
 
             # Use unified error handling - automatically detects Response and validates
             result = await self._handle_openai_request_async(
-                api_call=lambda body=body: self._client.responses.create(**body),
+                api_call=lambda body=body: provider_attempt.run_async(
+                    operation=lambda: self._client.responses.create(**body)
+                ),
                 request=message,
             )
 
