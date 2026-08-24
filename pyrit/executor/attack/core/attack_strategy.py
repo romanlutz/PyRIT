@@ -523,8 +523,11 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], Id
         objective_target = TargetIdentifier.from_component_identifier(self.get_objective_target().get_identifier())
 
         prepended_config = self._prepended_conversation_config
-        merged_params["prepended_conversation_converter_roles"] = list(prepended_config.apply_converters_to_roles)
-        all_children["prepended_conversation_formatter"] = prepended_config.get_message_normalizer().get_identifier()
+        if prepended_config.apply_converters_to_roles != ["user"] or prepended_config.message_normalizer is not None:
+            merged_params["prepended_conversation_converter_roles"] = list(prepended_config.apply_converters_to_roles)
+            all_children["prepended_conversation_formatter"] = (
+                prepended_config.get_message_normalizer().get_identifier()
+            )
 
         # Add scorer if present
         objective_scorer: ScorerIdentifier | None = None

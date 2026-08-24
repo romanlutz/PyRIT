@@ -58,6 +58,16 @@ def test_attack_strategy_owns_prepended_policy_and_identifier() -> None:
 
 
 @pytest.mark.usefixtures("patch_central_database")
+def test_attack_strategy_default_prepended_policy_preserves_identifier() -> None:
+    attack = PromptSendingAttack(objective_target=_NonEditableHistoryTarget())
+
+    identifier = attack.get_identifier()
+
+    assert "prepended_conversation_converter_roles" not in identifier.params
+    assert "prepended_conversation_formatter" not in identifier.children
+
+
+@pytest.mark.usefixtures("patch_central_database")
 def test_attack_strategy_resolves_per_send_history_override() -> None:
     attack = PromptSendingAttack(objective_target=_NonEditableHistoryTarget())
     context = PrependedHistorySendContext(
