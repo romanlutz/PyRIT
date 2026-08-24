@@ -203,20 +203,17 @@ async def test_send_prompt_async_target_failure_is_persisted(mock_memory_instanc
             send_context=target_context,
         )
 
-    assert target_context.provider_attempt_count == 0
+    assert target_context.target_invocation_count == 0
     mock_memory_instance.add_message_to_memory.assert_not_called()
 
 
-async def test_child_task_provider_failure_is_persisted(mock_memory_instance):
+async def test_child_task_target_failure_is_persisted(mock_memory_instance):
     class ChildTaskTarget(MockPromptTarget):
-        _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
-
         async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
-            async def fail_after_provider_attempt_async() -> list[Message]:
-                self._mark_provider_attempted()
+            async def fail_in_child_task_async() -> list[Message]:
                 raise RuntimeError("provider failed")
 
-            return await asyncio.create_task(fail_after_provider_attempt_async())
+            return await asyncio.create_task(fail_in_child_task_async())
 
     conversation_id = "prepended-conversation"
     seed = Message.from_prompt(prompt="seed", role="user")
@@ -236,8 +233,8 @@ async def test_child_task_provider_failure_is_persisted(mock_memory_instance):
             send_context=target_context,
         )
 
-    assert target_context.provider_attempt_count == 1
-    assert target_context.is_seed_consumed
+    assert target_context.target_invocation_count == 1
+    assert not target_context.is_seed_consumed
     assert mock_memory_instance.add_message_to_memory.call_count == 2
     persisted_values = [
         call.kwargs["request"].get_value() for call in mock_memory_instance.add_message_to_memory.call_args_list
@@ -245,22 +242,22 @@ async def test_child_task_provider_failure_is_persisted(mock_memory_instance):
     assert "request" in persisted_values
 
 
-async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(mock_memory_instance):
+async def test_concurrent_rejection_is_not_misclassified_as_target_invocation(mock_memory_instance):
     conversation_id = "prepended-conversation"
     seed = Message.from_prompt(prompt="seed", role="user")
     seed.get_piece().conversation_id = conversation_id
     mock_memory_instance.get_conversation_messages.return_value = [seed]
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
-    provider_started = asyncio.Event()
-    provider_release = asyncio.Event()
+    target_started = asyncio.Event()
+    target_release = asyncio.Event()
 
-    async def wait_in_provider(*, normalized_conversation: list[Message]) -> list[Message]:
-        provider_started.set()
-        await provider_release.wait()
+    async def wait_in_target(*, normalized_conversation: list[Message]) -> list[Message]:
+        target_started.set()
+        await target_release.wait()
         raise RuntimeError("provider failed")
 
-    target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_provider)  # type: ignore[method-assign]
+    target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_target)  # type: ignore[method-assign]
     target_context = PrependedHistorySendContext(
         conversation_id=conversation_id,
         seed_message_ids=(seed.get_piece().id,),
@@ -275,7 +272,7 @@ async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(moc
             send_context=target_context,
         )
     )
-    await provider_started.wait()
+    await target_started.wait()
 
     with pytest.raises(Exception, match="Error normalizing prompt"):
         await normalizer.send_prompt_async(
@@ -286,7 +283,7 @@ async def test_concurrent_rejection_is_not_misclassified_as_provider_attempt(moc
         )
 
     mock_memory_instance.add_message_to_memory.assert_not_called()
-    provider_release.set()
+    target_release.set()
     with pytest.raises(Exception, match="Error sending prompt"):
         await first_send
     persisted_values = [

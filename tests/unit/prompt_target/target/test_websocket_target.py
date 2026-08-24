@@ -22,18 +22,6 @@ from pyrit.models import Message, MessagePiece
 from pyrit.prompt_target import WebsocketTarget
 
 
-class _OverriddenWebsocketTarget(WebsocketTarget):
-    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
-        request = normalized_conversation[-1].get_piece()
-        return [
-            MessagePiece(
-                role="assistant",
-                original_value="response",
-                conversation_id=request.conversation_id,
-            ).to_message()
-        ]
-
-
 @pytest.fixture
 def response_parser() -> Callable[[str | bytes], str | None]:
     def parse_response(message: str | bytes) -> str | None:
@@ -92,10 +80,6 @@ def test_init_invalid_endpoint_raises(
             response_parser=response_parser,
             message_builder=message_builder,
         )
-
-
-def test_overridden_managed_target_uses_compatibility_boundary() -> None:
-    assert not _OverriddenWebsocketTarget._MANAGES_PROVIDER_ATTEMPT_BOUNDARY
 
 
 def test_init_empty_protocol_identifier_raises(
@@ -269,7 +253,7 @@ async def test_send_prompt_async_failure_discards_connection(websocket_target: W
     assert "conversation" not in websocket_target._existing_conversation
 
 
-async def test_cancellation_before_websocket_send_does_not_consume_seed(
+async def test_cancellation_during_websocket_setup_occurs_after_target_invocation(
     websocket_target: WebsocketTarget,
     sqlite_instance: SQLiteMemory,
 ) -> None:
@@ -304,7 +288,7 @@ async def test_cancellation_before_websocket_send_does_not_consume_seed(
         with pytest.raises(asyncio.CancelledError):
             await send_task
 
-    assert send_context.provider_attempt_count == 0
+    assert send_context.target_invocation_count == 1
     assert not send_context.is_seed_consumed
 
 
@@ -387,8 +371,8 @@ async def test_consumed_context_retains_history_for_reconnect(
         replay_seed_each_send=False,
     )
     send_context.begin_send()
-    send_context.mark_provider_attempted()
-    send_context.finish_send()
+    send_context.mark_target_invoked()
+    send_context.finish_send(succeeded=True)
 
     with (
         patch.object(

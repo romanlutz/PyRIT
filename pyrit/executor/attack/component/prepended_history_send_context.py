@@ -21,7 +21,7 @@ class PrependedHistorySendContext:
     inferred from response roles or error codes. A stateful cloned conversation
     may instead have an empty seed plus copied branch messages to bootstrap its
     new provider session. A context may be used by only one send at a time.
-    Stateful targets consume the bootstrap when provider invocation begins;
+    Stateful targets consume the bootstrap after target-specific execution succeeds;
     stateless targets replay their explicit seed for every send.
     """
 
@@ -31,8 +31,8 @@ class PrependedHistorySendContext:
     bootstrap_message_ids: tuple[uuid.UUID, ...] | None = None
     _seed_consumed: bool = field(default=False, init=False, repr=False)
     _send_in_progress: bool = field(default=False, init=False, repr=False)
-    _provider_attempt_marked: bool = field(default=False, init=False, repr=False)
-    _provider_attempt_count: int = field(default=0, init=False, repr=False)
+    _target_invocation_marked: bool = field(default=False, init=False, repr=False)
+    _target_invocation_count: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """
@@ -76,9 +76,9 @@ class PrependedHistorySendContext:
         return self._seed_consumed
 
     @property
-    def provider_attempt_count(self) -> int:
-        """Number of sends that reached provider invocation."""
-        return self._provider_attempt_count
+    def target_invocation_count(self) -> int:
+        """Number of sends that reached target-specific execution."""
+        return self._target_invocation_count
 
     def begin_send(self) -> None:
         """
@@ -93,31 +93,33 @@ class PrependedHistorySendContext:
                 "Wait for the active send to finish before sending another request."
             )
         self._send_in_progress = True
-        self._provider_attempt_marked = False
+        self._target_invocation_marked = False
 
-    def mark_provider_attempted(self) -> None:
+    def mark_target_invoked(self) -> None:
         """
-        Record that provider invocation has begun for the active send.
-
-        Stateful targets consume their seed history at this boundary even if the
-        provider later fails or the task is cancelled.
+        Record that target-specific execution has begun for the active send.
 
         Raises:
             RuntimeError: If no send currently owns the context.
         """
         if not self._send_in_progress:
-            raise RuntimeError("Cannot mark a provider attempt without an active send.")
-        if self._provider_attempt_marked:
+            raise RuntimeError("Cannot mark a target invocation without an active send.")
+        if self._target_invocation_marked:
             return
-        self._provider_attempt_marked = True
-        self._provider_attempt_count += 1
-        if not self.replay_seed_each_send:
-            self._seed_consumed = True
+        self._target_invocation_marked = True
+        self._target_invocation_count += 1
 
-    def finish_send(self) -> None:
-        """Release this context after the active send completes or is cancelled."""
+    def finish_send(self, *, succeeded: bool) -> None:
+        """
+        Release this context and consume stateful bootstrap after successful target execution.
+
+        Args:
+            succeeded: Whether target-specific execution returned successfully.
+        """
         if not self._send_in_progress:
             return
+        if succeeded and self._target_invocation_marked and not self.replay_seed_each_send:
+            self._seed_consumed = True
         self._send_in_progress = False
 
     def select_history(self, *, messages: list[Message]) -> list[Message]:

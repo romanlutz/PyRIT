@@ -45,9 +45,9 @@
 # 5. Serializes the normalized view and invokes the provider.
 #
 # The attack-owned `PrependedHistorySendContext` records the persisted prepended-message boundary.
-# Stateful targets consume it after the first provider attempt; stateless targets reuse it for each
-# current request. Targets interact with that state only through an internal `TargetSendContext`
-# protocol at the send boundary.
+# Stateful targets consume it after the first successful target invocation; failed or cancelled
+# invocations retain it for retry. Stateless targets reuse it for each current request. Targets
+# interact with that state only through an internal `TargetSendContext` protocol at the send boundary.
 #
 # ## Base Classes
 #

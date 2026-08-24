@@ -65,7 +65,6 @@ class PlaywrightTarget(PromptTarget):
             ),
         )
     )
-    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -117,9 +116,7 @@ class PlaywrightTarget(PromptTarget):
             raise RuntimeError(
                 "Playwright page is not initialized. Please pass a Page object when initializing PlaywrightTarget."
             )
-
         try:
-            self._mark_provider_attempted()
             text = await self._interaction_func(self._page, message)
         except Exception as e:
             raise RuntimeError(f"An error occurred during interaction: {str(e)}") from e

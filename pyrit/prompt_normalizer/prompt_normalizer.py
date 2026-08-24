@@ -124,7 +124,7 @@ class PromptNormalizer:
         await self._calc_hash_async(request=request)
 
         responses = None
-        provider_attempt_count_before_send = send_context.provider_attempt_count if send_context else 0
+        target_invocation_count_before_send = send_context.target_invocation_count if send_context else 0
         try:
             responses = await target.send_prompt_async(
                 message=request,
@@ -133,7 +133,7 @@ class PromptNormalizer:
             )
             self.memory.add_message_to_memory(request=request)
         except EmptyResponseException as ex:
-            if send_context and send_context.provider_attempt_count == provider_attempt_count_before_send:
+            if send_context and send_context.target_invocation_count == target_invocation_count_before_send:
                 cid = request.message_pieces[0].conversation_id if request.message_pieces else None
                 raise Exception(f"Error normalizing prompt with conversation ID: {cid}") from ex
 
@@ -150,7 +150,7 @@ class PromptNormalizer:
             ]
 
         except Exception as ex:
-            if send_context and send_context.provider_attempt_count == provider_attempt_count_before_send:
+            if send_context and send_context.target_invocation_count == target_invocation_count_before_send:
                 cid = request.message_pieces[0].conversation_id if request.message_pieces else None
                 raise Exception(f"Error normalizing prompt with conversation ID: {cid}") from ex
 

@@ -38,7 +38,6 @@ class WebsocketTarget(PromptTarget):
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
         capabilities=TargetCapabilities(supports_multi_turn=True)
     )
-    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -259,7 +258,6 @@ class WebsocketTarget(PromptTarget):
                     conversation_id=conversation_id,
                     conversation_history=normalized_conversation[:-1],
                 )
-                self._mark_provider_attempted()
                 result = await self._send_text_async(
                     text=request.converted_value,
                     conversation_id=conversation_id,

@@ -94,7 +94,6 @@ class PlaywrightCopilotTarget(PromptTarget):
             ),
         )
     )
-    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     # Placeholder text constants
     PLACEHOLDER_GENERATING_RESPONSE: str = "generating response"
@@ -293,7 +292,6 @@ class PlaywrightCopilotTarget(PromptTarget):
         initial_group_count = len(initial_ai_message_groups)
         logger.debug(f"Initial message group count before sending: {initial_group_count}")
 
-        self._mark_provider_attempted()
         await self._page.click(selectors.send_button_selector)
 
         # Wait for the next AI message to appear
@@ -828,7 +826,6 @@ class PlaywrightCopilotTarget(PromptTarget):
         async with self._page.expect_file_chooser() as fc_info:
             await add_files_button.click()
         file_chooser = await fc_info.value
-        self._mark_provider_attempted()
         await file_chooser.set_files(image_path)
 
         # Check for login requirement in Consumer Copilot

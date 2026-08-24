@@ -91,7 +91,6 @@ class WebSocketCopilotTarget(PromptTarget):
             ),
         )
     )
-    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -528,8 +527,6 @@ class WebSocketCopilotTarget(PromptTarget):
             for input_msg in inputs:
                 payload = self._dict_to_websocket(input_msg)
                 is_user_input = input_msg.get("type") == CopilotMessageType.USER_PROMPT
-                if is_user_input:
-                    self._mark_provider_attempted()
                 await websocket.send(payload)
 
                 max_message_iterations = 1000

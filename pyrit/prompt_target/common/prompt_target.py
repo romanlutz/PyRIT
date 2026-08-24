@@ -24,13 +24,7 @@ from pyrit.prompt_target.common.target_capabilities import (
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.target_history import filter_non_replayable_messages
-from pyrit.prompt_target.common.target_send_context import (
-    TargetSendContext,
-    _activate_target_send_context,
-    _mark_active_provider_attempted,
-    _reset_target_send_context,
-)
-from pyrit.prompt_target.common.utils import _marks_provider_attempt
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +62,6 @@ class PromptTarget(Identifiable):
     # Per-instance overrides are also possible via the ``custom_configuration``
     # constructor parameter, which takes precedence over the class-level value.
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(capabilities=TargetCapabilities())
-    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY: ClassVar[bool] = False
 
     # Declarative auth facts consumed by the create-target service and catalog.
     # Kept off ``TargetCapabilities`` (auth is a construction/credential axis, not
@@ -95,8 +88,6 @@ class PromptTarget(Identifiable):
                 after ``self``.
         """
         super().__init_subclass__(**kwargs)
-        if "_send_prompt_to_target_async" in cls.__dict__ and "_MANAGES_PROVIDER_ATTEMPT_BOUNDARY" not in cls.__dict__:
-            cls._MANAGES_PROVIDER_ATTEMPT_BOUNDARY = False
         # Local import to avoid a circular dependency at package init time.
         from pyrit.common.brick_contract import enforce_keyword_only_init
 
@@ -184,6 +175,7 @@ class PromptTarget(Identifiable):
         if send_context:
             send_context.begin_send()
 
+        send_succeeded = False
         try:
             normalized_conversation = await self._get_normalized_conversation_async(
                 message=message,
@@ -193,27 +185,14 @@ class PromptTarget(Identifiable):
             if not normalized_conversation:
                 raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
             self._validate_request(normalized_conversation=normalized_conversation)
-            active_context_token = (
-                _activate_target_send_context(send_context=send_context) if send_context is not None else None
-            )
-            try:
-                target_send = self._send_prompt_to_target_async
-                target_marks_provider_attempt = self._MANAGES_PROVIDER_ATTEMPT_BOUNDARY or _marks_provider_attempt(
-                    target_send
-                )
-                if send_context and not target_marks_provider_attempt:
-                    send_context.mark_provider_attempted()
-                return await target_send(normalized_conversation=normalized_conversation)
-            finally:
-                if active_context_token is not None:
-                    _reset_target_send_context(token=active_context_token)
+            if send_context:
+                send_context.mark_target_invoked()
+            response = await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+            send_succeeded = True
+            return response
         finally:
             if send_context:
-                send_context.finish_send()
-
-    def _mark_provider_attempted(self) -> None:
-        """Notify caller-owned state immediately before irreversible provider I/O."""
-        _mark_active_provider_attempted()
+                send_context.finish_send(succeeded=send_succeeded)
 
     @abc.abstractmethod
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:

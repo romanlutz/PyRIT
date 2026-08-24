@@ -48,7 +48,7 @@ def test_context_requires_unique_persisted_seed_ids() -> None:
         )
 
 
-def test_stateful_context_consumes_explicit_boundary_at_provider_attempt() -> None:
+def test_stateful_context_consumes_explicit_boundary_at_target_invocation() -> None:
     first = _message(role="system", value="system", sequence=0)
     second = _message(role="user", value="seed", sequence=1)
     unrelated = _message(role="assistant", value="later response", sequence=2)
@@ -60,19 +60,20 @@ def test_stateful_context_consumes_explicit_boundary_at_provider_attempt() -> No
 
     context.begin_send()
     selected = context.select_history(messages=[unrelated, second, first])
-    context.mark_provider_attempted()
-    context.finish_send()
+    context.mark_target_invoked()
+    assert not context.is_seed_consumed
+    context.finish_send(succeeded=True)
 
     assert selected == [first, second]
     assert context.is_seed_consumed
-    assert context.provider_attempt_count == 1
+    assert context.target_invocation_count == 1
 
     context.begin_send()
     assert context.select_history(messages=[first, second, unrelated]) == [first, second, unrelated]
-    context.finish_send()
+    context.finish_send(succeeded=True)
 
 
-def test_stateless_context_replays_explicit_boundary_after_provider_attempt() -> None:
+def test_stateless_context_replays_explicit_boundary_after_target_invocation() -> None:
     seed = _message(role="user", value="seed", sequence=0)
     context = PrependedHistorySendContext(
         conversation_id="conversation",
@@ -83,11 +84,11 @@ def test_stateless_context_replays_explicit_boundary_after_provider_attempt() ->
     for _ in range(2):
         context.begin_send()
         assert context.select_history(messages=[seed]) == [seed]
-        context.mark_provider_attempted()
-        context.finish_send()
+        context.mark_target_invoked()
+        context.finish_send(succeeded=True)
 
     assert not context.is_seed_consumed
-    assert context.provider_attempt_count == 2
+    assert context.target_invocation_count == 2
 
 
 def test_context_rejects_concurrent_send_until_active_send_finishes() -> None:
@@ -101,12 +102,12 @@ def test_context_rejects_concurrent_send_until_active_send_finishes() -> None:
     with pytest.raises(RuntimeError, match="Concurrent sends"):
         context.begin_send()
 
-    context.finish_send()
+    context.finish_send(succeeded=False)
     context.begin_send()
-    context.finish_send()
+    context.finish_send(succeeded=False)
 
 
-def test_context_rejects_provider_attempt_without_active_send() -> None:
+def test_context_rejects_target_invocation_without_active_send() -> None:
     context = PrependedHistorySendContext(
         conversation_id="conversation",
         seed_message_ids=(uuid.uuid4(),),
@@ -114,10 +115,10 @@ def test_context_rejects_provider_attempt_without_active_send() -> None:
     )
 
     with pytest.raises(RuntimeError, match="without an active send"):
-        context.mark_provider_attempted()
+        context.mark_target_invoked()
 
 
-def test_context_counts_one_provider_attempt_per_send() -> None:
+def test_context_counts_one_target_invocation_per_send() -> None:
     context = PrependedHistorySendContext(
         conversation_id="conversation",
         seed_message_ids=(uuid.uuid4(),),
@@ -125,11 +126,11 @@ def test_context_counts_one_provider_attempt_per_send() -> None:
     )
 
     context.begin_send()
-    context.mark_provider_attempted()
-    context.mark_provider_attempted()
-    context.finish_send()
+    context.mark_target_invoked()
+    context.mark_target_invoked()
+    context.finish_send(succeeded=True)
 
-    assert context.provider_attempt_count == 1
+    assert context.target_invocation_count == 1
 
 
 def test_context_rejects_missing_persisted_boundary_message() -> None:
@@ -209,8 +210,8 @@ def test_context_remap_resets_consumed_state_for_new_conversation() -> None:
         replay_seed_each_send=False,
     )
     context.begin_send()
-    context.mark_provider_attempted()
-    context.finish_send()
+    context.mark_target_invoked()
+    context.finish_send(succeeded=True)
 
     duplicate = context.remap_for_duplicate_conversation(
         conversation_id="duplicate",

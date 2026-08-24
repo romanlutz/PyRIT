@@ -26,9 +26,9 @@ A `Message` object contains the current request and the identifiers needed to lo
 history. This is discussed in more depth [here](../memory/3_memory_data_types.md).
 
 `send_context` is an internal protocol that lets caller-owned execution state select persisted history
-and observe the provider-attempt boundary. Attacks with prepended history own the concrete
+and observe when target-specific execution begins. Attacks with prepended history own the concrete
 `PrependedHistorySendContext`; targets do not construct it, clone it, or decide whether its seed should
-be replayed. Before a provider send, `PromptTarget` loads memory history, asks the protocol for the
+be replayed. Before target-specific execution, `PromptTarget` loads memory history, asks the protocol for the
 caller-approved target view, and then runs the target's capability-normalization pipeline. Request
 converters have already run by this point, so role-specific converter choices remain intact even when
 the target must receive one flattened request. The context is ephemeral and does not replace the
@@ -47,10 +47,11 @@ turns. A stateful TAP target without editable history can flatten only text conv
 branching; non-text converter output requires an editable-history target, a stateless target, or
 `branching_factor=1` so copied media is never replayed under a different role.
 
-The provider-attempt signal is emitted after shared target-side rate limiting. Targets that need more
-precise setup, such as WebSocket, Playwright, or conversation-keyed HTTP targets, emit it immediately
-before the irreversible provider operation. Cancellation before that point leaves a one-time
-bootstrap available for retry.
+`PromptTarget` records one target invocation immediately before calling
+`_send_prompt_to_target_async`. This framework-owned boundary is not a target capability or a
+subclass-managed flag. A stateful target consumes one-time bootstrap history only after that call
+returns successfully; normalization failures, target errors, and cancellation retain it for retry.
+Target-side rate limiting remains independent and continues to use `limit_requests_per_minute`.
 
 `send_prompt_async` is the final public orchestration method. Custom target subclasses implement
 `_send_prompt_to_target_async(*, normalized_conversation: list[Message]) -> list[Message]` instead of

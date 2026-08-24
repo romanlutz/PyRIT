@@ -1246,12 +1246,12 @@ async def test_target_normalization_cancellation_propagates():
             normalizer_overrides=normalizer_overrides,
             send_context=target_context,
         )
-    assert target_context.provider_attempt_count == 0
+    assert target_context.target_invocation_count == 0
     assert not target_context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_rate_limit_cancellation_does_not_consume_stateful_seed():
+async def test_rate_limit_cancellation_retains_stateful_seed_after_target_invocation():
     target = MockPromptTarget(rpm=1)
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
     mock_memory = MagicMock(spec=MemoryInterface)
@@ -1282,12 +1282,12 @@ async def test_rate_limit_cancellation_does_not_consume_stateful_seed():
         with pytest.raises(asyncio.CancelledError):
             await send_task
 
-    assert target_context.provider_attempt_count == 0
+    assert target_context.target_invocation_count == 1
     assert not target_context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_provider_failure_propagates_after_normalization():
+async def test_target_failure_retains_stateful_seed_after_normalization():
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
     mock_memory = MagicMock(spec=MemoryInterface)
@@ -1307,12 +1307,12 @@ async def test_provider_failure_propagates_after_normalization():
             normalizer_overrides=normalizer_overrides,
             send_context=target_context,
         )
-    assert target_context.provider_attempt_count == 1
-    assert target_context.is_seed_consumed
+    assert target_context.target_invocation_count == 1
+    assert not target_context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_provider_cancellation_consumes_stateful_seed_and_releases_context():
+async def test_target_cancellation_retains_stateful_seed_and_releases_context():
     target = MockPromptTarget()
     target._configuration = TargetConfiguration(capabilities=TargetCapabilities(supports_multi_turn=True))
     prepended = _make_message(role="user", content="prepended")
@@ -1324,15 +1324,15 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
         [prepended, first_live],
     ]
     target._memory = mock_memory
-    provider_started = asyncio.Event()
-    provider_release = asyncio.Event()
+    target_started = asyncio.Event()
+    target_release = asyncio.Event()
 
-    async def wait_in_provider(*, normalized_conversation: list[Message]) -> list[Message]:
-        provider_started.set()
-        await provider_release.wait()
+    async def wait_in_target(*, normalized_conversation: list[Message]) -> list[Message]:
+        target_started.set()
+        await target_release.wait()
         return [_make_message(role="assistant", content="response")]
 
-    target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_provider)  # type: ignore[method-assign]
+    target._send_prompt_to_target_async = AsyncMock(side_effect=wait_in_target)  # type: ignore[method-assign]
     target_context = _make_prepended_history_send_context(
         prepended_messages=[prepended],
         target_supports_multi_turn=True,
@@ -1344,13 +1344,13 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
             send_context=target_context,
         )
     )
-    await provider_started.wait()
+    await target_started.wait()
     first_send.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_send
 
-    assert target_context.is_seed_consumed
-    assert target_context.provider_attempt_count == 1
+    assert not target_context.is_seed_consumed
+    assert target_context.target_invocation_count == 1
 
     target._send_prompt_to_target_async = AsyncMock(  # type: ignore[method-assign]
         return_value=[_make_message(role="assistant", content="second response")]
@@ -1360,8 +1360,10 @@ async def test_provider_cancellation_consumes_stateful_seed_and_releases_context
         normalizer_overrides=_make_normalizer_overrides(send_context=target_context),
         send_context=target_context,
     )
+    assert target_context.is_seed_consumed
+    assert target_context.target_invocation_count == 2
     payload = target._send_prompt_to_target_async.await_args.kwargs["normalized_conversation"]
-    assert [message.get_value() for message in payload] == ["prepended", "first live", "second live"]
+    assert [message.get_value() for message in payload] == ["Turn 1:\nuser: prepended\nTurn 2:\nuser: second live"]
 
 
 @pytest.mark.usefixtures("patch_central_database")
