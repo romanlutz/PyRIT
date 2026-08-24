@@ -23,18 +23,25 @@ import ChatInputArea from './ChatInputArea'
 import ConversationPanel from './ConversationPanel'
 import ConverterPanel from './ConverterPanel'
 import TargetBadge from './TargetBadge'
+import {
+  RETRYABLE_TARGET_RESPONSE_ERROR,
+  buildRecoveryConversationRequest,
+  findLastProcessingErrorIndex,
+  getLatestTargetResponseFailure,
+  getPersistedProcessingRecovery,
+} from './chatRecovery'
+import type { RecoverableSendDraft } from './chatRecovery'
 import type { PieceConversion } from './converterTypes'
 import { PIECE_TYPE_TO_DATA_TYPE, basenameFromValue, buildMediaUrl, dataTypeToAttachmentKind, isPathDataType } from './converterTypes'
 import LabelsBar from '../Labels/LabelsBar'
 import type { ChatInputAreaHandle } from './ChatInputArea'
 import { attacksApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
-import { buildMessagePieces, backendMessageToFrontend, backendMessagesToFrontend } from '../../utils/messageMapper'
+import { buildMessagePieces, backendMessagesToFrontend } from '../../utils/messageMapper'
 import { exportConversation } from '../../utils/conversationExport'
 import type { ExportFormat } from '../../utils/conversationExport'
 import type {
   AttackTargetResolutionStatus,
-  BackendMessage,
   ChatSendOutcome,
   CreateConversationRequest,
   Message,
@@ -48,106 +55,6 @@ import { useChatWindowStyles } from './ChatWindow.styles'
 
 const NARROW_SCREEN_QUERY = '(max-width: 600px)'
 const MARKDOWN_PREFERENCE_STORAGE_KEY = 'pyrit.chatMarkdownMode'
-const RETRYABLE_TARGET_RESPONSE_ERROR = 'processing'
-
-interface RecoverableSendDraft {
-  conversationId: string
-  failedRequestTurnNumber: number
-  originalValue: string
-  attachments: MessageAttachment[]
-  conversions: Record<string, PieceConversion>
-  source: 'live' | 'persisted'
-  missingConverterSelections: boolean
-}
-
-interface TargetResponseFailure {
-  type: string
-  errorTurnNumber: number
-  failedRequestTurnNumber?: number
-}
-
-function findPrecedingUserMessage(
-  messages: BackendMessage[],
-  beforeIndex: number,
-): BackendMessage | undefined {
-  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'user') {
-      return messages[index]
-    }
-  }
-  return undefined
-}
-
-function getLatestTargetResponseFailure(messages: BackendMessage[]): TargetResponseFailure | undefined {
-  const latestMessageIndex = messages.length - 1
-  const latestMessage = messages[messages.length - 1]
-  if (
-    !latestMessage
-    || (latestMessage.role !== 'assistant' && latestMessage.role !== 'simulated_assistant')
-  ) {
-    return undefined
-  }
-
-  const errorType = latestMessage.message_pieces.find(
-    (piece) => piece.response_error && piece.response_error !== 'none',
-  )?.response_error
-  if (!errorType) {
-    return undefined
-  }
-
-  return {
-    type: errorType,
-    errorTurnNumber: latestMessage.turn_number,
-    failedRequestTurnNumber: findPrecedingUserMessage(messages, latestMessageIndex)?.turn_number,
-  }
-}
-
-function getPersistedProcessingRecovery(
-  conversationId: string,
-  messages: BackendMessage[],
-): RecoverableSendDraft | undefined {
-  for (let errorIndex = messages.length - 1; errorIndex >= 0; errorIndex -= 1) {
-    const errorMessage = messages[errorIndex]
-    const isProcessingError = (
-      errorMessage.role === 'assistant'
-      || errorMessage.role === 'simulated_assistant'
-    ) && errorMessage.message_pieces.some(
-      (piece) => piece.response_error === RETRYABLE_TARGET_RESPONSE_ERROR,
-    )
-    if (!isProcessingError) {
-      continue
-    }
-
-    const failedRequest = findPrecedingUserMessage(messages, errorIndex)
-    if (!failedRequest) {
-      return undefined
-    }
-
-    const mappedRequest = backendMessageToFrontend(failedRequest)
-    const attachments = mappedRequest.originalAttachments ?? mappedRequest.attachments ?? []
-    return {
-      conversationId,
-      failedRequestTurnNumber: failedRequest.turn_number,
-      originalValue: mappedRequest.originalContent ?? mappedRequest.content,
-      attachments: attachments.map((attachment) => ({ ...attachment })),
-      conversions: {},
-      source: 'persisted',
-      missingConverterSelections: failedRequest.message_pieces.some(
-        (piece) => Boolean(piece.converter_identifiers?.length),
-      ),
-    }
-  }
-  return undefined
-}
-
-function findLastProcessingErrorIndex(messages: Message[]): number | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].error?.type === RETRYABLE_TARGET_RESPONSE_ERROR) {
-      return index
-    }
-  }
-  return undefined
-}
 
 function readStoredMarkdownPreference(): boolean {
   if (typeof window === 'undefined') return false
@@ -780,13 +687,7 @@ export default function ChatWindow({
     const supportsMultiTurn = Boolean(
       activeTarget && activeTarget.capabilities?.supports_multi_turn !== false,
     )
-    const cutoffIndex = recoverableSend.failedRequestTurnNumber - 1
-    const recoveryRequest: CreateConversationRequest = supportsMultiTurn && cutoffIndex >= 0
-      ? {
-          source_conversation_id: recoverableSend.conversationId,
-          cutoff_index: cutoffIndex,
-        }
-      : {}
+    const recoveryRequest = buildRecoveryConversationRequest(recoverableSend, supportsMultiTurn)
     const sourceConversationId = recoverableSend.conversationId
     const draftRevision = inputBoxRef.current?.getDraftRevision()
 
