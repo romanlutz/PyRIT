@@ -268,12 +268,10 @@ class PromptTarget(Identifiable):
         """
         signature = inspect.signature(type(self)._send_prompt_to_target_async)
         parameter = signature.parameters.get("provider_attempt")
-        if parameter is not None and parameter.kind in {
+        return parameter is not None and parameter.kind in {
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
-        }:
-            return True
-        return any(item.kind is inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values())
+        }
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         """

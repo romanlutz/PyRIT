@@ -205,6 +205,7 @@ class AzureBlobStorageTarget(PromptTarget):
             blob_client = self._client_async.get_blob_client(blob=blob_path)
             if await blob_client.exists():
                 logger.info(msg=f"Blob {blob_path} already exists. Deleting it before uploading a new version.")
+                await provider_attempt.start_async()
                 await blob_client.delete_blob()
             logger.info(msg=f"Uploading new blob to {blob_path}")
             await provider_attempt.run_async(

@@ -65,16 +65,18 @@ class _TokenAwareTarget(PromptTarget):
         return []
 
 
-class _KwargsTokenTarget(PromptTarget):
+class _LegacyKwargsTarget(PromptTarget):
+    def __init__(self, *, rpm: int | None = None) -> None:
+        super().__init__(max_requests_per_minute=rpm)
+        self.received_kwargs: dict[str, object] = {}
+
     async def _send_prompt_to_target_async(
         self,
         *,
         normalized_conversation: list[Message],
         **kwargs: object,
     ) -> list[Message]:
-        provider_attempt = kwargs["provider_attempt"]
-        assert isinstance(provider_attempt, ProviderAttempt)
-        await provider_attempt.start_async()
+        self.received_kwargs = kwargs
         return []
 
 
@@ -182,13 +184,17 @@ async def test_token_aware_target_setup_failure_does_not_start_attempt() -> None
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_kwargs_target_receives_provider_attempt() -> None:
-    target = _KwargsTokenTarget()
+async def test_legacy_kwargs_target_uses_conservative_bridge() -> None:
+    target = _LegacyKwargsTarget(rpm=30)
     context = _context(target=target)
 
-    await target.send_prompt_async(message=_message(), send_context=context)
+    with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+        await target.send_prompt_async(message=_message(), send_context=context)
 
+    sleep.assert_awaited_once_with(2.0)
+    assert target.received_kwargs == {}
     assert context.provider_attempt_count == 1
+    assert context.is_seed_consumed
 
 
 @pytest.mark.usefixtures("patch_central_database")
