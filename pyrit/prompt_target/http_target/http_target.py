@@ -18,11 +18,8 @@ from pyrit.models import (
     construct_response_from_request,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +165,8 @@ class HTTPTarget(PromptTarget):
             http_request_w_prompt = self.http_request
         return http_request_w_prompt
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    @limit_requests_per_minute
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the HTTP target.
 
@@ -181,12 +174,10 @@ class HTTPTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         request = message.message_pieces[0]
 
@@ -211,24 +202,20 @@ class HTTPTarget(PromptTarget):
 
         try:
             if isinstance(http_body, dict):
-                response = await provider_attempt.run_async(
-                    operation=lambda: client.request(
-                        method=http_method,
-                        url=url,
-                        headers=header_dict,
-                        data=http_body,
-                        follow_redirects=self.follow_redirects,
-                    )
+                response = await client.request(
+                    method=http_method,
+                    url=url,
+                    headers=header_dict,
+                    data=http_body,
+                    follow_redirects=self.follow_redirects,
                 )
             else:
-                response = await provider_attempt.run_async(
-                    operation=lambda: client.request(
-                        method=http_method,
-                        url=url,
-                        headers=header_dict,
-                        content=http_body,
-                        follow_redirects=self.follow_redirects,
-                    )
+                response = await client.request(
+                    method=http_method,
+                    url=url,
+                    headers=header_dict,
+                    content=http_body,
+                    follow_redirects=self.follow_redirects,
                 )
 
             response_content = response.content

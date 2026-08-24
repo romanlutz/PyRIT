@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import asyncio
 import os
 from collections.abc import MutableSequence
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,10 +10,8 @@ from azure.storage.blob.aio import BlobClient as AsyncBlobClient
 from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
 from unit.mocks import get_image_message_piece, get_sample_conversations
 
-from pyrit.executor.attack.component.prepended_history_send_context import PrependedHistorySendContext
-from pyrit.memory import MemoryInterface
 from pyrit.models import Message, MessagePiece, flatten_to_message_pieces
-from pyrit.prompt_target import AzureBlobStorageTarget, TargetCapabilities, TargetConfiguration
+from pyrit.prompt_target import AzureBlobStorageTarget
 
 
 @pytest.fixture
@@ -29,32 +26,6 @@ def azure_blob_storage_target(patch_central_database):
         container_url="https://test.blob.core.windows.net/test",
         sas_token="valid_sas_token",
     )
-
-
-def _configure_send_context(
-    *,
-    target: AzureBlobStorageTarget,
-    conversation_id: str = "blob-conversation",
-) -> PrependedHistorySendContext:
-    seed = Message.from_prompt(prompt="seed", role="user")
-    seed.get_piece().conversation_id = conversation_id
-    memory = MagicMock(spec=MemoryInterface)
-    memory.get_conversation_messages.return_value = [seed]
-    target._memory = memory
-    target._configuration = TargetConfiguration(
-        capabilities=TargetCapabilities(supports_multi_turn=True),
-    )
-    return PrependedHistorySendContext(
-        conversation_id=conversation_id,
-        seed_message_ids=(seed.get_piece().id,),
-        replay_seed_each_send=False,
-    )
-
-
-def _request(*, conversation_id: str = "blob-conversation") -> Message:
-    request = Message.from_prompt(prompt="current", role="user")
-    request.get_piece().conversation_id = conversation_id
-    return request
 
 
 def test_initialization_with_required_parameters(azure_blob_storage_target: AzureBlobStorageTarget):
@@ -269,121 +240,6 @@ async def test_upload_blob_async_raises_when_client_async_none(azure_blob_storag
                 await azure_blob_storage_target._upload_blob_async(
                     file_name="test.txt", data=b"hello", content_type="text/plain"
                 )
-
-
-async def test_existing_blob_delete_failure_is_attempted(
-    azure_blob_storage_target: AzureBlobStorageTarget,
-) -> None:
-    send_context = _configure_send_context(target=azure_blob_storage_target)
-    blob_client = AsyncMock(spec=AsyncBlobClient)
-    blob_client.exists.return_value = True
-    blob_client.delete_blob.side_effect = RuntimeError("delete failed")
-    container_client = AsyncMock(spec=AsyncContainerClient)
-    container_client.get_blob_client = MagicMock(return_value=blob_client)
-    azure_blob_storage_target._client_async = container_client
-
-    with pytest.raises(RuntimeError, match="delete failed"):
-        await azure_blob_storage_target.send_prompt_async(
-            message=_request(),
-            send_context=send_context,
-        )
-
-    blob_client.delete_blob.assert_awaited_once_with()
-    blob_client.upload_blob.assert_not_awaited()
-    assert send_context.provider_attempt_count == 1
-    assert send_context.is_seed_consumed
-
-
-async def test_existing_blob_delete_cancellation_is_attempted(
-    azure_blob_storage_target: AzureBlobStorageTarget,
-) -> None:
-    send_context = _configure_send_context(target=azure_blob_storage_target)
-    delete_started = asyncio.Event()
-
-    async def wait_in_delete_async() -> None:
-        delete_started.set()
-        await asyncio.Event().wait()
-
-    blob_client = AsyncMock(spec=AsyncBlobClient)
-    blob_client.exists.return_value = True
-    blob_client.delete_blob.side_effect = wait_in_delete_async
-    container_client = AsyncMock(spec=AsyncContainerClient)
-    container_client.get_blob_client = MagicMock(return_value=blob_client)
-    azure_blob_storage_target._client_async = container_client
-
-    send_task = asyncio.create_task(
-        azure_blob_storage_target.send_prompt_async(
-            message=_request(),
-            send_context=send_context,
-        )
-    )
-    await delete_started.wait()
-    send_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await send_task
-
-    blob_client.upload_blob.assert_not_awaited()
-    assert send_context.provider_attempt_count == 1
-    assert send_context.is_seed_consumed
-
-
-async def test_blob_exists_failure_before_mutation_is_unattempted(
-    azure_blob_storage_target: AzureBlobStorageTarget,
-) -> None:
-    send_context = _configure_send_context(target=azure_blob_storage_target)
-    blob_client = AsyncMock(spec=AsyncBlobClient)
-    blob_client.exists.side_effect = RuntimeError("exists failed")
-    container_client = AsyncMock(spec=AsyncContainerClient)
-    container_client.get_blob_client = MagicMock(return_value=blob_client)
-    azure_blob_storage_target._client_async = container_client
-
-    with pytest.raises(RuntimeError, match="exists failed"):
-        await azure_blob_storage_target.send_prompt_async(
-            message=_request(),
-            send_context=send_context,
-        )
-
-    blob_client.delete_blob.assert_not_awaited()
-    blob_client.upload_blob.assert_not_awaited()
-    assert send_context.provider_attempt_count == 0
-    assert not send_context.is_seed_consumed
-
-
-async def test_missing_blob_rate_limit_cancellation_is_unattempted(
-    azure_blob_storage_target: AzureBlobStorageTarget,
-) -> None:
-    send_context = _configure_send_context(target=azure_blob_storage_target)
-    azure_blob_storage_target._max_requests_per_minute = 1
-    blob_client = AsyncMock(spec=AsyncBlobClient)
-    blob_client.exists.return_value = False
-    container_client = AsyncMock(spec=AsyncContainerClient)
-    container_client.get_blob_client = MagicMock(return_value=blob_client)
-    azure_blob_storage_target._client_async = container_client
-    wait_started = asyncio.Event()
-
-    async def wait_for_rate_limit_async(delay: float) -> None:
-        wait_started.set()
-        await asyncio.Event().wait()
-
-    with patch(
-        "pyrit.prompt_target.common.prompt_target.asyncio.sleep",
-        side_effect=wait_for_rate_limit_async,
-    ):
-        send_task = asyncio.create_task(
-            azure_blob_storage_target.send_prompt_async(
-                message=_request(),
-                send_context=send_context,
-            )
-        )
-        await wait_started.wait()
-        send_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await send_task
-
-    blob_client.delete_blob.assert_not_awaited()
-    blob_client.upload_blob.assert_not_awaited()
-    assert send_context.provider_attempt_count == 0
-    assert not send_context.is_seed_consumed
 
 
 @pytest.mark.parametrize(

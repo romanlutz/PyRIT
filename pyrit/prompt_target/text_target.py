@@ -6,7 +6,6 @@ from typing import IO
 
 from pyrit.models import Message
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import ProviderAttempt
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
 
@@ -36,12 +35,7 @@ class TextTarget(PromptTarget):
         super().__init__(custom_configuration=custom_configuration)
         self._text_stream = text_stream
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously write a message to the text stream.
 
@@ -49,7 +43,6 @@ class TextTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): Unused provider boundary.
 
         Returns:
             list[Message]: An empty list (no response expected).

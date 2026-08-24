@@ -26,11 +26,7 @@ from pyrit.models import (
     MessagePiece,
     construct_response_from_request,
 )
-from pyrit.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
+from pyrit.prompt_target import PromptTarget, limit_requests_per_minute
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -95,6 +91,7 @@ class WebSocketCopilotTarget(PromptTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -272,14 +269,7 @@ class WebSocketCopilotTarget(PromptTarget):
         logger.debug(f"WebSocket URL: {websocket_url}")
         return websocket_url
 
-    async def _upload_image_async(
-        self,
-        *,
-        image_path: str,
-        data_url: str,
-        conversation_id: str,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> str:
+    async def _upload_image_async(self, *, image_path: str, data_url: str, conversation_id: str) -> str:
         """
         Upload an image to Copilot's file upload endpoint (/m365Copilot/UploadFile).
 
@@ -291,7 +281,6 @@ class WebSocketCopilotTarget(PromptTarget):
             image_path (str): Path to a local image file.
             data_url (str): Base64-encoded data URL of the image.
             conversation_id (str): The Copilot conversation ID.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             str: The uploaded file ID (docId) returned by the Copilot API.
@@ -299,7 +288,6 @@ class WebSocketCopilotTarget(PromptTarget):
         Raises:
             RuntimeError: If the upload fails or returns an unexpected response.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         upload_url = "https://substrate.office.com/m365Copilot/UploadFile"
         access_token = await self._authenticator.get_token_async()
 
@@ -320,9 +308,7 @@ class WebSocketCopilotTarget(PromptTarget):
             }
 
             logger.debug(f"Uploading image to Copilot: {image_path}")
-            response = await provider_attempt.run_async(
-                operation=lambda: client.post(upload_url, headers=headers, data=payload, timeout=16.0)
-            )
+            response = await client.post(upload_url, headers=headers, data=payload, timeout=16.0)
 
             if response.status_code != 200:
                 raise RuntimeError(f"Failed to upload image. Status: {response.status_code}, Response: {response.text}")
@@ -337,20 +323,13 @@ class WebSocketCopilotTarget(PromptTarget):
             logger.info(f"Successfully uploaded image: {image_path} -> docId={doc_id}")
             return str(doc_id)
 
-    async def _process_image_piece_async(
-        self,
-        *,
-        image_path: str,
-        copilot_conversation_id: str,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> dict[str, Any]:
+    async def _process_image_piece_async(self, *, image_path: str, copilot_conversation_id: str) -> dict[str, Any]:
         """
         Process an image piece by uploading it and creating a message annotation.
 
         Args:
             image_path (str): Path to the local image file.
             copilot_conversation_id (str): The Copilot conversation identifier.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             dict: Message annotation structure for the uploaded image.
@@ -365,7 +344,6 @@ class WebSocketCopilotTarget(PromptTarget):
             image_path=image_path,
             conversation_id=copilot_conversation_id,
             data_url=data_url,
-            provider_attempt=provider_attempt,
         )
 
         # Create message annotation with uploaded docId (no URL field)
@@ -390,7 +368,6 @@ class WebSocketCopilotTarget(PromptTarget):
         session_id: str,
         copilot_conversation_id: str,
         is_start_of_session: bool,
-        provider_attempt: ProviderAttempt | None = None,
     ) -> dict[str, Any]:
         """
         Construct the prompt message payload for Copilot WebSocket API.
@@ -403,7 +380,6 @@ class WebSocketCopilotTarget(PromptTarget):
             session_id (str): Copilot session identifier.
             copilot_conversation_id (str): Copilot conversation identifier.
             is_start_of_session (bool): Whether this is the first message in the conversation.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             dict: The complete message payload ready to be sent via WebSocket.
@@ -421,7 +397,6 @@ class WebSocketCopilotTarget(PromptTarget):
                 annotation = await self._process_image_piece_async(
                     image_path=piece.converted_value,
                     copilot_conversation_id=copilot_conversation_id,
-                    provider_attempt=provider_attempt,
                 )
                 message_annotations.append(annotation)
 
@@ -509,7 +484,6 @@ class WebSocketCopilotTarget(PromptTarget):
         session_id: str,
         copilot_conversation_id: str,
         is_start_of_session: bool,
-        provider_attempt: ProviderAttempt | None = None,
     ) -> str:
         """
         Establish WebSocket connection, send prompt, and await response.
@@ -522,7 +496,6 @@ class WebSocketCopilotTarget(PromptTarget):
             session_id (str): Copilot session identifier.
             copilot_conversation_id (str): Copilot conversation identifier.
             is_start_of_session (bool): Whether this is the first message in the conversation.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             str: The final response text from Copilot.
@@ -532,7 +505,6 @@ class WebSocketCopilotTarget(PromptTarget):
             RuntimeError: If WebSocket connection closes unexpectedly, protocol violation occurs,
                 or maximum message iterations exceeded.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         websocket_url = await self._build_websocket_url_async(
             session_id=session_id, copilot_conversation_id=copilot_conversation_id
         )
@@ -544,7 +516,6 @@ class WebSocketCopilotTarget(PromptTarget):
                 session_id=session_id,
                 copilot_conversation_id=copilot_conversation_id,
                 is_start_of_session=is_start_of_session,
-                provider_attempt=provider_attempt,
             ),
         ]
         response = ""
@@ -558,7 +529,7 @@ class WebSocketCopilotTarget(PromptTarget):
                 payload = self._dict_to_websocket(input_msg)
                 is_user_input = input_msg.get("type") == CopilotMessageType.USER_PROMPT
                 if is_user_input:
-                    await provider_attempt.start_async()
+                    self._mark_provider_attempted()
                 await websocket.send(payload)
 
                 max_message_iterations = 1000
@@ -675,13 +646,9 @@ class WebSocketCopilotTarget(PromptTarget):
 
         return session_id, copilot_conversation_id
 
+    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to Microsoft Copilot using WebSocket.
 
@@ -693,7 +660,6 @@ class WebSocketCopilotTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from Copilot.
@@ -704,7 +670,6 @@ class WebSocketCopilotTarget(PromptTarget):
             InvalidStatus: If the WebSocket handshake fails with an HTTP status error.
             RuntimeError: If any other error occurs during WebSocket communication.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
 
         pyrit_conversation_id = message.message_pieces[0].conversation_id
@@ -728,7 +693,6 @@ class WebSocketCopilotTarget(PromptTarget):
                 session_id=session_id,
                 copilot_conversation_id=copilot_conversation_id,
                 is_start_of_session=is_start_of_session,
-                provider_attempt=provider_attempt,
             )
 
             if not response_text or not response_text.strip():

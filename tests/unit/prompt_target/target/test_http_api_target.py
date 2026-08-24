@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyrit.models import Message, MessagePiece
-from pyrit.prompt_target.common.target_send_context import TargetSendContext
 from pyrit.prompt_target.http_target.httpx_api_target import HTTPXAPITarget
 
 
@@ -154,12 +153,7 @@ async def test_send_prompt_async_follows_redirects_when_enabled(mock_request, pa
 
 @patch("httpx.AsyncClient.request")
 async def test_send_prompt_async_missing_explicit_file_path_raises(mock_request, patch_central_database, tmp_path):
-    message_piece = MessagePiece(
-        role="user",
-        original_value="mock",
-        converted_value="trigger",
-        conversation_id="missing-file",
-    )
+    message_piece = MessagePiece(role="user", original_value="mock", converted_value="trigger")
     message = Message(message_pieces=[message_piece])
     missing_file = tmp_path / "missing.pdf"
 
@@ -170,15 +164,11 @@ async def test_send_prompt_async_missing_explicit_file_path_raises(mock_request,
         allowed_upload_directory=tmp_path,
         timeout=180,
     )
-    send_context = MagicMock(spec=TargetSendContext)
-    send_context.conversation_id = "missing-file"
-    send_context.select_history.return_value = []
 
     with pytest.raises(FileNotFoundError, match="File not found"):
-        await target.send_prompt_async(message=message, send_context=send_context)
+        await target.send_prompt_async(message=message)
 
     mock_request.assert_not_called()
-    send_context.mark_provider_attempted.assert_not_called()
 
 
 async def test_send_prompt_async_validation(patch_central_database):

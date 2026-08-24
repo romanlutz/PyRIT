@@ -26,13 +26,9 @@ from pyrit.models import (
     construct_response_from_request,
 )
 from pyrit.prompt_target.common.prompt_target import AuthMode, PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
-from pyrit.prompt_target.common.utils import validate_temperature, validate_top_p
+from pyrit.prompt_target.common.utils import limit_requests_per_minute, validate_temperature, validate_top_p
 
 logger = logging.getLogger(__name__)
 
@@ -219,12 +215,8 @@ class AzureMLChatTarget(PromptTarget):
             "authentication is used automatically. Pass an api_key or a token provider callable instead."
         )
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    @limit_requests_per_minute
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the Azure ML chat target.
 
@@ -232,7 +224,6 @@ class AzureMLChatTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
@@ -242,7 +233,6 @@ class AzureMLChatTarget(PromptTarget):
             RateLimitException: If the target rate limit is exceeded.
             HTTPStatusError: For any other HTTP errors during the process.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         request = message.message_pieces[0]
 
@@ -251,7 +241,6 @@ class AzureMLChatTarget(PromptTarget):
         try:
             resp_text = await self._complete_chat_async(
                 messages=normalized_conversation,
-                provider_attempt=provider_attempt,
             )
 
             if not resp_text:
@@ -274,8 +263,6 @@ class AzureMLChatTarget(PromptTarget):
     async def _complete_chat_async(
         self,
         messages: list[Message],
-        *,
-        provider_attempt: ProviderAttempt | None = None,
     ) -> str:
         """
         Completes a chat interaction by generating a response to the given input prompt.
@@ -284,7 +271,6 @@ class AzureMLChatTarget(PromptTarget):
 
         Args:
             messages (list[Message]): The message objects containing the role and content.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             str: The generated response message.
@@ -293,17 +279,11 @@ class AzureMLChatTarget(PromptTarget):
             EmptyResponseException: If the response from the chat is empty.
             Exception: For any other errors during the process.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         headers = await self._get_headers_async()
         payload = await self._construct_http_body_async(messages)
 
-        response = await provider_attempt.run_async(
-            operation=lambda: net_utility.make_request_and_raise_if_error_async(
-                endpoint_uri=self._endpoint,
-                method="POST",
-                request_body=payload,
-                headers=headers,
-            )
+        response = await net_utility.make_request_and_raise_if_error_async(
+            endpoint_uri=self._endpoint, method="POST", request_body=payload, headers=headers
         )
 
         try:

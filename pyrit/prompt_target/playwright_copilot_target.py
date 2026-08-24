@@ -13,10 +13,6 @@ from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, construct_response_from_request
 from pyrit.models.literals import PromptDataType
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -98,6 +94,8 @@ class PlaywrightCopilotTarget(PromptTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
+
     # Placeholder text constants
     PLACEHOLDER_GENERATING_RESPONSE: str = "generating response"
     PLACEHOLDER_GENERATING: str = "generating"
@@ -200,12 +198,7 @@ class PlaywrightCopilotTarget(PromptTarget):
             file_picker_selector='span.fui-MenuItem__content:has-text("Upload images and files")',
         )
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Send a message to Microsoft Copilot and return the response.
 
@@ -213,7 +206,6 @@ class PlaywrightCopilotTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from Copilot.
@@ -221,14 +213,10 @@ class PlaywrightCopilotTarget(PromptTarget):
         Raises:
             RuntimeError: If an error occurs during interaction.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
 
         try:
-            response_content = await self._interact_with_copilot_async(
-                message,
-                provider_attempt=provider_attempt,
-            )
+            response_content = await self._interact_with_copilot_async(message)
         except Exception as e:
             raise RuntimeError(f"An error occurred during interaction: {str(e)}") from e
 
@@ -259,24 +247,17 @@ class PlaywrightCopilotTarget(PromptTarget):
 
         return [response_entry]
 
-    async def _interact_with_copilot_async(
-        self,
-        message: Message,
-        *,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> str | list[tuple[str, PromptDataType]]:
+    async def _interact_with_copilot_async(self, message: Message) -> str | list[tuple[str, PromptDataType]]:
         """
         Interact with Microsoft Copilot interface to send multimodal prompts.
 
         Args:
             message: The message containing text and/or image pieces to send.
-            provider_attempt: One-shot provider boundary.
 
         Returns:
             str | list[tuple[str, PromptDataType]]: The response content from Copilot,
                 either as a single text string or a list of (data, data_type) tuples.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         selectors = self._get_selectors()
         if any(piece.converted_value_data_type == "text" for piece in message.message_pieces):
             await self._clear_text_input_async(input_selector=selectors.input_selector)
@@ -286,22 +267,16 @@ class PlaywrightCopilotTarget(PromptTarget):
             if piece.converted_value_data_type == "text":
                 await self._send_text_async(text=piece.converted_value, input_selector=selectors.input_selector)
             elif piece.converted_value_data_type == "image_path":
-                await self._upload_image_async(piece.converted_value, provider_attempt=provider_attempt)
+                await self._upload_image_async(piece.converted_value)
 
-        return await self._wait_for_response_async(selectors, provider_attempt=provider_attempt)
+        return await self._wait_for_response_async(selectors)
 
-    async def _wait_for_response_async(
-        self,
-        selectors: CopilotSelectors,
-        *,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> str | list[tuple[str, PromptDataType]]:
+    async def _wait_for_response_async(self, selectors: CopilotSelectors) -> str | list[tuple[str, PromptDataType]]:
         """
         Wait for Copilot's response and extract the text and/or images.
 
         Args:
             selectors (CopilotSelectors): The selectors for the Copilot interface.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             str | list[tuple[str, PromptDataType]]: The response content from Copilot,
@@ -310,7 +285,6 @@ class PlaywrightCopilotTarget(PromptTarget):
         Raises:
             TimeoutError: If waiting for the AI response times out.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         # Count current AI messages and message groups before sending
         initial_ai_messages = await self._page.eval_on_selector_all(
             selectors.ai_messages_selector, "elements => elements.length"
@@ -319,7 +293,7 @@ class PlaywrightCopilotTarget(PromptTarget):
         initial_group_count = len(initial_ai_message_groups)
         logger.debug(f"Initial message group count before sending: {initial_group_count}")
 
-        await provider_attempt.start_async()
+        self._mark_provider_attempted()
         await self._page.click(selectors.send_button_selector)
 
         # Wait for the next AI message to appear
@@ -834,20 +808,13 @@ class PlaywrightCopilotTarget(PromptTarget):
         await input_locator.press("ControlOrMeta+A")
         await input_locator.press("Backspace")
 
-    async def _upload_image_async(
-        self,
-        image_path: str,
-        *,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> None:
+    async def _upload_image_async(self, image_path: str) -> None:
         """
         Handle image upload through Copilot's dropdown interface.
 
         Args:
             image_path: The file path of the image to upload.
-            provider_attempt: One-shot provider boundary.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         selectors = self._get_selectors()
 
         # First, click the button to open the dropdown with retry logic
@@ -861,7 +828,7 @@ class PlaywrightCopilotTarget(PromptTarget):
         async with self._page.expect_file_chooser() as fc_info:
             await add_files_button.click()
         file_chooser = await fc_info.value
-        await provider_attempt.start_async()
+        self._mark_provider_attempted()
         await file_chooser.set_files(image_path)
 
         # Check for login requirement in Consumer Copilot

@@ -8,12 +8,9 @@ from pyrit.models import (
     construct_response_from_request,
 )
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 # Avoid errors for users who don't have playwright installed
 if TYPE_CHECKING:
@@ -68,6 +65,7 @@ class PlaywrightTarget(PromptTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -98,12 +96,8 @@ class PlaywrightTarget(PromptTarget):
         self._interaction_func = interaction_func
         self._page = page
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    @limit_requests_per_minute
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the Playwright target.
 
@@ -111,7 +105,6 @@ class PlaywrightTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response from the prompt target.
@@ -119,7 +112,6 @@ class PlaywrightTarget(PromptTarget):
         Raises:
             RuntimeError: If the Playwright page is not initialized or if an error occurs during interaction.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         if not self._page:
             raise RuntimeError(
@@ -127,7 +119,8 @@ class PlaywrightTarget(PromptTarget):
             )
 
         try:
-            text = await provider_attempt.run_async(operation=lambda: self._interaction_func(self._page, message))
+            self._mark_provider_attempted()
+            text = await self._interaction_func(self._page, message)
         except Exception as e:
             raise RuntimeError(f"An error occurred during interaction: {str(e)}") from e
 

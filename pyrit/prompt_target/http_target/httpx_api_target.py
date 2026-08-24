@@ -17,12 +17,9 @@ from pyrit.models import (
     MessagePiece,
     construct_response_from_request,
 )
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.http_target.http_target import HTTPTarget
 
 logger = logging.getLogger(__name__)
@@ -53,6 +50,7 @@ class HTTPXAPITarget(HTTPTarget):
             ),
         )
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -126,12 +124,8 @@ class HTTPXAPITarget(HTTPTarget):
         if self.method not in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
             raise ValueError(f"Invalid HTTP method: {self.method}")
 
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    @limit_requests_per_minute
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Override the parent's method to skip raw http_request usage,
         and do a standard "API mode" approach.
@@ -148,7 +142,6 @@ class HTTPXAPITarget(HTTPTarget):
             httpx.RequestError: If the request fails.
             FileNotFoundError: If the specified file to upload is not found.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
         message_piece: MessagePiece = message.message_pieces[0]
         upload_path = await self._get_upload_path_async(message_piece=message_piece)
@@ -174,29 +167,27 @@ class HTTPXAPITarget(HTTPTarget):
 
                     logger.info(f"HTTPXApiTarget: uploading file={filename} via {self.method} to {self.http_url}")
 
-                    response = await provider_attempt.run_async(
-                        operation=lambda: client.request(
-                            method=self.method,
-                            url=self.http_url,
-                            headers=self.headers,
-                            params=self.params,
-                            files=files,
-                            follow_redirects=self.follow_redirects,
-                        )
+                    self._mark_provider_attempted()
+                    response = await client.request(
+                        method=self.method,
+                        url=self.http_url,
+                        headers=self.headers,
+                        params=self.params,
+                        files=files,
+                        follow_redirects=self.follow_redirects,
                     )
                 else:
                     # No file upload, handle based on HTTP method
                     logger.info(f"HTTPXApiTarget: sending {self.method} to {self.http_url} with possible JSON/form.")
-                    response = await provider_attempt.run_async(
-                        operation=lambda: client.request(
-                            method=self.method,
-                            url=self.http_url,
-                            headers=self.headers,
-                            params=self.params,
-                            json=self.json_data if self.method in {"POST", "PUT", "PATCH"} else None,
-                            data=self.form_data if self.method in {"POST", "PUT", "PATCH"} else None,
-                            follow_redirects=self.follow_redirects,
-                        )
+                    self._mark_provider_attempted()
+                    response = await client.request(
+                        method=self.method,
+                        url=self.http_url,
+                        headers=self.headers,
+                        params=self.params,
+                        json=self.json_data if self.method in {"POST", "PUT", "PATCH"} else None,
+                        data=self.form_data if self.method in {"POST", "PUT", "PATCH"} else None,
+                        follow_redirects=self.follow_redirects,
                     )
 
             except httpx.TimeoutException:

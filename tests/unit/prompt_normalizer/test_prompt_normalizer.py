@@ -41,7 +41,7 @@ from pyrit.prompt_normalizer import NormalizerRequest, PromptNormalizer
 from pyrit.prompt_normalizer.converter_configuration import (
     ConverterConfiguration,
 )
-from pyrit.prompt_target import CapabilityName, PromptTarget, ProviderAttempt
+from pyrit.prompt_target import CapabilityName, PromptTarget
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -209,14 +209,11 @@ async def test_send_prompt_async_target_failure_is_persisted(mock_memory_instanc
 
 async def test_child_task_provider_failure_is_persisted(mock_memory_instance):
     class ChildTaskTarget(MockPromptTarget):
-        async def _send_prompt_to_target_async(
-            self,
-            *,
-            normalized_conversation: list[Message],
-            provider_attempt: ProviderAttempt,
-        ) -> list[Message]:
+        _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
+
+        async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
             async def fail_after_provider_attempt_async() -> list[Message]:
-                await provider_attempt.start_async()
+                self._mark_provider_attempted()
                 raise RuntimeError("provider failed")
 
             return await asyncio.create_task(fail_after_provider_attempt_async())

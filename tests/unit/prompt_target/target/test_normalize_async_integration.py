@@ -1269,7 +1269,7 @@ async def test_rate_limit_cancellation_does_not_consume_stateful_seed():
         sleep_started.set()
         await sleep_release.wait()
 
-    with patch("pyrit.prompt_target.common.prompt_target.asyncio.sleep", side_effect=wait_for_rate_limit):
+    with patch("pyrit.prompt_target.common.utils.asyncio.sleep", side_effect=wait_for_rate_limit):
         send_task = asyncio.create_task(
             target.send_prompt_async(
                 message=_make_message(role="user", content="live"),

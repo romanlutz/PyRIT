@@ -2,11 +2,9 @@
 # Licensed under the MIT license.
 
 import abc
-import asyncio
-import inspect
 import logging
 from collections.abc import Mapping
-from typing import Any, ClassVar, Literal, Protocol, cast, final
+from typing import Any, ClassVar, Literal, final
 
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.message_normalizer import MessageListNormalizer
@@ -19,10 +17,6 @@ from pyrit.models import (
     MessagePiece,
     TargetIdentifier,
 )
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _ProviderAttemptState,
-)
 from pyrit.prompt_target.common.target_capabilities import (
     CapabilityName,
     TargetCapabilities,
@@ -30,7 +24,13 @@ from pyrit.prompt_target.common.target_capabilities import (
 )
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 from pyrit.prompt_target.common.target_history import filter_non_replayable_messages
-from pyrit.prompt_target.common.target_send_context import TargetSendContext
+from pyrit.prompt_target.common.target_send_context import (
+    TargetSendContext,
+    _activate_target_send_context,
+    _mark_active_provider_attempted,
+    _reset_target_send_context,
+)
+from pyrit.prompt_target.common.utils import _marks_provider_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,6 @@ logger = logging.getLogger(__name__)
 # (e.g. minting a Microsoft Entra ID token for its own endpoint, or falling back
 # to ``DefaultAzureCredential``).
 AuthMode = Literal["api_key", "identity"]
-
-
-class _LegacyTargetSend(Protocol):
-    async def __call__(self, *, normalized_conversation: list[Message]) -> list[Message]:
-        """Invoke a target that implements the legacy protected signature."""
-        ...
 
 
 class PromptTarget(Identifiable):
@@ -74,6 +68,8 @@ class PromptTarget(Identifiable):
     # Per-instance overrides are also possible via the ``custom_configuration``
     # constructor parameter, which takes precedence over the class-level value.
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(capabilities=TargetCapabilities())
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY: ClassVar[bool] = False
+
     # Declarative auth facts consumed by the create-target service and catalog.
     # Kept off ``TargetCapabilities`` (auth is a construction/credential axis, not
     # a message-handling capability) and out of the identity hash. It is surfaced
@@ -99,6 +95,8 @@ class PromptTarget(Identifiable):
                 after ``self``.
         """
         super().__init_subclass__(**kwargs)
+        if "_send_prompt_to_target_async" in cls.__dict__ and "_MANAGES_PROVIDER_ATTEMPT_BOUNDARY" not in cls.__dict__:
+            cls._MANAGES_PROVIDER_ATTEMPT_BOUNDARY = False
         # Local import to avoid a circular dependency at package init time.
         from pyrit.common.brick_contract import enforce_keyword_only_init
 
@@ -195,27 +193,30 @@ class PromptTarget(Identifiable):
             if not normalized_conversation:
                 raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
             self._validate_request(normalized_conversation=normalized_conversation)
-            provider_attempt = ProviderAttempt(
-                wait_for_start_async=self._wait_for_rate_limit_async,
-                state=_ProviderAttemptState(
-                    on_started=send_context.mark_provider_attempted if send_context else None,
-                ),
+            active_context_token = (
+                _activate_target_send_context(send_context=send_context) if send_context is not None else None
             )
-            return await self._send_normalized_prompt_async(
-                normalized_conversation=normalized_conversation,
-                provider_attempt=provider_attempt,
-            )
+            try:
+                target_send = self._send_prompt_to_target_async
+                target_marks_provider_attempt = self._MANAGES_PROVIDER_ATTEMPT_BOUNDARY or _marks_provider_attempt(
+                    target_send
+                )
+                if send_context and not target_marks_provider_attempt:
+                    send_context.mark_provider_attempted()
+                return await target_send(normalized_conversation=normalized_conversation)
+            finally:
+                if active_context_token is not None:
+                    _reset_target_send_context(token=active_context_token)
         finally:
             if send_context:
                 send_context.finish_send()
 
+    def _mark_provider_attempted(self) -> None:
+        """Notify caller-owned state immediately before irreversible provider I/O."""
+        _mark_active_provider_attempted()
+
     @abc.abstractmethod
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Target-specific send logic.
 
@@ -225,53 +226,10 @@ class PromptTarget(Identifiable):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt): One-shot provider boundary.
 
         Returns:
             list[Message]: Response messages from the target.
         """
-
-    async def _send_normalized_prompt_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt,
-    ) -> list[Message]:
-        """
-        Invoke the most-derived implementation through the compatibility bridge.
-
-        Returns:
-            list[Message]: Response messages from the target.
-        """
-        target_send = self._send_prompt_to_target_async
-        if self._accepts_provider_attempt():
-            return await target_send(
-                normalized_conversation=normalized_conversation,
-                provider_attempt=provider_attempt,
-            )
-
-        await provider_attempt.start_async()
-        legacy_target_send = cast("_LegacyTargetSend", target_send)
-        return await legacy_target_send(normalized_conversation=normalized_conversation)
-
-    async def _wait_for_rate_limit_async(self) -> None:
-        """Apply this concrete target's shared requests-per-minute wait once."""
-        if self._max_requests_per_minute and self._max_requests_per_minute > 0:
-            await asyncio.sleep(60 / self._max_requests_per_minute)
-
-    def _accepts_provider_attempt(self) -> bool:
-        """
-        Check whether the most-derived target method accepts the explicit token.
-
-        Returns:
-            bool: Whether the target method accepts ``provider_attempt``.
-        """
-        signature = inspect.signature(type(self)._send_prompt_to_target_async)
-        parameter = signature.parameters.get("provider_attempt")
-        return parameter is not None and parameter.kind in {
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        }
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         """

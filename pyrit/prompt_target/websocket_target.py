@@ -13,11 +13,7 @@ from websockets.protocol import State
 
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
-from pyrit.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
+from pyrit.prompt_target import PromptTarget, limit_requests_per_minute
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
 
@@ -42,6 +38,7 @@ class WebsocketTarget(PromptTarget):
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(
         capabilities=TargetCapabilities(supports_multi_turn=True)
     )
+    _MANAGES_PROVIDER_ATTEMPT_BOUNDARY = True
 
     def __init__(
         self,
@@ -231,19 +228,14 @@ class WebsocketTarget(PromptTarget):
             self._conversation_locks.clear()
             self._is_cleaning_up = False
 
+    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Send the current normalized message to the WebSocket service.
 
         Args:
             normalized_conversation (list[Message]): Normalized conversation with the current request last.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the target response.
@@ -251,7 +243,6 @@ class WebsocketTarget(PromptTarget):
         Raises:
             ValueError: If the current message is not text.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         self._raise_if_closed()
         request = normalized_conversation[-1].message_pieces[0]
         if request.converted_value_data_type != "text":
@@ -268,7 +259,7 @@ class WebsocketTarget(PromptTarget):
                     conversation_id=conversation_id,
                     conversation_history=normalized_conversation[:-1],
                 )
-                await provider_attempt.start_async()
+                self._mark_provider_attempted()
                 result = await self._send_text_async(
                     text=request.converted_value,
                     conversation_id=conversation_id,
@@ -283,11 +274,6 @@ class WebsocketTarget(PromptTarget):
             response_type="text",
         ).message_pieces[0]
         return [Message(message_pieces=[response_piece])]
-
-    async def _wait_for_rate_limit_async(self) -> None:
-        """Wait for the shared limiter and reject sends closed during the wait."""
-        await super()._wait_for_rate_limit_async()
-        self._raise_if_closed()
 
     async def _get_or_create_connection_async(
         self,

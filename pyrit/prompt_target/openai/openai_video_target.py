@@ -13,12 +13,9 @@ from pyrit.exceptions import (
 )
 from pyrit.memory import data_serializer_factory
 from pyrit.models import ComponentIdentifier, Message, MessagePiece, construct_response_from_request
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.utils import limit_requests_per_minute
 from pyrit.prompt_target.openai.openai_error_handling import _is_content_filter_error
 from pyrit.prompt_target.openai.openai_target import OpenAITarget
 
@@ -174,13 +171,9 @@ class OpenAIVideoTarget(OpenAITarget):
                 f"Supported durations: {', '.join(self.SUPPORTED_DURATIONS)} seconds"
             )
 
+    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously sends a message and generates a video using the OpenAI SDK.
 
@@ -197,7 +190,6 @@ class OpenAIVideoTarget(OpenAITarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             A list containing the response with the generated video path.
@@ -206,7 +198,6 @@ class OpenAIVideoTarget(OpenAITarget):
             RateLimitException: If the rate limit is exceeded.
             ValueError: If the request is invalid.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         message = normalized_conversation[-1]
 
         text_piece = message.get_piece_by_type(data_type="text")
@@ -225,36 +216,17 @@ class OpenAIVideoTarget(OpenAITarget):
         logger.info(f"Sending video generation prompt: {prompt}")
 
         if remix_video_id:
-            response = await self._send_remix_async(
-                video_id=str(remix_video_id),
-                prompt=prompt,
-                request=message,
-                provider_attempt=provider_attempt,
-            )
+            response = await self._send_remix_async(video_id=str(remix_video_id), prompt=prompt, request=message)
         elif image_piece:
             response = await self._send_text_plus_image_to_video_async(
-                image_piece=image_piece,
-                prompt=prompt,
-                request=message,
-                provider_attempt=provider_attempt,
+                image_piece=image_piece, prompt=prompt, request=message
             )
         else:
-            response = await self._send_text_to_video_async(
-                prompt=prompt,
-                request=message,
-                provider_attempt=provider_attempt,
-            )
+            response = await self._send_text_to_video_async(prompt=prompt, request=message)
 
         return [response]
 
-    async def _send_remix_async(
-        self,
-        *,
-        video_id: str,
-        prompt: str,
-        request: Message,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> Message:
+    async def _send_remix_async(self, *, video_id: str, prompt: str, request: Message) -> Message:
         """
         Send a remix request for an existing video.
 
@@ -262,27 +234,18 @@ class OpenAIVideoTarget(OpenAITarget):
             video_id: The ID of the completed video to remix.
             prompt: The text prompt directing the remix.
             request: The original request message.
-            provider_attempt: One-shot provider boundary.
 
         Returns:
             The response Message with the generated video path.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         logger.info(f"Remix mode: Creating variation of video {video_id}")
         return await self._handle_openai_request_async(
-            api_call=lambda: provider_attempt.run_async(
-                operation=lambda: self._remix_and_poll_async(video_id=video_id, prompt=prompt)
-            ),
+            api_call=lambda: self._remix_and_poll_async(video_id=video_id, prompt=prompt),
             request=request,
         )
 
     async def _send_text_plus_image_to_video_async(
-        self,
-        *,
-        image_piece: MessagePiece,
-        prompt: str,
-        request: Message,
-        provider_attempt: ProviderAttempt | None = None,
+        self, *, image_piece: MessagePiece, prompt: str, request: Message
     ) -> Message:
         """
         Send a text+image-to-video request using an image as the first frame.
@@ -291,54 +254,40 @@ class OpenAIVideoTarget(OpenAITarget):
             image_piece: The MessagePiece containing the image path.
             prompt: The text prompt describing the desired video.
             request: The original request message.
-            provider_attempt: One-shot provider boundary.
 
         Returns:
             The response Message with the generated video path.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         logger.info("Text+Image-to-video mode: Using image as first frame")
         input_file = await self._prepare_image_input_async(image_piece=image_piece)
         return await self._handle_openai_request_async(
-            api_call=lambda: provider_attempt.run_async(
-                operation=lambda: self._client.videos.create_and_poll(
-                    model=self._model_name,
-                    prompt=prompt,
-                    size=self._size,
-                    seconds=self._n_seconds,
-                    input_reference=input_file,
-                )
+            api_call=lambda: self._client.videos.create_and_poll(
+                model=self._model_name,
+                prompt=prompt,
+                size=self._size,
+                seconds=self._n_seconds,
+                input_reference=input_file,
             ),
             request=request,
         )
 
-    async def _send_text_to_video_async(
-        self,
-        *,
-        prompt: str,
-        request: Message,
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> Message:
+    async def _send_text_to_video_async(self, *, prompt: str, request: Message) -> Message:
         """
         Send a text-to-video generation request.
 
         Args:
             prompt: The text prompt describing the desired video.
             request: The original request message.
-            provider_attempt: One-shot provider boundary.
 
         Returns:
             The response Message with the generated video path.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
         return await self._handle_openai_request_async(
-            api_call=lambda: provider_attempt.run_async(
-                operation=lambda: self._client.videos.create_and_poll(
-                    model=self._model_name,
-                    prompt=prompt,
-                    size=self._size,
-                    seconds=self._n_seconds,
-                )
+            api_call=lambda: self._client.videos.create_and_poll(
+                model=self._model_name,
+                prompt=prompt,
+                size=self._size,
+                seconds=self._n_seconds,
             ),
             request=request,
         )

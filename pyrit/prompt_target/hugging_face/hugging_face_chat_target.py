@@ -12,12 +12,9 @@ from pyrit.common import default_values
 from pyrit.exceptions import EmptyResponseException, pyrit_target_retry
 from pyrit.models import ComponentIdentifier, Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
-from pyrit.prompt_target.common.provider_attempt import (
-    ProviderAttempt,
-    _get_provider_attempt_or_legacy_noop,
-)
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.utils import limit_requests_per_minute
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
@@ -175,7 +172,6 @@ class HuggingFaceChatTarget(PromptTarget):
             raise RuntimeError("CUDA requested but not available.")
 
         self.load_model_and_tokenizer_task = asyncio.create_task(self.load_model_and_tokenizer_async())
-        self._model_load_lock = asyncio.Lock()
 
     def _build_identifier(self) -> ComponentIdentifier:
         """
@@ -331,13 +327,9 @@ class HuggingFaceChatTarget(PromptTarget):
             logger.error(f"Error loading model {self.model_id}: {e}")
             raise
 
+    @limit_requests_per_minute
     @pyrit_target_retry
-    async def _send_prompt_to_target_async(
-        self,
-        *,
-        normalized_conversation: list[Message],
-        provider_attempt: ProviderAttempt | None = None,
-    ) -> list[Message]:
+    async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Send a normalized prompt asynchronously to the HuggingFace model.
 
@@ -348,7 +340,6 @@ class HuggingFaceChatTarget(PromptTarget):
             normalized_conversation (list[Message]): The full conversation
                 (history + current message) after running the normalization
                 pipeline. The current message is the last element.
-            provider_attempt (ProviderAttempt | None): One-shot provider boundary.
 
         Returns:
             list[Message]: A list containing the response object with generated text pieces.
@@ -356,8 +347,7 @@ class HuggingFaceChatTarget(PromptTarget):
         Raises:
             EmptyResponseException: If the model generates an empty response.
         """
-        provider_attempt = _get_provider_attempt_or_legacy_noop(provider_attempt=provider_attempt)
-        await self._wait_for_model_and_tokenizer_async()
+        await self.load_model_and_tokenizer_task
 
         request = normalized_conversation[-1].message_pieces[0]
 
@@ -373,7 +363,7 @@ class HuggingFaceChatTarget(PromptTarget):
 
         try:
             # Ensure model is on the correct device (should already be, but safeguard for device changes)
-            await asyncio.to_thread(self.model.to, self.device)
+            self.model.to(self.device)
 
             # Record input length to extract only newly generated tokens
             input_length = input_ids.shape[-1]
@@ -381,9 +371,7 @@ class HuggingFaceChatTarget(PromptTarget):
             generate_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask, **self._generation_params}
 
             logger.info("Generating response from model...")
-            generated_ids = await provider_attempt.run_async(
-                operation=lambda: asyncio.to_thread(self.model.generate, **generate_kwargs)
-            )
+            generated_ids = self.model.generate(**generate_kwargs)
 
             logger.info(f"Generated IDs: {generated_ids}")
 
@@ -416,14 +404,6 @@ class HuggingFaceChatTarget(PromptTarget):
         except Exception as e:
             logger.error(f"Error occurred during inference: {e}")
             raise
-
-    async def _wait_for_model_and_tokenizer_async(self) -> None:
-        """Wait for shared model loading without allowing a send cancellation to cancel it."""
-        async with self._model_load_lock:
-            if self.load_model_and_tokenizer_task.cancelled():
-                self.load_model_and_tokenizer_task = asyncio.create_task(self.load_model_and_tokenizer_async())
-            load_task = self.load_model_and_tokenizer_task
-        await asyncio.shield(load_task)
 
     def _build_chat_messages(self, *, normalized_conversation: list[Message]) -> list[dict[str, str]]:
         """

@@ -233,11 +233,9 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - This is often an LLM, but it doesn't have to be. For Cross-Domain Prompt Injection Attacks, the target might be a storage account that a later target has a reference to. Message and conversation should be generic enough to handle this extra data.
 - Target capabilities should be used to see if a target is compatible with the capabilities that the other components want to use.
 - Targets should use message_normalizer along with TargetConfiguration to transform `Messages` into formats that target supports.
-- `PromptTarget` passes a narrow, one-shot `ProviderAttempt` token to the concrete target. The
-  target starts it after cancellable setup and immediately before the first irreversible operation
-  that may deliver the current request. The token applies shared rate limiting and reports only
-  that the logical send was attempted; bootstrap-history identity, replay, consumption, and
-  branching state remain caller-owned.
+- A target may observe an internal, caller-owned send context at the provider-invocation boundary,
+  after target-side waits and immediately before irreversible provider I/O, but the caller owns any
+  bootstrap-history identity, replay, or branching state.
 - Because targets are so varied, it is reasonable to return multiple tool calls, or none at all.
 - One attack can have many targets (and in fact, converters and scorers can also use targets to convert/score the prompt).
 - **Does not own**: what to send or what to do with the response. A target sends a prepared `Message` and returns a response — it doesn't convert prompts (converters), score (scorers), manage the conversation or decide the next turn (attacks), apply attack logic, or persist prompts and responses to memory (the `prompt_normalizer` owns that). Its retries stay at the target layer (e.g. `RateLimitException`).

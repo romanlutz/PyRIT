@@ -80,8 +80,9 @@ async def test_limit_requests_per_minute_no_rpm():
     inner_func = AsyncMock(return_value="response")
     decorated = limit_requests_per_minute(inner_func)
 
-    with pytest.warns(DeprecationWarning, match="limit_requests_per_minute"):
+    with patch("asyncio.sleep") as mock_sleep:
         result = await decorated(mock_self, message="test")
+        mock_sleep.assert_not_called()
     assert result == "response"
 
 
@@ -92,12 +93,9 @@ async def test_limit_requests_per_minute_with_rpm():
     inner_func = AsyncMock(return_value="response")
     decorated = limit_requests_per_minute(inner_func)
 
-    with (
-        pytest.warns(DeprecationWarning, match="limit_requests_per_minute"),
-        patch("asyncio.sleep") as mock_sleep,
-    ):
+    with patch("asyncio.sleep") as mock_sleep:
         result = await decorated(mock_self, message="test")
-        mock_sleep.assert_not_called()
+        mock_sleep.assert_called_once_with(2.0)  # 60/30
     assert result == "response"
 
 
@@ -108,8 +106,9 @@ async def test_limit_requests_per_minute_zero_rpm():
     inner_func = AsyncMock(return_value="response")
     decorated = limit_requests_per_minute(inner_func)
 
-    with pytest.warns(DeprecationWarning, match="limit_requests_per_minute"):
+    with patch("asyncio.sleep") as mock_sleep:
         result = await decorated(mock_self, message="test")
+        mock_sleep.assert_not_called()
     assert result == "response"
 
 

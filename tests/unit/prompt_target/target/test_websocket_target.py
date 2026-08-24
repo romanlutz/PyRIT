@@ -2,7 +2,6 @@
 # Licensed under the MIT license.
 
 import asyncio
-import inspect
 import json
 import sys
 from collections.abc import Callable
@@ -95,9 +94,8 @@ def test_init_invalid_endpoint_raises(
         )
 
 
-def test_overridden_migrated_target_uses_legacy_signature() -> None:
-    signature = inspect.signature(_OverriddenWebsocketTarget._send_prompt_to_target_async)
-    assert "provider_attempt" not in signature.parameters
+def test_overridden_managed_target_uses_compatibility_boundary() -> None:
+    assert not _OverriddenWebsocketTarget._MANAGES_PROVIDER_ATTEMPT_BOUNDARY
 
 
 def test_init_empty_protocol_identifier_raises(
@@ -348,44 +346,6 @@ async def test_get_or_create_connection_async_restores_history_on_reconnect(
     connect.assert_awaited_once()
     restore_callback.assert_awaited_once_with(replacement_connection, history)
     assert target._existing_conversation == {"conversation": replacement_connection}
-
-
-async def test_restore_failure_does_not_start_provider_attempt(
-    response_parser: Callable[[str | bytes], str | None],
-    message_builder: Callable[[str], str | bytes],
-    sqlite_instance: SQLiteMemory,
-) -> None:
-    restore_callback = AsyncMock(side_effect=RuntimeError("restore failed"))
-    target = WebsocketTarget(
-        endpoint="wss://example.com",
-        protocol_identifier="test-protocol",
-        initialization_strings=[],
-        response_parser=response_parser,
-        message_builder=message_builder,
-        conversation_restore_callback=restore_callback,
-        discard_initial_messages=0,
-    )
-    seed = create_message(value="Seed")
-    sqlite_instance.add_message_to_memory(request=seed)
-    send_context = PrependedHistorySendContext(
-        conversation_id="conversation",
-        seed_message_ids=(seed.get_piece().id,),
-        replay_seed_each_send=False,
-    )
-    connection = AsyncMock(spec=ClientConnection)
-    connection.state = State.OPEN
-
-    with (
-        patch.object(target, "_connect_async", new_callable=AsyncMock, return_value=connection),
-        pytest.raises(RuntimeError, match="restore failed"),
-    ):
-        await target.send_prompt_async(
-            message=create_message(value="Current"),
-            send_context=send_context,
-        )
-
-    assert send_context.provider_attempt_count == 0
-    assert not send_context.is_seed_consumed
 
 
 async def test_consumed_context_retains_history_for_reconnect(
@@ -874,7 +834,7 @@ async def test_cleanup_target_async_blocks_rate_limited_send(
         await release_rate_limit.wait()
 
     with (
-        patch("pyrit.prompt_target.common.prompt_target.asyncio.sleep", side_effect=wait_for_rate_limit),
+        patch("pyrit.prompt_target.common.utils.asyncio.sleep", side_effect=wait_for_rate_limit),
         patch.object(target, "_connect_async", new_callable=AsyncMock) as connect,
     ):
         send_task = asyncio.create_task(target.send_prompt_async(message=create_message()))
@@ -885,7 +845,7 @@ async def test_cleanup_target_async_blocks_rate_limited_send(
         with pytest.raises(RuntimeError, match="has been cleaned up"):
             await send_task
 
-    connect.assert_awaited_once()
+    connect.assert_not_awaited()
 
 
 async def test_cleanup_target_async_cancellation_finishes_closing_connections(

@@ -1,13 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
-
 import pytest
 from unit.mocks import MockPromptTarget
 
-from pyrit.executor.attack.component.prepended_history_send_context import PrependedHistorySendContext
-from pyrit.memory import MemoryInterface
 from pyrit.models import Message
 from pyrit.prompt_target import RoundRobinTarget, TargetCapabilities, TargetConfiguration
 
@@ -348,34 +344,6 @@ async def test_send_prompt_fallback_tries_remaining_targets():
     assert t1.prompt_sent == ["fallback order test"]
     assert t3.prompt_sent == []
     assert len(response) == 1
-
-
-@pytest.mark.usefixtures("patch_central_database")
-async def test_fallback_uses_each_inner_rate_limiter_and_marks_logical_send_once():
-    t1 = MockPromptTarget(rpm=30)
-    t2 = MockPromptTarget(rpm=60)
-    rr = RoundRobinTarget(targets=[t1, t2])
-    t1._send_prompt_to_target_async = AsyncMock(side_effect=RuntimeError("t1 down"))  # type: ignore[method-assign]
-
-    seed = Message.from_prompt(prompt="seed", role="user")
-    seed.get_piece().conversation_id = "round-robin-context"
-    request = Message.from_prompt(prompt="request", role="user")
-    request.get_piece().conversation_id = "round-robin-context"
-    memory = MagicMock(spec=MemoryInterface)
-    memory.get_conversation_messages.return_value = [seed]
-    rr._memory = memory
-    send_context = PrependedHistorySendContext(
-        conversation_id="round-robin-context",
-        seed_message_ids=(seed.get_piece().id,),
-        replay_seed_each_send=False,
-    )
-
-    with patch("pyrit.prompt_target.common.prompt_target.asyncio.sleep", new_callable=AsyncMock) as sleep:
-        await rr.send_prompt_async(message=request, send_context=send_context)
-
-    assert sleep.await_args_list == [call(2.0), call(1.0)]
-    assert t2.prompt_sent == ["request"]
-    assert send_context.provider_attempt_count == 1
 
 
 # ── Identifier ───────────────────────────────────────────────────────────────
