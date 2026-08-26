@@ -13,6 +13,22 @@ from pyrit.converter.code_attack_converter import _TEMPLATE_ENCODING
 Template = CodeAttackConverter.Template
 Encoding = CodeAttackConverter.Encoding
 
+_CODE_ATTACK_AUTHORS = [
+    "Qibing Ren",
+    "Chang Gao",
+    "Jing Shao",
+    "Junchi Yan",
+    "Xin Tan",
+    "Wai Lam",
+    "Lizhuang Ma",
+]
+_CODE_ATTACK_GROUPS = [
+    "Shanghai Jiao Tong University",
+    "The Chinese University of Hong Kong",
+    "Shanghai Artificial Intelligence Laboratory",
+    "East China Normal University",
+]
+
 # Matches a whole double-quoted literal including its escape sequences.
 _LITERAL = r'"((?:[^"\\]|\\.)*)"'
 
@@ -68,6 +84,15 @@ async def test_every_template_member_renders(template):
     assert "wrapped_input" not in result.output_text
     # The encoded objective must be present in the rendered code.
     assert re.search(_LITERAL, result.output_text), f"{template.name} produced no string literal"
+
+
+@pytest.mark.parametrize("template", list(Template), ids=lambda t: t.name)
+def test_every_builtin_template_has_paper_attribution(template: Template) -> None:
+    converter = CodeAttackConverter(template=template)
+
+    assert converter._seed_prompt.authors == _CODE_ATTACK_AUTHORS
+    assert converter._seed_prompt.groups == _CODE_ATTACK_GROUPS
+    assert converter._seed_prompt.source == "https://github.com/renqibing/CodeAttack"
 
 
 def test_custom_path_template_constructs(tmp_path):
