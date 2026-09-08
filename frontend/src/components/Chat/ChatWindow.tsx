@@ -38,8 +38,8 @@ import { exportConversation } from '../../utils/conversationExport'
 import type { ExportFormat } from '../../utils/conversationExport'
 import type {
   AttackTargetResolutionStatus,
-  BackendMessage,
   ChatSendOutcome,
+  ConversationMessagesResponse,
   CreateConversationRequest,
   Message,
   MessageAttachment,
@@ -59,17 +59,12 @@ const CLEAN_CONVERSATION_MESSAGE =
 interface RecoverableSendDraft {
   conversationId: string
   failedRequestTurnNumber: number
+  errorMessageIndex: number
   originalValue: string
   attachments: MessageAttachment[]
   conversions: Record<string, PieceConversion>
   source: 'live' | 'persisted'
   missingConverterSelections: boolean
-}
-
-interface TargetResponseFailure {
-  type: string
-  errorTurnNumber: number
-  failedRequestTurnNumber?: number
 }
 
 function getRecoveryDescription(draft: RecoverableSendDraft): string {
@@ -86,86 +81,44 @@ function getRecoveryDescription(draft: RecoverableSendDraft): string {
   return `${CLEAN_CONVERSATION_MESSAGE} ${restored} Review them before sending.`
 }
 
-function findPrecedingUserMessage(
-  messages: BackendMessage[],
-  beforeIndex: number,
-): BackendMessage | undefined {
-  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
-    if (messages[index].role === 'user') {
-      return messages[index]
-    }
-  }
-  return undefined
-}
-
-function getLatestTargetResponseFailure(messages: BackendMessage[]): TargetResponseFailure | undefined {
-  const latestMessageIndex = messages.length - 1
-  const latestMessage = messages[messages.length - 1]
-  if (
-    !latestMessage
-    || (latestMessage.role !== 'assistant' && latestMessage.role !== 'simulated_assistant')
-  ) {
-    return undefined
-  }
-
-  const errorType = latestMessage.message_pieces.find(
-    (piece) => piece.response_error && piece.response_error !== 'none',
-  )?.response_error
-  if (!errorType) {
-    return undefined
-  }
-
-  return {
-    type: errorType,
-    errorTurnNumber: latestMessage.turn_number,
-    failedRequestTurnNumber: findPrecedingUserMessage(messages, latestMessageIndex)?.turn_number,
-  }
-}
-
 function getPersistedProcessingRecovery(
   conversationId: string,
-  messages: BackendMessage[],
+  response: ConversationMessagesResponse,
 ): RecoverableSendDraft | undefined {
-  for (let errorIndex = messages.length - 1; errorIndex >= 0; errorIndex -= 1) {
-    const errorMessage = messages[errorIndex]
-    const isProcessingError = (
-      errorMessage.role === 'assistant'
-      || errorMessage.role === 'simulated_assistant'
-    ) && errorMessage.message_pieces.some(
-      (piece) => piece.response_error === RETRYABLE_TARGET_RESPONSE_ERROR,
-    )
-    if (!isProcessingError) {
-      continue
-    }
-
-    const failedRequest = findPrecedingUserMessage(messages, errorIndex)
-    if (!failedRequest) {
-      return undefined
-    }
-
-    const originalDraft = backendMessageToOriginalDraft(failedRequest)
-    return {
-      conversationId,
-      failedRequestTurnNumber: failedRequest.turn_number,
-      originalValue: originalDraft.content,
-      attachments: (originalDraft.attachments ?? []).map((attachment) => ({ ...attachment })),
-      conversions: {},
-      source: 'persisted',
-      missingConverterSelections: failedRequest.message_pieces.some(
-        (piece) => Boolean(piece.converter_identifiers?.length),
-      ),
-    }
+  const outcome = response.target_response_outcome
+  if (outcome?.response_error !== RETRYABLE_TARGET_RESPONSE_ERROR) {
+    return undefined
   }
-  return undefined
-}
 
-function findLastProcessingErrorIndex(messages: Message[]): number | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].error?.type === RETRYABLE_TARGET_RESPONSE_ERROR) {
-      return index
-    }
+  const failedRequest = response.messages.find(
+    (message) => (
+      message.role === 'user'
+      && message.turn_number === outcome.request_turn_number
+    ),
+  )
+  const errorMessageIndex = response.messages.findIndex(
+    (message) => (
+      message.role === 'assistant'
+      && message.turn_number === outcome.response_turn_number
+    ),
+  )
+  if (!failedRequest || errorMessageIndex < 0) {
+    return undefined
   }
-  return undefined
+
+  const originalDraft = backendMessageToOriginalDraft(failedRequest)
+  return {
+    conversationId,
+    failedRequestTurnNumber: outcome.request_turn_number,
+    errorMessageIndex,
+    originalValue: originalDraft.content,
+    attachments: (originalDraft.attachments ?? []).map((attachment) => ({ ...attachment })),
+    conversions: {},
+    source: 'persisted',
+    missingConverterSelections: failedRequest.message_pieces.some(
+      (piece) => Boolean(piece.converter_identifiers?.length),
+    ),
+  }
 }
 
 function readStoredMarkdownPreference(): boolean {
@@ -410,7 +363,7 @@ export default function ChatWindow({
       // Discard stale response if user navigated away while loading
       if (viewedConvRef.current !== convId) { return }
       const frontendMessages = backendMessagesToFrontend(response.messages)
-      const persistedRecovery = getPersistedProcessingRecovery(convId, response.messages)
+      const persistedRecovery = getPersistedProcessingRecovery(convId, response)
       setRecoverableSends((currentRecoveries) => {
         const currentRecovery = currentRecoveries[convId]
         if (persistedRecovery) {
@@ -636,21 +589,30 @@ export default function ChatWindow({
         converter_ids: converterIds,
       })
 
-      const targetResponseFailure = getLatestTargetResponseFailure(response.messages.messages)
-      const status: ChatSendOutcome['status'] = targetResponseFailure?.type === RETRYABLE_TARGET_RESPONSE_ERROR
+      const targetResponseOutcome = response.messages.target_response_outcome
+      const status: ChatSendOutcome['status'] = targetResponseOutcome?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR
         ? 'retryable_failure'
-        : targetResponseFailure
+        : targetResponseOutcome?.response_error && targetResponseOutcome.response_error !== 'none'
           ? 'non_retryable_failure'
           : 'sent'
       const backendMessages = backendMessagesToFrontend(response.messages.messages)
 
-      if (targetResponseFailure?.type === RETRYABLE_TARGET_RESPONSE_ERROR) {
+      if (targetResponseOutcome?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR) {
+        const errorMessageIndex = response.messages.messages.findIndex(
+          (message) => (
+            message.role === 'assistant'
+            && message.turn_number === targetResponseOutcome.response_turn_number
+          ),
+        )
+        if (errorMessageIndex < 0) {
+          throw new Error('Target response outcome did not match an assistant message.')
+        }
         setRecoverableSends((currentRecoveries) => ({
           ...currentRecoveries,
           [effectiveConvId]: {
             conversationId: effectiveConvId,
-            failedRequestTurnNumber: targetResponseFailure.failedRequestTurnNumber
-              ?? targetResponseFailure.errorTurnNumber - 1,
+            failedRequestTurnNumber: targetResponseOutcome.request_turn_number,
+            errorMessageIndex,
             originalValue,
             attachments: attachments.map((attachment) => ({ ...attachment })),
             conversions,
@@ -970,7 +932,8 @@ export default function ChatWindow({
 
   const singleTurnLimitReached = activeTarget?.capabilities?.supports_multi_turn === false && messages.some(m => m.role === 'user')
   const recoverableProcessingErrorIndex = recoverableSend?.conversationId === viewedConversationId
-    ? findLastProcessingErrorIndex(messages)
+    && recoverableSend.errorMessageIndex >= 0
+    ? recoverableSend.errorMessageIndex
     : undefined
   const processingRecoveryDescription = recoverableSend
     ? getRecoveryDescription(recoverableSend)

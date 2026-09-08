@@ -11,6 +11,11 @@ const MOCK_CONV_ID = "err-conv-001";
 function buildSuccessMessageMock(userText: string) {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 0,
@@ -52,6 +57,11 @@ function buildSuccessMessageMock(userText: string) {
 function buildProcessingFailureMock(userText: string) {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "processing",
+        request_turn_number: 2,
+        response_turn_number: 3,
+      },
       messages: [
         {
           turn_number: 2,
@@ -102,6 +112,19 @@ async function mockAllAPIs(
   page: Page,
   addMessageHandler?: (route: Route) => Promise<void>,
 ) {
+  // Authentication config
+  await page.route(/\/api\/auth\/config/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        clientId: "",
+        tenantId: "",
+        allowedGroupIds: "",
+      }),
+    });
+  });
+
   // Targets
   await page.route(/\/api\/targets/, async (route) => {
     if (route.request().method() === "GET") {

@@ -7,6 +7,7 @@ import {
   BackendMessage,
   Message,
   MessageAttachment,
+  PromptResponseError,
   TargetCapabilities,
   TargetInfo,
   TargetInstance,
@@ -99,6 +100,11 @@ const mockTarget: TargetInstance = makeTarget({
 function makeTextResponse(text: string) {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 1,
@@ -124,6 +130,11 @@ function makeTextResponse(text: string) {
 function makeImageResponse() {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 1,
@@ -150,6 +161,11 @@ function makeImageResponse() {
 function makeAudioResponse() {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 1,
@@ -176,6 +192,11 @@ function makeAudioResponse() {
 function makeVideoResponse() {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 1,
@@ -202,6 +223,11 @@ function makeVideoResponse() {
 function makeMultiModalResponse() {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 0,
+        response_turn_number: 1,
+      },
       messages: [
         {
           turn_number: 1,
@@ -235,13 +261,18 @@ function makeMultiModalResponse() {
 }
 
 function makeErrorResponse(
-  errorType: string,
+  errorType: PromptResponseError,
   description: string,
   failedRequestTurnNumber = 0,
   hasConverters = false
 ) {
   return {
     messages: {
+      target_response_outcome: {
+        response_error: errorType,
+        request_turn_number: failedRequestTurnNumber,
+        response_turn_number: failedRequestTurnNumber + 1,
+      },
       messages: [
         {
           turn_number: failedRequestTurnNumber,
@@ -1677,7 +1708,13 @@ describe("ChatWindow Integration", () => {
     ];
 
     mockedAttacksApi.getMessages.mockResolvedValue({
+      conversation_id: "conv-persisted-processing",
       messages: persistedMessages,
+      target_response_outcome: {
+        response_error: "processing",
+        request_turn_number: 2,
+        response_turn_number: 3,
+      },
     } as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
@@ -1756,6 +1793,151 @@ describe("ChatWindow Integration", () => {
     expect(restoredInput).toHaveValue("original persisted prompt");
     expect(screen.getAllByText("evidence.png", { exact: false })).toHaveLength(1);
     expect(screen.queryByText(/converted\.pdf/i)).not.toBeInTheDocument();
+  });
+
+  it("should not recover a historical processing error after a later successful response", async () => {
+    const historicalFailure = makeErrorResponse(
+      "processing",
+      "The target could not process this message."
+    );
+    const laterUser: BackendMessage = {
+      turn_number: 2,
+      role: "user",
+      message_pieces: [
+        {
+          id: "p-later-user",
+          original_value_data_type: "text",
+          converted_value_data_type: "text",
+          original_value: "later request",
+          converted_value: "later request",
+          scores: [],
+          response_error: "none",
+        },
+      ],
+      created_at: "2026-01-01T00:00:02Z",
+    };
+    const laterAssistant: BackendMessage = {
+      turn_number: 3,
+      role: "assistant",
+      message_pieces: [
+        {
+          id: "p-later-assistant",
+          original_value_data_type: "text",
+          converted_value_data_type: "text",
+          original_value: "latest success",
+          converted_value: "latest success",
+          scores: [],
+          response_error: "none",
+        },
+      ],
+      created_at: "2026-01-01T00:00:03Z",
+    };
+
+    mockedAttacksApi.getMessages.mockResolvedValue({
+      conversation_id: "conv-stale-processing",
+      messages: [
+        ...historicalFailure.messages.messages,
+        laterUser,
+        laterAssistant,
+      ],
+      target_response_outcome: {
+        response_error: "none",
+        request_turn_number: 2,
+        response_turn_number: 3,
+      },
+    } as never);
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([
+      {
+        role: "user",
+        content: "failed request",
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+      {
+        role: "assistant",
+        content: "",
+        timestamp: "2026-01-01T00:00:01Z",
+        error: {
+          type: "processing",
+          description: "The target could not process this message.",
+        },
+      },
+      {
+        role: "user",
+        content: "later request",
+        timestamp: "2026-01-01T00:00:02Z",
+      },
+      {
+        role: "assistant",
+        content: "latest success",
+        timestamp: "2026-01-01T00:00:03Z",
+      },
+    ]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-stale-processing"
+          conversationId="conv-stale-processing"
+          activeConversationId="conv-stale-processing"
+        />
+      </TestWrapper>
+    );
+
+    expect(await screen.findByText("latest success")).toBeInTheDocument();
+    expect(screen.queryByTestId(/^recover-processing-error-btn-/)).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
+  it("should not treat simulated assistant history as a target processing failure", async () => {
+    const processingResponse = makeErrorResponse(
+      "processing",
+      "The target could not process this message."
+    );
+    const simulatedMessages = processingResponse.messages.messages.map(
+      (message, index) => index === 1
+        ? { ...message, role: "simulated_assistant" }
+        : message
+    );
+
+    mockedAttacksApi.getMessages.mockResolvedValue({
+      conversation_id: "conv-simulated-processing",
+      messages: simulatedMessages,
+      target_response_outcome: null,
+    } as never);
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([
+      {
+        role: "user",
+        content: "failed request",
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+      {
+        role: "simulated_assistant",
+        content: "",
+        timestamp: "2026-01-01T00:00:01Z",
+        error: {
+          type: "processing",
+          description: "The target could not process this message.",
+        },
+      },
+    ]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-simulated-processing"
+          conversationId="conv-simulated-processing"
+          activeConversationId="conv-simulated-processing"
+        />
+      </TestWrapper>
+    );
+
+    await waitFor(() => {
+      expect(mockedMapper.backendMessagesToFrontend).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId(/^recover-processing-error-btn-/)).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
   it("should clear an unchanged submitted draft after switching conversations", async () => {

@@ -301,6 +301,8 @@ export interface BackendScore {
   timestamp: string
 }
 
+export type PromptResponseError = 'blocked' | 'none' | 'processing' | 'empty' | 'unknown'
+
 export interface BackendMessagePiece {
   id: string
   original_value_data_type: string
@@ -316,7 +318,7 @@ export interface BackendMessagePiece {
   prompt_metadata?: Record<string, unknown> | null
   converter_identifiers?: Array<Record<string, unknown>>
   scores: BackendScore[]
-  response_error: string // 'none' | 'blocked' | 'processing' | 'empty' | 'unknown'
+  response_error: PromptResponseError
   response_error_description?: string | null
 }
 
@@ -327,9 +329,16 @@ export interface BackendMessage {
   created_at: string
 }
 
+export interface TargetResponseOutcome {
+  response_error: PromptResponseError
+  request_turn_number: number
+  response_turn_number: number
+}
+
 export interface ConversationMessagesResponse {
   conversation_id: string
   messages: BackendMessage[]
+  target_response_outcome: TargetResponseOutcome | null
 }
 
 export interface MessagePieceRequest {

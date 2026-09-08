@@ -28,6 +28,7 @@ from pyrit.backend.models.attacks import (
     PrependedMessageRequest,
     ScoreView,
     TargetInfo,
+    TargetResponseOutcome,
     UpdateAttackRequest,
     UpdateMainConversationRequest,
     UpdateMainConversationResponse,
@@ -90,6 +91,7 @@ __all__ = [
     "PrependedMessageRequest",
     "ScoreView",
     "TargetInfo",
+    "TargetResponseOutcome",
     "UpdateAttackRequest",
     # Common
     "SENSITIVE_FIELD_PATTERNS",
