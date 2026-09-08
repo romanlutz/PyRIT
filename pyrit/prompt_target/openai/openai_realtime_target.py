@@ -489,14 +489,27 @@ class RealtimeTarget(OpenAITarget):
 
         Args:
             conversation_id (str): The conversation ID to disconnect from.
+
+        Raises:
+            asyncio.CancelledError: If cleanup is cancelled, after the connection finishes closing.
         """
         connection = self._existing_conversation.pop(conversation_id, None)
-        if connection:
+        if not connection:
+            return
+
+        close_task = asyncio.ensure_future(connection.close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError as cancellation_error:
             try:
-                await connection.close()
-                logger.info(f"Disconnected from {self._endpoint} with conversation ID: {conversation_id}")
-            except Exception as e:
-                logger.warning(f"Error closing connection for {conversation_id}: {e}")
+                await close_task
+            except BaseException as close_error:
+                raise cancellation_error from close_error
+            raise
+        except Exception as e:
+            logger.warning(f"Error closing connection for {conversation_id}: {e}")
+        else:
+            logger.info(f"Disconnected from {self._endpoint} with conversation ID: {conversation_id}")
 
     async def _connect_async(self, *, conversation_id: str) -> Any:
         """
@@ -859,10 +872,9 @@ class RealtimeTarget(OpenAITarget):
         return output_audio_path, result
 
     async def _cancel_receive_task_async(self, *, receive_task: asyncio.Task[RealtimeTargetResult]) -> None:
-        """Cancel and retrieve an unfinished Realtime receive task."""
-        if receive_task.done():
-            return
-        receive_task.cancel()
+        """Cancel and retrieve a Realtime receive task."""
+        if not receive_task.done():
+            receive_task.cancel()
         await asyncio.gather(receive_task, return_exceptions=True)
 
     async def _construct_message_from_response_async(self, response: Any, request: Any) -> Message:

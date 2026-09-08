@@ -136,6 +136,20 @@ async def test_response_create_failure_cancels_receive_task(target):
     assert receive_cancelled.is_set()
 
 
+async def test_cancel_receive_task_async_gathers_completed_failure(target):
+    async def fail_receive_async() -> RealtimeTargetResult:
+        raise RuntimeError("receive failed")
+
+    receive_task = asyncio.create_task(fail_receive_async())
+    with pytest.raises(RuntimeError, match="receive failed"):
+        await receive_task
+
+    with patch.object(asyncio, "gather", new_callable=AsyncMock) as gather:
+        await target._cancel_receive_task_async(receive_task=receive_task)
+
+    gather.assert_awaited_once_with(receive_task, return_exceptions=True)
+
+
 async def test_send_prompt_async_propagates_interrupted_to_metadata(target):
     """When a turn result carries interrupted=True, both response pieces' metadata must reflect it."""
     target._connect_async = AsyncMock(return_value=AsyncMock())
@@ -1339,6 +1353,34 @@ async def test_cleanup_conversation_async_swallows_close_error(target):
     # The error is swallowed and the conversation is still removed.
     await target.cleanup_conversation_async(conversation_id="conv")
 
+    assert "conv" not in target._existing_conversation
+
+
+async def test_cleanup_conversation_async_finishes_close_before_propagating_cancellation(target):
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    close_finished = asyncio.Event()
+
+    async def close_async() -> None:
+        close_started.set()
+        await close_release.wait()
+        close_finished.set()
+
+    mock_connection = AsyncMock()
+    mock_connection.close.side_effect = close_async
+    target._existing_conversation["conv"] = mock_connection
+
+    cleanup_task = asyncio.create_task(target.cleanup_conversation_async(conversation_id="conv"))
+    await close_started.wait()
+    cleanup_task.cancel()
+    await asyncio.sleep(0)
+
+    assert not cleanup_task.done()
+    close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+    assert close_finished.is_set()
     assert "conv" not in target._existing_conversation
 
 
