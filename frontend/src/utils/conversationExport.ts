@@ -324,7 +324,7 @@ function messageForExport(message: Message): Message {
 
 /**
  * Strip an attachment down to what is safe to write into a shared file: the
- * `File` handle and recovery-only source value can't be serialized, and the
+ * `File` handle and recovery-only source metadata can't be serialized, and the
  * source URL is a short-lived signed storage link or an absolute path on the
  * operator's machine. Inline `data:` values stay because the URL is the payload.
  */
@@ -332,6 +332,7 @@ function attachmentForExport(attachment: MessageAttachment): MessageAttachment {
   const next = { ...attachment }
   delete next.file
   delete next.sourceValue
+  delete next.sourceDataType
   if (!next.url.startsWith('data:')) {
     next.url = ''
   }

@@ -1709,6 +1709,272 @@ describe("ChatWindow Integration", () => {
     });
   });
 
+  it("should ignore an older same-conversation load after a processing failure", async () => {
+    const user = userEvent.setup();
+    const processingResponse = makeErrorResponse(
+      "processing",
+      "The target could not process this message.",
+      2
+    );
+    const staleLoadResponse = {
+      conversation_id: "conv-processing-load-race",
+      messages: [],
+      target_response_outcome: null,
+    };
+    let resolveLoad: ((value: typeof staleLoadResponse) => void) | undefined;
+
+    mockedAttacksApi.getMessages.mockImplementation(
+      () => new Promise<typeof staleLoadResponse>((resolve) => {
+        resolveLoad = resolve;
+      }) as never
+    );
+    mockedMapper.buildMessagePieces.mockResolvedValue([
+      { data_type: "text", original_value: "keep this draft" },
+    ]);
+    mockedAttacksApi.addMessage.mockResolvedValue(processingResponse as never);
+    mockedMapper.backendMessagesToFrontend.mockImplementation((messages) =>
+      messages.length === 0
+        ? []
+        : [
+            {
+              role: "user",
+              content: "keep this draft",
+              timestamp: "2026-01-01T00:00:00Z",
+            },
+            {
+              role: "assistant",
+              content: "",
+              timestamp: "2026-01-01T00:00:01Z",
+              error: {
+                type: "processing",
+                description: "The target could not process this message.",
+              },
+            },
+          ]
+    );
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-processing-load-race"
+          conversationId="conv-processing-load-race"
+          activeConversationId="conv-processing-load-race"
+        />
+      </TestWrapper>
+    );
+
+    await waitFor(() => {
+      expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(1);
+    });
+    const input = screen.getByRole("textbox");
+    await user.type(input, "keep this draft");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => {
+      expect(mockedMapper.backendMessagesToFrontend).toHaveBeenCalledWith(
+        processingResponse.messages.messages
+      );
+    });
+
+    await act(async () => {
+      resolveLoad?.(staleLoadResponse);
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /edit in clean conversation/i })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/The target could not process this message\./)).toBeInTheDocument();
+    expect(input).toHaveValue("keep this draft");
+    expect(input).toBeDisabled();
+  });
+
+  it("should ignore an older same-conversation load failure after a processing failure", async () => {
+    const user = userEvent.setup();
+    const processingResponse = makeErrorResponse(
+      "processing",
+      "The target could not process this message.",
+      2
+    );
+    let rejectLoad: ((reason?: unknown) => void) | undefined;
+
+    mockedAttacksApi.getMessages.mockImplementation(
+      () => new Promise((_resolve, reject) => {
+        rejectLoad = reject;
+      }) as never
+    );
+    mockedMapper.buildMessagePieces.mockResolvedValue([
+      { data_type: "text", original_value: "keep failed draft" },
+    ]);
+    mockedAttacksApi.addMessage.mockResolvedValue(processingResponse as never);
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([
+      {
+        role: "user",
+        content: "keep failed draft",
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+      {
+        role: "assistant",
+        content: "",
+        timestamp: "2026-01-01T00:00:01Z",
+        error: {
+          type: "processing",
+          description: "The target could not process this message.",
+        },
+      },
+    ]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-processing-load-failure"
+          conversationId="conv-processing-load-failure"
+          activeConversationId="conv-processing-load-failure"
+        />
+      </TestWrapper>
+    );
+
+    await waitFor(() => {
+      expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(1);
+    });
+    const input = screen.getByRole("textbox");
+    await user.type(input, "keep failed draft");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => {
+      expect(mockedMapper.backendMessagesToFrontend).toHaveBeenCalledWith(
+        processingResponse.messages.messages
+      );
+    });
+
+    await act(async () => {
+      rejectLoad?.(new Error("stale load failed"));
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /edit in clean conversation/i })
+    ).toBeInTheDocument();
+    expect(screen.getByText(/The target could not process this message\./)).toBeInTheDocument();
+    expect(input).toHaveValue("keep failed draft");
+    expect(input).toBeDisabled();
+  });
+
+  it("should let the latest same-conversation load control the transcript and loading state", async () => {
+    const user = userEvent.setup();
+    const olderResponse = makeTextResponse("older response").messages;
+    const newerResponse = makeTextResponse("newer response").messages;
+    let resolveOlderLoad: ((value: typeof olderResponse) => void) | undefined;
+    let resolveNewerLoad: ((value: typeof newerResponse) => void) | undefined;
+
+    mockedAttacksApi.getConversations.mockResolvedValue({
+      main_conversation_id: "conv-latest-load",
+      conversations: [
+        {
+          conversation_id: "conv-latest-load",
+          message_count: 1,
+        },
+      ],
+    } as never);
+    mockedAttacksApi.getMessages
+      .mockImplementationOnce(
+        () => new Promise<typeof olderResponse>((resolve) => {
+          resolveOlderLoad = resolve;
+        }) as never
+      )
+      .mockImplementationOnce(
+        () => new Promise<typeof newerResponse>((resolve) => {
+          resolveNewerLoad = resolve;
+        }) as never
+      );
+    mockedMapper.backendMessagesToFrontend.mockImplementation(
+      actualMessageMapper.backendMessagesToFrontend
+    );
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-latest-load"
+          conversationId="conv-latest-load"
+          activeConversationId="conv-latest-load"
+          relatedConversationCount={1}
+        />
+      </TestWrapper>
+    );
+
+    await waitFor(() => {
+      expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(1);
+    });
+    await user.click(
+      await screen.findByRole("button", { name: "Select conversation conv-latest-load" })
+    );
+    await waitFor(() => {
+      expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      resolveOlderLoad?.(olderResponse);
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("older response")).not.toBeInTheDocument();
+    expect(screen.getByTestId("loading-state")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveNewerLoad?.(newerResponse);
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("newer response")).toBeInTheDocument();
+    expect(screen.queryByText("older response")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("loading-state")).not.toBeInTheDocument();
+  });
+
+  it("should preserve an already-loaded transcript when a same-conversation refresh fails", async () => {
+    const user = userEvent.setup();
+    const loadedResponse = makeTextResponse("keep the loaded response").messages;
+
+    mockedAttacksApi.getConversations.mockResolvedValue({
+      main_conversation_id: "conv-refresh-failure",
+      conversations: [
+        {
+          conversation_id: "conv-refresh-failure",
+          message_count: 1,
+        },
+      ],
+    } as never);
+    mockedAttacksApi.getMessages
+      .mockResolvedValueOnce(loadedResponse as never)
+      .mockRejectedValueOnce(new Error("refresh failed"));
+    mockedMapper.backendMessagesToFrontend.mockImplementation(
+      actualMessageMapper.backendMessagesToFrontend
+    );
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="ar-refresh-failure"
+          conversationId="conv-refresh-failure"
+          activeConversationId="conv-refresh-failure"
+          relatedConversationCount={1}
+        />
+      </TestWrapper>
+    );
+
+    expect(await screen.findByText("keep the loaded response")).toBeInTheDocument();
+    await user.click(
+      await screen.findByRole("button", { name: "Select conversation conv-refresh-failure" })
+    );
+    await waitFor(() => {
+      expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId("loading-state")).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText("keep the loaded response")).toBeInTheDocument();
+  });
+
   it("should reconstruct recovery when loading a persisted processing error", async () => {
     const user = userEvent.setup();
     const onSelectConversation = jest.fn();

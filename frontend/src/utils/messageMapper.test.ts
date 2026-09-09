@@ -136,12 +136,55 @@ describe("messageMapper", () => {
           name: "evidence.png",
           url: "/api/media?path=%2Foriginal%2Fevidence.png",
           sourceValue: "/original/evidence.png",
+          sourceDataType: "image_path",
         }),
       ]);
       expect(result.attachments).not.toEqual(
         expect.arrayContaining([
           expect.objectContaining({ name: "converted.pdf" }),
         ])
+      );
+    });
+
+    it("preserves a persisted attachment data type when rebuilding it for resubmission", async () => {
+      const msg: BackendMessage = {
+        turn_number: 2,
+        role: "user",
+        message_pieces: [
+          {
+            id: "binary-image",
+            original_value_data_type: "binary_path",
+            converted_value_data_type: "binary_path",
+            original_value: "/original/evidence.png",
+            original_value_url: "/api/media?path=%2Foriginal%2Fevidence.png",
+            original_value_mime_type: "image/png",
+            original_filename: "evidence.png",
+            converted_value: "/original/evidence.png",
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-01-01T00:00:00Z",
+      };
+
+      const draft = backendMessageToOriginalDraft(msg);
+      const attachment = draft.attachments?.[0];
+
+      expect(attachment).toEqual(
+        expect.objectContaining({
+          mimeType: "image/png",
+          sourceDataType: "binary_path",
+        })
+      );
+      if (!attachment) {
+        throw new Error("Expected the persisted attachment to be reconstructed");
+      }
+      expect(await attachmentToMessagePieceRequest(attachment)).toEqual(
+        expect.objectContaining({
+          data_type: "binary_path",
+          original_value: "/original/evidence.png",
+          mime_type: "image/png",
+        })
       );
     });
   });

@@ -74,6 +74,11 @@ interface RecoverableSendDraft {
   missingConverterSelections: boolean
 }
 
+interface ConversationLoadRequest {
+  conversationId: string
+  requestId: number
+}
+
 function getRecoveryDescription(draft: RecoverableSendDraft): string {
   if (draft.source === 'live') {
     return `${CLEAN_CONVERSATION_MESSAGE} Your prompt, attachments, and converter choices are preserved for editing.`
@@ -212,6 +217,10 @@ export default function ChatWindow({
   const [isLoadingMessages, setIsLoadingMessages] = useState(false)
   /** Which conversation's messages are currently loaded (set after fetch completes) */
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null)
+  const loadedConversationIdRef = useRef<string | null>(null)
+  const nextConversationLoadRequestIdRef = useRef(0)
+  const latestConversationLoadRequestIdsRef = useRef<Map<string, number>>(new Map())
+  const activeConversationLoadRequestRef = useRef<ConversationLoadRequest | null>(null)
   const isSending = activeConversationId ? sendingConversations.has(activeConversationId) : Boolean(sendingConversations.size)
   const [isPanelOpen, setIsPanelOpen] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
@@ -234,6 +243,23 @@ export default function ChatWindow({
   const recoverableSend = viewedConversationId
     ? recoverableSends[viewedConversationId]
     : undefined
+
+  const markConversationLoaded = useCallback((loadedId: string | null): void => {
+    loadedConversationIdRef.current = loadedId
+    setLoadedConversationId(loadedId)
+  }, [])
+
+  const invalidateConversationLoads = useCallback((conversationIdToInvalidate: string): void => {
+    latestConversationLoadRequestIdsRef.current.delete(conversationIdToInvalidate)
+    if (activeConversationLoadRequestRef.current?.conversationId === conversationIdToInvalidate) {
+      activeConversationLoadRequestRef.current = null
+      setIsLoadingMessages(false)
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    loadedConversationIdRef.current = loadedConversationId
+  }, [loadedConversationId])
 
   const handleMarkdownChange = useCallback((
     _event: ChangeEvent<HTMLInputElement>,
@@ -372,11 +398,19 @@ export default function ChatWindow({
 
   // Load messages for a given conversation
   const loadConversation = useCallback(async (arId: string, convId: string) => {
+    nextConversationLoadRequestIdRef.current += 1
+    const requestId = nextConversationLoadRequestIdRef.current
+    latestConversationLoadRequestIdsRef.current.set(convId, requestId)
+    activeConversationLoadRequestRef.current = { conversationId: convId, requestId }
     setIsLoadingMessages(true)
+    const isCurrentLoad = (): boolean => (
+      latestConversationLoadRequestIdsRef.current.get(convId) === requestId
+    )
+
     try {
       const response = await attacksApi.getMessages(arId, convId)
-      // Discard stale response if user navigated away while loading
-      if (viewedConvRef.current !== convId) { return }
+      // Discard superseded loads and responses invalidated by a send.
+      if (!isCurrentLoad() || viewedConvRef.current !== convId) { return }
       const frontendMessages = backendMessagesToFrontend(response.messages)
       const persistedRecovery = getPersistedProcessingRecovery(convId, response)
       setRecoverableSends((currentRecoveries) => {
@@ -407,15 +441,25 @@ export default function ChatWindow({
         })
       }
       setMessages(frontendMessages)
-      setLoadedConversationId(convId)
+      markConversationLoaded(convId)
     } catch {
-      if (viewedConvRef.current !== convId) { return }
-      setMessages([])
-      setLoadedConversationId(convId)
+      if (!isCurrentLoad() || viewedConvRef.current !== convId) { return }
+      // Initial-load failures must not show another conversation's transcript.
+      // Refresh failures keep the already-loaded transcript and recovery aligned.
+      if (loadedConversationIdRef.current !== convId) {
+        setMessages([])
+        markConversationLoaded(convId)
+      }
     } finally {
-      setIsLoadingMessages(false)
+      if (latestConversationLoadRequestIdsRef.current.get(convId) === requestId) {
+        latestConversationLoadRequestIdsRef.current.delete(convId)
+      }
+      if (activeConversationLoadRequestRef.current?.requestId === requestId) {
+        activeConversationLoadRequestRef.current = null
+        setIsLoadingMessages(false)
+      }
     }
-  }, [])
+  }, [markConversationLoaded])
 
   // Reload messages when activeConversationId changes
   useEffect(() => {
@@ -470,6 +514,7 @@ export default function ChatWindow({
       return { status: 'retryable_failure', clearDraft: false }
     }
 
+    invalidateConversationLoads(initialSendConvId)
     setRecoverableSends((currentRecoveries) => {
       if (!currentRecoveries[initialSendConvId]) {
         return currentRecoveries
@@ -645,7 +690,7 @@ export default function ChatWindow({
         // This correctly handles the case where the user switched away and
         // back during the request — the full conversation is restored.
         setMessages(backendMessages)
-        setLoadedConversationId(effectiveConvId)
+        markConversationLoaded(effectiveConvId)
       }
       return {
         status,
@@ -662,9 +707,9 @@ export default function ChatWindow({
         // Mark the viewed conversation as loaded so first-send failures do not
         // get stuck behind the "Loading conversation..." placeholder.
         if (viewedConversationId) {
-          setLoadedConversationId(viewedConversationId)
+          markConversationLoaded(viewedConversationId)
         } else if (sendConvId !== '__pending__') {
-          setLoadedConversationId(sendConvId)
+          markConversationLoaded(sendConvId)
         }
 
         const apiError = toApiError(err)
@@ -699,6 +744,7 @@ export default function ChatWindow({
         clearDraft: viewedConversationId != null && viewedConversationId !== sendConvId,
       }
     } finally {
+      invalidateConversationLoads(sendConvId)
       sendingConvIdsRef.current.delete(sendConvId)
       pendingUserMessagesRef.current.delete(sendConvId)
       setSendingConversations(prev => {
@@ -920,11 +966,11 @@ export default function ChatWindow({
       const messagesResp = await attacksApi.getMessages(createResponse.attack_result_id, createResponse.conversation_id)
       const frontendMessages = backendMessagesToFrontend(messagesResp.messages)
       setMessages(frontendMessages)
-      setLoadedConversationId(createResponse.conversation_id)
+      markConversationLoaded(createResponse.conversation_id)
     } catch (err) {
       console.error('Failed to branch into new attack:', err)
     }
-  }, [activeTarget, activeConversationId, labels, onConversationCreated])
+  }, [activeTarget, activeConversationId, labels, markConversationLoaded, onConversationCreated])
 
   const handleChangeMainConversation = useCallback(async (convId: string) => {
     if (
@@ -978,11 +1024,19 @@ export default function ChatWindow({
       const messagesResp = await attacksApi.getMessages(createResponse.attack_result_id, createResponse.conversation_id)
       const frontendMessages = backendMessagesToFrontend(messagesResp.messages)
       setMessages(frontendMessages)
-      setLoadedConversationId(createResponse.conversation_id)
+      markConversationLoaded(createResponse.conversation_id)
     } catch (err) {
       console.error('Failed to use as template:', err)
     }
-  }, [attackResultId, activeTarget, activeConversationId, messages, labels, onConversationCreated])
+  }, [
+    activeConversationId,
+    activeTarget,
+    attackResultId,
+    labels,
+    markConversationLoaded,
+    messages,
+    onConversationCreated,
+  ])
 
   const systemMessage = messages.find(message => message.role === 'system')
 

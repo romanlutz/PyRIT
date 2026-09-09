@@ -16,6 +16,8 @@ export interface MessageAttachment {
   file?: File
   /** Raw backend value used when reconstructing a persisted attachment for resubmission. */
   sourceValue?: string
+  /** Backend data type paired with sourceValue so persisted attachments retain their original semantics. */
+  sourceDataType?: string
   /** Backend piece ID — preserved so remix/copy can trace back to the original piece */
   pieceId?: string
   /** Backend prompt_metadata — preserved so video_id etc. carry over on remix/copy */

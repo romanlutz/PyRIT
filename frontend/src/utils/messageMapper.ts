@@ -198,6 +198,7 @@ function pieceToAttachment(
     mimeType: mime,
     size,
     sourceValue: mediaValue,
+    sourceDataType: isOriginal ? dataType : undefined,
     pieceId: piece.id,
     metadata: piece.prompt_metadata || undefined,
   }
@@ -391,7 +392,7 @@ export async function attachmentToMessagePieceRequest(att: MessageAttachment): P
   }
 
   return {
-    data_type: mimeTypeToDataType(att.mimeType),
+    data_type: att.sourceDataType ?? mimeTypeToDataType(att.mimeType),
     original_value: base64Value,
     mime_type: att.mimeType,
     original_prompt_id: att.pieceId,

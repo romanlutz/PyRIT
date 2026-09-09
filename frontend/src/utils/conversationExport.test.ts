@@ -368,6 +368,7 @@ describe("conversationExport", () => {
                 mimeType: "image/png",
                 pieceId: "piece-9",
                 sourceValue: "C:\\private\\raw-image.png",
+                sourceDataType: "image_path",
                 file,
               },
             ],
@@ -378,6 +379,7 @@ describe("conversationExport", () => {
       const attachment = JSON.parse(json).messages[0].attachments[0];
       expect(attachment.file).toBeUndefined();
       expect(attachment.sourceValue).toBeUndefined();
+      expect(attachment.sourceDataType).toBeUndefined();
       expect(attachment.name).toBe("local.png");
       expect(attachment.pieceId).toBe("piece-9");
     });
