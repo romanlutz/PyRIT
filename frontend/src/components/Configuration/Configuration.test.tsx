@@ -1,6 +1,9 @@
+import type { ReactElement } from 'react'
+
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 
 import { configurationApi, initializersApi } from '@/services/api'
 
@@ -29,12 +32,27 @@ const mockedInitializersApi = jest.mocked(initializersApi)
 // Fluent UI dialogs can render slowly in JSDOM under full test load.
 jest.setTimeout(60_000)
 
-function renderPage(): void {
+function RouterProbe(): ReactElement {
+  const location = useLocation()
+  const navigate = useNavigate()
+
+  return (
+    <>
+      <output aria-label="Current URL">{location.pathname}{location.search}</output>
+      <button type="button" onClick={() => void navigate(-1)}>Go back</button>
+    </>
+  )
+}
+
+function renderPage(initialPath = '/config'): void {
   render(
     <FluentProvider theme={webLightTheme}>
-      <main>
-        <Configuration />
-      </main>
+      <MemoryRouter initialEntries={[initialPath]}>
+        <main>
+          <Configuration />
+        </main>
+        <RouterProbe />
+      </MemoryRouter>
     </FluentProvider>,
   )
 }
@@ -242,6 +260,40 @@ describe('Configuration', () => {
 
     expect(await screen.findByTestId('configured-initializer-row-0')).toHaveTextContent('Registers targets.')
     expect(screen.queryByRole('button', { name: 'Apply now' })).not.toBeInTheDocument()
+  })
+
+  it('should restore a linked tab and preserve unrelated query parameters', async () => {
+    const user = userEvent.setup()
+    renderPage('/config?source=docs&tab=environment')
+
+    expect(screen.getByRole('tab', { name: 'Environment & Secrets', selected: true })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Environment file contents')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('tab', { name: 'Initializers' }))
+    expect(screen.getByLabelText('Current URL')).toHaveTextContent(/^\/config\?source=docs&tab=initializers$/)
+
+    await user.click(screen.getByRole('tab', { name: 'PyRIT Configuration' }))
+    expect(screen.getByLabelText('Current URL')).toHaveTextContent(/^\/config\?source=docs$/)
+  })
+
+  it('should restore the previous tab through browser history', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(screen.getByRole('tab', { name: 'Environment & Secrets' }))
+    await user.click(screen.getByRole('tab', { name: 'Initializers' }))
+    expect(screen.getByLabelText('Current URL')).toHaveTextContent(/^\/config\?tab=initializers$/)
+
+    await user.click(screen.getByRole('button', { name: 'Go back' }))
+    expect(screen.getByRole('tab', { name: 'Environment & Secrets', selected: true })).toBeInTheDocument()
+    expect(screen.getByLabelText('Current URL')).toHaveTextContent(/^\/config\?tab=environment$/)
+  })
+
+  it('should fall back to the configuration tab for an unknown URL value', async () => {
+    renderPage('/config?tab=unknown')
+
+    expect(screen.getByRole('tab', { name: 'PyRIT Configuration', selected: true })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Configuration YAML')).toBeInTheDocument()
   })
 
 })
