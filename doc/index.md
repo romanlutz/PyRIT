@@ -156,6 +156,32 @@ Guidance, methodology, threat models, and learning resources for AI red teaming 
 :::::{grid} 1 2 3 3
 
 ::::{card}
+:link: https://commandline.microsoft.com/pyrit-python-risk-identification-tool-ai-red-teaming-subject-matter-experts/
+
+:::{image} assets/ecosystem/commandline-blog.png
+:alt: PyRIT Democratizing AI red teaming through open-source tooling
+:class: ecosystem-resource-thumb
+:::
+
+**PyRIT: Democratizing AI red teaming through open-source tooling**
+
+Roman Lutz, 2026
+::::
+
+::::{card}
+:link: https://commandline.microsoft.com/wp-content/uploads/2026/08/PyRIT_Whitepaper_2026.pdf
+
+:::{image} assets/ecosystem/papers/pyrit-2026.png
+:alt: PyRIT Democratizing AI Red Teaming Through Open-Source Tooling
+:class: ecosystem-paper-thumb
+:::
+
+**PyRIT: Democratizing AI Red Teaming Through Open-Source Tooling**
+
+Lutz et al., 2026
+::::
+
+::::{card}
 :link: https://aka.ms/medusa-repo
 
 :::{image} assets/ecosystem/medusa.png
@@ -205,19 +231,6 @@ Microsoft AI Red Team, 2026 (v2.0)
 **Lessons from Red Teaming 100 Generative AI Products**
 
 Bullwinkel et al., 2025
-::::
-
-::::{card}
-:link: https://arxiv.org/abs/2410.02828
-
-:::{image} assets/ecosystem/papers/pyrit.png
-:alt: PyRIT paper
-:class: ecosystem-paper-thumb
-:::
-
-**PyRIT: A Framework for Security Risk Identification and Red Teaming in Generative AI Systems**
-
-Lopez et al., 2024
 ::::
 
 :::::
