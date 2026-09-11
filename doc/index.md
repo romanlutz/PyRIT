@@ -296,7 +296,12 @@ Run security assessments from the command line with `pyrit_scan` or the interact
 pyrit_scan airt.scam --target openai_chat
 ```
 
-![scanner-demo](scanner-demo.png)
+```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/scanner_walkthrough.mp4
+:width: 100%
+:title: PyRIT Scanner walkthrough
+:placeholder: scanner-demo.png
+:class: landing-demo-video
+```
 
 Use `pyrit_scan --help` to learn more about what else `pyrit_scan` can do.
 For more details, see the [Scanner](scanner/0_scanner) page.
@@ -310,7 +315,12 @@ Start the local web app and give it a try:
 ```bash
 pyrit_backend # serves webapp on http://localhost:8000/
 ```
-![copyrit-demo](copyrit-demo.png)
+```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/CoPyRIT-GUI-walkthrough.mp4
+:width: 100%
+:title: CoPyRIT GUI walkthrough
+:placeholder: copyrit-demo.png
+:class: landing-demo-video
+```
 
 For more details, see the [GUI](gui/0_gui) page.
 :::
