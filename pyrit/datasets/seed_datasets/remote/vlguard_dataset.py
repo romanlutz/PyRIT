@@ -4,22 +4,55 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
-import zipfile
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from huggingface_hub import hf_hub_download
+from typing_extensions import override
 
 from pyrit.common.path import DB_DATA_PATH
+from pyrit.common.safe_extract import safe_extract_zip
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models import Modality, SeedDataset, SeedPrompt
+from pyrit.models.harm_category import HarmCategory
+
+if TYPE_CHECKING:
+    from pyrit.models.seeds.seed_group import SeedUnion
 
 logger = logging.getLogger(__name__)
 
-_HF_REPO_ID = "ys-zong/VLGuard"
+
+def _cache_is_valid(*, json_path: Path, image_dir: Path) -> bool:
+    """
+    Check whether both cached metadata and extracted images are available.
+
+    Args:
+        json_path: Path to the cached metadata file.
+        image_dir: Path to the extracted image directory.
+
+    Returns:
+        bool: True when the complete cache is available.
+    """
+    return json_path.exists() and image_dir.exists() and any(image_dir.iterdir())
+
+
+def _load_metadata(json_path: Path) -> list[dict[str, str]]:
+    """
+    Load VLGuard metadata from its JSON file.
+
+    Args:
+        json_path: Path to the metadata file.
+
+    Returns:
+        list[dict[str, str]]: Parsed VLGuard metadata.
+    """
+    with open(json_path, encoding="utf-8") as file:
+        return cast("list[dict[str, str]]", json.load(file))
 
 
 class VLGuardCategory(Enum):
@@ -89,16 +122,46 @@ class _VLGuardDataset(_RemoteDatasetLoader):
     https://huggingface.co/datasets/ys-zong/VLGuard before use, and provide
     a HuggingFace token.
 
-    Reference: https://arxiv.org/abs/2402.02207
+    Reference: [@zong2024vlguard]
     Paper: Safety Fine-Tuning at (Almost) No Cost: A Baseline for Vision Large Language Models (ICML 2024)
     """
+
+    HARM_SUBCATEGORY_ALIAS_OVERRIDES: dict[str, list[HarmCategory]] = {
+        "personal data": [HarmCategory.PPI],
+        "professional advice": [
+            HarmCategory.LEGAL_ADVICE,
+            HarmCategory.FINANCIAL_ADVICE,
+            HarmCategory.HEALTH_DIAGNOSIS,
+        ],
+        "political": [HarmCategory.CAMPAIGNING],
+        "sexually explicit": [HarmCategory.SEXUAL_CONTENT],
+        "violence": [HarmCategory.VIOLENT_CONTENT],
+        "disinformation": [HarmCategory.INFO_INTEGRITY],
+        "sex": [HarmCategory.REPRESENTATIONAL, HarmCategory.HATE_SPEECH],
+        "race": [HarmCategory.REPRESENTATIONAL, HarmCategory.HATE_SPEECH],
+    }
+    _HF_REPO_ID: ClassVar[str] = "ys-zong/VLGuard"
+
+    _AUTHORS = [
+        "Yongshuo Zong",
+        "Ondrej Bohdal",
+        "Tingyang Yu",
+        "Yongxin Yang",
+        "Timothy Hospedales",
+    ]
+
+    _GROUPS = ["University of Edinburgh", "EPFL"]
+
+    # Metadata
+    modalities: tuple[Modality, ...] = (Modality.TEXT, Modality.IMAGE)
+    size: str = "large"  # 884 image-instruction pairs across 4 categories
+    tags: frozenset[str] = frozenset({"safety", "multimodal"})
 
     def __init__(
         self,
         *,
         subset: VLGuardSubset = VLGuardSubset.UNSAFES,
         categories: list[VLGuardCategory] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
         """
@@ -108,21 +171,20 @@ class _VLGuardDataset(_RemoteDatasetLoader):
             subset (VLGuardSubset): Which evaluation subset to load. Defaults to UNSAFES.
             categories (list[VLGuardCategory] | None): List of VLGuard categories to filter by.
                 If None, all categories are included.
-            max_examples (int | None): Maximum number of multimodal examples to fetch. Each example
-                produces 2 prompts (text + image). If None, fetches all examples.
             token (str | None): HuggingFace authentication token for accessing the gated dataset.
-                If None, uses the default token from the environment or HuggingFace CLI login.
+                If not provided, reads from the ``HUGGINGFACE_TOKEN`` environment variable.
 
         Raises:
             ValueError: If any of the specified categories are invalid.
         """
         self.subset = subset
         self.categories = categories
-        self.max_examples = max_examples
-        self.token = token
-        self.source = f"https://huggingface.co/datasets/{_HF_REPO_ID}"
+        self.token = token if token is not None else os.environ.get("HUGGINGFACE_TOKEN")
+        self.source = f"https://huggingface.co/datasets/{self._HF_REPO_ID}"
 
         if categories is not None:
+            if not categories:
+                raise ValueError("`categories` must be a non-empty list (pass None to include all categories)")
             valid_categories = {cat.value for cat in VLGuardCategory}
             invalid_categories = {
                 cat.value if isinstance(cat, VLGuardCategory) else cat for cat in categories
@@ -131,10 +193,12 @@ class _VLGuardDataset(_RemoteDatasetLoader):
                 raise ValueError(f"Invalid VLGuard categories: {', '.join(invalid_categories)}")
 
     @property
+    @override
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "vlguard"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch VLGuard multimodal examples and return as SeedDataset.
@@ -153,7 +217,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
 
         metadata, image_dir = await self._download_dataset_files_async(cache=cache)
 
-        prompts: list[SeedPrompt] = []
+        prompts: list[SeedUnion] = []
 
         for example in metadata:
             image_filename = example.get("image")
@@ -185,18 +249,22 @@ class _VLGuardDataset(_RemoteDatasetLoader):
                 continue
 
             image_path = image_dir / image_filename
-            if not image_path.exists():
+            if not await asyncio.to_thread(image_path.exists):
                 logger.warning(f"Image not found: {image_path}")
                 continue
 
             group_id = uuid.uuid4()
+            standardized_harm_categories = self._standardize_harm_categories(
+                subcategory,
+                alias_overrides=self.HARM_SUBCATEGORY_ALIAS_OVERRIDES,
+            )
 
             text_prompt = SeedPrompt(
                 value=instruction,
                 data_type="text",
                 name="VLGuard Text",
                 dataset_name=self.dataset_name,
-                harm_categories=[category],
+                harm_categories=standardized_harm_categories,
                 description=f"Text component of VLGuard multimodal prompt ({self.subset.value}).",
                 source=self.source,
                 prompt_group_id=group_id,
@@ -204,9 +272,13 @@ class _VLGuardDataset(_RemoteDatasetLoader):
                 metadata={
                     "category": category,
                     "subcategory": subcategory,
+                    "harmful_category": category,
+                    "harmful_subcategory": subcategory,
                     "subset": self.subset.value,
                     "safe_image": is_safe,
                 },
+                authors=self._AUTHORS,
+                groups=self._GROUPS,
             )
 
             image_prompt = SeedPrompt(
@@ -214,7 +286,7 @@ class _VLGuardDataset(_RemoteDatasetLoader):
                 data_type="image_path",
                 name="VLGuard Image",
                 dataset_name=self.dataset_name,
-                harm_categories=[category],
+                harm_categories=standardized_harm_categories,
                 description=f"Image component of VLGuard multimodal prompt ({self.subset.value}).",
                 source=self.source,
                 prompt_group_id=group_id,
@@ -222,18 +294,18 @@ class _VLGuardDataset(_RemoteDatasetLoader):
                 metadata={
                     "category": category,
                     "subcategory": subcategory,
+                    "harmful_category": category,
+                    "harmful_subcategory": subcategory,
                     "subset": self.subset.value,
                     "safe_image": is_safe,
                     "original_filename": image_filename,
                 },
+                authors=self._AUTHORS,
+                groups=self._GROUPS,
             )
 
             prompts.append(text_prompt)
             prompts.append(image_prompt)
-
-            # len(prompts) is divided by two since each example produces one image and one text prompt.
-            if self.max_examples is not None and len(prompts) >= self.max_examples * 2:
-                break
 
         logger.info(f"Successfully loaded {len(prompts)} prompts from VLGuard dataset ({self.subset.value})")
 
@@ -273,30 +345,29 @@ class _VLGuardDataset(_RemoteDatasetLoader):
             tuple[list[dict], Path]: Tuple of (metadata list, image directory path).
         """
         cache_dir = DB_DATA_PATH / "seed-prompt-entries" / "vlguard"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(cache_dir.mkdir, parents=True, exist_ok=True)
 
         json_path = cache_dir / "test.json"
         image_dir = cache_dir / "test"
 
         # Use cache if available
-        if cache and json_path.exists() and image_dir.exists() and any(image_dir.iterdir()):
+        if cache and await asyncio.to_thread(_cache_is_valid, json_path=json_path, image_dir=image_dir):
             logger.info("Using cached VLGuard dataset")
-            with open(json_path, encoding="utf-8") as f:
-                metadata = json.load(f)
+            metadata = await asyncio.to_thread(_load_metadata, json_path)
             return metadata, image_dir
 
         logger.info("Downloading VLGuard dataset from HuggingFace...")
 
         def _download_sync() -> tuple[str, str]:
             json_file = hf_hub_download(
-                repo_id=_HF_REPO_ID,
+                repo_id=self._HF_REPO_ID,
                 filename="test.json",
                 repo_type="dataset",
                 local_dir=str(cache_dir),
                 token=self.token,
             )
             zip_file = hf_hub_download(
-                repo_id=_HF_REPO_ID,
+                repo_id=self._HF_REPO_ID,
                 filename="test.zip",
                 repo_type="dataset",
                 local_dir=str(cache_dir),
@@ -308,12 +379,10 @@ class _VLGuardDataset(_RemoteDatasetLoader):
 
         # Extract images from zip
         zip_path = cache_dir / "test.zip"
-        if zip_path.exists():
+        if await asyncio.to_thread(zip_path.exists):
             logger.info("Extracting VLGuard test images...")
-            with zipfile.ZipFile(str(zip_path), "r") as zf:
-                zf.extractall(str(cache_dir))
+            await asyncio.to_thread(safe_extract_zip, source=zip_path, dest_dir=cache_dir)
 
-        with open(json_path, encoding="utf-8") as f:
-            metadata = json.load(f)
+        metadata = await asyncio.to_thread(_load_metadata, json_path)
 
         return metadata, image_dir

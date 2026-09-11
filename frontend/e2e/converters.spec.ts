@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { makeTarget } from "./_targets";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -186,7 +187,7 @@ async function mockBackendAPIs(page: Page) {
         contentType: "application/json",
         body: JSON.stringify({
           items: [
-            {
+            makeTarget({
               target_registry_name: "mock-openai-chat",
               target_type: "OpenAIChatTarget",
               endpoint: "https://mock.openai.com",
@@ -201,7 +202,7 @@ async function mockBackendAPIs(page: Page) {
                 supported_input_data_types: ["text"],
                 supported_output_data_types: ["text"],
               },
-            },
+            }),
           ],
           pagination: { limit: 50, has_more: false },
         }),
@@ -242,9 +243,9 @@ async function mockBackendAPIs(page: Page) {
         turn_number: turnNumber,
         role: "user",
         created_at: new Date().toISOString(),
-        pieces: [
+        message_pieces: [
           {
-            piece_id: `piece-u-${turnNumber}`,
+            id: `piece-u-${turnNumber}`,
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: userText,
@@ -258,9 +259,9 @@ async function mockBackendAPIs(page: Page) {
         turn_number: turnNumber,
         role: "assistant",
         created_at: new Date().toISOString(),
-        pieces: [
+        message_pieces: [
           {
-            piece_id: `piece-a-${turnNumber}`,
+            id: `piece-a-${turnNumber}`,
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: `Mock response for: ${displayText}`,
@@ -406,9 +407,9 @@ async function mockBackendAPIs(page: Page) {
   });
 }
 
-/** Navigate to config, set the mock target as active, then return to chat. */
+/** Navigate to targets, set the mock target as active, then return to chat. */
 async function activateMockTarget(page: Page) {
-  await page.getByTitle("Configuration").click();
+  await page.getByTitle("Targets").click();
   await expect(page.getByText("Target Configuration")).toBeVisible({ timeout: 10000 });
 
   const setActiveBtn = page.getByRole("button", { name: /set active/i });
@@ -520,7 +521,7 @@ test.describe("Converter Panel", () => {
     await expect(page.getByText(/Mock response for:/)).toBeVisible({ timeout: 15000 });
 
     // Navigate to History view
-    await page.getByTitle("Attack History").click();
+    await page.getByTitle("History").click();
 
     // Converter badge should appear in the attack table
     await expect(page.getByText("Base64Converter")).toBeVisible({ timeout: 10000 });
@@ -564,7 +565,7 @@ test.describe("Converter Panel", () => {
 
   test("should show converter type in history filter options", async ({ page }) => {
     // Navigate to History view
-    await page.getByTitle("Attack History").click();
+    await page.getByTitle("History").click();
 
     // The converter badge should be visible in the attack table
     await expect(page.getByText("Base64Converter")).toBeVisible({ timeout: 10000 });

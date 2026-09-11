@@ -69,6 +69,14 @@ export default function AttackTable({ attacks, onOpenAttack, formatDate }: Attac
             key={attack.attack_result_id}
             className={styles.clickableRow}
             onClick={() => onOpenAttack(attack.attack_result_id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onOpenAttack(attack.attack_result_id)
+              }
+            }}
+            tabIndex={0}
+            aria-label={`Open ${attack.attack_type} attack`}
             data-testid={`attack-row-${attack.attack_result_id}`}
           >
             <TableCell>
@@ -96,10 +104,10 @@ export default function AttackTable({ attacks, onOpenAttack, formatDate }: Attac
               )}
             </TableCell>
             <TableCell>
-              <Text size={200} className={styles.nowrap}>{attack.labels.operator || '—'}</Text>
+              <Text size={200} className={styles.nowrap}>{attack.operator || '—'}</Text>
             </TableCell>
             <TableCell>
-              <Text size={200} className={styles.nowrap}>{attack.labels.operation || '—'}</Text>
+              <Text size={200} className={styles.nowrap}>{attack.operation || '—'}</Text>
             </TableCell>
             <TableCell>
               <Text size={200}>{attack.message_count}</Text>
@@ -125,7 +133,7 @@ export default function AttackTable({ attacks, onOpenAttack, formatDate }: Attac
             </TableCell>
             <TableCell>
               {(() => {
-                const otherLabels = Object.entries(attack.labels ?? {}).filter(([k]) => k !== 'operator' && k !== 'operation' && k !== 'source')
+                const otherLabels = Object.entries(attack.labels ?? {}).filter(([k]) => k !== 'source')
                 return otherLabels.length > 0 ? (
                   <div className={styles.badgeGroup}>
                     {otherLabels.slice(0, 2).map(([k, v]) => (
@@ -161,6 +169,7 @@ export default function AttackTable({ attacks, onOpenAttack, formatDate }: Attac
             <TableCell>
               <Tooltip content="Open attack" relationship="label">
                 <Button
+                  className={styles.touchTarget}
                   appearance="subtle"
                   size="small"
                   icon={<OpenRegular />}

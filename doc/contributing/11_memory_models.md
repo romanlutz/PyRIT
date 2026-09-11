@@ -12,7 +12,7 @@ This guide covers how to work with PyRIT's memory models — where they live, ho
 | Migration revisions | `pyrit/memory/alembic/versions/` |
 | Migration helpers | `pyrit/memory/migration.py` |
 | CLI migration tool | `build_scripts/memory_migrations.py` |
-| Schema diagram | `doc/code/memory/10_schema_diagram.md` |
+| Schema diagram | `doc/code/memory/9_schema_diagram.md` |
 
 ## Current Models
 
@@ -41,7 +41,7 @@ Make your changes in `pyrit/memory/memory_models.py`. Follow these conventions:
 ### 2. Generate a migration
 
 ```bash
-python build_scripts/memory_migrations.py generate -m "short description of change"
+python -m build_scripts.memory_migrations generate -m "short description of change"
 ```
 
 This creates a new revision file under `pyrit/memory/alembic/versions/`. **Review the generated file carefully** — auto-generated migrations may need manual adjustments (e.g. for data migrations or default values).
@@ -49,14 +49,14 @@ This creates a new revision file under `pyrit/memory/alembic/versions/`. **Revie
 ### 3. Validate the migration
 
 ```bash
-python build_scripts/memory_migrations.py check
+python -m build_scripts.memory_migrations check
 ```
 
 This verifies the schema produced by running all migrations matches the current models. Both pre-commit hooks (see below) and CI run this check.
 
 ### 4. Update the schema diagram
 
-If you changed the schema in a meaningful way (added a table, added a foreign key, etc.), update the Mermaid diagram in `doc/code/memory/10_schema_diagram.md`.
+If you changed the schema in a meaningful way (added a table, added a foreign key, etc.), update the Mermaid diagram in `doc/code/memory/9_schema_diagram.md`.
 
 ## How Migrations Run at Startup
 
@@ -92,6 +92,8 @@ await initialize_pyrit_async("SQLite", skip_schema_migration=True)
 ### Migration revisions are immutable
 
 Once a migration revision is committed, it **must not be modified or deleted**. This is enforced by a pre-commit hook (`enforce_alembic_revision_immutability`). If you need to fix a migration, create a new revision instead.
+
+A release branch is the one exception. A patch release cherry-picks a fix onto a branch cut from an earlier tag, and that fix may legitimately amend a revision that has already shipped, so the hook does not compare history on a release branch. Review is the control there.
 
 ### Pre-commit hooks
 

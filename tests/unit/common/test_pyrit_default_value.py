@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import Optional
 
 import pytest
 
@@ -28,7 +27,7 @@ class TestApplyDefaultsDecorator:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
@@ -41,7 +40,7 @@ class TestApplyDefaultsDecorator:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 self.param1 = param1
 
         set_default_value(class_type=TestClass, parameter_name="param1", value="default_value")
@@ -55,7 +54,7 @@ class TestApplyDefaultsDecorator:
         class TestClass:
             @apply_defaults
             def __init__(
-                self, *, param1: Optional[str] = None, param2: Optional[int] = None, param3: Optional[float] = None
+                self, *, param1: str | None = None, param2: int | None = None, param3: float | None = None
             ) -> None:
                 self.param1 = param1
                 self.param2 = param2
@@ -75,7 +74,7 @@ class TestApplyDefaultsDecorator:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
@@ -92,7 +91,7 @@ class TestApplyDefaultsDecorator:
         class TestClass:
             @apply_defaults
             def __init__(
-                self, *, param1: Optional[str] = None, param2: Optional[int] = None, param3: Optional[float] = None
+                self, *, param1: str | None = None, param2: int | None = None, param3: float | None = None
             ) -> None:
                 self.param1 = param1
                 self.param2 = param2
@@ -115,9 +114,9 @@ class TestApplyDefaultsDecorator:
             def __init__(
                 self,
                 *,
-                param_int: Optional[int] = None,
-                param_bool: Optional[bool] = None,
-                param_str: Optional[str] = None,
+                param_int: int | None = None,
+                param_bool: bool | None = None,
+                param_str: str | None = None,
             ) -> None:
                 self.param_int = param_int
                 self.param_bool = param_bool
@@ -145,13 +144,13 @@ class TestInheritance:
 
         class ParentClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
         class ChildClass(ParentClass):
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 super().__init__(param1=param1, param2=param2)
 
         set_default_value(class_type=ParentClass, parameter_name="param1", value="parent_value")
@@ -166,13 +165,13 @@ class TestInheritance:
 
         class ParentClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
         class ChildClass(ParentClass):
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 super().__init__(param1=param1, param2=param2)
 
         set_default_value(class_type=ParentClass, parameter_name="param1", value="parent_value")
@@ -189,19 +188,19 @@ class TestInheritance:
 
         class GrandParent:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 self.param1 = param1
 
         class Parent(GrandParent):
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 super().__init__(param1=param1)
                 self.param2 = param2
 
         class Child(Parent):
             @apply_defaults
             def __init__(
-                self, *, param1: Optional[str] = None, param2: Optional[int] = None, param3: Optional[float] = None
+                self, *, param1: str | None = None, param2: int | None = None, param3: float | None = None
             ) -> None:
                 super().__init__(param1=param1, param2=param2)
                 self.param3 = param3
@@ -215,17 +214,58 @@ class TestInheritance:
         assert child_obj.param2 == 50
         assert child_obj.param3 == 3.14
 
+    def test_reregistering_true_then_false_replaces_previous(self) -> None:
+        """True-then-False re-registration must replace the old scope, not shadow it."""
+
+        class TargetClass:
+            @apply_defaults
+            def __init__(self, *, param1: str | None = None) -> None:
+                self.param1 = param1
+
+        class ChildClass(TargetClass):
+            @apply_defaults
+            def __init__(self, *, param1: str | None = None) -> None:
+                super().__init__(param1=param1)
+
+        set_default_value(class_type=TargetClass, parameter_name="param1", value="broad", include_subclasses=True)
+        set_default_value(class_type=TargetClass, parameter_name="param1", value="exact", include_subclasses=False)
+
+        # The newer registration wins for the registered class itself...
+        assert TargetClass().param1 == "exact"
+        # ...and subclasses no longer inherit the removed True-scope default.
+        assert ChildClass().param1 is None
+
+    def test_reregistering_false_then_true_replaces_previous(self) -> None:
+        """False-then-True re-registration restores subclass inheritance."""
+
+        class TargetClass:
+            @apply_defaults
+            def __init__(self, *, param1: str | None = None) -> None:
+                self.param1 = param1
+
+        class ChildClass(TargetClass):
+            @apply_defaults
+            def __init__(self, *, param1: str | None = None) -> None:
+                super().__init__(param1=param1)
+
+        set_default_value(class_type=TargetClass, parameter_name="param1", value="exact", include_subclasses=False)
+        set_default_value(class_type=TargetClass, parameter_name="param1", value="broad", include_subclasses=True)
+
+        assert TargetClass().param1 == "broad"
+        # Subclass inheritance comes back with the restored True scope.
+        assert ChildClass().param1 == "broad"
+
     def test_parent_not_affected_by_child_defaults(self) -> None:
         """Test that setting defaults on child class doesn't affect parent instances."""
 
         class ParentClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 self.param1 = param1
 
         class ChildClass(ParentClass):
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 super().__init__(param1=param1)
 
         set_default_value(class_type=ChildClass, parameter_name="param1", value="child_value")
@@ -354,7 +394,7 @@ class TestSetDefaultValue:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 self.param1 = param1
 
         set_default_value(class_type=TestClass, parameter_name="param1", value="stored_value")
@@ -367,7 +407,7 @@ class TestSetDefaultValue:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None) -> None:
                 self.param1 = param1
 
         set_default_value(class_type=TestClass, parameter_name="param1", value="first_value")
@@ -392,24 +432,28 @@ class TestComplexScenarios:
             def __init__(
                 self,
                 *,
-                temperature: Optional[float] = None,
-                top_p: Optional[float] = None,
-                max_tokens: Optional[int] = None,
+                temperature: float | None = None,
+                top_p: float | None = None,
+                max_completion_tokens: int | None = None,
             ) -> None:
                 self.temperature = temperature
                 self.top_p = top_p
-                self.max_tokens = max_tokens
+                self.max_completion_tokens = max_completion_tokens
 
         class AzureOpenAIChatTarget(OpenAIChatTarget):
             @apply_defaults
             def __init__(
                 self,
                 *,
-                temperature: Optional[float] = None,
-                top_p: Optional[float] = None,
-                max_tokens: Optional[int] = None,
+                temperature: float | None = None,
+                top_p: float | None = None,
+                max_completion_tokens: int | None = None,
             ) -> None:
-                super().__init__(temperature=temperature, top_p=top_p, max_tokens=max_tokens)
+                super().__init__(
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_completion_tokens=max_completion_tokens,
+                )
 
         # Set defaults for base class
         set_default_value(class_type=OpenAIChatTarget, parameter_name="temperature", value=0.7)
@@ -422,31 +466,31 @@ class TestComplexScenarios:
         base_obj = OpenAIChatTarget()
         assert base_obj.temperature == 0.7
         assert base_obj.top_p == 0.9
-        assert base_obj.max_tokens is None
+        assert base_obj.max_completion_tokens is None
 
         # Test subclass with inheritance
         azure_obj = AzureOpenAIChatTarget()
         assert azure_obj.temperature == 0.3  # More specific default
         assert azure_obj.top_p == 0.9  # Inherited from parent
-        assert azure_obj.max_tokens is None  # No default set
+        assert azure_obj.max_completion_tokens is None  # No default set
 
         # Test with explicit overrides
-        custom_obj = AzureOpenAIChatTarget(temperature=0.5, max_tokens=100)
+        custom_obj = AzureOpenAIChatTarget(temperature=0.5, max_completion_tokens=100)
         assert custom_obj.temperature == 0.5  # Explicit override
         assert custom_obj.top_p == 0.9  # Still uses default
-        assert custom_obj.max_tokens == 100  # Explicit override
+        assert custom_obj.max_completion_tokens == 100  # Explicit override
 
     def test_multiple_classes_independent_defaults(self) -> None:
         """Test that multiple classes can have independent default configurations."""
 
         class ClassA:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         class ClassB:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         set_default_value(class_type=ClassA, parameter_name="param", value="value_a")
@@ -471,7 +515,7 @@ class TestResetDefaultValues:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[int] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: int | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
@@ -497,12 +541,12 @@ class TestResetDefaultValues:
 
         class ClassA:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         class ClassB:
             @apply_defaults
-            def __init__(self, *, param: Optional[int] = None) -> None:
+            def __init__(self, *, param: int | None = None) -> None:
                 self.param = param
 
         # Set defaults for multiple classes
@@ -523,7 +567,7 @@ class TestResetDefaultValues:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         # Set initial default
@@ -544,7 +588,7 @@ class TestResetDefaultValues:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         # Reset when no defaults are set
@@ -562,12 +606,12 @@ class TestResetDefaultValues:
 
         class ParentClass:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         class ChildClass(ParentClass):
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 super().__init__(param=param)
 
         # Set defaults for both parent and child
@@ -588,7 +632,7 @@ class TestResetDefaultValues:
 
         class TestClass:
             @apply_defaults
-            def __init__(self, *, param1: Optional[str] = None, param2: Optional[str] = None) -> None:
+            def __init__(self, *, param1: str | None = None, param2: str | None = None) -> None:
                 self.param1 = param1
                 self.param2 = param2
 
@@ -614,7 +658,7 @@ class TestSetGlobalVariable:
 
         # Ensure the variable doesn't exist initially
         if hasattr(sys.modules["__main__"], "test_global_var"):
-            delattr(sys.modules["__main__"], "test_global_var")
+            del sys.modules["__main__"].test_global_var
 
         try:
             # Set a global variable
@@ -627,7 +671,7 @@ class TestSetGlobalVariable:
         finally:
             # Cleanup
             if hasattr(sys.modules["__main__"], "test_global_var"):
-                delattr(sys.modules["__main__"], "test_global_var")
+                del sys.modules["__main__"].test_global_var
 
     def test_set_global_variable_overwrites_existing(self) -> None:
         """Test that set_global_variable overwrites existing variables."""
@@ -645,7 +689,7 @@ class TestSetGlobalVariable:
         finally:
             # Cleanup
             if hasattr(sys.modules["__main__"], "test_overwrite_var"):
-                delattr(sys.modules["__main__"], "test_overwrite_var")
+                del sys.modules["__main__"].test_overwrite_var
 
     def test_set_global_variable_with_complex_objects(self) -> None:
         """Test that set_global_variable works with complex objects."""
@@ -674,9 +718,9 @@ class TestSetGlobalVariable:
         finally:
             # Cleanup
             if hasattr(sys.modules["__main__"], "test_dict_var"):
-                delattr(sys.modules["__main__"], "test_dict_var")
+                del sys.modules["__main__"].test_dict_var
             if hasattr(sys.modules["__main__"], "test_obj_var"):
-                delattr(sys.modules["__main__"], "test_obj_var")
+                del sys.modules["__main__"].test_obj_var
 
     def test_set_global_variable_with_none_value(self) -> None:
         """Test that set_global_variable can set None as a value."""
@@ -691,7 +735,7 @@ class TestSetGlobalVariable:
         finally:
             # Cleanup
             if hasattr(sys.modules["__main__"], "test_none_var"):
-                delattr(sys.modules["__main__"], "test_none_var")
+                del sys.modules["__main__"].test_none_var
 
 
 class TestRequiredValue:
@@ -761,7 +805,7 @@ class TestRequiredValue:
                 self,
                 *,
                 required_param: str = REQUIRED_VALUE,  # type: ignore[assignment]
-                optional_param: Optional[str] = None,
+                optional_param: str | None = None,
             ) -> None:
                 self.required_param = required_param
                 self.optional_param = optional_param
@@ -847,7 +891,7 @@ class TestRequiredValue:
 
         class TestClass1:
             @apply_defaults
-            def __init__(self, *, param: Optional[str] = None) -> None:
+            def __init__(self, *, param: str | None = None) -> None:
                 self.param = param
 
         class TestClass2:

@@ -121,6 +121,10 @@ class TestPromptIntelDatasetInit:
         with pytest.raises(ValueError, match="Expected PromptIntelCategory"):
             _PromptIntelDataset(api_key=api_key, categories=["manipulation"])
 
+    def test_init_empty_categories_raises(self, api_key):
+        with pytest.raises(ValueError, match="`categories` must be a non-empty list"):
+            _PromptIntelDataset(api_key=api_key, categories=[])
+
     def test_init_multiple_categories_accepted(self, api_key):
         loader = _PromptIntelDataset(
             api_key=api_key,
@@ -168,7 +172,10 @@ class TestPromptIntelDatasetFetch:
         assert first.data_type == "text"
         assert first.dataset_name == "promptintel"
         assert first.name == "Hidden Prompt Injection to Exfiltrate Data"
-        assert first.harm_categories == ["Indirect prompt injection", "Data exfiltration via prompt"]
+        # PromptIntel `threats` are attack techniques, not harms, so harm_categories
+        # is empty while the raw threat labels are preserved verbatim in metadata.
+        assert first.harm_categories == []
+        assert first.metadata["threats"] == "Indirect prompt injection, Data exfiltration via prompt"
         assert first.authors == ["TestAuthor"]
         assert first.description == "This prompt tricks an AI agent into leaking sensitive data."
         assert "promptintel.novahunting.ai/prompt/c6985e05" in first.source
@@ -293,16 +300,6 @@ class TestPromptIntelDatasetPagination:
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == 2  # 1 prompt from page1 + 1 from page2 = 2 SeedPrompts
-
-    async def test_max_prompts_limits_results(self, api_key, mock_promptintel_response):
-        loader = _PromptIntelDataset(api_key=api_key, max_prompts=1)
-        mock_resp = _make_mock_response(json_data=mock_promptintel_response)
-
-        with patch("requests.get", return_value=mock_resp):
-            dataset = await loader.fetch_dataset_async()
-
-        # max_prompts=1 should limit to 1 SeedPrompt
-        assert len(dataset.seeds) == 1
 
 
 class TestPromptIntelDatasetAPIErrors:

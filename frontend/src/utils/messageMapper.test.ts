@@ -99,9 +99,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: "Hello there",
@@ -119,15 +119,199 @@ describe("messageMapper", () => {
       expect(result.content).toBe("Hello there");
       expect(result.attachments).toBeUndefined();
       expect(result.error).toBeUndefined();
+      expect(result.scores).toBeUndefined();
+    });
+
+    it("should preserve text pieces with their own scores in backend order", () => {
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1",
+            original_value_data_type: "text",
+            converted_value_data_type: "text",
+            original_value: "Hello",
+            converted_value: "Hello",
+            scores: [
+              {
+                id: "score-old",
+                message_piece_id: "p1",
+                scorer_type: "OldScorer",
+                score_type: "true_false",
+                score_value: "False",
+                timestamp: "2026-02-15T00:00:00Z",
+              },
+            ],
+            response_error: "none",
+          },
+          {
+            id: "p2",
+            original_value_data_type: "text",
+            converted_value_data_type: "text",
+            original_value: "there",
+            converted_value: "there",
+            scores: [
+              {
+                id: "score-new",
+                message_piece_id: "p2",
+                scorer_type: "NewScorer",
+                score_type: "float_scale",
+                score_value: "0.9",
+                score_category: ["harmful"],
+                score_rationale: "Newest rationale",
+                timestamp: "2026-02-15T00:01:00Z",
+              },
+            ],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.scores).toBeUndefined();
+      expect(result.displayPieces).toEqual([
+        {
+          type: "text",
+          pieceId: "p1",
+          pieceIndex: 0,
+          content: "Hello",
+          scores: [
+            expect.objectContaining({
+              ...msg.message_pieces[0].scores[0],
+              pieceIndex: 0,
+              pieceType: "text",
+              sourceLabel: "Piece 1 · text",
+            }),
+          ],
+        },
+        {
+          type: "text",
+          pieceId: "p2",
+          pieceIndex: 1,
+          content: "there",
+          scores: [
+            expect.objectContaining({
+              ...msg.message_pieces[1].scores[0],
+              pieceIndex: 1,
+              pieceType: "text",
+              sourceLabel: "Piece 2 · text",
+            }),
+          ],
+        },
+      ]);
+    });
+
+    it("should attach an image piece's scores to its display piece, not to message.scores", () => {
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1",
+            original_value_data_type: "text",
+            converted_value_data_type: "image_path",
+            original_value: "generate an image",
+            converted_value: "/api/media?path=output%2Fimage.png",
+            converted_value_mime_type: "image/png",
+            scores: [
+              {
+                id: "score-image",
+                message_piece_id: "p1",
+                scorer_type: "ImageScorer",
+                score_type: "true_false",
+                score_value: "True",
+                timestamp: "2026-02-15T00:00:00Z",
+              },
+            ],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.scores).toBeUndefined();
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments![0]).not.toHaveProperty("scores");
+      expect(result.displayPieces).toEqual([
+        expect.objectContaining({
+          type: "media",
+          pieceId: "p1",
+          pieceIndex: 0,
+          attachment: result.attachments![0],
+          scores: [
+            expect.objectContaining({
+              ...msg.message_pieces[0].scores[0],
+              pieceIndex: 0,
+              pieceType: "image_path",
+              sourceLabel: "Piece 1 · image_path · image_path_p1",
+            }),
+          ],
+        }),
+      ]);
+    });
+
+    it("should keep a media piece with no renderable value as a score-only display piece", () => {
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1",
+            original_value_data_type: "image_path",
+            converted_value_data_type: "image_path",
+            original_value: "/api/media?path=output%2Foriginal.png",
+            converted_value: "",
+            converted_value_mime_type: "image/png",
+            scores: [
+              {
+                id: "score-image",
+                message_piece_id: "p1",
+                scorer_type: "ImageScorer",
+                score_type: "true_false",
+                score_value: "False",
+                timestamp: "2026-02-15T00:00:00Z",
+              },
+            ],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.scores).toBeUndefined();
+      expect(result.attachments).toBeUndefined();
+      expect(result.displayPieces).toEqual([
+        {
+          type: "media",
+          pieceId: "p1",
+          pieceIndex: 0,
+          attachment: undefined,
+          scores: [
+            expect.objectContaining({
+              ...msg.message_pieces[0].scores[0],
+              pieceIndex: 0,
+              pieceType: "image_path",
+              sourceLabel: "Piece 1 · image_path · image_path_p1",
+            }),
+          ],
+        },
+      ]);
     });
 
     it("should convert an image response", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "image_path",
             original_value: "generate an image",
@@ -149,13 +333,45 @@ describe("messageMapper", () => {
       );
     });
 
+    it("prefers converted_value_url over the raw converted_value for media", () => {
+      // New shape (Phase 10+): raw storage path stays in converted_value;
+      // the client-fetchable URL the mapper resolves goes to converted_value_url.
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1",
+            original_value_data_type: "text",
+            converted_value_data_type: "image_path",
+            original_value: "generate an image",
+            converted_value: "C:\\dbdata\\prompt-memory-entries\\images\\image.png",
+            converted_value_url: "/api/media?path=C%3A%5Cdbdata%5Cimages%5Cimage.png",
+            converted_value_mime_type: "image/png",
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments![0].url).toBe(
+        "/api/media?path=C%3A%5Cdbdata%5Cimages%5Cimage.png"
+      );
+      // Path-style URLs don't have a known payload size to display.
+      expect(result.attachments![0].size).toBeUndefined();
+    });
+
     it("should convert an audio response", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "audio_path",
             original_value: "speak this",
@@ -179,9 +395,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "video_path",
             original_value: "generate video",
@@ -205,9 +421,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "vid-1",
+            id: "vid-1",
             original_value_data_type: "text",
             converted_value_data_type: "video_path",
             original_value: "generate video",
@@ -231,9 +447,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "binary_path",
             original_value: "convert this",
@@ -260,9 +476,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "",
@@ -285,9 +501,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "Here is the image:",
@@ -295,7 +511,7 @@ describe("messageMapper", () => {
             response_error: "none",
           },
           {
-            piece_id: "p2",
+            id: "p2",
             original_value_data_type: "text",
             converted_value_data_type: "image_path",
             converted_value: "aW1hZ2U=",
@@ -312,15 +528,16 @@ describe("messageMapper", () => {
       expect(result.content).toBe("Here is the image:");
       expect(result.attachments).toHaveLength(1);
       expect(result.attachments![0].type).toBe("image");
+      expect(result.displayPieces?.map((piece) => piece.type)).toEqual(["text", "media"]);
     });
 
     it("should map user role correctly", () => {
       const msg: BackendMessage = {
         turn_number: 0,
         role: "user",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "test",
@@ -338,9 +555,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 0,
         role: "system",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "You are helpful",
@@ -358,9 +575,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 0,
         role: "simulated_assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "injected",
@@ -378,9 +595,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "image_path",
             converted_value: "/api/media?path=output%2Fimg.png",
@@ -398,15 +615,130 @@ describe("messageMapper", () => {
     });
   });
 
+  describe("pieceToAttachment size handling", () => {
+    function makeMediaMessage(
+      converted_value: string,
+      converted_value_data_type = "image_path",
+      converted_value_mime_type: string | undefined = "image/png",
+    ): BackendMessage {
+      return {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1abcdef",
+            original_value_data_type: "text",
+            converted_value_data_type,
+            original_value: "prompt",
+            converted_value,
+            converted_value_mime_type,
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+    }
+
+    it("omits size for /api/media path URLs (the originally reported bug)", () => {
+      // Reproduces the screenshot: a backend-served PNG referenced via
+      // /api/media?path=... would otherwise produce a chip like "(119 B)"
+      // because value.length was used as size.
+      const url = "/api/media?path=C%3A%5CUsers%5Cromanlutz%5Cgit%5CPyRIT%5Cdbdata%5Cprompt-memory-entries%5Cimages%5Cimage_150c901b9db7.png";
+      expect(url.length).toBeGreaterThan(50); // sanity: long enough for the old bug to bite
+
+      const result = backendMessageToFrontend(makeMediaMessage(url));
+
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments![0].url).toBe(url);
+      expect(result.attachments![0].size).toBeUndefined();
+    });
+
+    it("omits size for Windows absolute paths", () => {
+      const result = backendMessageToFrontend(
+        makeMediaMessage("C:\\Users\\me\\dbdata\\prompt-memory-entries\\images\\img.png")
+      );
+      expect(result.attachments![0].size).toBeUndefined();
+    });
+
+    it("omits size for Unix absolute paths", () => {
+      const result = backendMessageToFrontend(
+        makeMediaMessage("/dbdata/prompt-memory-entries/images/img.png")
+      );
+      expect(result.attachments![0].size).toBeUndefined();
+    });
+
+    it("omits size for data: / blob: / file: URI schemes", () => {
+      for (const url of [
+        "data:image/png;base64,aGVsbG8=",
+        "blob:https://example.com/abc-123",
+        "file:///tmp/img.png",
+      ]) {
+        const result = backendMessageToFrontend(makeMediaMessage(url));
+        expect(result.attachments![0].size).toBeUndefined();
+      }
+    });
+
+    it("sets size to the decoded byte count for base64-inlined media", () => {
+      // btoa("hello world") = "aGVsbG8gd29ybGQ=" — 11 decoded bytes.
+      const base64 = "aGVsbG8gd29ybGQ=";
+      const result = backendMessageToFrontend(makeMediaMessage(base64));
+
+      expect(result.attachments![0].url).toBe(`data:image/png;base64,${base64}`);
+      expect(result.attachments![0].size).toBe(11);
+    });
+
+    it("computes base64 size correctly without padding", () => {
+      // 16-char base64 with no padding decodes to floor(16 * 3 / 4) = 12 bytes.
+      const base64 = "YWJjZGVmZ2hpamtsbW5vcA"; // "abcdefghijklmnop" without '=' padding
+      const result = backendMessageToFrontend(makeMediaMessage(base64));
+      expect(result.attachments![0].size).toBe(16);
+    });
+
+    it("omits size on the original-side attachment for path values", () => {
+      // Same /api/media URL on original_value — used when originalAttachments
+      // is populated via pieceToAttachment(piece, 'original').
+      const url = "/api/media?path=output%2Fimage.png";
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        message_pieces: [
+          {
+            id: "p1abcdef",
+            original_value_data_type: "image_path",
+            converted_value_data_type: "image_path",
+            original_value: url,
+            converted_value: "aW1hZ2VkYXRhYWFhYWFh", // 20 chars base64
+            converted_value_mime_type: "image/png",
+            original_value_mime_type: "image/png",
+            scores: [],
+            response_error: "none",
+          },
+        ],
+        created_at: "2026-02-15T00:00:00Z",
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      // Converted attachment should be present with computed size.
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments![0].size).toBe(15); // floor(20 * 3 / 4)
+
+      // originalAttachments only populated when URLs differ — they do here.
+      expect(result.originalAttachments).toHaveLength(1);
+      expect(result.originalAttachments![0].size).toBeUndefined();
+    });
+  });
+
   describe("backendMessagesToFrontend", () => {
     it("should convert multiple messages", () => {
       const messages: BackendMessage[] = [
         {
           turn_number: 0,
           role: "user",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p1",
+              id: "p1",
               original_value_data_type: "text",
               converted_value_data_type: "text",
               converted_value: "Hello",
@@ -419,9 +751,9 @@ describe("messageMapper", () => {
         {
           turn_number: 1,
           role: "assistant",
-          pieces: [
+          message_pieces: [
             {
-              piece_id: "p2",
+              id: "p2",
               original_value_data_type: "text",
               converted_value_data_type: "text",
               converted_value: "Hi there!",
@@ -668,9 +1000,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: JSON.stringify({
@@ -681,7 +1013,7 @@ describe("messageMapper", () => {
             response_error: "none",
           },
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "Here is the answer.",
@@ -702,9 +1034,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: JSON.stringify({
@@ -718,7 +1050,7 @@ describe("messageMapper", () => {
             response_error: "none",
           },
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "Answer.",
@@ -738,9 +1070,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: JSON.stringify({
@@ -751,7 +1083,7 @@ describe("messageMapper", () => {
             response_error: "none",
           },
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "Just text.",
@@ -774,9 +1106,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: JSON.stringify({
@@ -801,9 +1133,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: "plain text reasoning",
@@ -826,9 +1158,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "user",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: "Tell me a joke",
@@ -849,9 +1181,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "user",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: "Hello",
@@ -872,9 +1204,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "user",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: "Hello",
@@ -894,9 +1226,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "user",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: "Hello World",
@@ -917,9 +1249,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             original_value: null,
@@ -940,9 +1272,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "text",
             converted_value_data_type: "text",
             converted_value: "Some response",
@@ -962,9 +1294,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "image_path",
             converted_value_data_type: "image_path",
             original_value: "originalImageData",
@@ -987,9 +1319,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p1",
+            id: "p1",
             original_value_data_type: "image_path",
             converted_value_data_type: "image_path",
             original_value: "sameData",
@@ -1014,9 +1346,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p-audio",
+            id: "p-audio",
             original_value_data_type: "text",
             converted_value_data_type: "audio_path",
             converted_value: "audioBase64Data",
@@ -1036,9 +1368,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "p-video",
+            id: "p-video",
             original_value_data_type: "text",
             converted_value_data_type: "video_path",
             converted_value: "videoBase64Data",
@@ -1060,9 +1392,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: JSON.stringify({
@@ -1085,9 +1417,9 @@ describe("messageMapper", () => {
       const msg: BackendMessage = {
         turn_number: 1,
         role: "assistant",
-        pieces: [
+        message_pieces: [
           {
-            piece_id: "r1",
+            id: "r1",
             original_value_data_type: "reasoning",
             converted_value_data_type: "reasoning",
             converted_value: "",

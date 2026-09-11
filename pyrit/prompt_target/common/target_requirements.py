@@ -20,14 +20,14 @@ class TargetRequirements:
     requires from a target.
 
     The single source of truth for capability names is the
-    :class:`CapabilityName` enum; this class is simply a typed wrapper
+    ``CapabilityName`` enum; this class is simply a typed wrapper
     around the set of capabilities a consumer needs.
 
     Two tiers of requirement are supported:
 
     * ``required`` \u2014 satisfied either by native support on the target or
       by an ``ADAPT`` entry in the target's
-      :class:`CapabilityHandlingPolicy`. Use this when the consumer only
+      ``CapabilityHandlingPolicy``. Use this when the consumer only
       needs the behavior to appear on the wire.
     * ``native_required`` \u2014 must be natively supported. Adaptation is
       rejected. Use this when adaptation would silently change the
@@ -38,7 +38,7 @@ class TargetRequirements:
     Modality requirements are also supported:
 
     * ``required_input_modalities`` — each entry is a frozenset of
-      :class:`PromptDataType` values the consumer needs the target to
+      ``PromptDataType`` values the consumer needs the target to
       accept. At least one of the target's input modality combos must be
       a superset of each required combo.
     * ``required_output_modalities`` — same semantics for outputs.
@@ -129,7 +129,6 @@ def _build_chat_target_requirements() -> TargetRequirements:
 CHAT_TARGET_REQUIREMENTS: TargetRequirements = _build_chat_target_requirements()
 """
 Standard requirements for a chat-style target: must support multi-turn conversations
-with an editable history. This is the replacement for the deprecated
-``PromptChatTarget`` type-based check; consumers validate their target against
+with an editable history. Consumers validate their target against
 these requirements at construction time.
 """

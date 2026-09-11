@@ -4,9 +4,11 @@
 import contextlib
 import logging
 import os
+from pathlib import Path
 
-from pyrit.models import Message, MessagePiece, Score
+from pyrit.models import Message, MessagePiece
 from pyrit.output.conversation.base import ConversationPrinterBase
+from pyrit.output.conversation.source import ConversationSource, MemoryConversationSource
 from pyrit.output.score.markdown import MarkdownScorePrinter
 from pyrit.output.sink import Sink
 
@@ -24,6 +26,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
     def __init__(
         self,
         *,
+        source: ConversationSource,
         sink: Sink | None = None,
         score_printer: MarkdownScorePrinter | None = None,
         blur_images: bool = False,
@@ -34,6 +37,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         Initialize the markdown conversation printer.
 
         Args:
+            source (ConversationSource): Data source used to fetch inline scores.
             sink (Sink | None): Output sink. Defaults to StdoutSink().
             score_printer (MarkdownScorePrinter | None): Score printer for inline score rendering.
                 Defaults to a new MarkdownScorePrinter with matching sink.
@@ -51,6 +55,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
                 directory using the original basename plus ``_blurred.png``.
         """
         super().__init__(sink=sink)
+        self._source = source
         self._score_printer = score_printer or MarkdownScorePrinter(sink=sink)
         self._blur_images = blur_images
         self._blur_radius = blur_radius
@@ -61,7 +66,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         messages: list[Message],
         *,
         include_scores: bool = False,
-        include_reasoning_trace: bool = False,
+        include_reasoning_summaries: bool = False,
     ) -> str:
         """
         Render a list of messages as markdown and return as a string.
@@ -69,7 +74,7 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         Args:
             messages (list[Message]): The messages to render.
             include_scores (bool): Whether to include scores. Defaults to False.
-            include_reasoning_trace (bool): Accepted for interface compatibility. Unused.
+            include_reasoning_summaries (bool): Whether to include reasoning summaries. Defaults to False.
 
         Returns:
             str: The rendered conversation markdown text.
@@ -81,44 +86,59 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         turn_number = 0
 
         for message in messages:
-            if not message.message_pieces:
+            pieces = self._get_renderable_pieces(
+                message=message,
+                include_reasoning_summaries=include_reasoning_summaries,
+            )
+            if not pieces:
                 continue
 
             message_role = message.get_piece().api_role
 
             if message_role == "system":
-                markdown_lines.extend(self._format_system_message(message))
+                markdown_lines.extend(await self._format_system_message_async(pieces=pieces))
             elif message_role == "user":
                 turn_number += 1
-                markdown_lines.extend(await self._format_user_message_async(message=message, turn_number=turn_number))
+                markdown_lines.extend(
+                    await self._format_user_message_async(
+                        pieces=pieces,
+                        turn_number=turn_number,
+                    )
+                )
             else:
-                markdown_lines.extend(await self._format_assistant_message_async(message=message))
+                markdown_lines.extend(await self._format_assistant_message_async(pieces=pieces))
 
             if include_scores:
-                markdown_lines.extend(await self._format_message_scores_async(message))
+                markdown_lines.extend(await self._format_message_scores_async(pieces=pieces))
 
         return "\n".join(markdown_lines)
 
-    def _format_system_message(self, message: Message) -> list[str]:
+    async def _format_system_message_async(self, *, pieces: list[MessagePiece]) -> list[str]:
         """
         Format a system message as markdown.
 
         Args:
-            message (Message): The system message to format.
+            pieces (list[MessagePiece]): The filtered system-message pieces to format.
 
         Returns:
             list[str]: Markdown strings for the system message.
         """
         lines = ["\n### System Message\n"]
-        lines.extend(f"{piece.converted_value}\n" for piece in message.message_pieces)
+        for piece in pieces:
+            lines.extend(await self._format_piece_content_async(piece=piece, show_original=False))
         return lines
 
-    async def _format_user_message_async(self, *, message: Message, turn_number: int) -> list[str]:
+    async def _format_user_message_async(
+        self,
+        *,
+        pieces: list[MessagePiece],
+        turn_number: int,
+    ) -> list[str]:
         """
         Format a user message as markdown with turn numbering.
 
         Args:
-            message (Message): The user message to format.
+            pieces (list[MessagePiece]): The filtered user-message pieces to format.
             turn_number (int): The conversation turn number.
 
         Returns:
@@ -126,29 +146,37 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         """
         lines = [f"\n### Turn {turn_number}\n", "#### User\n"]
 
-        for piece in message.message_pieces:
+        for piece in pieces:
             lines.extend(await self._format_piece_content_async(piece=piece, show_original=True))
 
         return lines
 
-    async def _format_assistant_message_async(self, *, message: Message) -> list[str]:
+    async def _format_assistant_message_async(self, *, pieces: list[MessagePiece]) -> list[str]:
         """
         Format an assistant response message as markdown.
 
         Args:
-            message (Message): The response message to format.
+            pieces (list[MessagePiece]): The filtered assistant-message pieces to format.
 
         Returns:
             list[str]: Markdown strings for the response message.
         """
         lines: list[str] = []
-        piece = message.message_pieces[0]
+        piece = pieces[0]
         role_name = "Assistant (Simulated)" if piece.is_simulated else piece.api_role.capitalize()
 
         lines.append(f"\n#### {role_name}\n")
 
-        for piece in message.message_pieces:
-            lines.extend(await self._format_piece_content_async(piece=piece, show_original=False))
+        reasoning_rendered = False
+        response_heading_rendered = False
+        for piece in pieces:
+            formatted = await self._format_piece_content_async(piece=piece, show_original=False)
+            if self._is_reasoning_piece(piece=piece):
+                reasoning_rendered = bool(formatted) or reasoning_rendered
+            elif reasoning_rendered and not response_heading_rendered:
+                lines.extend(self._format_response_heading())
+                response_heading_rendered = True
+            lines.extend(formatted)
 
         return lines
 
@@ -163,6 +191,8 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         Returns:
             list[str]: Markdown lines for this piece.
         """
+        if self._is_reasoning_piece(piece=piece):
+            return self._format_reasoning_summary(self._get_reasoning_value(piece=piece))
         if piece.converted_value_data_type == "image_path":
             return self._format_image_content(image_path=piece.converted_value)
         if piece.converted_value_data_type == "audio_path":
@@ -170,6 +200,41 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         if piece.has_error():
             return self._format_error_content(piece=piece)
         return self._format_text_content(piece=piece, show_original=show_original)
+
+    def _format_reasoning_summary(self, reasoning_value: str) -> list[str]:
+        """
+        Format a provider-generated reasoning summary as Markdown.
+
+        Args:
+            reasoning_value (str): Serialized OpenAI Responses reasoning item.
+
+        Returns:
+            list[str]: A labeled Markdown block, or a warning when extraction fails.
+        """
+        try:
+            summary = self._extract_reasoning_summary(reasoning_value)
+        except ValueError:
+            return [f"> **{self._REASONING_RENDER_WARNING}**\n"]
+
+        if not summary:
+            summary = "[No reasoning summary was returned by the provider.]"
+
+        block_lines = [
+            "> **💭 Reasoning**",
+            "> *Provider-generated summary (not raw chain-of-thought)*",
+            *(f"> {line}" if line else ">" for line in summary.splitlines()),
+        ]
+        return ["\n".join(block_lines) + "\n"]
+
+    @staticmethod
+    def _format_response_heading() -> list[str]:
+        """
+        Format the boundary between reasoning and the model response.
+
+        Returns:
+            list[str]: Markdown lines for the response heading.
+        """
+        return ["**💬 Response**\n"]
 
     def _format_text_content(self, *, piece: MessagePiece, show_original: bool) -> list[str]:
         """
@@ -223,12 +288,21 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
 
     @staticmethod
     def _format_link_path(path: str) -> str:
-        """Return a markdown-friendly link (POSIX separators, relative if possible)."""
+        """Return a markdown-friendly link path for notebook renderers."""
+        path_obj = Path(path).resolve()
+        cwd = Path.cwd().resolve()
         try:
-            relative_path = os.path.relpath(path)
+            # Prefer relative links (including ".." segments) so notebook markdown
+            # renderers in VS Code/Jupyter can resolve local files consistently.
+            relative_path = os.path.relpath(path_obj, cwd)
         except ValueError:
-            # Different mount/drive than cwd (Windows). Fall back to the absolute path.
-            relative_path = os.path.abspath(path)
+            # Windows cross-drive paths cannot be relativized; use a file URI
+            # instead of a bare absolute path like "C:/..." that markdown often
+            # treats as a malformed URL scheme.
+            try:
+                return path_obj.as_uri()
+            except ValueError:
+                return str(path_obj).replace("\\", "/")
         return relative_path.replace("\\", "/")
 
     def _maybe_blur_image_on_disk(self, *, image_path: str) -> str | None:
@@ -251,12 +325,12 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
             str | None: The path to the blurred image, or ``None`` on failure.
         """
         try:
-            blurred_path = self._blurred_destination(image_path=image_path)
-            if os.path.exists(blurred_path):
+            blurred_path = Path(self._blurred_destination(image_path=image_path))
+            if blurred_path.exists():
                 logger.debug(f"Reusing cached blurred image at {blurred_path}")
-                return blurred_path
+                return str(blurred_path)
 
-            os.makedirs(os.path.dirname(blurred_path) or ".", exist_ok=True)
+            blurred_path.parent.mkdir(parents=True, exist_ok=True)
 
             from pyrit.output._image_utils import blur_image_bytes
 
@@ -264,17 +338,17 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
                 original_bytes = f.read()
             blurred_bytes = blur_image_bytes(image_bytes=original_bytes, radius=self._blur_radius)
 
-            temp_path = f"{blurred_path}.tmp.{os.getpid()}"
+            temp_path = blurred_path.parent / f"{blurred_path.name}.tmp.{os.getpid()}"
             try:
                 with open(temp_path, "wb") as f:
                     f.write(blurred_bytes)
                 os.replace(temp_path, blurred_path)
             except Exception:
-                if os.path.exists(temp_path):
+                if temp_path.exists():
                     with contextlib.suppress(OSError):
-                        os.remove(temp_path)
+                        temp_path.unlink()
                 raise
-            return blurred_path
+            return str(blurred_path)
         except Exception as exc:
             logger.warning(f"Failed to write blurred image for {image_path}; falling back to a text link. Error: {exc}")
             return None
@@ -289,9 +363,9 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         Returns:
             str: Path to the blurred file (sibling by default, or under ``blurred_dir``).
         """
-        directory = self._blurred_dir if self._blurred_dir is not None else os.path.dirname(image_path)
-        stem = os.path.splitext(os.path.basename(image_path))[0]
-        return os.path.join(directory, f"{stem}_blurred.png")
+        image_path_obj = Path(image_path)
+        directory = Path(self._blurred_dir) if self._blurred_dir is not None else image_path_obj.parent
+        return str(directory / f"{image_path_obj.stem}_blurred.png")
 
     def _format_audio_content(self, *, audio_path: str) -> list[str]:
         """
@@ -348,19 +422,19 @@ class MarkdownConversationPrinter(ConversationPrinterBase):
         lines.append("```\n")
         return lines
 
-    async def _format_message_scores_async(self, message: Message) -> list[str]:
+    async def _format_message_scores_async(self, *, pieces: list[MessagePiece]) -> list[str]:
         """
         Format scores for all pieces in a message as markdown.
 
         Args:
-            message (Message): The message containing pieces to format scores for.
+            pieces (list[MessagePiece]): The filtered pieces whose scores should be formatted.
 
         Returns:
             list[str]: Markdown strings for the scores.
         """
         lines: list[str] = []
-        for piece in message.message_pieces:
-            scores = await self._get_scores_async(prompt_ids=[str(piece.id)])
+        for piece in pieces:
+            scores = await self._source.get_scores_async(prompt_ids=[str(piece.id)])
             if scores:
                 lines.append("\n##### Scores\n")
                 lines.extend(self._score_printer._format_score(score, indent="") for score in scores)
@@ -399,22 +473,20 @@ class MarkdownConversationMemoryPrinter(MarkdownConversationPrinter):
                 Defaults to None (sibling of the original).
         """
         super().__init__(
+            source=MemoryConversationSource(),
             sink=sink,
             score_printer=score_printer,
             blur_images=blur_images,
             blur_radius=blur_radius,
             blurred_dir=blurred_dir,
         )
-        from pyrit.memory import CentralMemory
-
-        self._memory = CentralMemory.get_memory_instance()
 
     async def render_async(
         self,
         messages: list[Message],
         *,
         include_scores: bool = False,
-        include_reasoning_trace: bool = False,
+        include_reasoning_summaries: bool = False,
     ) -> str:
         """
         Render a list of messages as markdown and return as a string.
@@ -422,20 +494,11 @@ class MarkdownConversationMemoryPrinter(MarkdownConversationPrinter):
         Args:
             messages (list[Message]): The messages to render.
             include_scores (bool): Whether to include scores. Defaults to False.
-            include_reasoning_trace (bool): Accepted for interface compatibility. Unused.
+            include_reasoning_summaries (bool): Whether to include reasoning summaries. Defaults to False.
 
         Returns:
             str: The rendered conversation markdown text.
         """
         return await super().render_async(
-            messages, include_scores=include_scores, include_reasoning_trace=include_reasoning_trace
+            messages, include_scores=include_scores, include_reasoning_summaries=include_reasoning_summaries
         )
-
-    async def _get_scores_async(self, *, prompt_ids: list[str]) -> list[Score]:
-        """
-        Fetch scores from CentralMemory.
-
-        Returns:
-            list[Score]: The scores.
-        """
-        return list(self._memory.get_prompt_scores(prompt_ids=prompt_ids))

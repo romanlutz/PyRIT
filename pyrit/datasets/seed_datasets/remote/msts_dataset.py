@@ -5,87 +5,25 @@ import io
 import logging
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
+
+from typing_extensions import override
 
 from pyrit.common.net_utility import make_request_and_raise_if_error_async
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
-from pyrit.models import SeedDataset, SeedPrompt, data_serializer_factory
+from pyrit.memory import data_serializer_factory
+from pyrit.models import SeedDataset, SeedPrompt
+from pyrit.models.harm_category import HarmCategory
 
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
+    from pyrit.models.seeds.seed_group import SeedUnion
+
 logger = logging.getLogger(__name__)
-
-_HF_REPO_ID = "felfri/MSTS"
-
-_LANGUAGE_TO_SPLIT: dict[str, str] = {
-    "en": "english",
-    "de": "german",
-    "ru": "russian",
-    "zh": "chinese",
-    "hi": "hindi",
-    "es": "spanish",
-    "it": "italian",
-    "fr": "french",
-    "ko": "korean",
-    "ar": "arabic",
-    "fa": "farsi",
-}
-
-_VALID_TEXT_MODIFIERS: frozenset[str] = frozenset({"assistance", "intention"})
-
-_PIL_FORMAT_TO_EXTENSION: dict[str, str] = {
-    "JPEG": "jpg",
-    "JPG": "jpg",
-    "PNG": "png",
-    "GIF": "gif",
-    "BMP": "bmp",
-    "TIFF": "tiff",
-    "WEBP": "webp",
-}
-
-_AUTHORS: list[str] = [
-    "Paul Röttger",
-    "Giuseppe Attanasio",
-    "Felix Friedrich",
-    "Janis Goldzycher",
-    "Alicia Parrish",
-    "Rishabh Bhardwaj",
-    "Chiara Di Bonaventura",
-    "Roman Eng",
-    "Gaia El Khoury Geagea",
-    "Sujata Goswami",
-    "Jieun Han",
-    "Dirk Hovy",
-    "Seogyeong Jeong",
-    "Paloma Jeretič",
-    "Flor Miriam Plaza-del-Arco",
-    "Donya Rooein",
-    "Patrick Schramowski",
-    "Anastassia Shaitarova",
-    "Xudong Shen",
-    "Richard Willats",
-    "Andrea Zugarini",
-    "Bertie Vidgen",
-]
-
-_GROUPS: list[str] = [
-    "Bocconi University",
-    "Instituto de Telecomunicações",
-    "TU Darmstadt / hessian.AI",
-    "University of Zurich",
-    "Google DeepMind",
-    "Walled AI",
-    "King's College London",
-    "Sapienza University of Rome",
-    "KAIST",
-    "Aalto University",
-    "expert.ai",
-    "MLCommons",
-]
 
 
 class _MSTSDataset(_RemoteDatasetLoader):
@@ -117,6 +55,80 @@ class _MSTSDataset(_RemoteDatasetLoader):
     Paper: [@rottger2025msts]
     """
 
+    _HF_REPO_ID: ClassVar[str] = "felfri/MSTS"
+
+    _LANGUAGE_TO_SPLIT: ClassVar[dict[str, str]] = {
+        "en": "english",
+        "de": "german",
+        "ru": "russian",
+        "zh": "chinese",
+        "hi": "hindi",
+        "es": "spanish",
+        "it": "italian",
+        "fr": "french",
+        "ko": "korean",
+        "ar": "arabic",
+        "fa": "farsi",
+    }
+
+    _VALID_TEXT_MODIFIERS: ClassVar[frozenset[str]] = frozenset({"assistance", "intention"})
+
+    _PIL_FORMAT_TO_EXTENSION: ClassVar[dict[str, str]] = {
+        "JPEG": "jpg",
+        "JPG": "jpg",
+        "PNG": "png",
+        "GIF": "gif",
+        "BMP": "bmp",
+        "TIFF": "tiff",
+        "WEBP": "webp",
+    }
+
+    _AUTHORS: ClassVar[list[str]] = [
+        "Paul Röttger",
+        "Giuseppe Attanasio",
+        "Felix Friedrich",
+        "Janis Goldzycher",
+        "Alicia Parrish",
+        "Rishabh Bhardwaj",
+        "Chiara Di Bonaventura",
+        "Roman Eng",
+        "Gaia El Khoury Geagea",
+        "Sujata Goswami",
+        "Jieun Han",
+        "Dirk Hovy",
+        "Seogyeong Jeong",
+        "Paloma Jeretič",
+        "Flor Miriam Plaza-del-Arco",
+        "Donya Rooein",
+        "Patrick Schramowski",
+        "Anastassia Shaitarova",
+        "Xudong Shen",
+        "Richard Willats",
+        "Andrea Zugarini",
+        "Bertie Vidgen",
+    ]
+
+    _GROUPS: ClassVar[list[str]] = [
+        "Bocconi University",
+        "Instituto de Telecomunicações",
+        "TU Darmstadt",
+        "hessian.AI",
+        "University of Zurich",
+        "Google DeepMind",
+        "Walled AI",
+        "King's College London",
+        "Imperial College London",
+        "Clarkson University",
+        "Lawrence Berkeley National Laboratory",
+        "KAIST",
+        "University of Pennsylvania",
+        "DFKI",
+        "CERTAIN",
+        "National University of Singapore",
+        "Contextual AI",
+        "expert.ai",
+    ]
+
     # Metadata
     harm_categories: list[str] = [
         "Violent Crimes",
@@ -125,6 +137,47 @@ class _MSTSDataset(_RemoteDatasetLoader):
         "Suicide & Self-Harm",
         "Other",
     ]
+    HARM_CATEGORY_ALIAS_OVERRIDES: dict[str, list[HarmCategory]] = {
+        "violent crimes": [HarmCategory.VIOLENT_CONTENT],
+        "non-violent crimes": [HarmCategory.COORDINATION_HARM],
+        "sex-related crimes": [HarmCategory.SEXUAL_CONTENT],
+        "suicide & self-harm": [HarmCategory.SUICIDE, HarmCategory.SELF_HARM],
+        "other": [HarmCategory.OTHER],
+    }
+    # The 21 fine-grained hazard_subcategory values resolve far more precisely than
+    # the 5 top-level hazard_category buckets (e.g. the "Other" bucket splits into
+    # "Conspiracy theories" -> INFO_INTEGRITY and "Gross behaviour" -> OTHER). When a
+    # row's subcategory is present and recognized it takes precedence; otherwise the
+    # loader falls back to the coarse hazard_category mapping above.
+    HAZARD_SUBCATEGORY_ALIAS_OVERRIDES: dict[str, list[HarmCategory]] = {
+        "property damage": [HarmCategory.COORDINATION_HARM],
+        "sale, purchase or ownership of illegal, regulated or unregistered items": [
+            HarmCategory.REGULATED_GOODS,
+            HarmCategory.COORDINATION_HARM,
+        ],
+        "environmental pollution": [HarmCategory.OTHER],
+        "production of illegal, regulated or unregistered items": [
+            HarmCategory.REGULATED_GOODS,
+            HarmCategory.COORDINATION_HARM,
+        ],
+        "reckless endangerment": [HarmCategory.DANGEROUS_SITUATIONS],
+        "dangerous challenges": [HarmCategory.DANGEROUS_SITUATIONS],
+        "scams & fraud": [HarmCategory.SCAMS, HarmCategory.DECEPTION],
+        "self-harm": [HarmCategory.SELF_HARM],
+        "physical assault": [HarmCategory.VIOLENT_CONTENT],
+        "murder": [HarmCategory.VIOLENT_CONTENT],
+        "gross behaviour": [HarmCategory.OTHER],
+        "sexual harassment": [HarmCategory.HARASSMENT, HarmCategory.SEXUAL_SOLICITATION],
+        "trespassing": [HarmCategory.COORDINATION_HARM],
+        "terror": [HarmCategory.VIOLENT_EXTREMISM, HarmCategory.COORDINATION_HARM],
+        "conspiracy theories": [HarmCategory.INFO_INTEGRITY],
+        "eating disorders": [HarmCategory.EATING_DISORDERS, HarmCategory.SELF_HARM],
+        "suicide": [HarmCategory.SUICIDE, HarmCategory.SELF_HARM],
+        "sexual assault": [HarmCategory.SEXUAL_CONTENT, HarmCategory.VIOLENT_CONTENT],
+        "indecent exposure": [HarmCategory.SEXUAL_CONTENT],
+        "theft": [HarmCategory.COORDINATION_HARM],
+        "mass violence": [HarmCategory.VIOLENT_CONTENT, HarmCategory.VIOLENT_EXTREMISM],
+    }
     modalities: list[str] = ["text", "image"]
     size: str = "large"
     tags: set[str] = {"default", "safety", "multimodal", "multilingual"}
@@ -134,7 +187,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
         *,
         languages: list[str] | None = None,
         text_modifiers: list[str] | None = None,
-        max_examples: int | None = None,
         token: str | None = None,
     ) -> None:
         """
@@ -146,11 +198,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
                 language. Defaults to ``["en"]``.
             text_modifiers (list[str] | None): Subset of {"assistance", "intention"} to include.
                 Defaults to both.
-            max_examples (int | None): Maximum number of test pairs to successfully load
-                across all languages and modifiers combined. Rows whose image fetch fails
-                are skipped and do NOT count toward this limit, so a request for N examples
-                returns up to N pairs as long as enough source rows succeed. Each loaded
-                pair produces 2 SeedPrompts (image + text). Defaults to None (no limit).
             token (str | None): Optional HuggingFace authentication token.
 
         Raises:
@@ -158,15 +205,16 @@ class _MSTSDataset(_RemoteDatasetLoader):
         """
         self.languages = self._resolve_languages(languages)
         self.text_modifiers = self._resolve_text_modifiers(text_modifiers)
-        self.max_examples = max_examples
         self.token = token
-        self.source = f"https://huggingface.co/datasets/{_HF_REPO_ID}"
+        self.source = f"https://huggingface.co/datasets/{self._HF_REPO_ID}"
 
     @property
+    @override
     def dataset_name(self) -> str:
-        """Return the dataset name."""
+        """The dataset name."""
         return "msts"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
         Fetch MSTS examples and return as a SeedDataset.
@@ -174,10 +222,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
         Each test row produces a pair of SeedPrompts that share a ``prompt_group_id``
         and both have ``sequence=0``, so they are delivered together as a single
         multimodal user message (image + text) rather than as two separate turns.
-
-        When ``max_examples`` is set, only successfully loaded pairs count toward the
-        limit; rows whose image fetch fails are logged and skipped without consuming
-        the quota.
 
         Args:
             cache (bool): Whether to cache the fetched dataset and images. Defaults to True.
@@ -187,23 +231,19 @@ class _MSTSDataset(_RemoteDatasetLoader):
         """
         logger.info(f"Loading MSTS dataset (languages={self.languages}, text_modifiers={self.text_modifiers})")
 
-        prompts: list[SeedPrompt] = []
+        prompts: list[SeedUnion] = []
         failed_image_count = 0
-        successful_pairs = 0
 
         for language in self.languages:
-            split_name = _LANGUAGE_TO_SPLIT[language]
-            split_data = await self._fetch_from_huggingface(
-                dataset_name=_HF_REPO_ID,
+            split_name = self._LANGUAGE_TO_SPLIT[language]
+            split_data = await self._fetch_from_huggingface_async(
+                dataset_name=self._HF_REPO_ID,
                 split=split_name,
                 cache=cache,
                 token=self.token,
             )
 
             for row in split_data:
-                if self.max_examples is not None and successful_pairs >= self.max_examples:
-                    break
-
                 if row.get("prompt_type") not in self.text_modifiers:
                     continue
 
@@ -218,10 +258,6 @@ class _MSTSDataset(_RemoteDatasetLoader):
                     continue
 
                 prompts.extend(pair)
-                successful_pairs += 1
-
-            if self.max_examples is not None and successful_pairs >= self.max_examples:
-                break
 
         if failed_image_count > 0:
             logger.warning(f"[MSTS] Skipped {failed_image_count} example(s) due to image fetch failures")
@@ -254,11 +290,11 @@ class _MSTSDataset(_RemoteDatasetLoader):
             )
 
         if languages == ["all"]:
-            return list(_LANGUAGE_TO_SPLIT.keys())
+            return list(_MSTSDataset._LANGUAGE_TO_SPLIT.keys())
 
-        invalid = [lang for lang in languages if lang not in _LANGUAGE_TO_SPLIT]
+        invalid = [lang for lang in languages if lang not in _MSTSDataset._LANGUAGE_TO_SPLIT]
         if invalid:
-            valid = ", ".join(sorted(_LANGUAGE_TO_SPLIT.keys()))
+            valid = ", ".join(sorted(_MSTSDataset._LANGUAGE_TO_SPLIT.keys()))
             raise ValueError(
                 f"Unsupported MSTS language(s): {invalid}. Valid ISO codes: {valid}. "
                 f"Pass ['all'] to load every language."
@@ -288,14 +324,14 @@ class _MSTSDataset(_RemoteDatasetLoader):
                 "MSTS text_modifiers must not be empty. Pass None to use the default ['assistance', 'intention']."
             )
 
-        invalid = [m for m in text_modifiers if m not in _VALID_TEXT_MODIFIERS]
+        invalid = [m for m in text_modifiers if m not in _MSTSDataset._VALID_TEXT_MODIFIERS]
         if invalid:
-            valid = ", ".join(sorted(_VALID_TEXT_MODIFIERS))
+            valid = ", ".join(sorted(_MSTSDataset._VALID_TEXT_MODIFIERS))
             raise ValueError(f"Invalid MSTS text_modifiers: {invalid}. Valid values: {valid}.")
 
         return list(text_modifiers)
 
-    async def _build_prompt_pair_async(self, *, row: dict[str, Any], language: str) -> list[SeedPrompt]:
+    async def _build_prompt_pair_async(self, *, row: dict[str, Any], language: str) -> list["SeedUnion"]:
         """
         Build an image+text SeedPrompt pair for a single MSTS row.
 
@@ -330,7 +366,17 @@ class _MSTSDataset(_RemoteDatasetLoader):
         )
 
         group_id = uuid.uuid4()
-        harm_categories = [hazard_category] if hazard_category else []
+        subcategory_key = hazard_subcategory.strip().lower()
+        if subcategory_key in self.HAZARD_SUBCATEGORY_ALIAS_OVERRIDES:
+            harm_categories = self._standardize_harm_categories(
+                hazard_subcategory,
+                alias_overrides=self.HAZARD_SUBCATEGORY_ALIAS_OVERRIDES,
+            )
+        else:
+            harm_categories = self._standardize_harm_categories(
+                hazard_category,
+                alias_overrides=self.HARM_CATEGORY_ALIAS_OVERRIDES,
+            )
         metadata: dict[str, str | int] = {
             "case_id": case_id,
             "image_id": image_id,
@@ -354,8 +400,8 @@ class _MSTSDataset(_RemoteDatasetLoader):
                 "Image component of an MSTS multimodal safety test prompt. "
                 "The unsafe meaning emerges only from the combination of image and text."
             ),
-            authors=_AUTHORS,
-            groups=_GROUPS,
+            authors=self._AUTHORS,
+            groups=self._GROUPS,
             source=self.source,
             prompt_group_id=group_id,
             sequence=0,
@@ -372,8 +418,8 @@ class _MSTSDataset(_RemoteDatasetLoader):
                 "Text component of an MSTS multimodal safety test prompt. "
                 "The unsafe meaning emerges only from the combination of image and text."
             ),
-            authors=_AUTHORS,
-            groups=_GROUPS,
+            authors=self._AUTHORS,
+            groups=self._GROUPS,
             source=self.source,
             prompt_group_id=group_id,
             sequence=0,
@@ -403,7 +449,7 @@ class _MSTSDataset(_RemoteDatasetLoader):
 
         pil_format = getattr(pil_image, "format", None) if pil_image is not None else None
         if isinstance(pil_format, str):
-            mapped = _PIL_FORMAT_TO_EXTENSION.get(pil_format.upper())
+            mapped = _MSTSDataset._PIL_FORMAT_TO_EXTENSION.get(pil_format.upper())
             if mapped:
                 return mapped
 
@@ -450,7 +496,7 @@ class _MSTSDataset(_RemoteDatasetLoader):
             )
         serializer.value = str(Path(str(results_path) + serializer.data_sub_directory, filename))
         try:
-            if await results_storage_io.path_exists(serializer.value):
+            if await results_storage_io.path_exists_async(serializer.value):
                 return serializer.value
         except Exception as e:
             logger.warning(f"[MSTS] Failed to check if image {image_id} exists in cache: {e}")
@@ -460,7 +506,7 @@ class _MSTSDataset(_RemoteDatasetLoader):
             response = await make_request_and_raise_if_error_async(endpoint_uri=image_url, method="GET")
             image_bytes = response.content
 
-        await serializer.save_data(data=image_bytes, output_filename=filename.rsplit(".", 1)[0])
+        await serializer.save_data_async(data=image_bytes, output_filename=filename.rsplit(".", 1)[0])
 
         return str(serializer.value)
 

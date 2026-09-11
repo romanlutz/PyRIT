@@ -1,17 +1,18 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
+import json
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Literal, Optional, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from pyrit.common import get_non_required_value
 from pyrit.message_normalizer.chat_message_normalizer import ChatMessageNormalizer
 from pyrit.message_normalizer.message_normalizer import (
     MessageStringNormalizer,
     SystemMessageBehavior,
-    apply_system_message_behavior,
+    apply_system_message_behavior_async,
 )
-from pyrit.models import Message
+from pyrit.models import ComponentIdentifier, Message
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -23,7 +24,7 @@ TokenizerSystemBehavior = Literal["keep", "squash", "ignore", "developer"]
 """
 Extended system message behavior for tokenizer templates:
 - "keep": Keep system messages as-is (default for most models)
-- "squash": Merge system message into first user message
+- "squash": Merge system messages into the following user message
 - "ignore": Drop system messages entirely
 - "developer": Change system role to developer role (for newer OpenAI models)
 """
@@ -101,7 +102,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
             tokenizer: A Hugging Face tokenizer with a chat template.
             system_message_behavior: How to handle system messages. Options:
                 - "keep": Keep system messages as-is (default)
-                - "squash": Merge system into first user message
+                - "squash": Merge system messages into the following user message
                 - "ignore": Drop system messages entirely
                 - "developer": Change system role to developer role
         """
@@ -109,7 +110,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         self.system_message_behavior = system_message_behavior
 
     @staticmethod
-    def _load_tokenizer(model_name: str, token: Optional[str]) -> "PreTrainedTokenizerBase":
+    def _load_tokenizer(model_name: str, token: str | None) -> "PreTrainedTokenizerBase":
         """
         Load a tokenizer from HuggingFace.
 
@@ -122,11 +123,13 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         Returns:
             The loaded tokenizer.
         """
-        from transformers import AutoTokenizer
+        import transformers
 
         return cast(
             "PreTrainedTokenizerBase",
-            AutoTokenizer.from_pretrained(model_name, token=token or None),
+            transformers.AutoTokenizer.from_pretrained(  # ty: ignore[possibly-missing-attribute]
+                model_name, token=token or None
+            ),
         )
 
     @classmethod
@@ -134,8 +137,8 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         cls,
         model_name_or_alias: str,
         *,
-        token: Optional[str] = None,
-        system_message_behavior: Optional[TokenizerSystemBehavior] = None,
+        token: str | None = None,
+        system_message_behavior: TokenizerSystemBehavior | None = None,
     ) -> "TokenizerTemplateNormalizer":
         """
         Create a normalizer from a model name or alias.
@@ -193,7 +196,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
 
         Handles system messages based on the configured system_message_behavior:
         - "keep": Pass system messages as-is
-        - "squash": Merge system into first user message
+        - "squash": Merge system messages into the following user message
         - "ignore": Drop system messages entirely
         - "developer": Change system role to developer role
 
@@ -210,7 +213,7 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
         base_behavior: SystemMessageBehavior = (
             "keep" if self.system_message_behavior == "developer" else self.system_message_behavior
         )
-        processed_messages = await apply_system_message_behavior(messages, base_behavior)
+        processed_messages = await apply_system_message_behavior_async(messages, base_behavior)
 
         # Use ChatMessageNormalizer with developer role if needed
         chat_normalizer = ChatMessageNormalizer(use_developer_role=use_developer)
@@ -225,4 +228,31 @@ class TokenizerTemplateNormalizer(MessageStringNormalizer):
                 tokenize=False,
                 add_generation_prompt=True,
             )
+        )
+
+    def _build_identifier(self) -> ComponentIdentifier:
+        """
+        Build an identifier for the tokenizer template and role behavior.
+
+        Returns:
+            The tokenizer formatter's behavioral identifier.
+        """
+        tokenizer_type = f"{type(self.tokenizer).__module__}.{type(self.tokenizer).__qualname__}"
+        return ComponentIdentifier.of(
+            self,
+            params={
+                "system_message_behavior": self.system_message_behavior,
+                "tokenizer_type": tokenizer_type,
+                "tokenizer_name_or_path": str(getattr(self.tokenizer, "name_or_path", "")),
+                "chat_template": json.dumps(
+                    getattr(self.tokenizer, "chat_template", None),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "special_tokens_map": json.dumps(
+                    getattr(self.tokenizer, "special_tokens_map", {}),
+                    sort_keys=True,
+                    default=str,
+                ),
+            },
         )

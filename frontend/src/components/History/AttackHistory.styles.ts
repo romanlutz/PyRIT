@@ -1,4 +1,10 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+import {
+  TOUCH_INPUT_QUERY,
+  MINIMUM_TOUCH_TARGET_SIZE,
+  mobileTouchTarget,
+  mobileTouchTargetHeight,
+} from '../../styles/touchTargets'
 
 export const useAttackHistoryStyles = makeStyles({
   root: {
@@ -21,12 +27,44 @@ export const useAttackHistoryStyles = makeStyles({
   },
   filters: {
     display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: tokens.spacingVerticalS,
+  },
+  filterRow: {
+    display: 'flex',
     gap: tokens.spacingHorizontalS,
     alignItems: 'center',
     flexWrap: 'wrap',
   },
+  secondaryFilterRow: {
+    display: 'flex',
+    alignItems: 'center',
+    minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+  },
   filterDropdown: {
     minWidth: '160px',
+    ...mobileTouchTargetHeight,
+    '& > input': {
+      [TOUCH_INPUT_QUERY]: {
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
+    '& > [role="button"]': {
+      [TOUCH_INPUT_QUERY]: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minWidth: MINIMUM_TOUCH_TARGET_SIZE,
+        minHeight: MINIMUM_TOUCH_TARGET_SIZE,
+      },
+    },
+  },
+  touchTarget: {
+    ...mobileTouchTarget,
+  },
+  touchTargetHeight: {
+    ...mobileTouchTargetHeight,
   },
   content: {
     flex: 1,
@@ -52,6 +90,10 @@ export const useAttackHistoryStyles = makeStyles({
     cursor: 'pointer',
     ':hover': {
       backgroundColor: tokens.colorNeutralBackground1Hover,
+    },
+    ':focus-visible': {
+      outline: `2px solid ${tokens.colorStrokeFocus2}`,
+      outlineOffset: '-2px',
     },
   },
   previewCell: {

@@ -3,17 +3,37 @@
 
 import abc
 import logging
-from typing import Any, Union, final
+from collections.abc import Mapping
+from typing import Any, ClassVar, Literal, final
 
-from pyrit.common.deprecation import print_deprecation_message
-from pyrit.identifiers import ComponentIdentifier, Identifiable
 from pyrit.memory import CentralMemory, MemoryInterface
-from pyrit.models import Message, MessagePiece
-from pyrit.models.json_response_config import _JsonResponseConfig
-from pyrit.prompt_target.common.target_capabilities import CapabilityName, TargetCapabilities
+from pyrit.message_normalizer import MessageListNormalizer
+from pyrit.models import (
+    ComponentIdentifier,
+    Conversation,
+    Identifiable,
+    JsonResponseConfig,
+    Message,
+    MessagePiece,
+    TargetIdentifier,
+)
+from pyrit.prompt_target.common.target_capabilities import (
+    CapabilityName,
+    TargetCapabilities,
+    get_known_capabilities,
+)
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.prompt_target.common.target_history import filter_non_replayable_messages
+from pyrit.prompt_target.common.target_send_context import TargetSendContext
 
 logger = logging.getLogger(__name__)
+
+# Authentication modes a target can expose to the create-target catalog / API.
+# ``api_key`` passes a key (from params or the target's env var); ``identity``
+# omits the key so the target authenticates itself via an ambient Azure identity
+# (e.g. minting a Microsoft Entra ID token for its own endpoint, or falling back
+# to ``DefaultAzureCredential``).
+AuthMode = Literal["api_key", "identity"]
 
 
 class PromptTarget(Identifiable):
@@ -26,7 +46,7 @@ class PromptTarget(Identifiable):
 
     _memory: MemoryInterface
 
-    # A list of PromptConverters that are supported by the prompt target.
+    # A list of Converters that are supported by the prompt target.
     # An empty list implies that the prompt target supports all converters.
     supported_converters: list[Any]
 
@@ -43,8 +63,39 @@ class PromptTarget(Identifiable):
     # constructor parameter, which takes precedence over the class-level value.
     _DEFAULT_CONFIGURATION: TargetConfiguration = TargetConfiguration(capabilities=TargetCapabilities())
 
+    # Declarative auth facts consumed by the create-target service and catalog.
+    # Kept off ``TargetCapabilities`` (auth is a construction/credential axis, not
+    # a message-handling capability) and out of the identity hash. It is surfaced
+    # on ``TargetIdentifier`` only as a ``Param.ClassAttr`` (``Evaluate.Exclude``)
+    # so the registry can read it into ``TargetMetadata`` without building an
+    # instance — never as an identity input or a constructor argument.
+    #
+    # ``supported_auth_modes`` lists the auth modes the create-target API accepts
+    # for this type. Base default is api-key only; targets that can authenticate
+    # via an ambient Azure identity when given no key (e.g. OpenAI, Azure ML,
+    # Azure Blob Storage, Prompt Shield) override this to add ``"identity"``.
+    supported_auth_modes: ClassVar[tuple[AuthMode, ...]] = ("api_key",)
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """
+        Validate that subclasses follow the keyword-only ``__init__`` contract.
+
+        Args:
+            **kwargs: Additional keyword arguments passed to the superclass.
+
+        Raises:
+            TypeError: If the subclass ``__init__`` accepts positional parameters
+                after ``self``.
+        """
+        super().__init_subclass__(**kwargs)
+        # Local import to avoid a circular dependency at package init time.
+        from pyrit.common.brick_contract import enforce_keyword_only_init
+
+        enforce_keyword_only_init(cls, base_name="PromptTarget")
+
     def __init__(
         self,
+        *,
         verbose: bool = False,
         max_requests_per_minute: int | None = None,
         endpoint: str = "",
@@ -85,23 +136,31 @@ class PromptTarget(Identifiable):
             logging.basicConfig(level=logging.INFO)
 
     @final
-    async def send_prompt_async(self, *, message: Message) -> list[Message]:
+    async def send_prompt_async(
+        self,
+        *,
+        message: Message,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
+        send_context: TargetSendContext | None = None,
+    ) -> list[Message]:
         """
         Validate, normalize, and send a prompt to the target.
 
         This is the public entry point called by the prompt normalizer. It:
 
-        1. Validates the message, fetches the conversation from memory, appends ``message``, and runs
-           the normalization pipeline (system‑squash, history‑squash, etc.).
-        2. Validates the normalized conversation against the target's capabilities.
-        3. Delegates to :meth:`_send_prompt_to_target_async` with the normalized
-           conversation.
+        1. Validates the message.
+        2. Loads memory history and runs the target's normalization pipeline.
+        3. Validates the normalized conversation against the target's capabilities.
+        4. Delegates to ``_send_prompt_to_target_async`` with the normalized conversation.
 
         Subclasses MUST NOT override this method. Override
-        :meth:`_send_prompt_to_target_async` instead.
+        ``_send_prompt_to_target_async`` instead.
 
         Args:
             message (Message): The message to send.
+            normalizer_overrides: Optional per-send target normalizer overrides.
+            send_context: Optional internal coordination contract for caller-owned
+                history selection and send lifecycle state.
 
         Returns:
             list[Message]: Response messages from the target.
@@ -110,18 +169,37 @@ class PromptTarget(Identifiable):
             ValueError: If the message or normalized conversation are empty.
         """
         message.validate()
-        normalized_conversation = await self._get_normalized_conversation_async(message=message)
-        if not normalized_conversation:
-            raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
-        self._validate_request(normalized_conversation=normalized_conversation)
-        return await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+        conversation_id = message.get_piece().conversation_id or ""
+        if send_context and send_context.conversation_id != conversation_id:
+            raise ValueError("Target send context conversation_id does not match the current request conversation_id.")
+        if send_context:
+            send_context.begin_send()
+
+        send_succeeded = False
+        try:
+            normalized_conversation = await self._get_normalized_conversation_async(
+                message=message,
+                normalizer_overrides=normalizer_overrides,
+                send_context=send_context,
+            )
+            if not normalized_conversation:
+                raise ValueError("Normalization pipeline returned an empty conversation. Cannot send an empty request.")
+            self._validate_request(normalized_conversation=normalized_conversation)
+            if send_context:
+                send_context.mark_target_invoked()
+            response = await self._send_prompt_to_target_async(normalized_conversation=normalized_conversation)
+            send_succeeded = True
+            return response
+        finally:
+            if send_context:
+                send_context.finish_send(succeeded=send_succeeded)
 
     @abc.abstractmethod
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Target-specific send logic.
 
-        Called by :meth:`send_prompt_async` after validation and normalization.
+        Called by ``send_prompt_async`` after validation and normalization.
 
         Args:
             normalized_conversation (list[Message]): The full conversation
@@ -173,69 +251,52 @@ class PromptTarget(Identifiable):
         if not self.configuration.includes(capability=CapabilityName.MULTI_TURN) and len(normalized_conversation) > 1:
             raise ValueError(f"This target only supports a single turn conversation. {custom_configuration_message}")
 
-    async def _get_normalized_conversation_async(self, *, message: Message) -> list[Message]:
+    async def _get_normalized_conversation_async(
+        self,
+        *,
+        message: Message,
+        normalizer_overrides: Mapping[CapabilityName, MessageListNormalizer[Message]] | None = None,
+        send_context: TargetSendContext | None = None,
+    ) -> list[Message]:
         """
-        Fetch the conversation from memory, append the current message, and run the
-        normalization pipeline.
+        Build the target-facing conversation and run the normalization pipeline.
+
+        Memory history is loaded and the current message is appended before the
+        target normalization pipeline runs.
 
         The original conversation in memory is never mutated. The returned list is an
         ephemeral copy intended only for building the API request body.
 
-        After normalization, the metadata from the original ``message`` is copied
-        onto the last normalized message so that downstream code (e.g.
-        ``construct_response_from_request``) propagates the correct
-        ``conversation_id``, ``labels``, ``attack_identifier``, etc. to the response.
+        After normalization, every output piece is stamped with the current
+        conversation ID. Normalizers own all other output metadata; removed
+        ``prompt_metadata`` keys are not restored.
 
         Args:
             message (Message): The current message to append.
+            normalizer_overrides: Optional per-send target normalizer overrides.
+            send_context: Optional internal coordination contract for caller-approved
+                persisted history.
 
         Returns:
             list[Message]: The normalized conversation (possibly with system prompt squashed,
                 history squashed, etc.).
         """
         conversation_id = message.message_pieces[0].conversation_id
-        conversation = list(self._memory.get_conversation(conversation_id=conversation_id))
+        persisted_messages = (
+            list(self._memory.get_conversation_messages(conversation_id=conversation_id)) if conversation_id else []
+        )
+        persisted_messages = filter_non_replayable_messages(messages=persisted_messages)
+        conversation = send_context.select_history(messages=persisted_messages) if send_context else persisted_messages
         conversation.append(message)
-        normalized = await self.configuration.normalize_async(messages=conversation)
+        normalized = await self.configuration.normalize_async(
+            messages=conversation,
+            normalizer_overrides=normalizer_overrides,
+        )
         if normalized:
-            # Normalizers may create new Message objects (via Message.from_prompt) with
-            # random conversation_ids.  Stamp the correct conversation_id on every
-            # message (idempotent for originals, fixes new ones).  Full lineage is only
-            # propagated to the last message — it's the one targets use to build the
-            # response, and earlier messages carry their own legitimate metadata.
             for msg in normalized:
                 for piece in msg.message_pieces:
                     piece.conversation_id = conversation_id
-            self._propagate_lineage(source=message, target_message=normalized[-1])
-            if len(normalized) > len(conversation):
-                logger.warning(
-                    "Normalization produced more messages than the input conversation "
-                    "(%d → %d). Only the last normalized message has full lineage "
-                    "(labels, attack_identifier, etc.). Additional new messages have "
-                    "conversation_id set but require manual lineage updates if needed.",
-                    len(conversation),
-                    len(normalized),
-                )
         return normalized
-
-    @staticmethod
-    def _propagate_lineage(*, source: Message, target_message: Message) -> None:
-        """
-        Copy request-lineage metadata from ``source`` onto every piece in ``target_message``.
-
-        Normalizers may create brand-new ``Message`` objects (e.g. ``HistorySquashNormalizer``
-        uses ``Message.from_prompt``) that carry fresh random ``conversation_id`` values and
-        lack ``labels``, ``attack_identifier``, etc.  This method restores the original
-        metadata so that the response built from the normalized message stays part of the
-        correct conversation and retains traceability.
-
-        Args:
-            source: The original (pre-normalization) message whose metadata is authoritative.
-            target_message: The normalized message whose pieces will be updated in place.
-        """
-        source_piece = source.message_pieces[0]
-        for piece in target_message.message_pieces:
-            piece.copy_lineage_from(source_piece)
 
     def set_model_name(self, *, model_name: str) -> None:
         """
@@ -251,8 +312,6 @@ class PromptTarget(Identifiable):
         *,
         system_prompt: str,
         conversation_id: str,
-        attack_identifier: ComponentIdentifier | None = None,
-        labels: dict[str, str] | None = None,  # deprecated
     ) -> None:
         """
         Inject a system prompt into memory for the given conversation.
@@ -263,7 +322,7 @@ class PromptTarget(Identifiable):
 
         If the target does not natively support system prompts, whether this
         call is ultimately honored depends on the target's
-        :class:`CapabilityHandlingPolicy`:
+        ``CapabilityHandlingPolicy``:
 
         * ``ADAPT`` — the normalization pipeline (e.g. system squash) will
           fold the system message into user content on the wire.
@@ -273,42 +332,51 @@ class PromptTarget(Identifiable):
         Args:
             system_prompt (str): The system prompt text to set.
             conversation_id (str): The conversation id to attach the prompt to.
-            attack_identifier (ComponentIdentifier | None): Optional attack identifier.
-            labels (dict[str, str] | None): Optional labels.
 
         Raises:
             ValueError: If the target does not support multi-turn or editable history.
             RuntimeError: If the conversation already has messages.
         """
-        if labels is not None:
-            print_deprecation_message(
-                old_item="set_system_prompt(..., labels=...)",
-                new_item="set_system_prompt(...)",
-                removed_in="0.16.0",
-            )
-
         if not self.capabilities.supports_multi_turn or not self.capabilities.supports_editable_history:
             raise ValueError(
                 f"Target {type(self).__name__} does not support setting a system prompt. "
                 "It must support both multi-turn conversations and editable history."
             )
 
-        messages = self._memory.get_conversation(conversation_id=conversation_id)
+        messages = self._memory.get_conversation_messages(conversation_id=conversation_id)
 
         if messages:
             raise RuntimeError("Conversation already exists, system prompt needs to be set at the beginning")
 
+        self._memory.add_conversation_to_memory(
+            conversation=Conversation(conversation_id=conversation_id, target_identifier=self.get_identifier())
+        )
         self._memory.add_message_to_memory(
             request=MessagePiece(
                 role="system",
                 conversation_id=conversation_id,
                 original_value=system_prompt,
                 converted_value=system_prompt,
-                prompt_target_identifier=self.get_identifier(),
-                attack_identifier=attack_identifier,
-                labels=labels,
-            ).to_message()
+            ).to_message(),
         )
+
+    async def reset_conversation_async(self, *, conversation_id: str) -> None:
+        """
+        Release any target-side state held for a conversation.
+
+        The attack execution scope calls this for objective-target conversations
+        recorded at the common dispatch boundary. Targets that keep external state
+        keyed by conversation (a websocket connection, a browser page, an upstream
+        session) override this to close or discard it. Targets that are stateless
+        between calls need not override it.
+
+        This is best-effort cleanup, so implementations should not raise for a
+        conversation id they do not recognize, and should be safe to call more
+        than once for the same id.
+
+        Args:
+            conversation_id (str): The conversation id to release state for.
+        """
 
     def dispose_db_engine(self) -> None:
         """
@@ -320,14 +388,16 @@ class PromptTarget(Identifiable):
         self,
         *,
         params: dict[str, Any] | None = None,
-        children: dict[str, Union[ComponentIdentifier, list[ComponentIdentifier]]] | None = None,
+        targets: list[ComponentIdentifier] | None = None,
     ) -> ComponentIdentifier:
         """
         Construct the target identifier.
 
-        Builds a ComponentIdentifier with the base target parameters (endpoint,
-        model_name, max_requests_per_minute) and merges in any additional params
-        or children provided by subclasses.
+        Builds a ``TargetIdentifier`` with the base target params (endpoint,
+        model_name, max_requests_per_minute) and the target's promoted child slot.
+        The child slot is exposed as an explicit named parameter (mirroring
+        ``TargetIdentifier``'s promoted field) so it cannot drift into an untyped
+        ``children`` dict.
 
         Subclasses should call this method in their _build_identifier() implementation
         to set the identifier with their specific parameters.
@@ -335,23 +405,22 @@ class PromptTarget(Identifiable):
         Args:
             params (dict[str, Any] | None): Additional behavioral parameters from
                 the subclass (e.g., temperature, top_p). Merged into the base params.
-            children (dict[str, Union[ComponentIdentifier, list[ComponentIdentifier]]] | None):
-                Named child component identifiers.
+            targets (list[ComponentIdentifier] | None): Inner targets of a
+                multi-target (e.g., ``RoundRobinTarget``), promoted to
+                ``TargetIdentifier.targets``.
 
         Returns:
             ComponentIdentifier: The identifier for this prompt target.
         """
-        all_params: dict[str, Any] = {
-            "endpoint": self._endpoint,
-            "model_name": self._model_name or "",
-            "underlying_model_name": self._underlying_model or "",
-            "max_requests_per_minute": self._max_requests_per_minute,
-            "target_configuration": self.configuration.as_identifier_params(),
-        }
-        if params:
-            all_params.update(params)
-
-        return ComponentIdentifier.of(self, params=all_params, children=children)
+        return TargetIdentifier.of(
+            self,
+            params=params,
+            endpoint=self._endpoint,
+            model_name=self._model_name or "",
+            underlying_model_name=self._underlying_model or "",
+            max_requests_per_minute=self._max_requests_per_minute,
+            targets=targets,
+        )
 
     @property
     def configuration(self) -> TargetConfiguration:
@@ -388,7 +457,7 @@ class PromptTarget(Identifiable):
 
         Policy is preserved because it expresses user intent (ADAPT vs RAISE),
         independent of what the probe found. To change policy or normalizer
-        overrides, build a new :class:`TargetConfiguration` and pass it via
+        overrides, build a new ``TargetConfiguration`` and pass it via
         ``custom_configuration`` at construction time instead.
 
         Note:
@@ -401,6 +470,7 @@ class PromptTarget(Identifiable):
         self._configuration = TargetConfiguration(
             capabilities=capabilities,
             policy=self._configuration.policy,
+            normalizer_overrides=self._configuration.normalizer_overrides,
         )
 
     @classmethod
@@ -418,7 +488,7 @@ class PromptTarget(Identifiable):
             ``_DEFAULT_CONFIGURATION`` if the model is unrecognized or not provided.
         """
         if underlying_model:
-            known = TargetCapabilities.get_known_capabilities(underlying_model)
+            known = get_known_capabilities(underlying_model)
             if known is not None:
                 return TargetConfiguration(capabilities=known)
             logger.info(
@@ -460,7 +530,7 @@ class PromptTarget(Identifiable):
         config = self._get_json_response_config(message_piece=message_piece)
         return config.enabled
 
-    def _get_json_response_config(self, *, message_piece: MessagePiece) -> _JsonResponseConfig:
+    def _get_json_response_config(self, *, message_piece: MessagePiece) -> JsonResponseConfig:
         """
         Get the JSON response configuration from the message piece metadata.
 
@@ -469,12 +539,12 @@ class PromptTarget(Identifiable):
                 include JSON response configuration.
 
         Returns:
-            _JsonResponseConfig: The JSON response configuration.
+            JsonResponseConfig: The JSON response configuration.
 
         Raises:
             ValueError: If JSON response format is requested but unsupported.
         """
-        config = _JsonResponseConfig.from_metadata(metadata=message_piece.prompt_metadata)
+        config = JsonResponseConfig.from_metadata(metadata=message_piece.prompt_metadata)
 
         if config.enabled and not self.capabilities.supports_json_output:
             target_name = self.get_identifier().class_name

@@ -49,7 +49,6 @@ class TestVisualLeakBenchDataset:
         dataset = _VisualLeakBenchDataset()
         assert dataset.categories is None
         assert dataset.pii_types is None
-        assert dataset.max_examples is None
 
     def test_init_with_categories(self):
         """Test initialization with category filtering."""
@@ -67,6 +66,11 @@ class TestVisualLeakBenchDataset:
         with pytest.raises(ValueError, match="Expected VisualLeakBenchCategory"):
             _VisualLeakBenchDataset(categories=["PII Leakage"])
 
+    def test_init_with_empty_categories_raises(self):
+        """Test that an empty categories list raises ValueError."""
+        with pytest.raises(ValueError, match="`categories` must be a non-empty list"):
+            _VisualLeakBenchDataset(categories=[])
+
     def test_init_with_pii_types(self):
         """Test initialization with PII type filtering."""
         pii_types = [VisualLeakBenchPIIType.EMAIL, VisualLeakBenchPIIType.SSN]
@@ -83,10 +87,10 @@ class TestVisualLeakBenchDataset:
         with pytest.raises(ValueError, match="Expected VisualLeakBenchPIIType"):
             _VisualLeakBenchDataset(pii_types=["Email"])
 
-    def test_init_with_max_examples(self):
-        """Test initialization with max_examples."""
-        dataset = _VisualLeakBenchDataset(max_examples=10)
-        assert dataset.max_examples == 10
+    def test_init_with_empty_pii_types_raises(self):
+        """Test that an empty pii_types list raises ValueError."""
+        with pytest.raises(ValueError, match="`pii_types` must be a non-empty list"):
+            _VisualLeakBenchDataset(pii_types=[])
 
     async def test_fetch_dataset_ocr_creates_pair(self):
         """Test that OCR Injection example creates an image+text pair."""
@@ -138,7 +142,7 @@ class TestVisualLeakBenchDataset:
             dataset = await loader.fetch_dataset_async(cache=False)
 
         for seed in dataset.seeds:
-            assert seed.harm_categories == ["ocr_injection"]
+            assert seed.harm_categories == []
 
     async def test_fetch_dataset_harm_categories_pii(self):
         """Test that PII Leakage examples include pii_leakage and the specific PII type."""
@@ -152,8 +156,7 @@ class TestVisualLeakBenchDataset:
             dataset = await loader.fetch_dataset_async(cache=False)
 
         for seed in dataset.seeds:
-            assert "pii_leakage" in seed.harm_categories
-            assert "ssn" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
     async def test_category_filter_ocr_only(self):
         """Test filtering to OCR Injection only excludes PII examples."""
@@ -168,7 +171,7 @@ class TestVisualLeakBenchDataset:
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert seed.harm_categories == ["ocr_injection"]
+            assert seed.harm_categories == []
 
     async def test_category_filter_pii_only(self):
         """Test filtering to PII Leakage only excludes OCR examples."""
@@ -183,7 +186,7 @@ class TestVisualLeakBenchDataset:
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert "pii_leakage" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
     async def test_pii_type_filter(self):
         """Test that pii_types filter excludes non-matching PII examples."""
@@ -201,7 +204,7 @@ class TestVisualLeakBenchDataset:
 
         assert len(dataset.seeds) == 2
         for seed in dataset.seeds:
-            assert "email" in seed.harm_categories
+            assert seed.harm_categories == ["PPI"]
 
     async def test_pii_type_filter_does_not_affect_ocr(self):
         """Test that pii_types filter does not exclude OCR Injection examples."""
@@ -217,25 +220,7 @@ class TestVisualLeakBenchDataset:
         # OCR example passes through; SSN PII example is filtered out
         assert len(dataset.seeds) == 2
         categories = [seed.harm_categories for seed in dataset.seeds]
-        assert any("ocr_injection" in cats for cats in categories)
-
-    async def test_max_examples_limits_output(self):
-        """Test that max_examples limits the number of examples returned."""
-        mock_data = [
-            _make_ocr_example(filename="ocr_v2_0000.png"),
-            _make_ocr_example(filename="ocr_v2_0001.png"),
-            _make_ocr_example(filename="ocr_v2_0002.png"),
-        ]
-        loader = _VisualLeakBenchDataset(max_examples=2)
-
-        with (
-            patch.object(loader, "_fetch_from_url", return_value=mock_data),
-            patch.object(loader, "_fetch_and_save_image_async", return_value="/fake/img.png"),
-        ):
-            dataset = await loader.fetch_dataset_async(cache=False)
-
-        # max_examples=2 → at most 4 prompts (2 pairs)
-        assert len(dataset.seeds) <= 4
+        assert all(cats == [] for cats in categories)
 
     async def test_all_images_fail_produces_empty_dataset(self):
         """Test that when all image downloads fail, no prompts are produced and SeedDataset raises."""
@@ -323,14 +308,13 @@ class TestVisualLeakBenchDataset:
         """Test _build_harm_categories for OCR Injection."""
         loader = _VisualLeakBenchDataset()
         result = loader._build_harm_categories("OCR Injection", "")
-        assert result == ["ocr_injection"]
+        assert result == []
 
     def test_build_harm_categories_pii_with_type(self):
         """Test _build_harm_categories for PII Leakage with specific PII type."""
         loader = _VisualLeakBenchDataset()
         result = loader._build_harm_categories("PII Leakage", "API Key")
-        assert "pii_leakage" in result
-        assert "api_key" in result
+        assert result == ["api_key"]
 
     def test_build_harm_categories_pii_without_type(self):
         """Test _build_harm_categories for PII Leakage without PII type."""
@@ -358,7 +342,7 @@ async def test_fetch_and_save_image_returns_cached_path():
     mock_memory = MagicMock()
     mock_memory.results_path = "/results"
     mock_storage_io = AsyncMock()
-    mock_storage_io.path_exists = AsyncMock(return_value=True)
+    mock_storage_io.path_exists_async = AsyncMock(return_value=True)
     mock_memory.results_storage_io = mock_storage_io
     mock_serializer._memory = mock_memory
     mock_serializer.data_sub_directory = "/images"

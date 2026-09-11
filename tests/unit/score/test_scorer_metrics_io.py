@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from pyrit.identifiers import ComponentIdentifier
+import pytest
+
+from pyrit.models import ComponentIdentifier
 from pyrit.score.scorer_evaluation.scorer_metrics import (
     HarmScorerMetrics,
     ObjectiveScorerMetrics,
@@ -163,7 +165,7 @@ def test_metrics_to_registry_dict_includes_values():
 
 def test_find_objective_metrics_by_eval_hash_found(tmp_path):
     identifier = _make_identifier()
-    entry = identifier.to_dict()
+    entry = identifier.model_dump()
     entry["eval_hash"] = "hash_abc"
     entry["metrics"] = _metrics_to_registry_dict(_make_objective_metrics(accuracy=0.88))
     path = tmp_path / "objective_achieved_metrics.jsonl"
@@ -200,7 +202,7 @@ def test_find_objective_metrics_default_path():
 
 def test_find_harm_metrics_by_eval_hash_found():
     identifier = _make_identifier()
-    entry = identifier.to_dict()
+    entry = identifier.model_dump()
     entry["eval_hash"] = "harm_hash"
     entry["metrics"] = _metrics_to_registry_dict(_make_harm_metrics(mean_absolute_error=0.12))
 
@@ -217,13 +219,42 @@ def test_find_harm_metrics_by_eval_hash_not_found():
     assert result is None
 
 
+def test_find_harm_metrics_by_eval_hash_uses_explicit_file_path(tmp_path):
+    path = tmp_path / "custom_metrics.jsonl"
+    with patch("pyrit.score.scorer_evaluation.scorer_metrics_io._load_jsonl", return_value=[]) as mock_load:
+        result = find_harm_metrics_by_eval_hash(eval_hash="missing", file_path=path)
+
+    assert result is None
+    assert mock_load.call_args[0][0] == path
+
+
+@pytest.mark.parametrize(
+    ("harm_category", "expected_file_name"),
+    [
+        ("REPRESENTATIONAL", "representational_metrics.jsonl"),
+        ("SEXUAL_CONTENT", "sexual_metrics.jsonl"),
+    ],
+)
+def test_find_harm_metrics_by_eval_hash_maps_canonical_category(harm_category, expected_file_name):
+    with patch("pyrit.score.scorer_evaluation.scorer_metrics_io._load_jsonl", return_value=[]) as mock_load:
+        result = find_harm_metrics_by_eval_hash(eval_hash="missing", harm_category=harm_category)
+
+    assert result is None
+    assert mock_load.call_args[0][0].name == expected_file_name
+
+
+def test_find_harm_metrics_by_eval_hash_requires_path_or_category():
+    with pytest.raises(ValueError, match="Either harm_category or file_path must be provided"):
+        find_harm_metrics_by_eval_hash(eval_hash="missing")
+
+
 # --- get_all_objective_metrics tests ---
 
 
 def test_get_all_objective_metrics_from_file(tmp_path):
     identifier = _make_identifier(class_name="Scorer1")
     metrics = _make_objective_metrics()
-    entry = identifier.to_dict()
+    entry = identifier.model_dump()
     entry["eval_hash"] = "h1"
     entry["metrics"] = _metrics_to_registry_dict(metrics)
     path = tmp_path / "objective_achieved_metrics.jsonl"
@@ -257,7 +288,7 @@ def test_get_all_objective_metrics_default_path():
 def test_get_all_harm_metrics():
     identifier = _make_identifier()
     metrics = _make_harm_metrics()
-    entry = identifier.to_dict()
+    entry = identifier.model_dump()
     entry["metrics"] = _metrics_to_registry_dict(metrics)
 
     with patch("pyrit.score.scorer_evaluation.scorer_metrics_io._load_jsonl") as mock_load:

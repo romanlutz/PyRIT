@@ -5,23 +5,24 @@ import logging
 import textwrap
 from dataclasses import dataclass, field
 from string import Formatter
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.exceptions import ComponentRole, execution_context
-from pyrit.executor.attack.component import ConversationManager
+from pyrit.executor.attack.component import ConversationManager, PrependedConversationConfig
 from pyrit.executor.attack.core.attack_config import (
     AttackConverterConfig,
     AttackScoringConfig,
 )
 from pyrit.executor.attack.core.attack_parameters import AttackParameters
+from pyrit.executor.attack.core.attack_strategy import attack_outcome_from_score
 from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     ConversationSession,
     MultiTurnAttackContext,
     MultiTurnAttackStrategy,
 )
-from pyrit.identifiers import build_atomic_attack_identifier
 from pyrit.models import (
+    AtomicAttackIdentifier,
     AttackOutcome,
     AttackResult,
     Message,
@@ -102,9 +103,10 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         total_length: int = 200,
         chunk_type: str = "characters",
         request_template: str = DEFAULT_TEMPLATE,
-        attack_converter_config: Optional[AttackConverterConfig] = None,
-        attack_scoring_config: Optional[AttackScoringConfig] = None,
-        prompt_normalizer: Optional[PromptNormalizer] = None,
+        attack_converter_config: AttackConverterConfig | None = None,
+        attack_scoring_config: AttackScoringConfig | None = None,
+        prompt_normalizer: PromptNormalizer | None = None,
+        prepended_conversation_config: PrependedConversationConfig | None = None,
     ) -> None:
         """
         Initialize the chunked request attack strategy.
@@ -116,9 +118,11 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             chunk_type (str): Type of chunk to request (e.g., "characters", "bytes", "words").
             request_template (str): Template for generating chunk requests
                 (default: "Give me {chunk_type} {start}-{end} of '{objective}'").
-            attack_converter_config (Optional[AttackConverterConfig]): Configuration for prompt converters.
-            attack_scoring_config (Optional[AttackScoringConfig]): Configuration for scoring components.
-            prompt_normalizer (Optional[PromptNormalizer]): Normalizer for handling prompts.
+            attack_converter_config (AttackConverterConfig | None): Configuration for converters.
+            attack_scoring_config (AttackScoringConfig | None): Configuration for scoring components.
+            prompt_normalizer (PromptNormalizer | None): Normalizer for handling prompts.
+            prepended_conversation_config: Configuration for prepended-conversation
+                conversion and target-facing formatting.
 
         Raises:
             ValueError: If chunk_size or total_length are invalid.
@@ -150,6 +154,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             logger=logger,
             context_type=ChunkedRequestAttackContext,
             params_type=ChunkedRequestAttackParameters,
+            prepended_conversation_config=prepended_conversation_config,
         )
 
         # Store chunk configuration
@@ -167,21 +172,20 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         attack_scoring_config = attack_scoring_config or AttackScoringConfig()
 
         self._auxiliary_scorers = attack_scoring_config.auxiliary_scorers
-        self._objective_scorer: Optional[TrueFalseScorer] = attack_scoring_config.objective_scorer
+        self._objective_scorer: TrueFalseScorer | None = attack_scoring_config.objective_scorer
 
         # Initialize prompt normalizer and conversation manager
         self._prompt_normalizer = prompt_normalizer or PromptNormalizer()
         self._conversation_manager = ConversationManager(
-            attack_identifier=self.get_identifier(),
             prompt_normalizer=self._prompt_normalizer,
         )
 
-    def get_attack_scoring_config(self) -> Optional[AttackScoringConfig]:
+    def get_attack_scoring_config(self) -> AttackScoringConfig | None:
         """
         Get the attack scoring configuration used by this strategy.
 
         Returns:
-            Optional[AttackScoringConfig]: The scoring configuration with objective and auxiliary scorers.
+            AttackScoringConfig | None: The scoring configuration with objective and auxiliary scorers.
         """
         return AttackScoringConfig(
             objective_scorer=self._objective_scorer,
@@ -209,7 +213,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             context (ChunkedRequestAttackContext): The attack context.
 
         Returns:
-            List[str]: List of chunk request prompts.
+            list[str]: List of chunk request prompts.
         """
         prompts = []
         start = 1
@@ -247,6 +251,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             target=self._objective_target,
             conversation_id=context.session.conversation_id,
             request_converters=self._request_converters,
+            prepended_conversation_config=self._prepended_conversation_config,
             memory_labels=self._memory_labels,
         )
 
@@ -279,19 +284,21 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             with execution_context(
                 component_role=ComponentRole.OBJECTIVE_TARGET,
                 attack_strategy_name=self.__class__.__name__,
-                attack_identifier=self.get_identifier(),
                 component_identifier=self._objective_target.get_identifier(),
                 objective_target_conversation_id=context.session.conversation_id,
                 objective=context.objective,
             ):
+                context._record_objective_target_invocation(conversation_id=context.session.conversation_id)
                 response = await self._prompt_normalizer.send_prompt_async(
                     message=message,
                     target=self._objective_target,
                     conversation_id=context.session.conversation_id,
                     request_converter_configurations=self._request_converters,
                     response_converter_configurations=self._response_converters,
-                    labels=context.memory_labels,
-                    attack_identifier=self.get_identifier(),
+                    normalizer_overrides=self._get_prepended_normalizer_overrides(
+                        prepended_history_send_context=context.prepended_history_send_context,
+                    ),
+                    send_context=context.prepended_history_send_context,
                 )
 
             # Store the response
@@ -319,7 +326,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         return AttackResult(
             conversation_id=context.session.conversation_id,
             objective=context.objective,
-            atomic_attack_identifier=build_atomic_attack_identifier(attack_identifier=self.get_identifier()),
+            atomic_attack_identifier=AtomicAttackIdentifier.build(attack_identifier=self.get_identifier()),
             last_response=response.get_piece() if response else None,
             last_score=score,
             related_conversations=context.related_conversations,
@@ -333,16 +340,16 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
     def _determine_attack_outcome(
         self,
         *,
-        score: Optional[Score],
-    ) -> tuple[AttackOutcome, Optional[str]]:
+        score: Score | None,
+    ) -> tuple[AttackOutcome, str | None]:
         """
         Determine the outcome of the attack based on the score.
 
         Args:
-            score (Optional[Score]): The objective score (if any).
+            score (Score | None): The objective score (if any).
 
         Returns:
-            tuple[AttackOutcome, Optional[str]]: A tuple of (outcome, outcome_reason).
+            tuple[AttackOutcome, str | None]: A tuple of (outcome, outcome_reason).
         """
         if not self._objective_scorer:
             return AttackOutcome.UNDETERMINED, "No objective scorer configured"
@@ -350,7 +357,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         if not score:
             return AttackOutcome.FAILURE, "No score returned from scorer"
 
-        outcome = AttackOutcome.SUCCESS if score.get_value() else AttackOutcome.FAILURE
+        outcome = attack_outcome_from_score(score)
         outcome_reason = score.score_rationale if score.score_rationale else None
         return outcome, outcome_reason
 
@@ -359,7 +366,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         *,
         combined_value: str,
         objective: str,
-    ) -> Optional[Score]:
+    ) -> Score | None:
         """
         Score the combined chunk responses against the objective.
 
@@ -368,7 +375,7 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
             objective (str): The natural-language description of the attack's objective.
 
         Returns:
-            Optional[Score]: The score from the objective scorer if configured, or None if
+            Score | None: The score from the objective scorer if configured, or None if
                 no objective scorer is set.
         """
         if not self._objective_scorer:
@@ -377,7 +384,6 @@ class ChunkedRequestAttack(MultiTurnAttackStrategy[ChunkedRequestAttackContext, 
         with execution_context(
             component_role=ComponentRole.OBJECTIVE_SCORER,
             attack_strategy_name=self.__class__.__name__,
-            attack_identifier=self.get_identifier(),
             component_identifier=self._objective_scorer.get_identifier(),
             objective=objective,
         ):

@@ -1,16 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import Optional
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import MessagePiece, Score
+from pyrit.models import ComponentIdentifier, Condition, MessagePiece, Score
 from pyrit.score.audio_transcript_scorer import AudioTranscriptHelper
-from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
+from pyrit.score.float_scale.float_scale_scorer import MessageFloatScaleScorer
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 
 
-class AudioFloatScaleScorer(FloatScaleScorer):
+class AudioFloatScaleScorer(MessageFloatScaleScorer):
     """
     A scorer that processes audio files by transcribing them and scoring the transcript.
 
@@ -23,9 +21,8 @@ class AudioFloatScaleScorer(FloatScaleScorer):
     def __init__(
         self,
         *,
-        text_capable_scorer: FloatScaleScorer,
-        validator: Optional[ScorerPromptValidator] = None,
-        use_entra_auth: Optional[bool] = None,
+        text_capable_scorer: MessageFloatScaleScorer,
+        validator: ScorerPromptValidator | None = None,
     ) -> None:
         """
         Initialize the AudioFloatScaleScorer.
@@ -34,8 +31,6 @@ class AudioFloatScaleScorer(FloatScaleScorer):
             text_capable_scorer: A FloatScaleScorer capable of processing text.
                 This scorer will be used to evaluate the transcribed audio content.
             validator: Validator for the scorer. Defaults to audio_path data type validator.
-            use_entra_auth: **Deprecated.** Will be removed in v0.15.0.
-                Authentication is now auto-detected by the underlying converter.
 
         Raises:
             ValueError: If text_capable_scorer does not support text data type.
@@ -43,7 +38,6 @@ class AudioFloatScaleScorer(FloatScaleScorer):
         super().__init__(validator=validator or self._default_validator)
         self._audio_helper = AudioTranscriptHelper(
             text_capable_scorer=text_capable_scorer,
-            use_entra_auth=use_entra_auth,
         )
 
     def _build_identifier(self) -> ComponentIdentifier:
@@ -54,12 +48,28 @@ class AudioFloatScaleScorer(FloatScaleScorer):
             ComponentIdentifier: The identifier for this scorer.
         """
         return self._create_identifier(
-            children={
-                "sub_scorers": [self._audio_helper.text_scorer.get_identifier()],
-            },
+            sub_scorers=[self._audio_helper.text_scorer.get_identifier()],
         )
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    def matched_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report the conditions matched by the transcript scorer.
+
+        Returns:
+            frozenset[type[Condition]]: The matched condition types.
+        """
+        return self._audio_helper.text_scorer.matched_conditions()
+
+    def required_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report the conditions required by the transcript scorer.
+
+        Returns:
+            frozenset[type[Condition]]: The required condition types.
+        """
+        return self._audio_helper.text_scorer.required_conditions()
+
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         """
         Score an audio file by transcribing it and scoring the transcript.
 

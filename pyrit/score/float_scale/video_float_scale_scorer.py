@@ -1,15 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import MessagePiece, Score
+from pyrit.models import ComponentIdentifier, Condition, MessagePiece, Score, ScoreStatus
 from pyrit.score.float_scale.float_scale_score_aggregator import (
     FloatScaleAggregatorFunc,
     FloatScaleScorerByCategory,
 )
-from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
+from pyrit.score.float_scale.float_scale_scorer import MessageFloatScaleScorer
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.video_scorer import VideoHelper
 
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class VideoFloatScaleScorer(
-    FloatScaleScorer,
+    MessageFloatScaleScorer,
 ):
     """
     A scorer that processes videos by extracting frames and scoring them using a float scale image scorer.
@@ -42,13 +41,13 @@ class VideoFloatScaleScorer(
     def __init__(
         self,
         *,
-        image_capable_scorer: FloatScaleScorer,
-        audio_scorer: Optional[FloatScaleScorer] = None,
-        num_sampled_frames: Optional[int] = None,
-        validator: Optional[ScorerPromptValidator] = None,
+        image_capable_scorer: MessageFloatScaleScorer,
+        audio_scorer: MessageFloatScaleScorer | None = None,
+        num_sampled_frames: int | None = None,
+        validator: ScorerPromptValidator | None = None,
         score_aggregator: FloatScaleAggregatorFunc = FloatScaleScorerByCategory.MAX,
-        image_objective_template: Optional[str] = VideoHelper._DEFAULT_IMAGE_OBJECTIVE_TEMPLATE,
-        audio_objective_template: Optional[str] = None,
+        image_objective_template: str | None = VideoHelper._DEFAULT_IMAGE_OBJECTIVE_TEMPLATE,
+        audio_objective_template: str | None = None,
     ) -> None:
         """
         Initialize the VideoFloatScaleScorer.
@@ -79,7 +78,7 @@ class VideoFloatScaleScorer(
         Raises:
             ValueError: If audio_scorer is provided and does not support audio_path data type.
         """
-        FloatScaleScorer.__init__(self, validator=validator or self._DEFAULT_VALIDATOR)
+        MessageFloatScaleScorer.__init__(self, validator=validator or self._DEFAULT_VALIDATOR)
 
         self._video_helper = VideoHelper(
             image_capable_scorer=image_capable_scorer,
@@ -106,18 +105,46 @@ class VideoFloatScaleScorer(
 
         return self._create_identifier(
             params={
-                "score_aggregator": self._score_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
                 "num_sampled_frames": self._video_helper.num_sampled_frames,
                 "has_audio_scorer": self.audio_scorer is not None,
                 "image_objective_template": self._video_helper.image_objective_template,
                 "audio_objective_template": self._video_helper.audio_objective_template,
             },
-            children={
-                "sub_scorers": sub_scorer_ids,
-            },
+            score_aggregator=self._score_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
+            sub_scorers=sub_scorer_ids,
         )
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    def matched_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report the union of conditions matched by the media scorers.
+
+        Returns:
+            frozenset[type[Condition]]: The matched condition types.
+        """
+        scorers = [self._video_helper.image_scorer]
+        if self.audio_scorer:
+            scorers.append(self.audio_scorer)
+        conditions: set[type[Condition]] = set()
+        for scorer in scorers:
+            conditions.update(scorer.matched_conditions())
+        return frozenset(conditions)
+
+    def required_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report the union of conditions required by the media scorers.
+
+        Returns:
+            frozenset[type[Condition]]: The required condition types.
+        """
+        scorers = [self._video_helper.image_scorer]
+        if self.audio_scorer:
+            scorers.append(self.audio_scorer)
+        conditions: set[type[Condition]] = set()
+        for scorer in scorers:
+            conditions.update(scorer.required_conditions())
+        return frozenset(conditions)
+
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         """
         Score a single video piece by extracting frames and optionally audio, then aggregating their scores.
 
@@ -146,7 +173,7 @@ class VideoFloatScaleScorer(
         # Get the ID from the message piece
         piece_id = message_piece.id if message_piece.id is not None else message_piece.original_prompt_id
 
-        # Call the aggregator - all aggregators now return List[ScoreAggregatorResult]
+        # Call the aggregator - all aggregators now return list[ScoreAggregatorResult]
         aggregator_results: list[ScoreAggregatorResult] = self._score_aggregator(all_scores)
 
         # Build rationale prefix
@@ -158,7 +185,8 @@ class VideoFloatScaleScorer(
         aggregate_scores: list[Score] = []
         for result in aggregator_results:
             aggregate_score = Score(
-                score_value=str(result.value),
+                score_value=str(result.value) if result.value is not None else None,
+                status=ScoreStatus.UNDETERMINED if result.value is None else ScoreStatus.COMPLETE,
                 score_value_description=result.description,
                 score_type="float_scale",
                 score_category=result.category,

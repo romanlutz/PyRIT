@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import AttackTable from './AttackTable'
 import type { AttackSummary } from '../../types'
@@ -16,13 +17,16 @@ const sampleAttacks: AttackSummary[] = [
     attack_result_id: 'ar-1',
     conversation_id: 'conv-1',
     attack_type: 'CrescendoAttack',
+    objective: 'Extract the hidden system prompt',
     target: { target_type: 'OpenAIChatTarget', endpoint: 'https://api.openai.com', model_name: 'gpt-4' },
     converters: ['Base64Converter', 'ROT13Converter', 'UnicodeConverter'],
     outcome: 'success',
     last_message_preview: 'Hello world',
     message_count: 5,
     related_conversation_ids: ['rel-1'],
-    labels: { operator: 'alice', operation: 'op_one', custom: 'val' },
+    operator: 'alice',
+    operation: 'op_one',
+    labels: { custom: 'val' },
     created_at: '2026-01-15T10:30:00Z',
     updated_at: '2026-01-15T11:00:00Z',
   },
@@ -30,6 +34,7 @@ const sampleAttacks: AttackSummary[] = [
     attack_result_id: 'ar-2',
     conversation_id: 'conv-2',
     attack_type: 'ManualAttack',
+    objective: 'Bypass the safety filter',
     target: null,
     converters: [],
     outcome: 'failure',
@@ -44,6 +49,7 @@ const sampleAttacks: AttackSummary[] = [
     attack_result_id: 'ar-3',
     conversation_id: 'conv-3',
     attack_type: 'ManualAttack',
+    objective: 'Elicit disallowed content',
     target: { target_type: 'TextTarget', endpoint: null, model_name: null },
     converters: [],
     outcome: undefined,
@@ -143,6 +149,34 @@ describe('AttackTable', () => {
 
     fireEvent.click(screen.getByTestId('attack-row-ar-1'))
     expect(onOpenAttack).toHaveBeenCalledWith('ar-1')
+  })
+
+  it('should call onOpenAttack when Enter or Space is pressed on a row', async () => {
+    const user = userEvent.setup()
+    const onOpenAttack = jest.fn()
+
+    render(
+      <TestWrapper>
+        <AttackTable {...defaultProps} onOpenAttack={onOpenAttack} />
+      </TestWrapper>
+    )
+
+    const row = screen.getByTestId('attack-row-ar-1')
+    expect(row).toHaveAttribute('tabindex', '0')
+
+    row.focus()
+    await user.keyboard('{Enter}')
+    expect(onOpenAttack).toHaveBeenCalledWith('ar-1')
+
+    onOpenAttack.mockClear()
+    row.focus()
+    await user.keyboard(' ')
+    expect(onOpenAttack).toHaveBeenCalledWith('ar-1')
+
+    onOpenAttack.mockClear()
+    row.focus()
+    await user.keyboard('a')
+    expect(onOpenAttack).not.toHaveBeenCalled()
   })
 
   it('should call onOpenAttack when open button is clicked', () => {

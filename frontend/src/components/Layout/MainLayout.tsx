@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import {
+  Button,
   Text,
   Tooltip,
 } from '@fluentui/react-components'
+import { QuestionCircleRegular } from '@fluentui/react-icons'
 import { versionApi } from '../../services/api'
 import Navigation, { type ViewName } from '../Sidebar/Navigation'
 import { UserAccountButton } from '../UserAccountButton'
@@ -12,42 +14,73 @@ interface MainLayoutProps {
   children: React.ReactNode
   currentView: ViewName
   onNavigate: (view: ViewName) => void
-  onToggleTheme: () => void
-  isDarkMode: boolean
+  onOpenFeedback: () => void
+  canManageConfiguration: boolean
+  onStartTour?: () => void
 }
 
 export default function MainLayout({
   children,
   currentView,
   onNavigate,
-  onToggleTheme,
-  isDarkMode,
+  onOpenFeedback,
+  canManageConfiguration,
+  onStartTour,
 }: MainLayoutProps) {
   const styles = useMainLayoutStyles()
   const [version, setVersion] = useState<string>('Loading...')
+  const [commit, setCommit] = useState<string | null>(null)
   const [databaseInfo, setDatabaseInfo] = useState<string | null>(null)
 
   useEffect(() => {
     versionApi.getVersion()
       .then(data => {
-        setVersion(data.display || data.version)
+        setVersion(data.version)
+        document.title = `Co-PyRIT ${data.version}`
+        setCommit(data.version.includes('.dev') ? data.commit ?? null : null)
         setDatabaseInfo(data.database_info ?? null)
       })
-      .catch(() => setVersion('Unknown'))
+      .catch(() => {
+        setVersion('Unknown')
+        document.title = 'Co-PyRIT'
+      })
   }, [])
+
+  const title = version === 'Unknown' ? 'Co-PyRIT' : `Co-PyRIT ${version}`
 
   return (
     <div className={styles.root}>
       <div className={styles.topBar}>
-        <Tooltip content={<>{`PyRIT ${version}`}{databaseInfo && <><br />{databaseInfo}</>}</>} relationship="label">
+        <Tooltip
+          content={
+            <>
+              {`PyRIT ${version}`}
+              {commit && <><br />{`Commit: ${commit}`}</>}
+              {databaseInfo && <><br />{databaseInfo}</>}
+            </>
+          }
+          relationship="label"
+        >
           <img
             src="/roakey.png"
             alt="Co-PyRIT Logo"
             className={styles.logo}
           />
         </Tooltip>
-        <Text className={styles.title}>Co-PyRIT</Text>
+        <Text className={styles.title}>{title}</Text>
         <Text className={styles.subtitle}>Python Risk Identification Tool</Text>
+        <div className={styles.spacer} />
+        {onStartTour && (
+          <Button
+            appearance="subtle"
+            icon={<QuestionCircleRegular />}
+            onClick={onStartTour}
+            data-testid="start-tour"
+            className={styles.tourButton}
+          >
+            Take a tour
+          </Button>
+        )}
         <UserAccountButton />
       </div>
       <div className={styles.contentArea}>
@@ -55,8 +88,8 @@ export default function MainLayout({
           <Navigation
             currentView={currentView}
             onNavigate={onNavigate}
-            onToggleTheme={onToggleTheme}
-            isDarkMode={isDarkMode}
+            onOpenFeedback={onOpenFeedback}
+            canManageConfiguration={canManageConfiguration}
           />
         </aside>
         <main className={styles.main}>{children}</main>

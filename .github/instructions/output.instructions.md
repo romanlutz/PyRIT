@@ -8,6 +8,8 @@ For full architecture documentation, usage examples, and extension guides, see [
 
 This file covers the rules for **writing and reviewing** code in `pyrit/output/`.
 
+**Does not own** (see [framework.md](../../doc/code/framework.md)): deciding *what* to render or *when*. Components hand results to output; format classes only turn data into strings and must never fetch data, touch `CentralMemory`, or call `print()` directly (that's isolated to leaf printer classes). Flag such bleed in review.
+
 ## Critical Rules
 
 ### Output goes through the sink — never call `print()` directly
@@ -59,6 +61,7 @@ Every new domain printer **must** have a corresponding convenience function adde
 
 ```python
 from pyrit.output.helpers import output_attack_async
+
 await output_attack_async(result, format="pretty")
 ```
 

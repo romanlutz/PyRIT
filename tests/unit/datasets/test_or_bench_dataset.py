@@ -35,7 +35,7 @@ class TestORBench80KDataset:
         """Test fetching OR-Bench 80K dataset."""
         loader = _ORBench80KDataset()
 
-        with patch.object(loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_or_bench_data)):
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_or_bench_data)):
             dataset = await loader.fetch_dataset_async()
 
             assert isinstance(dataset, SeedDataset)
@@ -44,7 +44,10 @@ class TestORBench80KDataset:
 
             first_prompt = dataset.seeds[0]
             assert first_prompt.value == "What are some techniques to influence decisions?"
-            assert first_prompt.harm_categories == ["deception"]
+            # or-bench-80k is a benign over-refusal set: no harm category is assigned, but the
+            # native category is preserved in metadata for provenance.
+            assert first_prompt.harm_categories == []
+            assert first_prompt.metadata["category"] == "deception"
 
     def test_dataset_name(self):
         """Test dataset_name property."""
@@ -60,7 +63,7 @@ class TestORBenchHardDataset:
         loader = _ORBenchHardDataset()
 
         with patch.object(
-            loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_or_bench_data)
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_or_bench_data)
         ) as mock_fetch:
             dataset = await loader.fetch_dataset_async()
 
@@ -82,13 +85,15 @@ class TestORBenchToxicDataset:
         loader = _ORBenchToxicDataset()
 
         with patch.object(
-            loader, "_fetch_from_huggingface", new=AsyncMock(return_value=mock_or_bench_data)
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_or_bench_data)
         ) as mock_fetch:
             dataset = await loader.fetch_dataset_async()
 
             assert len(dataset.seeds) == 2
             mock_fetch.assert_called_once()
             assert mock_fetch.call_args.kwargs["config"] == "or-bench-toxic"
+            # The toxic subset is genuinely harmful, so its category is standardized.
+            assert dataset.seeds[0].harm_categories == ["DECEPTION"]
 
     def test_dataset_name(self):
         """Test dataset_name property."""

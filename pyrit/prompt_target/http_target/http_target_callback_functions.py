@@ -5,7 +5,7 @@
 import json
 import re
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -42,7 +42,7 @@ def get_http_target_json_response_callback_function(key: str) -> Callable[[reque
 
 
 def get_http_target_regex_matching_callback_function(
-    key: str, url: Optional[str] = None
+    key: str, url: str | None = None
 ) -> Callable[[requests.Response], str]:
     """
     Get a callback function that parses HTTP responses using regex matching.
@@ -87,16 +87,27 @@ def _fetch_key(data: dict[str, Any], key: str) -> Any:
         key (str): The key path to fetch the value.
 
     Returns:
-        Any: The fetched value.
+        Any: The fetched value ("" when the resolved value is JSON null).
+
+    Raises:
+        ValueError: If any path segment is missing, so a misconfigured key
+            surfaces immediately instead of silently degrading to "".
     """
     pattern = re.compile(r"([a-zA-Z_]+)|\[(-?\d+)\]")
     keys = pattern.findall(key)
     result: Any = data
     for key_part, index_part in keys:
         if key_part:
-            result = result.get(key_part, None) if isinstance(result, dict) else None
-        elif index_part and isinstance(result, list):
-            result = result[int(index_part)] if -len(result) <= int(index_part) < len(result) else None
-        if result is None:
-            return ""
+            if not isinstance(result, dict) or key_part not in result:
+                raise ValueError(f"Key path {key!r} not found in HTTP JSON response: missing segment {key_part!r}.")
+            result = result[key_part]
+        elif index_part:
+            index = int(index_part)
+            if not isinstance(result, list) or not -len(result) <= index < len(result):
+                raise ValueError(
+                    f"Key path {key!r} not found in HTTP JSON response: index [{index_part}] out of range."
+                )
+            result = result[index]
+    if result is None:
+        return ""
     return result

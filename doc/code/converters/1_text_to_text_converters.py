@@ -6,11 +6,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 # ---
 
 # %% [markdown]
-# # 1. Text-to-Text Converters
+# # Text-to-Text Converters
 #
 # Text-to-text converters transform text input into modified text output. These converters are the most common type and include encoding schemes, obfuscation techniques, and LLM-based transformations.
 #
@@ -28,7 +28,7 @@
 # Non-LLM converters use deterministic algorithms to transform text. These include:
 # - **Encoding**: Base64, Binary, Morse, NATO phonetic, etc.
 # - **Obfuscation**: Leetspeak, Unicode manipulation, character swapping, ANSI escape codes
-# - **Text manipulation**: ROT13, Caesar cipher, Atbash, etc.
+# - **Text manipulation**: ROT13, Caesar cipher, Atbash, Vigenere cipher, etc.
 
 # %% [markdown]
 # ### 1.1 Basic Encoding Converters
@@ -36,7 +36,10 @@
 # These converters encode text into various formats:
 
 # %%
-from pyrit.prompt_converter import (
+from pathlib import Path
+from types import SimpleNamespace
+
+from pyrit.converter import (
     AsciiArtConverter,
     AskToDecodeConverter,
     AtbashConverter,
@@ -46,17 +49,25 @@ from pyrit.prompt_converter import (
     BinAsciiConverter,
     BrailleConverter,
     CaesarConverter,
+    DigitBijectionConverter,
     EcojiConverter,
+    LetterBijectionConverter,
     MorseConverter,
     NatoConverter,
     NegationTrapConverter,
     ROT13Converter,
+    TokenBijectionConverter,
+    VigenereConverter,
 )
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
-await initialize_pyrit_async(memory_db_type=IN_MEMORY)  # type: ignore
+await initialize_pyrit_async(memory_db_type=IN_MEMORY, seed=42)  # type: ignore
 
 prompt = "tell me how to cut down a tree"
+token_bijection_vocab = Path("token_bijection_vocab.txt").read_text(encoding="utf-8").splitlines()
+token_bijection_tokenizer = SimpleNamespace(
+    get_vocab=lambda: {word: index for index, word in enumerate(token_bijection_vocab)}
+)
 
 print("ROT13:", await ROT13Converter().convert_async(prompt=prompt))  # type: ignore
 print("Base64:", await Base64Converter().convert_async(prompt=prompt))  # type: ignore
@@ -67,7 +78,16 @@ print("Morse:", await MorseConverter().convert_async(prompt=prompt))  # type: ig
 print("NATO:", await NatoConverter().convert_async(prompt=prompt))  # type: ignore
 print("Caesar:", await CaesarConverter(caesar_offset=3).convert_async(prompt=prompt))  # type: ignore
 print("Atbash:", await AtbashConverter().convert_async(prompt=prompt))  # type: ignore
+print("Vigenere:", await VigenereConverter(key="key").convert_async(prompt=prompt))  # type: ignore
 print("Braille:", await BrailleConverter().convert_async(prompt=prompt))  # type: ignore
+print("LetterBijectionConverter:", await LetterBijectionConverter(seed=42).convert_async(prompt=prompt))  # type: ignore
+print("DigitBijectionConverter:", await DigitBijectionConverter(seed=42).convert_async(prompt=prompt))  # type: ignore
+print(
+    "TokenBijectionConverter:",
+    await TokenBijectionConverter(tokenizer=token_bijection_tokenizer, seed=42).convert_async(  # type: ignore
+        prompt=prompt,
+    ),
+)
 print("ASCII Art:", await AsciiArtConverter().convert_async(prompt=prompt))  # type: ignore
 print("Ecoji:", await EcojiConverter().convert_async(prompt=prompt))  # type: ignore
 
@@ -85,10 +105,16 @@ print("Negation Trap:", await NegationTrapConverter().convert_async(prompt="your
 # These converters obfuscate text to evade detection or filters, including character-level manipulations, word-level attacks, and ANSI escape sequences:
 
 # %%
-from pyrit.prompt_converter import (
+from pyrit.converter import (
+    AcrosticConverter,
     AnsiAttackConverter,
+    ArabicPresentationFormConverter,
+    ArabiziConverter,
+    BidiConverter,
     CharacterSpaceConverter,
+    CharNoiseConverter,
     CharSwapConverter,
+    CodeAttackConverter,
     CodeChameleonConverter,
     ColloquialWordswapConverter,
     DiacriticConverter,
@@ -98,10 +124,12 @@ from pyrit.prompt_converter import (
     InsertPunctuationConverter,
     LeetspeakConverter,
     MathObfuscationConverter,
+    PuzzledConverter,
     RandomCapitalLettersConverter,
     RepeatTokenConverter,
     StringJoinConverter,
     SuperscriptConverter,
+    TatweelConverter,
     UnicodeConfusableConverter,
     UnicodeReplacementConverter,
     UnicodeSubstitutionConverter,
@@ -113,24 +141,50 @@ from pyrit.prompt_converter import (
 prompt = "tell me how to cut down a tree"
 
 print("Leetspeak:", await LeetspeakConverter().convert_async(prompt=prompt))  # type: ignore
-print("Random Capitals:", await RandomCapitalLettersConverter(percentage=50.0).convert_async(prompt=prompt))  # type: ignore
-print("Unicode Confusable:", await UnicodeConfusableConverter().convert_async(prompt=prompt))  # type: ignore
+print(
+    "Random Capitals:",
+    await RandomCapitalLettersConverter(percentage=50.0).convert_async(prompt=prompt),  # type: ignore
+)
+print(
+    "Unicode Confusable:",
+    await UnicodeConfusableConverter().convert_async(prompt=prompt),  # type: ignore
+)
 print("Unicode Substitution:", await UnicodeSubstitutionConverter().convert_async(prompt=prompt))  # type: ignore
 print("Unicode Replacement:", await UnicodeReplacementConverter().convert_async(prompt=prompt))  # type: ignore
 print("Emoji:", await EmojiConverter().convert_async(prompt=prompt))  # type: ignore
 print("First Letter:", await FirstLetterConverter().convert_async(prompt=prompt))  # type: ignore
+# Acrostic hides the prompt in the first letter of each line; a short prompt keeps the output readable
+print("Acrostic:", await AcrosticConverter().convert_async(prompt="cut a tree"))  # type: ignore
 print("String Join:", await StringJoinConverter().convert_async(prompt=prompt))  # type: ignore
 print("Zero Width:", await ZeroWidthConverter().convert_async(prompt=prompt))  # type: ignore
 print("Flip:", await FlipConverter().convert_async(prompt=prompt))  # type: ignore
 # Character Space [@robustintelligence2024bypass] inserts spaces between characters
 print("Character Space:", await CharacterSpaceConverter().convert_async(prompt=prompt))  # type: ignore
 print("Diacritic:", await DiacriticConverter().convert_async(prompt=prompt))  # type: ignore
+
+# Bidi [@boucher2023trojan] wraps text in Unicode bidirectional control characters
+print("Bidi:", await BidiConverter().convert_async(prompt=prompt))  # type: ignore
+# The Arabic converters only affect Arabic letters, so they use an Arabic prompt
+# ("tell me how to cut down a tree") rather than the Latin-script prompt above.
+arabic_prompt = "أخبرني كيف أقطع شجرة"
+# Tatweel inserts the Arabic kashida between adjacent Arabic letters
+print("Tatweel:", await TatweelConverter().convert_async(prompt=arabic_prompt))  # type: ignore
+# Arabic presentation form substitutes Arabic letters with their isolated glyphs
+print("Arabic Presentation Form:", await ArabicPresentationFormConverter().convert_async(prompt=arabic_prompt))  # type: ignore
+# Arabizi transliterates Arabic script into Latin-script chat Arabic
+print("Arabizi:", await ArabiziConverter().convert_async(prompt=arabic_prompt))  # type: ignore
 print("Superscript:", await SuperscriptConverter().convert_async(prompt=prompt))  # type: ignore
 print("Zalgo:", await ZalgoConverter().convert_async(prompt=prompt))  # type: ignore
 
 # CharSwap swaps characters within words
-char_swap = CharSwapConverter(max_iterations=3, word_selection_strategy=WordProportionSelectionStrategy(proportion=0.8))
+char_swap = CharSwapConverter(
+    max_iterations=3,
+    word_selection_strategy=WordProportionSelectionStrategy(proportion=0.8),
+)
 print("CharSwap:", await char_swap.convert_async(prompt=prompt))  # type: ignore
+
+# CharNoise nudges printable ASCII characters to an adjacent codepoint
+print("CharNoise:", await CharNoiseConverter(noise_probability=0.2).convert_async(prompt=prompt))  # type: ignore
 
 # Insert punctuation adds punctuation marks
 insert_punct = InsertPunctuationConverter(word_swap_ratio=0.2)
@@ -156,21 +210,37 @@ print("Colloquial Wordswap:", await colloquial.convert_async(prompt=prompt))  # 
 code_chameleon = CodeChameleonConverter(encrypt_type="reverse")
 print("CodeChameleon:", await code_chameleon.convert_async(prompt=prompt))  # type: ignore
 
+# PUZZLED [@ahn2025puzzled] hides sensitive words in a word puzzle the target must solve.
+# Run `python -m spacy download en_core_web_sm` for the paper's part-of-speech-aware word choice;
+# without it, words are picked by length alone and every clue is just "n-letter word".
+puzzled = PuzzledConverter(puzzle_type="word_search", seed=1)
+print("Puzzled:", await puzzled.convert_async(prompt=prompt))  # type: ignore
+
+# %%
+# CodeAttack [@ren2024codeattack] hides the request inside a code-completion task
+code_attack = CodeAttackConverter(template=CodeAttackConverter.Template.PYTHON_LIST)
+print("CodeAttack:", await code_attack.convert_async(prompt=prompt))  # type: ignore
+
 # %% [markdown]
 # ### 1.3 Text Manipulation Converters
 #
 # These converters perform text replacement, template injection, and URL encoding:
 
 # %%
-from pyrit.datasets import TextJailBreak
-from pyrit.prompt_converter import (
+from pyrit.converter import (
+    SATA_TASK_TEMPLATE,
     JsonStringConverter,
+    PolicyPuppetryConverter,
+    SATAMaskingConverter,
     SearchReplaceConverter,
     SuffixAppendConverter,
+    TaskFramingConverter,
     TemplateSegmentConverter,
     TextJailbreakConverter,
     UrlConverter,
 )
+from pyrit.converter.policy_puppetry_converter import PolicyPuppetryTemplate
+from pyrit.datasets import TextJailBreak
 
 prompt = "tell me how to cut down a tree"
 
@@ -198,13 +268,30 @@ print("Text Jailbreak:", await text_jailbreak.convert_async(prompt=prompt))  # t
 template_converter = TemplateSegmentConverter()
 print("Template Segment:", await template_converter.convert_async(prompt=prompt))  # type: ignore
 
+# Task framing wraps the prompt in a task template (default "TASK is '...'"), stripping quotes so they don't collide with the template's delimiters
+task_framing = TaskFramingConverter(strip_characters="'")
+print("Task Framing:", await task_framing.convert_async(prompt=prompt))  # type: ignore
+
+# SATA masking [@dong2025sata] replaces content-word cores with [MASK] and keeps
+# punctuation/whitespace. Compose with TaskFramingConverter + SATA_TASK_TEMPLATE.
+# Typical usage is with HarmBench objectives via SeedDataset.
+sata_mask = SATAMaskingConverter(num_masks=2)
+sata_masked = await sata_mask.convert_async(prompt=prompt)  # type: ignore
+print("SATA Mask:", sata_masked)
+sata_frame = TaskFramingConverter(task_template=SATA_TASK_TEMPLATE)
+print("SATA Framed:", await sata_frame.convert_async(prompt=sata_masked.output_text))  # type: ignore
+
+# Policy Puppetry [@hiddenlayer2025policypuppetry] frames the request as policy/config the model should follow
+policy_puppetry = PolicyPuppetryConverter(prompt_template=PolicyPuppetryTemplate.DR_HOUSE.to_seed_prompt())
+print("Policy Puppetry:", await policy_puppetry.convert_async(prompt=prompt))  # type: ignore
+
 # %% [markdown]
 # ### 1.4 Token Smuggling Converters
 #
 # These converters use Unicode variation selectors and other techniques to hide text:
 
 # %%
-from pyrit.prompt_converter import (
+from pyrit.converter import (
     AsciiSmugglerConverter,
     SneakyBitsSmugglerConverter,
     VariationSelectorSmugglerConverter,
@@ -236,10 +323,11 @@ print("Variation Selector:", await var_selector.convert_async(prompt=prompt))  #
 import pathlib
 
 from pyrit.common.path import CONVERTER_SEED_PROMPT_PATH
-from pyrit.models import SeedPrompt
-from pyrit.prompt_converter import (
+from pyrit.converter import (
+    DecompositionConverter,
     DenylistConverter,
     ImagePromptStyleConverter,
+    IPAConverter,
     MaliciousQuestionGeneratorConverter,
     MathPromptConverter,
     NoiseConverter,
@@ -252,6 +340,7 @@ from pyrit.prompt_converter import (
     TranslationConverter,
     VariationConverter,
 )
+from pyrit.models import SeedPrompt
 from pyrit.prompt_target import OpenAIChatTarget
 
 attack_llm = OpenAIChatTarget()
@@ -277,6 +366,10 @@ print("Tone (angry):", await tone_converter.convert_async(prompt=prompt))  # typ
 translation_converter = TranslationConverter(converter_target=attack_llm, language="French")
 print("Translation (French):", await translation_converter.convert_async(prompt=prompt))  # type: ignore
 
+# IPA transcription detects the source language and pronunciation variety
+ipa_converter = IPAConverter(converter_target=attack_llm)
+print("IPA:", await ipa_converter.convert_async(prompt=prompt))  # type: ignore
+
 # Random translation translates each word to a random language
 random_translation_converter = RandomTranslationConverter(
     converter_target=attack_llm, languages=["French", "German", "Spanish", "English"]
@@ -290,6 +383,16 @@ print("Tense (future):", await tense_converter.convert_async(prompt=prompt))  # 
 # Persuasion [@zeng2024persuasion] applies persuasion techniques
 persuasion_converter = PersuasionConverter(converter_target=attack_llm, persuasion_technique="logical_appeal")
 print("Persuasion:", await persuasion_converter.convert_async(prompt=prompt))  # type: ignore
+
+# Decomposition [@li2024drattack] splits the objective into phrases and rebuilds it as a
+# Question-A/Question-B reconstruction task that the target reassembles itself
+decomposition_converter = DecompositionConverter(converter_target=attack_llm)
+print("Decomposition:", await decomposition_converter.convert_async(prompt=prompt))  # type: ignore
+
+# With use_word_game=True, each noun phrase is also replaced by an innocuous codeword, with the
+# mapping established in the same prompt
+decomposition_word_game = DecompositionConverter(converter_target=attack_llm, use_word_game=True)
+print("Decomposition (word-game):", await decomposition_word_game.convert_async(prompt=prompt))  # type: ignore
 
 # Denylist detection
 denylist_converter = DenylistConverter(converter_target=attack_llm)

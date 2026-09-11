@@ -12,8 +12,7 @@ from pyrit.executor.workflow.xpia import (
     XPIAStatus,
     XPIAWorkflow,
 )
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import Message, MessagePiece, Score
+from pyrit.models import ComponentIdentifier, Message, MessagePiece, Score, ScoreStatus
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import PromptTarget
 from pyrit.score import Scorer
@@ -35,6 +34,13 @@ def _mock_target_id(name: str = "MockTarget") -> ComponentIdentifier:
         class_name=name,
         class_module="test_module",
     )
+
+
+def _mock_score(*, value: object, is_undetermined: bool = False) -> MagicMock:
+    """Create a Score mock with the model fields used during Pydantic validation."""
+    score = MagicMock(spec=Score, scored_expectation=None, is_undetermined=is_undetermined)
+    score.get_value.return_value = value
+    return score
 
 
 @pytest.fixture
@@ -198,8 +204,7 @@ class TestXPIAWorkflowPerform:
         mock_response.get_value.return_value = "Attack setup response"
         mock_prompt_normalizer.send_prompt_async.return_value = mock_response
 
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = 0.8
+        mock_score = _mock_score(value=0.8)
         mock_scorer.score_text_async.return_value = [mock_score]
 
         # Execute workflow
@@ -330,7 +335,6 @@ class TestXPIAWorkflowPerform:
         # Check that message was passed (converted from seed_group)
         assert "message" in call_args.kwargs
         assert call_args.kwargs["target"] == workflow._attack_setup_target
-        assert call_args.kwargs["labels"] == valid_context.memory_labels
         assert call_args.kwargs["conversation_id"] == valid_context.attack_setup_target_conversation_id
 
     @patch("pyrit.executor.workflow.xpia.CentralMemory")
@@ -541,8 +545,7 @@ class TestXPIAResult:
 
     def test_success_property_with_positive_score(self) -> None:
         """Test success property returns True for positive score."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = 0.8
+        mock_score = _mock_score(value=0.8)
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -550,8 +553,7 @@ class TestXPIAResult:
 
     def test_success_property_with_zero_score(self) -> None:
         """Test success property returns False for zero score."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = 0.0
+        mock_score = _mock_score(value=0.0)
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -559,8 +561,7 @@ class TestXPIAResult:
 
     def test_success_property_with_negative_score(self) -> None:
         """Test success property returns False for negative score."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = -0.5
+        mock_score = _mock_score(value=-0.5)
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -574,8 +575,7 @@ class TestXPIAResult:
 
     def test_success_property_with_non_numeric_score(self) -> None:
         """Test success property returns False for non-numeric score."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = "invalid"
+        mock_score = _mock_score(value="invalid")
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -583,8 +583,7 @@ class TestXPIAResult:
 
     def test_status_property_success(self) -> None:
         """Test status property returns SUCCESS for successful attack."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = 0.8
+        mock_score = _mock_score(value=0.8)
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -592,8 +591,7 @@ class TestXPIAResult:
 
     def test_status_property_failure(self) -> None:
         """Test status property returns FAILURE for failed attack."""
-        mock_score = MagicMock(spec=Score)
-        mock_score.get_value.return_value = 0.0
+        mock_score = _mock_score(value=0.0)
 
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=mock_score)
 
@@ -603,6 +601,23 @@ class TestXPIAResult:
         """Test status property returns UNKNOWN when no score is provided."""
         result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=None)
 
+        assert result.status == XPIAStatus.UNKNOWN
+
+    def test_status_property_unknown_for_undetermined_score(self) -> None:
+        score = Score(
+            score_value=None,
+            status=ScoreStatus.UNDETERMINED,
+            score_type="float_scale",
+            score_category=["test"],
+            score_value_description="No verdict",
+            score_rationale="The scorer could not reach a verdict.",
+            score_metadata={},
+            message_piece_id=str(uuid.uuid4()),
+            scorer_class_identifier=_mock_scorer_id(),
+        )
+        result = XPIAResult(processing_conversation_id="test-id", processing_response="test response", score=score)
+
+        assert result.success is False
         assert result.status == XPIAStatus.UNKNOWN
 
 

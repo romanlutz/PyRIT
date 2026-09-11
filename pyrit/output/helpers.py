@@ -11,9 +11,7 @@ deferred inside each ``*MemoryPrinter`` constructor, so importing this module (o
 
 import os
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import AttackResult, Message, Score
-from pyrit.models.scenario_result import ScenarioResult
+from pyrit.models import AttackResult, ComponentIdentifier, Message, ScenarioResult, Score
 from pyrit.output.attack_result.markdown import MarkdownAttackResultMemoryPrinter
 from pyrit.output.attack_result.pretty import PrettyAttackResultMemoryPrinter
 from pyrit.output.conversation.pretty import PrettyConversationMemoryPrinter
@@ -31,6 +29,7 @@ async def output_attack_async(
     include_auxiliary_scores: bool = False,
     include_pruned_conversations: bool = False,
     include_adversarial_conversation: bool = False,
+    include_reasoning_summaries: bool = False,
     blur_images: bool = False,
     blur_radius: int = 20,
     blurred_dir: str | os.PathLike[str] | None = None,
@@ -47,6 +46,7 @@ async def output_attack_async(
         include_pruned_conversations (bool): Whether to include pruned conversations. Defaults to False.
         include_adversarial_conversation (bool): Whether to include the adversarial conversation.
             Defaults to False.
+        include_reasoning_summaries (bool): Whether to include the reasoning summaries. Defaults to False.
         blur_images (bool): If True, apply a Gaussian blur to image outputs before
             rendering them. For "pretty" output, image bytes are blurred in-memory before
             display. For "markdown" output, a blurred file is written to disk and the
@@ -82,6 +82,7 @@ async def output_attack_async(
         include_auxiliary_scores=include_auxiliary_scores,
         include_pruned_conversations=include_pruned_conversations,
         include_adversarial_conversation=include_adversarial_conversation,
+        include_reasoning_summaries=include_reasoning_summaries,
     )
 
 
@@ -90,6 +91,7 @@ async def output_scenario_async(
     *,
     format: OutputFormat = "pretty",  # noqa: A002
     sink: Sink | None = None,
+    sort_groups_by_success_rate: bool = False,
 ) -> None:
     """
     Print a scenario result in the specified format to the specified destination.
@@ -98,6 +100,9 @@ async def output_scenario_async(
         result (ScenarioResult): The scenario result to print.
         format (OutputFormat): Output format — "pretty" or "markdown". Defaults to "pretty".
         sink (Sink | None): Output sink. Defaults to StdoutSink.
+        sort_groups_by_success_rate (bool): When True, the Per-Group Breakdown is sorted so
+            that the group with the highest success rate appears first. Defaults to False,
+            which preserves the original insertion order.
 
     Raises:
         ValueError: If ``format`` is not a supported value.
@@ -105,8 +110,35 @@ async def output_scenario_async(
     if format != "pretty":
         raise ValueError(f"Unsupported format for scenario results: {format!r}. Only 'pretty' is available.")
 
-    printer = PrettyScenarioResultMemoryPrinter(sink=sink or get_default_sink(StdoutSink))
+    printer = PrettyScenarioResultMemoryPrinter(
+        sink=sink or get_default_sink(StdoutSink),
+        sort_groups_by_success_rate=sort_groups_by_success_rate,
+    )
     await printer.write_async(result)
+
+
+async def output_scenario_attacks_async(
+    result: ScenarioResult,
+    *,
+    attack_result_ids: list[str] | None = None,
+    limit: int | None = None,
+    sink: Sink | None = None,
+) -> None:
+    """
+    Print a compact per-attack table for a scenario result.
+
+    Complements ``output_scenario_async`` (which prints the aggregate overview) by
+    listing individual attack results: id, technique, objective, outcome, and score.
+
+    Args:
+        result (ScenarioResult): The scenario result whose attacks to list.
+        attack_result_ids (list[str] | None): Restrict to these attack ids. Defaults to None.
+        limit (int | None): Maximum number of attacks to show. Defaults to None.
+        sink (Sink | None): Output sink. Defaults to StdoutSink.
+    """
+    resolved_sink = sink or get_default_sink(StdoutSink)
+    printer = PrettyScenarioResultMemoryPrinter(sink=resolved_sink)
+    await printer.write_async(result, view="attacks", attack_result_ids=attack_result_ids, limit=limit)
 
 
 async def output_scorer_async(
@@ -144,7 +176,7 @@ async def output_conversation_async(
     format: OutputFormat = "pretty",  # noqa: A002
     sink: Sink | None = None,
     include_scores: bool = False,
-    include_reasoning_trace: bool = False,
+    include_reasoning_summaries: bool = False,
     blur_images: bool = False,
     blur_radius: int = 20,
 ) -> None:
@@ -157,7 +189,7 @@ async def output_conversation_async(
         sink (Sink | None): Output sink. Defaults to StdoutSink for "pretty", IPythonMarkdownSink
             for "markdown".
         include_scores (bool): Whether to include scores. Defaults to False.
-        include_reasoning_trace (bool): Whether to include reasoning traces. Defaults to False.
+        include_reasoning_summaries (bool): Whether to include reasoning summaries. Defaults to False.
         blur_images (bool): If True, apply a Gaussian blur to image outputs before
             rendering them. For "pretty" output (the only format supported here),
             image bytes are blurred in-memory before display. The original image file
@@ -182,7 +214,7 @@ async def output_conversation_async(
     await printer.write_async(
         messages,
         include_scores=include_scores,
-        include_reasoning_trace=include_reasoning_trace,
+        include_reasoning_summaries=include_reasoning_summaries,
     )
 
 

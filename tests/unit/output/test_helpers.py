@@ -102,9 +102,34 @@ async def test_output_scenario_async_pretty(mock_cls):
     mock_printer.write_async.assert_called_once_with(result)
 
 
+@patch("pyrit.output.helpers.PrettyScenarioResultMemoryPrinter")
+async def test_output_scenario_async_forwards_sort_groups_by_success_rate(mock_cls):
+    mock_printer = MagicMock()
+    mock_printer.write_async = AsyncMock()
+    mock_cls.return_value = mock_printer
+    result = MagicMock()
+
+    await output_scenario_async(result, sort_groups_by_success_rate=True)
+
+    assert mock_cls.call_args.kwargs["sort_groups_by_success_rate"] is True
+    mock_printer.write_async.assert_called_once_with(result)
+
+
+@patch("pyrit.output.helpers.PrettyAttackResultMemoryPrinter")
+async def test_output_attack_async_forwards_reasoning_summaries(mock_cls):
+    mock_printer = MagicMock()
+    mock_printer.write_async = AsyncMock()
+    mock_cls.return_value = mock_printer
+    result = MagicMock()
+
+    await output_attack_async(result, include_reasoning_summaries=True)
+
+    assert mock_printer.write_async.call_args.kwargs["include_reasoning_summaries"] is True
+
+
 async def test_output_scenario_async_unsupported_format():
     with pytest.raises(ValueError, match="Unsupported format"):
-        await output_scenario_async(MagicMock(), format="markdown")
+        await output_scenario_async(AsyncMock(), format="markdown")
 
 
 # --- output_scorer_async tests ---
@@ -137,7 +162,7 @@ async def test_output_scorer_async_with_harm_category(mock_cls):
 
 async def test_output_scorer_async_unsupported_format():
     with pytest.raises(ValueError, match="Unsupported format"):
-        await output_scorer_async(scorer_identifier=MagicMock(), format="markdown")
+        await output_scorer_async(scorer_identifier=AsyncMock(), format="markdown")
 
 
 # --- output_conversation_async tests ---
@@ -167,12 +192,12 @@ async def test_output_conversation_async_with_scores(mock_cls):
 
     await output_conversation_async(messages, include_scores=True)
 
-    mock_printer.write_async.assert_called_once_with(messages, include_scores=True, include_reasoning_trace=False)
+    mock_printer.write_async.assert_called_once_with(messages, include_scores=True, include_reasoning_summaries=False)
 
 
 async def test_output_conversation_async_unsupported_format():
     with pytest.raises(ValueError, match="Unsupported format"):
-        await output_conversation_async([MagicMock()], format="markdown")
+        await output_conversation_async([AsyncMock()], format="markdown")
 
 
 # --- output_score_async tests ---
@@ -195,4 +220,4 @@ async def test_output_score_async_pretty_default(mock_cls):
 
 async def test_output_score_async_unsupported_format():
     with pytest.raises(ValueError, match="Unsupported format"):
-        await output_score_async([MagicMock()], format="markdown")
+        await output_score_async([AsyncMock()], format="markdown")

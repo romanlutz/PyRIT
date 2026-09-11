@@ -5,6 +5,7 @@
 FastAPI application entry point for PyRIT backend.
 """
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -14,14 +15,20 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from starlette.types import Scope
 
 import pyrit
 from pyrit.backend.middleware import RequestIdMiddleware, SecurityHeadersMiddleware, register_error_handlers
 from pyrit.backend.middleware.auth import EntraAuthMiddleware
+from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.routes import (
     attacks,
     auth,
+    configuration,
     converters,
+    datasets,
     health,
     initializers,
     labels,
@@ -30,6 +37,10 @@ from pyrit.backend.routes import (
     targets,
     version,
 )
+from pyrit.backend.services.configuration_file_service import ConfigurationFileService
+from pyrit.backend.services.environment_file_service import EnvironmentFileService
+from pyrit.common.path import CONFIGURATION_DIRECTORY_PATH
+from pyrit.registry import InitializerRegistry
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 # Check for development mode from environment variable
@@ -44,15 +55,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Initialize PyRIT on startup using the config file, then yield.
 
     Config resolution order:
-    1. ``PYRIT_CONFIG_FILE`` env var (if set)
-    2. ``~/.pyrit/.pyrit_conf`` (if it exists)
-    3. Built-in defaults (SQLite, no initializers)
+    1. Built-in defaults
+    2. ``~/.pyrit/.pyrit_conf`` when present
+    3. ``PYRIT_CONFIG_FILE`` local path or Azure Blob URI when set
     """
-    config_file_env = os.getenv("PYRIT_CONFIG_FILE")
-    config_file = Path(config_file_env) if config_file_env else None
+    configuration_file_service = ConfigurationFileService(config_file_value=os.getenv("PYRIT_CONFIG_FILE"))
+    app.state.configuration_file_service = configuration_file_service
+    async with configuration_file_service.resolve_async() as config_file:
+        config = ConfigurationLoader.load_with_overrides(config_file=config_file)
+    resolved_env_files = config.resolve_env_files()
+    read_only_file_sources = {}
+    if os.getenv("PYRIT_ENV_CONTENTS"):
+        read_only_file_sources[CONFIGURATION_DIRECTORY_PATH / ".env"] = (
+            "This file is materialized from the Container App secret and cannot be persisted here. "
+            "Update the deployment secret instead."
+        )
+    app.state.environment_file_service = EnvironmentFileService(
+        resolved_env_files=list(resolved_env_files) if resolved_env_files is not None else None,
+        env_akv_ref=config.resolve_env_akv_ref(),
+        env_akv_strict=config.env_akv_strict,
+        read_only_file_sources=read_only_file_sources,
+    )
+    initializer_registry = InitializerRegistry.get_registry_singleton()
+    initializer_registry.configure_custom_scripts_source(config.custom_initializers_source)
+    if config.allow_custom_initializers:
+        await asyncio.to_thread(initializer_registry.register_stored_initializers)
+    await config.initialize_pyrit_async(raise_on_initializer_error=False)
 
-    config = ConfigurationLoader.load_with_overrides(config_file=config_file)
-    await config.initialize_pyrit_async()
+    app.state.configured_initializers = [
+        ConfiguredInitializerSetting(
+            initializer_name=initializer.name,
+            parameters=initializer.args,
+            order_index=order_index,
+        )
+        for order_index, initializer in enumerate(config.initializer_configs)
+    ]
 
     # Expose config values to route handlers via app.state
     default_labels: dict[str, str] = {}
@@ -95,8 +132,8 @@ app.add_middleware(SecurityHeadersMiddleware, dev_mode=DEV_MODE)
 # Attach X-Request-ID to every request/response for log correlation
 app.add_middleware(RequestIdMiddleware)
 
-# Entra ID JWT validation (PKCE — no client secrets needed)
-# Disabled automatically if ENTRA_TENANT_ID / ENTRA_CLIENT_ID are not set
+# Microsoft Graph-backed authentication (PKCE — no client secrets needed)
+# Disabled if tenant/client configuration is absent; enabled deployments require allowed groups.
 app.add_middleware(EntraAuthMiddleware)
 
 
@@ -115,8 +152,10 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(attacks.router, prefix="/api", tags=["attacks"])
+app.include_router(configuration.router, prefix="/api", tags=["config"])
 app.include_router(targets.router, prefix="/api", tags=["targets"])
 app.include_router(converters.router, prefix="/api", tags=["converters"])
+app.include_router(datasets.router, prefix="/api", tags=["datasets"])
 app.include_router(scenarios.router, prefix="/api", tags=["scenarios"])
 app.include_router(initializers.router, prefix="/api", tags=["initializers"])
 app.include_router(labels.router, prefix="/api", tags=["labels"])
@@ -124,6 +163,22 @@ app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(media.router, prefix="/api", tags=["media"])
 app.include_router(version.router, tags=["version"])
+
+
+class SPAStaticFiles(StaticFiles):
+    """Serve index.html for unmatched non-API paths so client-side routes survive a refresh."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:  # pyrit-async-suffix-exempt
+        """Return the static file for ``path``, falling back to index.html for unmatched non-API paths."""
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # ``path`` arrives OS-normalized (backslashes on Windows), so compare
+            # against a forward-slash form to reliably detect the /api namespace.
+            normalized = path.replace(os.sep, "/")
+            if exc.status_code == 404 and not (normalized == "api" or normalized.startswith("api/")):
+                return await super().get_response("index.html", scope)
+            raise
 
 
 def setup_frontend() -> None:
@@ -136,12 +191,12 @@ def setup_frontend() -> None:
     elif frontend_path.exists():
         # Production mode: serve bundled frontend
         print(f"✅ Serving frontend from {frontend_path}")
-        app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")
+        app.mount("/", SPAStaticFiles(directory=str(frontend_path), html=True), name="frontend")
     else:
         # Production mode but no frontend found - warn but don't exit
         # This allows API-only usage
         print("⚠️ WARNING: Frontend not found!")
         print(f"   Expected location: {frontend_path}")
         print("   The frontend must be built and included in the package.")
-        print("   Run: python build_scripts/prepare_package.py")
+        print("   Run: python -m build_scripts.prepare_package")
         print("   API endpoints will still work but the UI won't be available.")
