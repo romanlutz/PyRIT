@@ -165,7 +165,7 @@ Guidance, methodology, threat models, and learning resources for AI red teaming 
 
 **PyRIT: Democratizing AI red teaming through open-source tooling**
 
-Roman Lutz, 2026
+Rich Lundeen and Roman Lutz, 2026
 ::::
 
 ::::{card}
@@ -178,7 +178,7 @@ Roman Lutz, 2026
 
 **PyRIT: Democratizing AI Red Teaming Through Open-Source Tooling**
 
-Lutz et al., 2026
+Lutz, Kim, et al., 2026
 ::::
 
 ::::{card}
