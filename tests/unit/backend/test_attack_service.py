@@ -11,6 +11,7 @@ import base64
 import json
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2424,6 +2425,45 @@ class TestPersistBase64Pieces:
         assert request.pieces[0].original_value == ("https://myblob.blob.core.windows.net/images/photo.png?sv=2024")
         assert request.pieces[0].converted_value == request.pieces[0].original_value
 
+    async def test_media_reference_is_resolved_without_persistence(self, attack_service) -> None:
+        """Local media URLs are converted back to their decoded file paths."""
+        request = AddMessageRequest(
+            role="user",
+            pieces=[
+                MessagePieceRequest(
+                    data_type="image_path",
+                    original_value="/api/media?path=%2Ftmp%2Fimage.png",
+                ),
+            ],
+            send=False,
+            target_conversation_id="test-id",
+        )
+
+        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as factory:
+            await AttackService._persist_base64_pieces_async(request)
+
+        assert request.pieces[0].original_value == "/tmp/image.png"
+        assert request.pieces[0].converted_value == "/tmp/image.png"
+        factory.assert_not_called()
+
+    async def test_existing_file_is_kept_without_persistence(self, attack_service, tmp_path: Path) -> None:
+        """An existing path remains the canonical original and converted value."""
+        media_path = tmp_path / "image.png"
+        media_path.write_bytes(b"image")
+        request = AddMessageRequest(
+            role="user",
+            pieces=[MessagePieceRequest(data_type="image_path", original_value=str(media_path))],
+            send=False,
+            target_conversation_id="test-id",
+        )
+
+        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as factory:
+            await AttackService._persist_base64_pieces_async(request)
+
+        assert request.pieces[0].original_value == str(media_path)
+        assert request.pieces[0].converted_value == str(media_path)
+        factory.assert_not_called()
+
     async def test_non_path_data_types_are_skipped(self, attack_service) -> None:
         """Non *_path types like reasoning, url, function_call should not be decoded."""
         request = AddMessageRequest(
@@ -2466,6 +2506,35 @@ class TestPersistBase64Pieces:
             mock_factory.assert_called_once()
             mock_serializer.save_b64_image_async.assert_called_once_with(data=long_b64)
             assert request.pieces[0].original_value == "/tmp/saved_audio.wav"
+
+    async def test_persistence_failure_does_not_partially_mutate_piece(self, attack_service) -> None:
+        """A failed save leaves both request values unchanged."""
+        request = AddMessageRequest(
+            role="user",
+            pieces=[
+                MessagePieceRequest(
+                    data_type="image_path",
+                    original_value="aW1hZ2VkYXRh",
+                    mime_type="image/png",
+                ),
+            ],
+            send=False,
+            target_conversation_id="test-id",
+        )
+        mock_serializer = MagicMock()
+        mock_serializer.save_b64_image_async = AsyncMock(side_effect=OSError("save failed"))
+
+        with (
+            patch(
+                "pyrit.backend.services.attack_service.data_serializer_factory",
+                return_value=mock_serializer,
+            ),
+            pytest.raises(OSError, match="save failed"),
+        ):
+            await AttackService._persist_base64_pieces_async(request)
+
+        assert request.pieces[0].original_value == "aW1hZ2VkYXRh"
+        assert request.pieces[0].converted_value is None
 
 
 # ============================================================================

@@ -17,14 +17,11 @@ ARCHITECTURE:
 
 import asyncio
 import logging
-import mimetypes
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Literal, cast
-from urllib.parse import parse_qs, urlparse
 
 from pyrit.backend.mappers import (
     attack_result_to_summary_async,
@@ -33,7 +30,6 @@ from pyrit.backend.mappers import (
     request_piece_to_pyrit_message_piece,
     request_to_pyrit_message,
 )
-from pyrit.backend.models import DEFAULT_MEDIA_EXTENSIONS
 from pyrit.backend.models.attacks import (
     AddMessageRequest,
     AddMessageResponse,
@@ -55,6 +51,7 @@ from pyrit.backend.models.attacks import (
 )
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.services.converter_service import get_converter_service
+from pyrit.backend.services.media_persistence import persist_media_value_async
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
     encode_keyset_cursor,
@@ -1076,61 +1073,16 @@ class AttackService:
             if not piece.data_type.endswith("_path"):
                 continue
 
-            # Already a remote URL (e.g. signed blob URL from a remix) — keep as-is
-            if piece.original_value.startswith(("http://", "https://")):
-                if piece.converted_value is None:
-                    piece.converted_value = piece.original_value
-                continue
-
-            # Already a local media URL (e.g. /api/media?path=...) — extract the file path
-            if piece.original_value.startswith("/api/media"):
-                parsed = urlparse(piece.original_value)
-                file_path = parse_qs(parsed.query).get("path", [None])[0]
-                if file_path:
-                    piece.original_value = file_path
-                    if piece.converted_value is None:
-                        piece.converted_value = file_path
-                continue
-
-            # Already an existing file on disk — keep as-is.
-            try:
-                if Path(piece.original_value).is_file():
-                    if piece.converted_value is None:
-                        piece.converted_value = piece.original_value
-                    continue
-            except (OSError, ValueError):
-                pass
-
-            # Strip data URI prefix if present (e.g. "data:image/png;base64,...")
-            # The backend itself returns data URIs from pyrit_messages_to_dto_async,
-            # so the client may echo them back.
-            value = piece.original_value
-            data_uri_mime_type = None
-            if value.startswith("data:"):
-                # Format: data:<mime>;base64,<payload>
-                header, _, payload = value.partition(",")
-                data_uri_mime_type = header.split(":", 1)[1].split(";", 1)[0] if ":" in header else None
-                value = payload
-
-            # Derive file extension from MIME metadata, then fall back to data_type.
-            ext = None
-            if piece.mime_type:
-                ext = mimetypes.guess_extension(piece.mime_type, strict=False)
-            if not ext and data_uri_mime_type:
-                ext = mimetypes.guess_extension(data_uri_mime_type, strict=False)
-            if not ext:
-                ext = DEFAULT_MEDIA_EXTENSIONS.get(piece.data_type, ".bin")
-
-            serializer = data_serializer_factory(
-                category="prompt-memory-entries",
+            result = await persist_media_value_async(
+                value=piece.original_value,
                 data_type=cast("PromptDataType", piece.data_type),
-                extension=ext,
+                mime_type=piece.mime_type,
+                serializer_factory=data_serializer_factory,
             )
-            await serializer.save_b64_image_async(data=value)
-            file_path = serializer.value
-            piece.original_value = file_path
-            if piece.converted_value is None:
-                piece.converted_value = file_path
+            if result.resolved:
+                piece.original_value = result.value
+                if piece.converted_value is None:
+                    piece.converted_value = result.value
 
     async def _store_prepended_messages_async(
         self,
