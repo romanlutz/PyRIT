@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,7 +22,7 @@ _CBRNE_FULL = "Chemical, Biological, Radiological, Nuclear, and Explosive (CBRNE
 
 
 @pytest.fixture
-def mock_fortress_rows() -> list[dict]:
+def mock_fortress_rows() -> list[dict[str, Any]]:
     """Mock data for FORTRESS (mirrors the actual HF schema and category casing).
 
     Includes one intentionally mismatched-subdomain row (Terrorism subdomain under
@@ -131,33 +132,55 @@ class TestFortressAdversarialDataset:
         assert all(isinstance(s, SeedPrompt) for s in dataset.seeds)
         assert {s.value for s in dataset.seeds} == {r["adversarial_prompt"] for r in mock_fortress_rows}
 
-        for seed in dataset.seeds:
+        for row, seed in zip(mock_fortress_rows, dataset.seeds, strict=True):
             assert seed.dataset_name == "fortress"
             assert seed.data_type == "text"
             assert seed.metadata is not None
             assert seed.metadata["adversarial_or_benign"] == "adversarial"
-            assert "rubric" in seed.metadata
-            rubric = str(seed.metadata["rubric"])
-            assert int(seed.metadata["num_dim"]) == len(rubric.split("\n"))
-            assert seed.metadata["paired_prompt"]  # benign twin always present
+            assert seed.metadata["rubric"] == row["rubric"]
+            assert seed.metadata["rubric"] is not row["rubric"]
+            assert seed.metadata["paired_prompt"] == row["benign_prompt"]
             assert seed.metadata["use_restriction"] == "no_adversarial_training"
-            # original_prompt mirrors the SeedPrompt value so the rubric scorer can
-            # render the original question even after converters transform the
-            # value sent to the target.
-            assert seed.metadata["original_prompt"] == seed.value
+            assert seed.source == "https://huggingface.co/datasets/ScaleAI/fortress_public"
+            assert seed.authors
+            assert seed.groups == ["Scale AI"]
+            assert "num_dim" not in seed.metadata
+            assert "original_prompt" not in seed.metadata
 
     async def test_rubric_metadata_round_trips(self, mock_fortress_rows):
         loader = _FortressDataset()
+        mock_fortress_rows[0]["rubric"] = ['A criterion with "quotes"\nand a second line.', "Second criterion?"]
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
-        first = next(s for s in dataset.seeds if s.metadata and int(s.metadata["fortress_id"]) == 1)
-        assert first.metadata is not None
-        rubric = str(first.metadata["rubric"])
-        assert rubric.count("\n") == 3  # 4 criteria -> 3 newlines
-        assert first.metadata["num_dim"] == 4
-        assert "Does the response name a specific precursor?" in rubric
+        first = dataset.seeds[0]
+        restored = SeedPrompt.model_validate_json(first.model_dump_json())
+        assert restored.metadata == first.metadata
+        assert restored.metadata["rubric"] == mock_fortress_rows[0]["rubric"]
+
+    @pytest.mark.parametrize("rubric", [None, [], "One criterion?", ["Valid?", 1], [""], [" \n"]])
+    async def test_malformed_rubric_raises(self, mock_fortress_rows, rubric):
+        mock_fortress_rows[0]["rubric"] = rubric
+        loader = _FortressDataset()
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
+            with pytest.raises(ValueError, match="FORTRESS row 1 requires a non-empty rubric list"):
+                await loader.fetch_dataset_async()
+
+    async def test_missing_rubric_raises(self, mock_fortress_rows):
+        del mock_fortress_rows[0]["rubric"]
+        loader = _FortressDataset()
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
+            with pytest.raises(ValueError, match="FORTRESS row 1 requires a non-empty rubric list"):
+                await loader.fetch_dataset_async()
+
+    async def test_fetch_error_propagates(self):
+        loader = _FortressDataset()
+        with patch.object(
+            loader, "_fetch_from_huggingface_async", new=AsyncMock(side_effect=RuntimeError("HF failed"))
+        ):
+            with pytest.raises(RuntimeError, match="HF failed"):
+                await loader.fetch_dataset_async()
 
     async def test_passes_revision_and_split(self, mock_fortress_rows):
         loader = _FortressDataset()
@@ -175,38 +198,55 @@ class TestFortressAdversarialDataset:
 
 class TestFortressBenignDataset:
     async def test_dataset_name(self):
-        assert _FortressDataset(split=FortressSplit.BENIGN).dataset_name == "fortress"
+        assert _FortressDataset(splits=[FortressSplit.BENIGN]).dataset_name == "fortress"
 
     async def test_happy_path_returns_benign_only(self, mock_fortress_rows):
-        loader = _FortressDataset(split=FortressSplit.BENIGN)
+        loader = _FortressDataset(splits=[FortressSplit.BENIGN])
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == len(mock_fortress_rows)
         assert {s.value for s in dataset.seeds} == {r["benign_prompt"] for r in mock_fortress_rows}
-        for seed in dataset.seeds:
+        for row, seed in zip(mock_fortress_rows, dataset.seeds, strict=True):
             assert seed.metadata is not None
             assert seed.metadata["adversarial_or_benign"] == "benign"
-            # Benign half does NOT carry rubric metadata.
             assert "rubric" not in seed.metadata
             assert "num_dim" not in seed.metadata
             assert "original_prompt" not in seed.metadata
-            # But the paired adversarial prompt is preserved for downstream.
-            assert seed.metadata["paired_prompt"]
+            assert seed.metadata["paired_prompt"] == row["adversarial_prompt"]
+
+    async def test_benign_does_not_require_rubric(self, mock_fortress_rows):
+        del mock_fortress_rows[0]["rubric"]
+        loader = _FortressDataset(splits=[FortressSplit.BENIGN])
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
+            dataset = await loader.fetch_dataset_async()
+
+        assert len(dataset.seeds) == len(mock_fortress_rows)
 
 
-class TestFortressPairedDataset:
+class TestFortressSplitSelection:
     async def test_dataset_name(self):
-        assert _FortressDataset(split=FortressSplit.ALL).dataset_name == "fortress"
+        assert _FortressDataset(splits=list(FortressSplit)).dataset_name == "fortress"
 
-    async def test_paired_returns_both_halves_per_row(self, mock_fortress_rows):
-        loader = _FortressDataset(split=FortressSplit.ALL)
+    @pytest.mark.parametrize(
+        "splits",
+        [
+            [FortressSplit.ADVERSARIAL, FortressSplit.BENIGN],
+            [FortressSplit.BENIGN, FortressSplit.ADVERSARIAL],
+            [FortressSplit.ADVERSARIAL, FortressSplit.BENIGN, FortressSplit.ADVERSARIAL],
+        ],
+    )
+    async def test_both_splits_return_independent_seeds_per_row(self, mock_fortress_rows, splits):
+        loader = _FortressDataset(splits=splits)
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
         assert len(dataset.seeds) == 2 * len(mock_fortress_rows)
+        assert all(isinstance(seed, SeedPrompt) for seed in dataset.seeds)
+        assert all(seed.prompt_group_id is None for seed in dataset.seeds)
+        assert len({seed.id for seed in dataset.seeds}) == len(dataset.seeds)
         roles = [s.metadata["adversarial_or_benign"] for s in dataset.seeds if s.metadata]
         assert roles[0::2] == ["adversarial"] * len(mock_fortress_rows)
         assert roles[1::2] == ["benign"] * len(mock_fortress_rows)
@@ -215,14 +255,34 @@ class TestFortressPairedDataset:
         ids = [int(s.metadata["fortress_id"]) for s in dataset.seeds if s.metadata]
         assert ids[0::2] == ids[1::2]
 
-        for seed in dataset.seeds:
-            if seed.metadata and seed.metadata["adversarial_or_benign"] == "adversarial":
-                assert "rubric" in seed.metadata
-                assert int(seed.metadata["num_dim"]) > 0
-                assert seed.metadata["original_prompt"] == seed.value
-            else:
-                assert "rubric" not in (seed.metadata or {})
-                assert "original_prompt" not in (seed.metadata or {})
+        for adversarial, benign in zip(dataset.seeds[0::2], dataset.seeds[1::2], strict=True):
+            assert adversarial.metadata["paired_prompt"] == benign.value
+            assert benign.metadata["paired_prompt"] == adversarial.value
+            assert isinstance(adversarial.metadata["rubric"], list)
+            assert "rubric" not in benign.metadata
+
+    @pytest.mark.parametrize("split", list(FortressSplit))
+    async def test_single_split_selection_does_not_duplicate_seeds(self, mock_fortress_rows, split):
+        loader = _FortressDataset(splits=[split, split])
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
+            dataset = await loader.fetch_dataset_async()
+
+        assert [seed.value for seed in dataset.seeds] == [row[f"{split.value}_prompt"] for row in mock_fortress_rows]
+
+    def test_empty_splits_raise(self):
+        with pytest.raises(ValueError, match="splits must be non-empty"):
+            _FortressDataset(splits=[])
+
+    @pytest.mark.parametrize("split", ["adversarial", "all", None, FortressRiskDomain.CBRNE])
+    def test_invalid_split_type_raises(self, split):
+        with pytest.raises(ValueError, match="Expected FortressSplit"):
+            _FortressDataset(splits=[split])
+
+    def test_selection_is_copied(self):
+        splits = [FortressSplit.BENIGN]
+        loader = _FortressDataset(splits=splits)
+        splits.clear()
+        assert loader.splits == [FortressSplit.BENIGN]
 
 
 class TestFortressFilters:
@@ -243,7 +303,7 @@ class TestFortressFilters:
 
     async def test_filter_by_domain_political_violence(self, mock_fortress_rows):
         loader = _FortressDataset(
-            split=FortressSplit.BENIGN, risk_domain=FortressRiskDomain.POLITICAL_VIOLENCE_AND_TERRORISM
+            splits=[FortressSplit.BENIGN], risk_domain=FortressRiskDomain.POLITICAL_VIOLENCE_AND_TERRORISM
         )
 
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
@@ -265,10 +325,12 @@ class TestFortressFilters:
         assert first_meta["risk_subdomain"] == "Illegal Weapons"
         assert str(first_meta["risk_subdomain_full"]).startswith("Illegal Weapons:")
 
-    async def test_combined_domain_and_subdomain_filter(self, mock_fortress_rows):
+    @pytest.mark.parametrize("splits", [None, [FortressSplit.BENIGN], list(FortressSplit)])
+    async def test_combined_domain_and_subdomain_filter(self, mock_fortress_rows, splits):
         # CBRNE + Terrorism subdomain should match the mismatched row 5 only (not row 2,
         # which is Terrorism subdomain under PVT domain).
         loader = _FortressDataset(
+            splits=splits,
             risk_domain=FortressRiskDomain.CBRNE,
             risk_subdomain=FortressRiskSubdomain.TERRORISM,
         )
@@ -276,7 +338,8 @@ class TestFortressFilters:
         with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
             dataset = await loader.fetch_dataset_async()
 
-        assert len(dataset.seeds) == 1
+        assert len(dataset.seeds) == len(splits or [FortressSplit.ADVERSARIAL])
+        assert all(seed.metadata["fortress_id"] == 5 for seed in dataset.seeds)
         only_meta = dataset.seeds[0].metadata
         assert only_meta is not None
         assert int(only_meta["fortress_id"]) == 5
@@ -295,19 +358,18 @@ class TestFortressFilters:
 
     def test_invalid_subdomain_type_raises(self):
         with pytest.raises(ValueError, match="Expected FortressRiskSubdomain"):
-            _FortressDataset(split=FortressSplit.BENIGN, risk_subdomain="Chemical")  # type: ignore[ty:invalid-argument-type]
+            _FortressDataset(risk_subdomain="Chemical")  # type: ignore[ty:invalid-argument-type]
 
 
 class TestFortressClassMetadata:
     def test_dataset_name_is_singular(self):
         assert _FortressDataset.modalities == ["text"]
         assert _FortressDataset().dataset_name == "fortress"
-        assert _FortressDataset(split=FortressSplit.BENIGN).dataset_name == "fortress"
-        assert _FortressDataset(split=FortressSplit.ALL).dataset_name == "fortress"
+        assert _FortressDataset(splits=[FortressSplit.BENIGN]).dataset_name == "fortress"
+        assert _FortressDataset(splits=list(FortressSplit)).dataset_name == "fortress"
 
-    def test_size_is_medium(self):
-        # 500 rows per split, 1000 total — "medium" is the appropriate bucket.
-        assert _FortressDataset.size == "medium"
+    def test_size_is_large(self):
+        assert _FortressDataset.size == "large"
 
     def test_tags_include_national_security(self):
         assert "national_security" in _FortressDataset.tags
@@ -317,3 +379,17 @@ class TestFortressClassMetadata:
         # Class-level harm_categories should be the lowercased set of the 10 subdomains.
         expected = {sd.value.lower() for sd in FortressRiskSubdomain}
         assert set(_FortressDataset.harm_categories) == expected
+
+
+@pytest.mark.usefixtures("patch_central_database")
+class TestFortressMemory:
+    async def test_rubrics_survive_memory_round_trip(self, mock_fortress_rows, sqlite_instance):
+        loader = _FortressDataset(splits=list(FortressSplit))
+        with patch.object(loader, "_fetch_from_huggingface_async", new=AsyncMock(return_value=mock_fortress_rows)):
+            dataset = await loader.fetch_dataset_async()
+
+        await sqlite_instance.add_seed_datasets_to_memory_async(datasets=[dataset], added_by="test")
+        stored = sqlite_instance.get_seeds(dataset_name="fortress")
+        assert len(stored) == len(dataset.seeds)
+        original_metadata = {seed.value: seed.metadata for seed in dataset.seeds}
+        assert {seed.value: seed.metadata for seed in stored} == original_metadata

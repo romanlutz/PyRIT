@@ -5,6 +5,8 @@ import logging
 from enum import Enum
 from typing import Any
 
+from typing_extensions import override
+
 from pyrit.datasets.seed_datasets.remote.remote_dataset_loader import (
     _RemoteDatasetLoader,
 )
@@ -23,19 +25,17 @@ _CBRNE_FULL: str = "Chemical, Biological, Radiological, Nuclear, and Explosive (
 
 class FortressSplit(Enum):
     """
-    Which half of the FORTRESS dataset to load.
+    Prompt types in the FORTRESS dataset.
 
     Every upstream row carries both an adversarial prompt and a benign rephrasing
-    on the same topic. This enum selects which half(s) the loader emits.
+    on the same topic. Pass either or both values to the loader's ``splits`` argument.
 
     - ``ADVERSARIAL``: the 500 expert-crafted adversarial prompts (default).
     - ``BENIGN``: the 500 benign rephrasings, for over-refusal measurement.
-    - ``ALL``: both halves, 1000 seeds total (adversarial then benign per row).
     """
 
     ADVERSARIAL = "adversarial"
     BENIGN = "benign"
-    ALL = "all"
 
 
 class FortressRiskDomain(Enum):
@@ -102,8 +102,11 @@ class _FortressDataset(_RemoteDatasetLoader):
     rephrasing on the same topic and an instance-specific 4-7 binary-question rubric.
     Designed for the paired (ARS, ORS) safety-vs-utility evaluation in the paper.
 
-    ``split`` selects which half(s) to emit (default ``FortressSplit.ADVERSARIAL``;
-    pass ``FortressSplit.ALL`` for both halves, 1000 seeds total).
+    ``splits`` selects the prompt types to emit, defaulting to adversarial only.
+    Selecting both types returns 1000 independent seeds, adversarial then benign
+    per row, linked by ``fortress_id`` and ``paired_prompt`` metadata.
+    Adversarial seeds preserve the source rubric as a list of criterion strings.
+    This loader does not implement scoring or the benchmark's aggregate metrics.
 
     Use restriction: This dataset should be used for safety evaluations only, and
     it is prohibited to use these data for any adversarial training or research.
@@ -122,7 +125,7 @@ class _FortressDataset(_RemoteDatasetLoader):
     HF_REVISION: str = HF_REVISION
 
     modalities: list[str] = ["text"]
-    size: str = "medium"
+    size: str = "large"
     tags: set[str] = {"safety", "jailbreak", "refusal", "calibration", "national_security"}
     harm_categories: list[str] = [
         "biological",
@@ -141,14 +144,14 @@ class _FortressDataset(_RemoteDatasetLoader):
         "FORTRESS: 500 expert-crafted national-security adversarial prompts (CBRNE, "
         "Political Violence & Terrorism, Criminal & Financial Illicit Activities), each "
         "paired with a benign rephrasing on the same topic. Adversarial seeds carry a "
-        "per-row 4-7-question binary rubric in metadata for use with FortressRubricScorer; "
-        "both halves carry the partner prompt for (ARS, ORS) trade-off analysis."
+        "per-row 4-7-question binary rubric as a list in metadata; "
+        "both halves carry the source row ID and partner prompt."
     )
 
     def __init__(
         self,
         *,
-        split: FortressSplit = FortressSplit.ADVERSARIAL,
+        splits: list[FortressSplit] | None = None,
         risk_domain: FortressRiskDomain | None = None,
         risk_subdomain: FortressRiskSubdomain | None = None,
     ) -> None:
@@ -156,7 +159,9 @@ class _FortressDataset(_RemoteDatasetLoader):
         Initialize the Fortress dataset loader.
 
         Args:
-            split (FortressSplit): Which half(s) to load. Defaults to ``ADVERSARIAL``.
+            splits (list[FortressSplit] | None): Prompt types to load. None selects only
+                ``ADVERSARIAL``. Select both ``ADVERSARIAL`` and ``BENIGN`` for all 1000
+                prompts. Duplicate selections do not duplicate seeds.
             risk_domain (FortressRiskDomain | None): If set, only return rows whose
                 ``risk_domain`` field matches this domain. Defaults to None (all domains).
             risk_subdomain (FortressRiskSubdomain | None): If set, only return rows whose
@@ -164,15 +169,18 @@ class _FortressDataset(_RemoteDatasetLoader):
                 Defaults to None (all subdomains).
 
         Raises:
-            ValueError: If ``split`` / ``risk_domain`` / ``risk_subdomain`` is not the expected enum type.
+            ValueError: If ``splits`` is empty or a filter has the wrong enum type.
         """
-        self._validate_enum(value=split, enum_cls=FortressSplit, label="split")
+        selected_splits = [FortressSplit.ADVERSARIAL] if splits is None else list(splits)
+        if not selected_splits:
+            raise ValueError("splits must be non-empty. Select ADVERSARIAL, BENIGN, or both.")
+        self._validate_enums(values=selected_splits, enum_cls=FortressSplit, label="splits")
         if risk_domain is not None:
             self._validate_enum(value=risk_domain, enum_cls=FortressRiskDomain, label="risk_domain")
         if risk_subdomain is not None:
             self._validate_enum(value=risk_subdomain, enum_cls=FortressRiskSubdomain, label="risk_subdomain")
 
-        self.split = split
+        self.splits = selected_splits
         self.risk_domain = risk_domain
         self.risk_subdomain = risk_subdomain
 
@@ -239,45 +247,46 @@ class _FortressDataset(_RemoteDatasetLoader):
         self,
         *,
         row: dict[str, Any],
-        adversarial_or_benign: str,
+        split: FortressSplit,
     ) -> SeedPrompt:
         """
         Build a single SeedPrompt for either the adversarial or benign half of a row.
 
         Args:
             row (dict[str, Any]): A raw Fortress HF row.
-            adversarial_or_benign (str): ``"adversarial"`` or ``"benign"``.
+            split (FortressSplit): Whether to emit the adversarial or benign prompt.
 
         Returns:
             SeedPrompt: The constructed seed prompt.
 
         Raises:
-            ValueError: If ``adversarial_or_benign`` is not one of the two valid values.
+            ValueError: If an adversarial row has a missing or malformed rubric.
         """
-        if adversarial_or_benign not in ("adversarial", "benign"):
-            raise ValueError(f"adversarial_or_benign must be 'adversarial' or 'benign'; got {adversarial_or_benign!r}.")
-
-        is_adversarial = adversarial_or_benign == "adversarial"
+        is_adversarial = split == FortressSplit.ADVERSARIAL
         value = row["adversarial_prompt"] if is_adversarial else row["benign_prompt"]
         paired_value = row["benign_prompt"] if is_adversarial else row["adversarial_prompt"]
         subdomain_full = str(row.get("risk_subdomain", ""))
         subdomain_short = _shorten_risk_subdomain(subdomain_full)
 
-        metadata: dict[str, str | int] = {
+        metadata: dict[str, str | int | list[str]] = {
             "fortress_id": int(row["ID"]),
             "risk_domain": str(row.get("risk_domain", "")),
             "risk_subdomain": subdomain_short,
             "risk_subdomain_full": subdomain_full,
-            "adversarial_or_benign": adversarial_or_benign,
+            "adversarial_or_benign": split.value,
             "paired_prompt": str(paired_value),
             "use_restriction": "no_adversarial_training",
         }
 
         if is_adversarial:
-            rubric_list = list(row.get("rubric") or [])
-            metadata["rubric"] = "\n".join(str(c) for c in rubric_list)
-            metadata["num_dim"] = len(rubric_list)
-            metadata["original_prompt"] = str(value)
+            rubric = row.get("rubric")
+            if (
+                not isinstance(rubric, list)
+                or not rubric
+                or any(not isinstance(criterion, str) or not criterion.strip() for criterion in rubric)
+            ):
+                raise ValueError(f"FORTRESS row {row['ID']} requires a non-empty rubric list of non-empty strings.")
+            metadata["rubric"] = list(rubric)
 
         return SeedPrompt(
             value=str(value),
@@ -292,13 +301,15 @@ class _FortressDataset(_RemoteDatasetLoader):
         )
 
     @property
+    @override
     def dataset_name(self) -> str:
         """The dataset name."""
         return "fortress"
 
+    @override
     async def fetch_dataset_async(self, *, cache: bool = True) -> SeedDataset:
         """
-        Fetch the Fortress dataset as a SeedDataset, respecting ``self.split``.
+        Fetch the Fortress dataset as a SeedDataset, respecting ``self.splits``.
 
         Args:
             cache (bool): Whether to cache the fetched dataset. Defaults to True.
@@ -307,25 +318,25 @@ class _FortressDataset(_RemoteDatasetLoader):
             SeedDataset: The selected Fortress prompts.
 
         Raises:
-            ValueError: If no rows remain after filtering.
+            ValueError: If no rows remain after filtering or an adversarial rubric is malformed.
         """
         logger.info(
-            f"Loading Fortress dataset (split={self.split.value}, "
+            f"Loading Fortress dataset (splits={[split.value for split in self.splits]}, "
             f"risk_domain={self.risk_domain}, risk_subdomain={self.risk_subdomain})"
         )
 
         rows = await self._fetch_filtered_rows_async(cache=cache)
-        emit_adv = self.split in (FortressSplit.ADVERSARIAL, FortressSplit.ALL)
-        emit_benign = self.split in (FortressSplit.BENIGN, FortressSplit.ALL)
+        emit_adv = FortressSplit.ADVERSARIAL in self.splits
+        emit_benign = FortressSplit.BENIGN in self.splits
 
         seeds: list[SeedPrompt] = []
         for row in rows:
             if emit_adv:
-                seeds.append(self._build_seed_prompt(row=row, adversarial_or_benign="adversarial"))
+                seeds.append(self._build_seed_prompt(row=row, split=FortressSplit.ADVERSARIAL))
             if emit_benign:
-                seeds.append(self._build_seed_prompt(row=row, adversarial_or_benign="benign"))
+                seeds.append(self._build_seed_prompt(row=row, split=FortressSplit.BENIGN))
 
-        logger.info(f"Loaded {len(seeds)} prompts from Fortress dataset (split={self.split.value})")
+        logger.info(f"Loaded {len(seeds)} prompts from Fortress dataset")
         return SeedDataset(seeds=seeds, dataset_name=self.dataset_name)
 
 

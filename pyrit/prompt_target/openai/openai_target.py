@@ -180,8 +180,9 @@ class OpenAITarget(PromptTarget):
         match = re.search(r"/deployments/([^/]+)/", url)
         if match:
             deployment = match.group(1)
-            logger.info(f"Extracted deployment name from URL: {deployment}")
-            return deployment
+            if isinstance(deployment, str):
+                logger.info(f"Extracted deployment name from URL: {deployment}")
+                return deployment
 
         return ""
 
@@ -548,7 +549,7 @@ class OpenAITarget(PromptTarget):
 
         If the subclass provides partial content via ``_extract_partial_content``,
         it is attached to each response piece as ``prompt_metadata["partial_content"]``
-        so that scorers with ``score_blocked_content=True`` can evaluate it.
+        so that scorers can evaluate what the model produced before the block.
 
         Provider-reported metadata (token usage, stop reason) is captured via
         ``_capture_response_metadata`` so a filtered response records what it consumed.

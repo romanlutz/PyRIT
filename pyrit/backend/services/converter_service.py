@@ -17,11 +17,9 @@ import mimetypes
 import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import TYPE_CHECKING, Any
 
 from pyrit.backend.mappers.converter_mappers import converter_object_to_instance
-from pyrit.backend.models import DEFAULT_MEDIA_EXTENSIONS
 from pyrit.backend.models.converters import (
     ConverterCatalogEntry,
     ConverterCatalogResponse,
@@ -33,9 +31,13 @@ from pyrit.backend.models.converters import (
     CreateConverterResponse,
     PreviewStep,
 )
+from pyrit.backend.services.media_persistence import persist_media_value_async
 from pyrit.memory import data_serializer_factory
 from pyrit.models import PromptDataType
 from pyrit.registry.components import ConverterRegistry
+
+if TYPE_CHECKING:
+    from pyrit.converter import ConverterResult
 
 
 class ConverterService:
@@ -170,46 +172,19 @@ class ConverterService:
         original_value = request.original_value
         data_type = request.original_value_data_type
 
-        # For path-based data types, persist base64/data-uri to a file.
-        # Reuse the same detection logic as AttackService._persist_base64_pieces_async
-        # to correctly distinguish file paths / URLs from raw base64 payloads.
+        # For path-based data types, resolve references or persist base64/data URIs.
         if str(data_type).endswith("_path"):
-            # Already a remote URL — keep as-is
-            if original_value.startswith(("http://", "https://")):
-                pass
-            # Already a local media URL (e.g. /api/media?path=...) — extract the file path
-            elif original_value.startswith("/api/media"):
-                parsed = urlparse(original_value)
-                file_path = parse_qs(parsed.query).get("path", [None])[0]
-                if file_path:
-                    original_value = file_path
-            # Data URI from the frontend (e.g. "data:image/png;base64,...") — decode and persist
-            elif original_value.startswith("data:"):
-                _, _, value = original_value.partition(",")
-
-                ext = DEFAULT_MEDIA_EXTENSIONS.get(str(data_type), ".bin")
-
-                serializer = data_serializer_factory(
-                    category="prompt-memory-entries",
-                    data_type=data_type,
-                    extension=ext,
-                )
-                await serializer.save_b64_image_async(data=value)
-                original_value = str(serializer.value)
-            # Already an existing file on disk — keep as-is
-            elif Path(original_value).is_file():
-                pass
-            else:
-                # Treat as raw base64
-                ext = DEFAULT_MEDIA_EXTENSIONS.get(str(data_type), ".bin")
-
-                serializer = data_serializer_factory(
-                    category="prompt-memory-entries",
-                    data_type=data_type,
-                    extension=ext,
-                )
-                await serializer.save_b64_image_async(data=original_value)
-                original_value = str(serializer.value)
+            result = await persist_media_value_async(
+                value=original_value,
+                data_type=data_type,
+                # Preview historically derives data-URI extensions from the
+                # declared prompt type; attack ingestion additionally accepts
+                # explicit/data-URI MIME metadata.
+                use_data_uri_mime_type=False,
+                require_valid_base64_after_path_error=True,
+                serializer_factory=data_serializer_factory,
+            )
+            original_value = result.value
 
         converters = self._gather_converters(converter_ids=request.converter_ids)
         steps, final_value, final_type = await self._apply_converters_async(
@@ -336,13 +311,13 @@ class ConverterService:
         Returns:
             Tuple of (steps, final_value, final_type).
         """
-        current_value = initial_value
-        current_type = initial_type
+        current_value: str = initial_value
+        current_type: PromptDataType = initial_type
         steps: list[PreviewStep] = []
 
         for conv_id, conv_type, conv_obj in converters:
             input_value, input_type = current_value, current_type
-            result = await conv_obj.convert_async(prompt=current_value, input_type=current_type)
+            result: ConverterResult = await conv_obj.convert_async(prompt=current_value, input_type=current_type)
             current_value, current_type = result.output_text, result.output_type
 
             steps.append(

@@ -252,7 +252,7 @@ async def _send_and_check_async(
     for attempt in range(attempts):
         try:
             responses = await asyncio.wait_for(target.send_prompt_async(message=message), timeout=timeout_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             last_exc = TimeoutError(f"timed out after {timeout_s}s")
             logger.debug("%s timed out (attempt %d/%d)", label, attempt + 1, attempts)
             if attempt + 1 < attempts:
@@ -285,7 +285,8 @@ async def _send_and_check_async(
 
 def _retry_backoff_seconds(*, attempt: int) -> float:
     """Return the exponential backoff delay for a retry attempt."""
-    return min(DEFAULT_PROBE_RETRY_BACKOFF_SECONDS * (2**attempt), MAX_PROBE_RETRY_BACKOFF_SECONDS)
+    backoff_seconds: float = DEFAULT_PROBE_RETRY_BACKOFF_SECONDS * (2**attempt)
+    return min(backoff_seconds, MAX_PROBE_RETRY_BACKOFF_SECONDS)
 
 
 async def _sleep_before_retry_async(*, attempt: int) -> None:

@@ -6,8 +6,6 @@ Unit tests for the ``scenario-results`` payload builders, view policies, and
 shared argument parser (``pyrit.cli._results`` and ``pyrit.cli._cli_args``).
 """
 
-import uuid
-
 import pytest
 
 from pyrit.cli._cli_args import (
@@ -17,32 +15,8 @@ from pyrit.cli._cli_args import (
 )
 from pyrit.cli._results import (
     apply_view_limit_policy,
-    build_attacks_table_payload,
     resolve_view,
 )
-from pyrit.models import AttackOutcome, AttackResult, Score
-from unit.mocks import make_scenario_result
-
-
-def _attack(*, outcome=AttackOutcome.SUCCESS, objective="obj", turns=1, with_score=False):
-    attack = AttackResult(
-        conversation_id=str(uuid.uuid4()),
-        objective=objective,
-        outcome=outcome,
-        executed_turns=turns,
-    )
-    if with_score:
-        attack.last_score = Score(
-            score_value="0.9",
-            score_type="float_scale",
-            message_piece_id=str(uuid.uuid4()),
-        )
-    return attack
-
-
-def _result(attack_results):
-    return make_scenario_result(attack_results=attack_results)
-
 
 # ---------------------------------------------------------------------------
 # ScenarioResultView
@@ -87,69 +61,6 @@ def test_limit_policy_keeps_limit_for_attacks(capsys):
 def test_limit_policy_noop_when_no_limit(capsys):
     assert apply_view_limit_policy(view=ScenarioResultView.OVERVIEW, limit=None) is None
     assert capsys.readouterr().out == ""
-
-
-# ---------------------------------------------------------------------------
-# build_attacks_table_payload
-# ---------------------------------------------------------------------------
-
-
-def test_builder_includes_all_attacks_grouped_by_atomic_name():
-    result = _result(
-        {
-            "tech_a": [_attack(objective="a1"), _attack(objective="a2")],
-            "tech_b": [_attack(objective="b1")],
-        }
-    )
-    payload = build_attacks_table_payload(result=result, scenario_result_id="SID")
-    assert payload.scenario_result_id == "SID"
-    assert payload.total == 3
-    assert len(payload.rows) == 3
-    assert {row.atomic_attack_name for row in payload.rows} == {"tech_a", "tech_b"}
-
-
-def test_builder_maps_outcome_and_score():
-    result = _result(
-        {
-            "tech_a": [
-                _attack(outcome=AttackOutcome.SUCCESS, turns=4, with_score=True),
-                _attack(outcome=AttackOutcome.FAILURE, with_score=False),
-            ]
-        }
-    )
-    payload = build_attacks_table_payload(result=result, scenario_result_id="SID")
-    scored, unscored = payload.rows[0], payload.rows[1]
-    assert scored.outcome == "success"
-    assert scored.executed_turns == 4
-    assert scored.score_value == "0.9"
-    assert unscored.outcome == "failure"
-    assert unscored.score_value is None
-
-
-def test_builder_filters_by_attack_result_ids():
-    keep = _attack(objective="keep")
-    drop = _attack(objective="drop")
-    result = _result({"tech_a": [keep, drop]})
-    payload = build_attacks_table_payload(
-        result=result,
-        scenario_result_id="SID",
-        attack_result_ids=[keep.attack_result_id],
-    )
-    assert payload.total == 1
-    assert payload.rows[0].attack_result_id == keep.attack_result_id
-
-
-def test_builder_limit_caps_rows_but_total_is_pre_limit():
-    result = _result({"tech_a": [_attack() for _ in range(5)]})
-    payload = build_attacks_table_payload(result=result, scenario_result_id="SID", limit=2)
-    assert payload.total == 5
-    assert len(payload.rows) == 2
-
-
-def test_builder_handles_no_attacks():
-    payload = build_attacks_table_payload(result=_result({}), scenario_result_id="SID")
-    assert payload.total == 0
-    assert payload.rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -198,20 +109,44 @@ def test_shell_parser_rejects_non_positive_limit():
         parser.parse_args(["SID", "--limit", "0"])
 
 
-def test_add_results_arguments_registers_id_flag_when_requested():
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    add_results_arguments(parser=parser, include_id_flag=True)
-    parsed = parser.parse_args(["--scenario-results", "SID", "--view", "overview"])
-    assert parsed.scenario_results == "SID"
-    assert parsed.view is ScenarioResultView.OVERVIEW
-
-
-def test_add_results_arguments_omits_id_flag_by_default():
+def test_add_results_arguments_registers_view_flags():
     import argparse
 
     parser = argparse.ArgumentParser()
     add_results_arguments(parser=parser)
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--scenario-results", "SID"])
+    parsed = parser.parse_args(["--view", "attacks", "--attack-result-ids", "a", "b", "--limit", "3"])
+    assert parsed.view is ScenarioResultView.ATTACKS
+    assert parsed.attack_result_ids == ["a", "b"]
+    assert parsed.limit == 3
+
+
+# ---------------------------------------------------------------------------
+# conversations / full views
+# ---------------------------------------------------------------------------
+
+
+def test_scenario_result_view_values_conversations_and_full():
+    assert ScenarioResultView.CONVERSATIONS.value == "conversations"
+    assert ScenarioResultView.FULL.value == "full"
+
+
+def test_resolve_view_passes_through_conversations():
+    assert resolve_view(view=ScenarioResultView.CONVERSATIONS) is ScenarioResultView.CONVERSATIONS
+
+
+def test_limit_policy_defaults_heavy_view_when_unscoped(capsys):
+    effective = apply_view_limit_policy(view=ScenarioResultView.CONVERSATIONS, limit=None)
+    assert effective == 5
+    assert "at most 5" in capsys.readouterr().out
+
+
+def test_limit_policy_heavy_view_respects_explicit_limit(capsys):
+    effective = apply_view_limit_policy(view=ScenarioResultView.FULL, limit=3)
+    assert effective == 3
+    assert capsys.readouterr().out == ""
+
+
+def test_limit_policy_heavy_view_respects_attack_ids(capsys):
+    effective = apply_view_limit_policy(view=ScenarioResultView.CONVERSATIONS, limit=None, attack_result_ids=["a"])
+    assert effective is None
+    assert capsys.readouterr().out == ""

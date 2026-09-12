@@ -21,12 +21,8 @@ from pyrit.common.path import DEFAULT_CONFIG_PATH
 from pyrit.common.utils import verify_and_resolve_path
 from pyrit.common.yaml_loadable import YamlLoadable
 from pyrit.models import class_name_to_snake_case
-from pyrit.setup.initialization import (
-    AZURE_SQL,
-    IN_MEMORY,
-    SQLITE,
-    initialize_pyrit_async,
-)
+from pyrit.setup.environment_loading import validate_env_akv_strict
+from pyrit.setup.initialization import AZURE_SQL, IN_MEMORY, SQLITE, initialize_pyrit_async
 
 if TYPE_CHECKING:
     from pyrit.setup.pyrit_initializer import PyRITInitializer
@@ -95,8 +91,15 @@ class ConfigurationLoader(YamlLoadable):
         initialization_scripts: List of paths to custom initialization scripts.
             None means "use defaults", [] means "load nothing".
         env_files: List of environment file paths to load.
-            None means "use defaults (.env, .env.local)", [] means "load nothing".
+            None means auto-discover supported ``.env`` and ``.env.local``;
+            [] means "load nothing".
+        env_akv_ref: List containing at most one Key Vault bootstrap secret URL.
+        env_akv_strict: Whether malformed or valueless entries in a Key Vault
+            bootstrap document should fail initialization.
+        custom_initializers_source: Local directory or Azure Blob container URI,
+            optionally followed by a blob prefix, used to persist custom initializer Python scripts.
         silent: Whether to suppress initialization messages.
+        seed: Optional root seed for deterministic converter operations.
         operator: Name for the current operator, e.g. a team or username.
         operation: Name for the current operation.
 
@@ -135,19 +138,64 @@ class ConfigurationLoader(YamlLoadable):
     initialization_scripts: list[str] | None = None
     env_files: list[str] | None = None
     env_akv_ref: list[str] | None = None
+    env_akv_strict: bool = True
     silent: bool = False
+    seed: int | None = None
     operator: str | None = None
     operation: str | None = None
     max_concurrent_scenario_runs: int = 3
     allow_custom_initializers: bool = False
+    custom_initializers_source: str | None = None
     server: dict[str, Any] | None = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate and normalize the configuration after loading."""
+        validate_env_akv_strict(env_akv_strict=self.env_akv_strict)
+        self._validate_allow_custom_initializers()
         self._normalize_memory_db_type()
         self._normalize_initializers()
+        self._validate_env_akv_ref()
+        self._validate_custom_initializers_source()
         self._normalize_server()
+
+    def _validate_allow_custom_initializers(self) -> None:
+        """
+        Validate that the custom initializer kill switch is a boolean.
+
+        Raises:
+            TypeError: If allow_custom_initializers is not a boolean.
+        """
+        if not isinstance(self.allow_custom_initializers, bool):
+            raise TypeError("allow_custom_initializers must be a bool.")
+
+    def _validate_custom_initializers_source(self) -> None:
+        """
+        Validate the optional custom initializer storage source.
+
+        Raises:
+            ValueError: If the source is not a non-empty string.
+        """
+        if self.custom_initializers_source is not None and (
+            not isinstance(self.custom_initializers_source, str) or not self.custom_initializers_source.strip()
+        ):
+            raise ValueError("custom_initializers_source must be a non-empty local directory or container URI.")
+
+    def _validate_env_akv_ref(self) -> None:
+        """
+        Validate the Key Vault bootstrap secret reference.
+
+        Raises:
+            ValueError: If env_akv_ref is not a list of non-empty strings.
+        """
+        if self.env_akv_ref is None:
+            return
+        if not isinstance(self.env_akv_ref, list):
+            raise ValueError("env_akv_ref must be a list of Azure Key Vault secret URLs.")
+        if len(self.env_akv_ref) > 1:
+            raise ValueError("env_akv_ref supports at most one Azure Key Vault bootstrap secret URL.")
+        if any(not isinstance(secret_url, str) or not secret_url.strip() for secret_url in self.env_akv_ref):
+            raise ValueError("env_akv_ref must contain only non-empty Azure Key Vault secret URLs.")
 
     def _normalize_memory_db_type(self) -> None:
         """
@@ -401,6 +449,7 @@ class ConfigurationLoader(YamlLoadable):
         initialization_scripts: Sequence[str] | None = None,
         env_files: Sequence[str] | None = None,
         env_akv_ref: Sequence[str] | None = None,
+        env_akv_strict: bool | None = None,
     ) -> "ConfigurationLoader":
         """
         Load configuration with optional overrides.
@@ -416,7 +465,8 @@ class ConfigurationLoader(YamlLoadable):
             initializers: Override for initializer list.
             initialization_scripts: Override for initialization script paths.
             env_files: Override for environment file paths.
-            env_akv_ref: Override for Azure Key Vault secret URLs.
+            env_akv_ref: Override containing at most one Azure Key Vault bootstrap secret URL.
+            env_akv_strict: Override for strict Key Vault bootstrap validation.
 
         Returns:
             A merged ConfigurationLoader instance.
@@ -477,7 +527,12 @@ class ConfigurationLoader(YamlLoadable):
             config_data["env_files"] = list(env_files)
 
         if env_akv_ref is not None:
+            if isinstance(env_akv_ref, str):
+                raise ValueError("env_akv_ref must be a sequence of Azure Key Vault secret URLs.")
             config_data["env_akv_ref"] = list(env_akv_ref)
+
+        if env_akv_strict is not None:
+            config_data["env_akv_strict"] = env_akv_strict
 
         return cls.from_dict(config_data)
 
@@ -491,12 +546,16 @@ class ConfigurationLoader(YamlLoadable):
         """
         return DEFAULT_CONFIG_PATH
 
-    def resolve_initializers(self) -> Sequence["PyRITInitializer"]:
+    def resolve_initializers(self, *, raise_on_initializer_error: bool = True) -> Sequence["PyRITInitializer"]:
         """
         Resolve initializer names to PyRITInitializer instances.
 
         Uses the InitializerRegistry to look up initializer classes by name
         and instantiate them with optional arguments.
+
+        Args:
+            raise_on_initializer_error: Whether to raise when an initializer cannot be resolved. If False,
+                log the failure and continue resolving the remaining initializers.
 
         Returns:
             Sequence of PyRITInitializer instances.
@@ -509,11 +568,11 @@ class ConfigurationLoader(YamlLoadable):
         from pyrit.registry import InitializerRegistry
 
         configs = self._initializer_configs
-        if not configs:
-            return []
-
-        registry = InitializerRegistry()
         resolved: list[PyRITInitializer] = []
+        if not configs:
+            return resolved
+
+        registry = InitializerRegistry.get_registry_singleton()
 
         logging.getLogger(__name__).info("Running %d initializer(s)...", len(configs))
 
@@ -522,9 +581,18 @@ class ConfigurationLoader(YamlLoadable):
                 instance = registry.create_and_configure(config.name, initializer_params=config.args)
             except KeyError as exc:
                 available = ", ".join(sorted(registry.get_class_names()))
-                raise ValueError(
+                error = ValueError(
                     f"Initializer '{config.name}' not found in registry.\nAvailable initializers: {available}"
-                ) from exc
+                )
+                if raise_on_initializer_error:
+                    raise error from exc
+                logging.getLogger(__name__).exception("Skipping initializer '%s': resolution failed.", config.name)
+                continue
+            except Exception:
+                if raise_on_initializer_error:
+                    raise
+                logging.getLogger(__name__).exception("Skipping initializer '%s': resolution failed.", config.name)
+                continue
 
             resolved.append(instance)
 
@@ -536,7 +604,7 @@ class ConfigurationLoader(YamlLoadable):
 
         Returns:
             None if field is None (use defaults), empty list if field is [],
-            or Sequence of resolved Path objects if paths are specified.
+            or a sequence of resolved Path objects.
         """
         # None means "use defaults" - return None to signal this
         if self.initialization_scripts is None:
@@ -544,7 +612,7 @@ class ConfigurationLoader(YamlLoadable):
 
         # Empty list means "load nothing" - return empty list
         if len(self.initialization_scripts) == 0:
-            return []
+            return list[pathlib.Path]()
 
         resolved: list[pathlib.Path] = []
         for script_str in self.initialization_scripts:
@@ -569,7 +637,7 @@ class ConfigurationLoader(YamlLoadable):
 
         # Empty list means "load nothing" - return empty list
         if len(self.env_files) == 0:
-            return []
+            return list[pathlib.Path]()
 
         resolved: list[pathlib.Path] = []
         for env_str in self.env_files:
@@ -582,26 +650,30 @@ class ConfigurationLoader(YamlLoadable):
 
     def resolve_env_akv_ref(self) -> list[str] | None:
         """
-        Return the list of AKV secret URLs, or ``None`` when not configured.
+        Return the AKV bootstrap secret URLs, or ``None`` when not configured.
 
         Returns:
-            list[str] | None: The configured AKV secret URLs, or ``None``.
+            list[str] | None: The configured AKV bootstrap secret URLs, or ``None``.
         """
         return self.env_akv_ref
 
-    async def initialize_pyrit_async(self) -> None:
+    async def initialize_pyrit_async(self, *, raise_on_initializer_error: bool = True) -> None:
         """
         Initialize PyRIT with the loaded configuration.
 
-        Resolves the ``.pyrit_conf`` baseline initializers to instances and calls the core
-        ``initialize_pyrit_async`` function. This method is intentionally unaware of any
-        persisted additional initializers: consumers such as ``pyrit.backend.main.lifespan``
-        run those after the baseline.
+        Resolves the ``.pyrit_conf`` initializers to instances and calls the core
+        ``initialize_pyrit_async`` function.
+
+        Args:
+            raise_on_initializer_error: Whether initializer resolution, loading, validation, or execution
+                failures should abort initialization. Defaults to True.
 
         Raises:
             ValueError: If configuration is invalid or initializers cannot be resolved.
         """
-        resolved_initializers = self.resolve_initializers()
+        resolved_initializers = self.resolve_initializers(
+            raise_on_initializer_error=raise_on_initializer_error,
+        )
         resolved_scripts = self.resolve_initialization_scripts()
         resolved_env_files = self.resolve_env_files()
 
@@ -614,7 +686,10 @@ class ConfigurationLoader(YamlLoadable):
             initializers=resolved_initializers if resolved_initializers else None,
             env_files=resolved_env_files,
             env_akv_ref=self.env_akv_ref,
+            env_akv_strict=self.env_akv_strict,
             silent=self.silent,
+            seed=self.seed,
+            raise_on_initializer_error=raise_on_initializer_error,
         )
 
 
