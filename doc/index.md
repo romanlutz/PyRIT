@@ -71,6 +71,135 @@ Evaluate AI responses with true/false, Likert scale, classification, and custom 
 
 +++ { "kind": "justified" }
 
+Getting Started
+
+## Setup and Installation
+
+1. Install PyRIT and verify installation.\
+For more details and alternative installation methods, see the [Install PyRIT](getting_started/install) page
+
+```{image} sprites/roakey-spyglass-scan.png
+:alt: Roakey raising a spyglass to scan the horizon
+:class: roakey-sprite roakey-sprite-spyglass
+```
+
+```bash
+# note: for local installation, python version 3.13 is recommended: https://www.python.org/downloads/latest/python3.13
+pip install pyrit
+python -c "import pyrit; print(f'PyRIT version installed: {pyrit.__version__}')"
+```
+
+2. Create and populate endpoint and startup configuration files in `~/.pyrit/.env` and `~/.pyrit/.pyrit_conf` with minimal content below.\
+For more details, see the [Configure PyRIT](getting_started/configuration) page.
+
+:::::{grid} 1 1 2 2
+
+::::{card} 🔑 ~/.pyrit/.env
+```bash
+# example OPENAI_CHAT_ENDPOINT values:
+# "https://api.openai.com/v1"
+# "https://<project>.cognitiveservices.azure.com/openai/v1/"
+# "https://<project>.services.ai.azure.com/openai/v1"
+OPENAI_CHAT_ENDPOINT="<open-ai-chat-endpoint>"
+OPENAI_CHAT_KEY="<your-api-key>"
+OPENAI_CHAT_MODEL="<model-name>"
+```
+::::
+
+::::{card} 📄 ~/.pyrit/.pyrit_conf
+```yaml
+memory_db_type: in_memory
+
+initializers:
+  - name: target
+    args:
+      tags:
+        - default
+        - scorer
+  - name: scorer
+```
+::::
+
+:::::
+
+3. Use PyRIT in any mode that best fits your use case: Scanner, GUI, or Framework.
+
+::::{tab-set}
+
+:::{tab-item}🔍 Scanner
+Run security assessments from the command line with `pyrit_scan` or the interactive `pyrit_shell`. Execute built-in scenarios against your AI targets.
+
+```bash
+pyrit_scan run airt.scam --target openai_chat
+```
+
+```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/scanner_walkthrough.mp4
+:width: 100%
+:title: PyRIT Scanner walkthrough
+:placeholder: scanner-demo.png
+:class: landing-demo-video
+```
+
+[Open the Scanner walkthrough directly](assets/videos/scanner-walkthrough.mp4).
+
+Use `pyrit_scan --help` to learn more about what else `pyrit_scan` can do.
+For more details, see the [Scanner](scanner/0_scanner) page.
+:::
+
+:::{tab-item}🖥️ GUI
+Use CoPyRIT's graphical interface for interactive red teaming. Chat with AI systems, track findings, and collaborate with your team.
+
+Start the local web app and give it a try:
+
+```bash
+pyrit_backend # serves webapp on http://localhost:8000/
+```
+```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/CoPyRIT-GUI-walkthrough.mp4
+:width: 100%
+:title: CoPyRIT GUI walkthrough
+:placeholder: copyrit-demo.png
+:class: landing-demo-video
+```
+
+[Open the CoPyRIT GUI walkthrough directly](assets/videos/copyrit-walkthrough.mp4).
+
+For more details, see the [GUI](gui/0_gui) page.
+:::
+
+:::{tab-item}🧩 Framework
+Dive into PyRIT's modular components — targets, converters, scorers, memory, and more. Create custom attacks and extend the framework.
+
+```python
+from pyrit.executor.attack import PromptSendingAttack
+from pyrit.output.attack_result.pretty import PrettyAttackResultMemoryPrinter
+from pyrit.prompt_target import OpenAIChatTarget
+from pyrit.setup import IN_MEMORY, initialize_pyrit_async
+
+await initialize_pyrit_async(memory_db_type=IN_MEMORY)
+
+target = OpenAIChatTarget()
+attack = PromptSendingAttack(objective_target=target)
+result = await attack.execute_async(objective="What model exactly are you? be concise.")
+
+printer = PrettyAttackResultMemoryPrinter()
+await printer.write_async(result)
+```
+
+![framework-demo](framework-demo.png)
+
+For more details, see the [Framework](code/framework) page.
+:::
+::::
+
+```{image} sprites/roakey-run-and-flag.png
+:alt: Roakey running in and planting a pirate flag
+:class: roakey-sprite roakey-sprite-flag
+```
+
+---
+
++++ { "kind": "justified" }
+
 Builders, contributors, consumers
 
 ## Ecosystem
@@ -239,132 +368,3 @@ Bullwinkel et al., 2025
 ::::
 
 :::::
-
----
-
-+++ { "kind": "justified" }
-
-Getting Started
-
-## Setup and Installation
-
-1. Install PyRIT and verify installation.\
-For more details and alternative installation methods, see the [Install PyRIT](getting_started/install) page
-
-```{image} sprites/roakey-spyglass-scan.png
-:alt: Roakey raising a spyglass to scan the horizon
-:class: roakey-sprite roakey-sprite-spyglass
-```
-
-```bash
-# note: for local installation, python version 3.13 is recommended: https://www.python.org/downloads/latest/python3.13
-pip install pyrit
-python -c "import pyrit; print(f'PyRIT version installed: {pyrit.__version__}')"
-```
-
-2. Create and populate endpoint and startup configuration files in `~/.pyrit/.env` and `~/.pyrit/.pyrit_conf` with minimal content below.\
-For more details, see the [Configure PyRIT](getting_started/configuration) page.
-
-:::::{grid} 1 1 2 2
-
-::::{card} 🔑 ~/.pyrit/.env
-```bash
-# example OPENAI_CHAT_ENDPOINT values:
-# "https://api.openai.com/v1"
-# "https://<project>.cognitiveservices.azure.com/openai/v1/"
-# "https://<project>.services.ai.azure.com/openai/v1"
-OPENAI_CHAT_ENDPOINT="<open-ai-chat-endpoint>"
-OPENAI_CHAT_KEY="<your-api-key>"
-OPENAI_CHAT_MODEL="<model-name>"
-```
-::::
-
-::::{card} 📄 ~/.pyrit/.pyrit_conf
-```yaml
-memory_db_type: in_memory
-
-initializers:
-  - name: target
-    args:
-      tags:
-        - default
-        - scorer
-  - name: scorer
-```
-::::
-
-:::::
-
-3. Use PyRIT in any mode that best fits your use case: Scanner, GUI, or Framework.
-
-::::{tab-set}
-
-:::{tab-item}🔍 Scanner
-Run security assessments from the command line with `pyrit_scan` or the interactive `pyrit_shell`. Execute built-in scenarios against your AI targets.
-
-```bash
-pyrit_scan run airt.scam --target openai_chat
-```
-
-```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/scanner_walkthrough.mp4
-:width: 100%
-:title: PyRIT Scanner walkthrough
-:placeholder: scanner-demo.png
-:class: landing-demo-video
-```
-
-[Open the Scanner walkthrough directly](assets/videos/scanner-walkthrough.mp4).
-
-Use `pyrit_scan --help` to learn more about what else `pyrit_scan` can do.
-For more details, see the [Scanner](scanner/0_scanner) page.
-:::
-
-:::{tab-item}🖥️ GUI
-Use CoPyRIT's graphical interface for interactive red teaming. Chat with AI systems, track findings, and collaborate with your team.
-
-Start the local web app and give it a try:
-
-```bash
-pyrit_backend # serves webapp on http://localhost:8000/
-```
-```{iframe} https://commandline.microsoft.com/wp-content/uploads/2026/08/CoPyRIT-GUI-walkthrough.mp4
-:width: 100%
-:title: CoPyRIT GUI walkthrough
-:placeholder: copyrit-demo.png
-:class: landing-demo-video
-```
-
-[Open the CoPyRIT GUI walkthrough directly](assets/videos/copyrit-walkthrough.mp4).
-
-For more details, see the [GUI](gui/0_gui) page.
-:::
-
-:::{tab-item}🧩 Framework
-Dive into PyRIT's modular components — targets, converters, scorers, memory, and more. Create custom attacks and extend the framework.
-
-```python
-from pyrit.executor.attack import PromptSendingAttack
-from pyrit.output.attack_result.pretty import PrettyAttackResultMemoryPrinter
-from pyrit.prompt_target import OpenAIChatTarget
-from pyrit.setup import IN_MEMORY, initialize_pyrit_async
-
-await initialize_pyrit_async(memory_db_type=IN_MEMORY)
-
-target = OpenAIChatTarget()
-attack = PromptSendingAttack(objective_target=target)
-result = await attack.execute_async(objective="What model exactly are you? be concise.")
-
-printer = PrettyAttackResultMemoryPrinter()
-await printer.write_async(result)
-```
-
-![framework-demo](framework-demo.png)
-
-For more details, see the [Framework](code/framework) page.
-:::
-::::
-
-```{image} sprites/roakey-run-and-flag.png
-:alt: Roakey running in and planting a pirate flag
-:class: roakey-sprite roakey-sprite-flag
-```
