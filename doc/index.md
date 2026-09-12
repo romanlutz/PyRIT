@@ -191,11 +191,6 @@ For more details, see the [Framework](code/framework) page.
 :::
 ::::
 
-```{image} sprites/roakey-run-and-flag.png
-:alt: Roakey running in and planting a pirate flag
-:class: roakey-sprite roakey-sprite-flag
-```
-
 ---
 
 +++ { "kind": "justified" }
@@ -368,3 +363,8 @@ Bullwinkel et al., 2025
 ::::
 
 :::::
+
+```{image} sprites/roakey-run-and-flag.png
+:alt: Roakey running in and planting a pirate flag
+:class: roakey-sprite roakey-sprite-flag
+```
