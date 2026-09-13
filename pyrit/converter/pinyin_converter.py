@@ -1,0 +1,206 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
+import logging
+import re
+from typing import Any, Literal
+
+from pyrit.converter.converter import Converter, ConverterResult
+from pyrit.models import ComponentIdentifier, PromptDataType
+
+logger = logging.getLogger(__name__)
+
+PinyinMode = Literal["full", "initial", "mixed"]
+
+# Han (Chinese) character ranges. pypinyin only has readings for these, so
+# everything else (Latin, digits, punctuation, whitespace, emoji, ...) is passed
+# through untouched.
+_HAN_PATTERN = re.compile(
+    "["
+    "㐀-䶿"  # CJK Unified Ideographs Extension A
+    "一-鿿"  # CJK Unified Ideographs
+    "豈-﫿"  # CJK Compatibility Ideographs
+    "\U00020000-\U0002a6df"  # CJK Unified Ideographs Extension B
+    "\U0002a700-\U0002ebef"  # CJK Unified Ideographs Extensions C-F
+    "\U0002f800-\U0002fa1f"  # CJK Compatibility Ideographs Supplement
+    "]"
+)
+
+
+class PinyinConverter(Converter):
+    """
+    Replaces Chinese (Hanzi) characters with their Pinyin romanization.
+
+    Pinyin mixing is a Chinese-specific adversarial text transformation: Hanzi characters
+    or spans are rewritten as full or abbreviated Pinyin while the text stays understandable
+    to a Chinese-reading model. This can bypass keyword- and token-level safety filters that
+    match on Hanzi rather than on romanized readings. The pattern is described in recent work
+    on Chinese LLM safety such as CSSBench.
+
+    The converter is deterministic (no LLM call) and operates character by character:
+
+    - ``full``: each selected Hanzi becomes its full Pinyin reading without tone marks
+      (e.g. ``中`` -> ``zhong``).
+    - ``initial``: each selected Hanzi becomes the first letter of its reading
+      (e.g. ``中`` -> ``z``).
+    - ``mixed``: each selected Hanzi is independently rendered as either its full reading or
+      its initial.
+
+    ``proportion`` controls how many of the Hanzi are converted; a value below ``1.0`` leaves
+    the rest as Hanzi, producing mixed Hanzi/Pinyin text. Characters that are not Hanzi are
+    always left unchanged. Pass ``seed`` for reproducible selection.
+
+    This converter requires the optional ``pinyin`` dependency: ``pip install pyrit[pinyin]``.
+    """
+
+    SUPPORTED_INPUT_TYPES = ("text",)
+    SUPPORTED_OUTPUT_TYPES = ("text",)
+
+    def __init__(
+        self,
+        *,
+        mode: PinyinMode = "full",
+        proportion: float = 1.0,
+        separator: str = "",
+        seed: int | None = None,
+    ) -> None:
+        """
+        Initialize the converter.
+
+        Args:
+            mode (PinyinMode): How a converted Hanzi is rendered. ``"full"`` uses the full
+                toneless reading, ``"initial"`` uses only the first letter, and ``"mixed"``
+                chooses one of the two independently per character. Defaults to ``"full"``.
+            proportion (float): Fraction in ``[0.0, 1.0]`` of the Hanzi characters to convert.
+                The selected count is ``round(proportion * number_of_hanzi)`` and the positions
+                are chosen at random (seedable). ``1.0`` converts every Hanzi. Defaults to
+                ``1.0``.
+            separator (str): String inserted after each converted syllable. Full Pinyin spans
+                run together by default (``中心`` -> ``zhongxin``); pass ``separator=" "`` to
+                keep syllable boundaries readable (``zhong xin``). Defaults to ``""``.
+            seed (int | None): Optional seed for reproducible selection and, in ``"mixed"``
+                mode, reproducible per-character rendering. Defaults to None.
+
+        Raises:
+            ValueError: If ``mode`` is not one of ``"full"``, ``"initial"``, ``"mixed"`` or if
+                ``proportion`` is outside ``[0.0, 1.0]``.
+        """
+        if mode not in ("full", "initial", "mixed"):
+            raise ValueError('mode must be one of "full", "initial", or "mixed"')
+        if not 0.0 <= proportion <= 1.0:
+            raise ValueError("proportion must be between 0.0 and 1.0")
+
+        self._mode: PinyinMode = mode
+        self._proportion = proportion
+        self._separator = separator
+        self._seed = seed
+
+    def _build_identifier(self) -> ComponentIdentifier:
+        """
+        Build the converter identifier with Pinyin parameters.
+
+        Returns:
+            ComponentIdentifier: The identifier for this converter.
+        """
+        return self._create_identifier(
+            params={
+                "mode": self._mode,
+                "proportion": self._proportion,
+                "separator": self._separator,
+                "seed": self._seed,
+            }
+        )
+
+    @staticmethod
+    def _import_pypinyin() -> Any:
+        """
+        Import the optional ``pypinyin`` dependency, raising a helpful error if it is missing.
+
+        Returns:
+            Any: The imported ``pypinyin`` module.
+
+        Raises:
+            ModuleNotFoundError: If ``pypinyin`` is not installed.
+        """
+        try:
+            import pypinyin
+        except ModuleNotFoundError as exc:
+            logger.error("Could not import pypinyin. You may need to install it via 'pip install pyrit[pinyin]'")
+            raise ModuleNotFoundError(
+                "PinyinConverter requires the 'pypinyin' package. Install it via 'pip install pyrit[pinyin]'."
+            ) from exc
+        return pypinyin
+
+    def _to_pinyin(self, char: str, *, style: Any, pypinyin: Any) -> str:
+        """
+        Return the Pinyin reading of a single Hanzi for the given ``pypinyin`` style.
+
+        Args:
+            char (str): A single Hanzi character to romanize.
+            style (Any): A ``pypinyin.Style`` member controlling the reading format.
+            pypinyin (Any): The imported ``pypinyin`` module.
+
+        Returns:
+            str: The Pinyin reading, or the original character when no reading is available.
+        """
+        result = pypinyin.lazy_pinyin(char, style=style)
+        if not result:
+            return char
+        reading = str(result[0])
+        return reading or char
+
+    async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
+        """
+        Convert Hanzi characters in the prompt to Pinyin.
+
+        Args:
+            prompt (str): The text prompt to convert.
+            input_type (PromptDataType): The input data type. Only ``text`` is supported.
+
+        Returns:
+            ConverterResult: The converted prompt.
+
+        Raises:
+            ValueError: If the input type is not supported.
+        """
+        if not self.input_supported(input_type):
+            raise ValueError("Input type not supported")
+
+        pypinyin = self._import_pypinyin()
+        from pypinyin import Style
+
+        han_indices = [i for i, ch in enumerate(prompt) if _HAN_PATTERN.match(ch)]
+        if not han_indices:
+            return ConverterResult(output_text=prompt, output_type="text")
+
+        rng = self._get_random_generator(stream="pinyin-selection")
+        count = round(self._proportion * len(han_indices))
+        selected = set(rng.sample(han_indices, count)) if count else set()
+
+        full_style = Style.NORMAL
+        initial_style = Style.FIRST_LETTER
+
+        out: list[str] = []
+        for i, ch in enumerate(prompt):
+            if i not in selected:
+                out.append(ch)
+                continue
+
+            if self._mode == "full":
+                style = full_style
+            elif self._mode == "initial":
+                style = initial_style
+            else:  # mixed: choose per character
+                style = rng.choice((full_style, initial_style))
+
+            reading = self._to_pinyin(ch, style=style, pypinyin=pypinyin)
+            out.append(reading)
+            # Only add a separator when the character was actually romanized.
+            if self._separator and reading != ch:
+                out.append(self._separator)
+
+        # A separator is appended after each romanized syllable; drop the trailing one.
+        if self._separator and out and out[-1] == self._separator:
+            out.pop()
+
+        return ConverterResult(output_text="".join(out), output_type="text")
