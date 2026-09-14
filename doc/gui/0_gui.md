@@ -46,7 +46,7 @@ and workspace background:
 | Raccoon | Warm gray with broad raccoon-tail stripes |
 | Jimothy | Mist and sage with a newly drawn, round-bodied Seattle raccoon |
 | Pirate | Navy and gold with a compass and nautical chart |
-| Seattle Rain | Cool blue-gray with rain and puddle ripples |
+| Seattle Rain | Dark storm gray with rain and puddle ripples |
 | Evergreen | Forest green with layered fir silhouettes |
 | Blueprint | Deep blue with a subtle technical drawing grid |
 | Night Sky | Indigo with sparse stars and constellation lines |

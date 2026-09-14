@@ -14,7 +14,7 @@ const PRESETS: readonly PresetCase[] = [
   { id: 'raccoon', label: 'Raccoon', resolved: 'light', background: { canvas: '#eeeae4', chrome: '#e1dcd4' } },
   { id: 'jimothy', label: 'Jimothy', resolved: 'light', background: { canvas: '#e5eee8', chrome: '#d5e2d9' } },
   { id: 'pirate', label: 'Pirate', resolved: 'dark', background: { canvas: '#111f2c', chrome: '#203648' } },
-  { id: 'seattle-rain', label: 'Seattle Rain', resolved: 'light', background: { canvas: '#e4edf3', chrome: '#d3e0e9' } },
+  { id: 'seattle-rain', label: 'Seattle Rain', resolved: 'dark', background: { canvas: '#303436', chrome: '#42474a' } },
   { id: 'evergreen', label: 'Evergreen', resolved: 'dark', background: { canvas: '#11251f', chrome: '#234336' } },
   { id: 'blueprint', label: 'Blueprint', resolved: 'dark', background: { canvas: '#102a45', chrome: '#224763' } },
   { id: 'night-sky', label: 'Night Sky', resolved: 'dark', background: { canvas: '#171e36', chrome: '#2e3957' } },
