@@ -38,6 +38,7 @@ import json
 import logging
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, overload
@@ -395,10 +396,12 @@ class GCGGenerator(
         return await super().execute_async(**kwargs)
 
     def _build_logfile_path(self) -> str:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
         if self._output.logfile:
             return self._output.logfile
-        return f"{self._output.result_prefix}_{timestamp}.json"
+        # Second-resolution timestamps collide for concurrent runs sharing a
+        # prefix; both would then read/modify/write the same JSON log.
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        return f"{self._output.result_prefix}_{timestamp}_{uuid.uuid4().hex[:8]}.json"
 
     @staticmethod
     def _apply_target_augmentation(
