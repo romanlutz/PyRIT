@@ -1,9 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from random import Random
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from pyrit.converter import ConverterResult, PinyinConverter
+from pyrit.converter.pinyin_converter import PinyinMode
 
 
 async def test_pinyin_full_mode_romanizes_every_hanzi():
@@ -104,3 +108,65 @@ def test_pinyin_identifier_includes_parameters():
     assert identifier.params["proportion"] == 0.25
     assert identifier.params["separator"] == " "
     assert identifier.params["seed"] == 99
+
+
+@pytest.mark.parametrize(
+    ("mode", "prompt", "expected"),
+    [
+        ("full", "银行", "yinhang"),
+        ("initial", "银行", "yh"),
+        ("full", "重庆", "chongqing"),
+        ("initial", "重庆", "cq"),
+        ("full", "音乐", "yinyue"),
+        ("initial", "音乐", "yy"),
+        ("full", "abc 银行! 123\n重庆 \U0001f600", "abc yinhang! 123\nchongqing \U0001f600"),
+        ("initial", "abc 银行! 123\n重庆 \U0001f600", "abc yh! 123\ncq \U0001f600"),
+    ],
+)
+async def test_pinyin_preserves_phrase_context_async(*, mode: PinyinMode, prompt: str, expected: str) -> None:
+    result = await PinyinConverter(mode=mode).convert_async(prompt=prompt)
+
+    assert result.output_text == expected
+
+
+@pytest.mark.parametrize(
+    ("mode", "choice_index", "expected"),
+    [
+        ("full", 0, "银hang"),
+        ("initial", 0, "银h"),
+        ("mixed", 0, "银hang"),
+        ("mixed", 1, "银h"),
+    ],
+)
+async def test_pinyin_partial_phrase_uses_unselected_context_async(
+    *, mode: PinyinMode, choice_index: int, expected: str
+) -> None:
+    converter = PinyinConverter(mode=mode, proportion=0.5)
+    rng = MagicMock(spec=Random)
+    rng.sample.return_value = [1]
+    rng.choice.side_effect = lambda choices: choices[choice_index]
+
+    with patch.object(converter, "_get_random_generator", return_value=rng):
+        result = await converter.convert_async(prompt="银行")
+
+    assert result.output_text == expected
+
+
+@pytest.mark.parametrize("proportion", [0.0, 0.1])
+@pytest.mark.parametrize("separator", [" ", "\n", "!", "好"])
+async def test_pinyin_preserves_original_trailing_characters_async(*, proportion: float, separator: str) -> None:
+    prompt = f"你好{separator}"
+    converter = PinyinConverter(proportion=proportion, separator=separator)
+
+    result = await converter.convert_async(prompt=prompt)
+
+    assert result.output_text == prompt
+
+
+@pytest.mark.parametrize("separator", [" ", "\n", "!", "a"])
+async def test_pinyin_preserves_original_separator_after_conversion_async(separator: str) -> None:
+    converter = PinyinConverter(separator=separator)
+
+    result = await converter.convert_async(prompt=f"中{separator}")
+
+    assert result.output_text == f"zhong{separator}{separator}"

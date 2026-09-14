@@ -2,16 +2,15 @@
 # Licensed under the MIT license.
 
 import re
-from typing import Any, Literal
+from typing import Literal
 
 from pyrit.converter.converter import Converter, ConverterResult
 from pyrit.models import ComponentIdentifier, PromptDataType
 
 PinyinMode = Literal["full", "initial", "mixed"]
 
-# Han (Chinese) character ranges. pypinyin only has readings for these, so
-# everything else (Latin, digits, punctuation, whitespace, emoji, ...) is passed
-# through untouched.
+# Han (Chinese) character ranges eligible for conversion. Other characters
+# (Latin, digits, punctuation, whitespace, emoji, ...) are passed through untouched.
 _HAN_PATTERN = re.compile(
     "["
     "㐀-䶿"  # CJK Unified Ideographs Extension A
@@ -34,7 +33,8 @@ class PinyinConverter(Converter):
     match on Hanzi rather than on romanized readings. The pattern is described in recent work
     on Chinese LLM safety such as CSSBench.
 
-    The converter is deterministic (no LLM call) and operates character by character:
+    The converter uses no LLM call. It resolves readings using phrase context before
+    replacing individual characters:
 
     - ``full``: each selected Hanzi becomes its full Pinyin reading without tone marks
       (e.g. ``中`` -> ``zhong``).
@@ -72,9 +72,11 @@ class PinyinConverter(Converter):
                 The selected count is ``round(proportion * number_of_hanzi)`` and the positions
                 are chosen at random (seedable). ``1.0`` converts every Hanzi. Defaults to
                 ``1.0``.
-            separator (str): String inserted after each converted syllable. Full Pinyin spans
-                run together by default (``中心`` -> ``zhongxin``); pass ``separator=" "`` to
-                keep syllable boundaries readable (``zhong xin``). Defaults to ``""``.
+            separator (str): String inserted after each converted syllable, except at the end
+                of the prompt. Original characters, including trailing whitespace, are preserved.
+                Full Pinyin spans run together by default (``中心`` -> ``zhongxin``); pass
+                ``separator=" "`` to keep syllable boundaries readable (``zhong xin``).
+                Defaults to ``""``.
             seed (int | None): Optional seed for reproducible selection and, in ``"mixed"``
                 mode, reproducible per-character rendering. Defaults to None.
 
@@ -108,23 +110,20 @@ class PinyinConverter(Converter):
             }
         )
 
-    def _to_pinyin(self, char: str, *, style: Any, pypinyin: Any) -> str:
+    def _get_pinyin_readings(self, prompt: str) -> list[str]:
         """
-        Return the Pinyin reading of a single Hanzi for the given ``pypinyin`` style.
+        Resolve phrase-aware Pinyin readings aligned with the original characters.
 
         Args:
-            char (str): A single Hanzi character to romanize.
-            style (Any): A ``pypinyin.Style`` member controlling the reading format.
-            pypinyin (Any): The imported ``pypinyin`` module.
+            prompt (str): The complete prompt used as pronunciation context.
 
         Returns:
-            str: The Pinyin reading, or the original character when no reading is available.
+            list[str]: One reading per character, preserving characters without a reading.
         """
-        result = pypinyin.lazy_pinyin(char, style=style)
-        if not result:
-            return char
-        reading = str(result[0])
-        return reading or char
+        from pypinyin import Style, lazy_pinyin
+
+        # List-returning callbacks preserve alignment but are missing from pypinyin's released type stub.
+        return lazy_pinyin(prompt, style=Style.NORMAL, errors=list)  # type: ignore[ty:invalid-argument-type]
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         """
@@ -143,9 +142,6 @@ class PinyinConverter(Converter):
         if not self.input_supported(input_type):
             raise ValueError("Input type not supported")
 
-        import pypinyin
-        from pypinyin import Style
-
         han_indices = [i for i, ch in enumerate(prompt) if _HAN_PATTERN.match(ch)]
         if not han_indices:
             return ConverterResult(output_text=prompt, output_type="text")
@@ -153,31 +149,24 @@ class PinyinConverter(Converter):
         rng = self._get_random_generator(stream="pinyin-selection")
         count = round(self._proportion * len(han_indices))
         selected = set(rng.sample(han_indices, count)) if count else set()
+        if not selected:
+            return ConverterResult(output_text=prompt, output_type="text")
 
-        full_style = Style.NORMAL
-        initial_style = Style.FIRST_LETTER
-
+        readings = self._get_pinyin_readings(prompt)
         out: list[str] = []
-        for i, ch in enumerate(prompt):
+        for i, (ch, reading) in enumerate(zip(prompt, readings, strict=True)):
             if i not in selected:
                 out.append(ch)
                 continue
 
-            if self._mode == "full":
-                style = full_style
-            elif self._mode == "initial":
-                style = initial_style
-            else:  # mixed: choose per character
-                style = rng.choice((full_style, initial_style))
+            reading = reading or ch
+            if self._mode == "initial":
+                reading = reading[0]
+            elif self._mode == "mixed":
+                reading = rng.choice((reading, reading[0]))
 
-            reading = self._to_pinyin(ch, style=style, pypinyin=pypinyin)
             out.append(reading)
-            # Only add a separator when the character was actually romanized.
-            if self._separator and reading != ch:
+            if self._separator and reading != ch and i < len(prompt) - 1:
                 out.append(self._separator)
-
-        # A separator is appended after each romanized syllable; drop the trailing one.
-        if self._separator and out and out[-1] == self._separator:
-            out.pop()
 
         return ConverterResult(output_text="".join(out), output_type="text")
