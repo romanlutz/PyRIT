@@ -1,14 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import logging
 import re
 from typing import Any, Literal
 
 from pyrit.converter.converter import Converter, ConverterResult
 from pyrit.models import ComponentIdentifier, PromptDataType
-
-logger = logging.getLogger(__name__)
 
 PinyinMode = Literal["full", "initial", "mixed"]
 
@@ -50,7 +47,7 @@ class PinyinConverter(Converter):
     the rest as Hanzi, producing mixed Hanzi/Pinyin text. Characters that are not Hanzi are
     always left unchanged. Pass ``seed`` for reproducible selection.
 
-    This converter requires the optional ``pinyin`` dependency: ``pip install pyrit[pinyin]``.
+    Pinyin dictionaries are loaded lazily when converting prompts.
     """
 
     SUPPORTED_INPUT_TYPES = ("text",)
@@ -111,26 +108,6 @@ class PinyinConverter(Converter):
             }
         )
 
-    @staticmethod
-    def _import_pypinyin() -> Any:
-        """
-        Import the optional ``pypinyin`` dependency, raising a helpful error if it is missing.
-
-        Returns:
-            Any: The imported ``pypinyin`` module.
-
-        Raises:
-            ModuleNotFoundError: If ``pypinyin`` is not installed.
-        """
-        try:
-            import pypinyin
-        except ModuleNotFoundError as exc:
-            logger.error("Could not import pypinyin. You may need to install it via 'pip install pyrit[pinyin]'")
-            raise ModuleNotFoundError(
-                "PinyinConverter requires the 'pypinyin' package. Install it via 'pip install pyrit[pinyin]'."
-            ) from exc
-        return pypinyin
-
     def _to_pinyin(self, char: str, *, style: Any, pypinyin: Any) -> str:
         """
         Return the Pinyin reading of a single Hanzi for the given ``pypinyin`` style.
@@ -166,7 +143,7 @@ class PinyinConverter(Converter):
         if not self.input_supported(input_type):
             raise ValueError("Input type not supported")
 
-        pypinyin = self._import_pypinyin()
+        import pypinyin
         from pypinyin import Style
 
         han_indices = [i for i, ch in enumerate(prompt) if _HAN_PATTERN.match(ch)]
