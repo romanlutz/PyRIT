@@ -22,9 +22,6 @@
 #
 # ## Converter Modality Reference Table
 #
-# `PinyinConverter` converts Chinese text to full Pinyin, initials, or a mixture of Hanzi and Pinyin.
-# It uses phrase context for pronunciation and preserves non-Hanzi text and trailing whitespace.
-#
 # The following table shows all available converters organized by their input and output modalities:
 # %%
 import pandas as pd
