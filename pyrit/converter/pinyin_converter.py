@@ -13,12 +13,14 @@ PinyinMode = Literal["full", "initial", "mixed"]
 # (Latin, digits, punctuation, whitespace, emoji, ...) are passed through untouched.
 _HAN_PATTERN = re.compile(
     "["
+    "\u3007"  # Ideographic number zero
     "㐀-䶿"  # CJK Unified Ideographs Extension A
     "一-鿿"  # CJK Unified Ideographs
     "豈-﫿"  # CJK Compatibility Ideographs
     "\U00020000-\U0002a6df"  # CJK Unified Ideographs Extension B
-    "\U0002a700-\U0002ebef"  # CJK Unified Ideographs Extensions C-F
+    "\U0002a700-\U0002ee5f"  # CJK Unified Ideographs Extensions C-F and I
     "\U0002f800-\U0002fa1f"  # CJK Compatibility Ideographs Supplement
+    "\U00030000-\U0003347f"  # CJK Unified Ideographs Extensions G, H, and J
     "]"
 )
 
@@ -45,7 +47,8 @@ class PinyinConverter(Converter):
 
     ``proportion`` controls how many of the Hanzi are converted; a value below ``1.0`` leaves
     the rest as Hanzi, producing mixed Hanzi/Pinyin text. Characters that are not Hanzi are
-    always left unchanged. Pass ``seed`` for reproducible selection.
+    always left unchanged, as are Hanzi without a dictionary reading. Pass ``seed`` for
+    reproducible selection.
 
     Pinyin dictionaries are loaded lazily when converting prompts.
     """

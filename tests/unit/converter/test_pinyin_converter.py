@@ -170,3 +170,60 @@ async def test_pinyin_preserves_original_separator_after_conversion_async(separa
     result = await converter.convert_async(prompt=f"中{separator}")
 
     assert result.output_text == f"zhong{separator}{separator}"
+
+
+@pytest.mark.parametrize(
+    ("mode", "prompt", "expected"),
+    [
+        ("full", "〇", "ling"),
+        ("initial", "〇", "l"),
+        ("full", "二〇二六", "erlingerliu"),
+        ("full", "\U00030021", "qian"),
+        ("initial", "\U00030021", "q"),
+        ("full", "\U00031350", "qi"),
+        ("initial", "\U00031350", "q"),
+    ],
+)
+async def test_pinyin_romanizes_extended_hanzi_async(*, mode: PinyinMode, prompt: str, expected: str) -> None:
+    result = await PinyinConverter(mode=mode).convert_async(prompt=prompt)
+
+    assert result.output_text == expected
+
+
+@pytest.mark.parametrize(
+    "character",
+    [
+        "〇",
+        "\U0002ebf0",
+        "\U0002ee5f",
+        "\U00030000",
+        "\U0003134f",
+        "\U00031350",
+        "\U000323af",
+        "\U000323b0",
+        "\U0003347f",
+    ],
+)
+async def test_pinyin_partial_count_includes_extended_hanzi_async(character: str) -> None:
+    converter = PinyinConverter(proportion=0.5)
+    rng = MagicMock(spec=Random)
+    rng.sample.return_value = [1]
+
+    with patch.object(converter, "_get_random_generator", return_value=rng):
+        result = await converter.convert_async(prompt=f"{character}中")
+
+    rng.sample.assert_called_once()
+    assert rng.sample.call_args.args == ([0, 1], 1)
+    assert result.output_text == f"{character}zhong"
+
+
+@pytest.mark.parametrize("mode", ["full", "initial", "mixed"])
+async def test_pinyin_preserves_extended_hanzi_without_readings_async(mode: PinyinMode) -> None:
+    prompt = "\U0002ebf0\U000323b0"
+    converter = PinyinConverter(mode=mode, separator="-")
+
+    with patch.object(converter, "_get_pinyin_readings", return_value=list(prompt)) as readings:
+        result = await converter.convert_async(prompt=prompt)
+
+    readings.assert_called_once()
+    assert result.output_text == prompt
