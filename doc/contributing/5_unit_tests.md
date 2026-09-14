@@ -21,6 +21,8 @@ Not all of our current tests follow these practices (we're working on it!) But f
 
 Declare the memory fixture explicitly even in constructor or identity tests that create targets, scorers, or attacks. Do not rely on another test leaving CentralMemory initialized.
 
+Run `uv sync --extra all` before validating fixture changes with `make unit-test` so optional target tests also exercise memory isolation.
+
 To avoid replaying the migration history for every ordinary test, `sqlite_template` runs the real Alembic migrations and schema check once per pytest session (once in each xdist worker). SQLite's backup API copies that private, read-only template into each test's database. Rows, schema changes, temporary tables, and result files are not shared between tests.
 
 Tests of initialization, upgrades, downgrades, schema checks, and `reset_database()` must still call those production paths explicitly. The fixture does not replace or patch migration or reset APIs.
