@@ -275,16 +275,12 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     if (pieceError && !error) {
       error = pieceError
     }
-    if (pieceError?.type === 'processing') {
-      // Stored processing errors can contain exception tracebacks. Keep those
-      // diagnostics out of the chat transcript and recovery actions.
-      continue
-    }
-
-    // Extract reasoning summaries from reasoning-type pieces
-    if (isReasoningDataType(piece.converted_value_data_type)) {
-      const summaries = extractReasoningSummaries(piece.converted_value)
-      reasoningSummaries.push(...summaries)
+    // Keep scoring evidence without exposing raw reasoning or processing diagnostics.
+    const isProcessingError = pieceError?.type === 'processing'
+    if (isProcessingError || isReasoningDataType(piece.converted_value_data_type)) {
+      if (!isProcessingError) {
+        reasoningSummaries.push(...extractReasoningSummaries(piece.converted_value))
+      }
       const scores = piece.scores
         .map((score) => scoreWithProvenance(score, { piece, pieceIndex }))
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())

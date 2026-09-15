@@ -619,6 +619,71 @@ describe("messageMapper", () => {
       });
     });
 
+    it("should preserve scores and provenance while redacting a processing-error piece", () => {
+      const msg: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        created_at: "2026-02-15T00:00:00Z",
+        message_pieces: [
+          {
+            id: "p-text",
+            original_value_data_type: "text",
+            converted_value_data_type: "text",
+            converted_value: "Visible response",
+            scores: [],
+            response_error: "none",
+          },
+          {
+            id: "p-processing",
+            original_value_data_type: "text",
+            converted_value_data_type: "error",
+            original_value: "Internal original diagnostic",
+            converted_value: "Traceback: internal converted diagnostic",
+            response_error: "processing",
+            scores: [
+              {
+                id: "older-score",
+                message_piece_id: "p-processing",
+                scorer_type: "AutomatedScorer",
+                score_type: "true_false",
+                score_value: "False",
+                timestamp: "2026-02-15T00:00:00Z",
+              },
+              {
+                id: "newer-score",
+                message_piece_id: "p-processing",
+                scorer_type: "ManualScorer",
+                score_type: "true_false",
+                score_value: "False",
+                is_objective_score: true,
+                score_rationale: "The target did not answer.",
+                timestamp: "2026-02-15T00:01:00Z",
+              },
+            ],
+          },
+        ],
+      };
+
+      const result = backendMessageToFrontend(msg);
+
+      expect(result.content).toBe("Visible response");
+      expect(result.originalContent).toBeUndefined();
+      expect(result.displayPieces?.[1]).toEqual({
+        type: "text",
+        pieceId: "p-processing",
+        pieceIndex: 1,
+        content: "",
+        scores: [...msg.message_pieces[1].scores].reverse().map((score) => ({
+          ...score,
+          pieceIndex: 1,
+          pieceType: "error",
+          sourceLabel: "Piece 2 · error",
+        })),
+      });
+      expect(result.error?.type).toBe("processing");
+      expect(JSON.stringify(result)).not.toMatch(/Internal original diagnostic|Traceback/);
+    });
+
     it("should handle multi-piece message with text + image", () => {
       const msg: BackendMessage = {
         turn_number: 1,

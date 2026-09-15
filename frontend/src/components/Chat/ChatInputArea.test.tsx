@@ -747,6 +747,43 @@ describe("ChatInputArea", () => {
     expect(screen.getByRole("button", { name: /send message/i })).toBeEnabled();
   });
 
+  it("should use the first recovered media reference instead of a later uploaded attachment for converters", async () => {
+    const ref = React.createRef<ChatInputAreaHandle>();
+    const onAttachmentsChange = jest.fn();
+    render(
+      <TestWrapper>
+        <ChatInputArea ref={ref} {...defaultProps} onAttachmentsChange={onAttachmentsChange} />
+      </TestWrapper>
+    );
+
+    React.act(() => {
+      ref.current?.addAttachment({
+        type: "image",
+        name: "restored.png",
+        url: "/api/media?path=display-only.png",
+        sourceValue: "/original/restored.png",
+        sourceDataType: "image_path",
+        mimeType: "image/png",
+      });
+      ref.current?.addAttachment({
+        type: "image",
+        name: "uploaded.png",
+        url: "blob:uploaded-image",
+        file: new File(["new image"], "uploaded.png", { type: "image/png" }),
+        mimeType: "image/png",
+      });
+    });
+
+    await waitFor(() => {
+      expect(onAttachmentsChange).toHaveBeenLastCalledWith(
+        ["image"],
+        { image: "/original/restored.png" }
+      );
+    });
+    expect(screen.getByText(/restored\.png/)).toBeInTheDocument();
+    expect(screen.getByText(/uploaded\.png/)).toBeInTheDocument();
+  });
+
   it("should render attachment chip without size label when size is undefined", async () => {
     // Regression guard for the media-chip bug: when an attachment forwarded
     // via "Copy to input box in a new conversation" has no known size (e.g.

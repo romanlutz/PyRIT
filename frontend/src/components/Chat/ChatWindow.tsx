@@ -71,6 +71,7 @@ const CLEAN_CONVERSATION_MESSAGE =
 interface RecoverableSendDraft {
   conversationId: string
   failedRequestTurnNumber: number
+  failedResponseTurnNumber: number
   errorMessageIndex: number
   originalValue: string
   attachments: MessageAttachment[]
@@ -127,6 +128,7 @@ function getPersistedProcessingRecovery(
   return {
     conversationId,
     failedRequestTurnNumber: outcome.request_turn_number,
+    failedResponseTurnNumber: outcome.response_turn_number,
     errorMessageIndex,
     originalValue: originalDraft.content,
     attachments: (originalDraft.attachments ?? []).map((attachment) => ({ ...attachment })),
@@ -437,12 +439,22 @@ export default function ChatWindow({
       setRecoverableSends((currentRecoveries) => {
         const currentRecovery = currentRecoveries[convId]
         if (persistedRecovery) {
-          if (currentRecovery?.source === 'live') {
-            return currentRecoveries
+          if (
+            currentRecovery?.source === 'live'
+            && currentRecovery.failedRequestTurnNumber === persistedRecovery.failedRequestTurnNumber
+            && currentRecovery.failedResponseTurnNumber === persistedRecovery.failedResponseTurnNumber
+          ) {
+            return {
+              ...currentRecoveries,
+              [convId]: {
+                ...currentRecovery,
+                errorMessageIndex: persistedRecovery.errorMessageIndex,
+              },
+            }
           }
           return { ...currentRecoveries, [convId]: persistedRecovery }
         }
-        if (!currentRecovery || currentRecovery.source === 'live') {
+        if (!currentRecovery) {
           return currentRecoveries
         }
         const nextRecoveries = { ...currentRecoveries }
@@ -698,6 +710,7 @@ export default function ChatWindow({
           [effectiveConvId]: {
             conversationId: effectiveConvId,
             failedRequestTurnNumber: targetResponseOutcome.request_turn_number,
+            failedResponseTurnNumber: targetResponseOutcome.response_turn_number,
             errorMessageIndex,
             originalValue,
             attachments: attachments.map((attachment) => ({ ...attachment })),

@@ -2,7 +2,8 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FluentProvider, webLightTheme } from "@fluentui/react-components";
 import MessageList from "./MessageList";
-import { BackendScore, Message } from "../../types";
+import { BackendMessage, BackendScore, Message } from "../../types";
+import { backendMessageToFrontend } from "@/utils/messageMapper";
 
 const originalClientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
 
@@ -115,6 +116,42 @@ describe("MessageList", () => {
     );
 
     expect(screen.getByText("Assistant message test")).toBeInTheDocument();
+  });
+
+  it("should show persisted scores on a redacted processing error", async () => {
+    const user = userEvent.setup();
+    const backendMessage: BackendMessage = {
+      turn_number: 1,
+      role: "assistant",
+      created_at: "2026-02-15T00:00:00Z",
+      message_pieces: [{
+        id: "processing-piece",
+        original_value_data_type: "text",
+        converted_value_data_type: "error",
+        original_value: "Internal original diagnostic",
+        converted_value: "Traceback: internal converted diagnostic",
+        response_error: "processing",
+        scores: [{
+          id: "processing-score",
+          message_piece_id: "processing-piece",
+          scorer_type: "ManualScorer",
+          score_type: "true_false",
+          score_value: "False",
+          score_rationale: "The target did not answer.",
+          timestamp: "2026-02-15T00:00:00Z",
+        }],
+      }],
+    };
+    render(
+      <TestWrapper>
+        <MessageList messages={[backendMessageToFrontend(backendMessage)]} />
+      </TestWrapper>
+    );
+
+    expect(screen.getByText(/the target could not process this message/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /score false from manualscorer/i }));
+    expect(screen.getByText("The target did not answer.")).toBeInTheDocument();
+    expect(screen.queryByText(/Internal original diagnostic|Traceback/)).not.toBeInTheDocument();
   });
 
   it("should show the message score and its details when present", async () => {

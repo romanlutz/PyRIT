@@ -342,6 +342,51 @@ describe("conversationExport", () => {
       expect(exportedMessage.displayPieces[0].scores[0].id).toBe("score-blocked");
     });
 
+    it("exports persisted processing-error scores without diagnostic values", () => {
+      const backendMessage: BackendMessage = {
+        turn_number: 1,
+        role: "assistant",
+        created_at: FIXED_NOW.toISOString(),
+        message_pieces: [{
+          id: "processing-piece",
+          original_value_data_type: "text",
+          converted_value_data_type: "error",
+          original_value: "Internal original diagnostic",
+          converted_value: "Traceback: internal converted diagnostic",
+          response_error: "processing",
+          scores: [{
+            id: "processing-score",
+            message_piece_id: "processing-piece",
+            scorer_type: "ManualScorer",
+            score_type: "true_false",
+            score_value: "False",
+            is_objective_score: true,
+            score_rationale: "No answer was returned.",
+            timestamp: FIXED_NOW.toISOString(),
+          }],
+        }],
+      };
+      const json = conversationToJson([backendMessageToFrontend(backendMessage)], "conv-processing", FIXED_NOW);
+      const exportedMessage = JSON.parse(json).messages[0];
+
+      expect(exportedMessage.displayPieces).toEqual([
+        expect.objectContaining({
+          pieceId: "processing-piece",
+          content: "",
+          scores: [
+            expect.objectContaining({
+              id: "processing-score",
+              message_piece_id: "processing-piece",
+              pieceIndex: 0,
+              pieceType: "error",
+              score_rationale: "No answer was returned.",
+            }),
+          ],
+        }),
+      ]);
+      expect(json).not.toMatch(/Internal original diagnostic|Traceback/);
+    });
+
     it("defaults the export timestamp to a valid ISO string when omitted", () => {
       const exportedAt = JSON.parse(conversationToJson([message()], "conv-1")).exported_at;
       expect(Number.isNaN(Date.parse(exportedAt))).toBe(false);
