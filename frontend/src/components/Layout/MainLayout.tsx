@@ -36,14 +36,23 @@ export default function MainLayout({
     versionApi.getVersion()
       .then(data => {
         setVersion(data.version)
+        document.title = `Co-PyRIT ${data.version}`
         setCommit(data.version.includes('.dev') ? data.commit ?? null : null)
         setDatabaseInfo(data.database_info ?? null)
       })
-      .catch(() => setVersion('Unknown'))
+      .catch(() => {
+        setVersion('Unknown')
+        document.title = 'Co-PyRIT'
+      })
   }, [])
+
+  const title = version === 'Unknown' ? 'Co-PyRIT' : `Co-PyRIT ${version}`
 
   return (
     <div className={styles.root}>
+      <a href="#main-content" className={styles.skipLink}>
+        Skip to main content
+      </a>
       <div className={styles.topBar}>
         <Tooltip
           content={
@@ -61,7 +70,7 @@ export default function MainLayout({
             className={styles.logo}
           />
         </Tooltip>
-        <Text className={styles.title}>Co-PyRIT</Text>
+        <Text className={styles.title}>{title}</Text>
         <Text className={styles.subtitle}>Python Risk Identification Tool</Text>
         <div className={styles.spacer} />
         {onStartTour && (
@@ -86,7 +95,9 @@ export default function MainLayout({
             canManageConfiguration={canManageConfiguration}
           />
         </aside>
-        <main className={styles.main}>{children}</main>
+        <main id="main-content" tabIndex={-1} className={styles.main}>
+          {children}
+        </main>
       </div>
     </div>
   )

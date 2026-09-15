@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { test, expect, type Locator, type Page } from "@playwright/test";
+import type { BackendMessage, BackendMessagePiece } from "@/types";
+import { makeAddMessageResponse } from "./_attacks";
 import { makeTarget } from "./_targets";
 
 // ---------------------------------------------------------------------------
@@ -17,7 +19,7 @@ function getMessageByText(page: Page, text: string): Locator {
 /** Intercept targets & attacks APIs so the chat flow can run without real keys. */
 async function mockBackendAPIs(page: Page) {
   // Accumulate messages so multi-turn tests get full history back
-  let accumulatedMessages: Record<string, unknown>[] = [];
+  let accumulatedMessages: BackendMessage[] = [];
 
   // Mock targets list – return one target already available
   await page.route(/\/api\/targets/, async (route) => {
@@ -57,7 +59,7 @@ async function mockBackendAPIs(page: Page) {
       }
 
       const turnNumber = Math.floor(accumulatedMessages.length / 2) + 1;
-      const userMsg = {
+      const userMsg: BackendMessage = {
         turn_number: turnNumber,
         role: "user",
         created_at: new Date().toISOString(),
@@ -73,7 +75,7 @@ async function mockBackendAPIs(page: Page) {
           },
         ],
       };
-      const assistantMsg = {
+      const assistantMsg: BackendMessage = {
         turn_number: turnNumber,
         role: "assistant",
         created_at: new Date().toISOString(),
@@ -96,11 +98,9 @@ async function mockBackendAPIs(page: Page) {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({
-          messages: {
-            messages: [...accumulatedMessages],
-          },
-        }),
+        body: JSON.stringify(makeAddMessageResponse(
+          "e2e-attack-001", MOCK_CONVERSATION_ID, [...accumulatedMessages],
+        )),
       });
     } else if (route.request().method() === "GET") {
       await route.fulfill({
@@ -379,7 +379,7 @@ test.describe("Chat without target", () => {
 /** Build the mock message/add-message route handler that returns the
  *  given response pieces for assistant messages. */
 function buildModalityMock(
-  assistantPieces: Record<string, unknown>[],
+  assistantPieces: BackendMessagePiece[],
   mockConversationId = "e2e-modality-conv",
 ) {
   return async function mockAPIs(page: Page) {
@@ -407,7 +407,7 @@ function buildModalityMock(
 
     // Add message – returns user turn + assistant with given pieces.
     // Also handles GET requests for loadConversation.
-    let lastMessages: Record<string, unknown>[] = [];
+    let lastMessages: BackendMessage[] = [];
     let postSeen = false; // track POST so GET doesn't return empty during render race
     await page.route(/\/api\/attacks\/[^/]+\/messages/, async (route) => {
       if (route.request().method() === "POST") {
@@ -449,11 +449,9 @@ function buildModalityMock(
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({
-            messages: {
-              messages: lastMessages,
-            },
-          }),
+          body: JSON.stringify(makeAddMessageResponse(
+            "e2e-modality-attack", mockConversationId, lastMessages,
+          )),
         });
       } else if (route.request().method() === "GET") {
         // Return empty before any POST so loadConversation doesn't hang,
