@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { lazy, Suspense, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react'
 import type { ChangeEvent } from 'react'
 import {
   Button,
@@ -12,6 +12,8 @@ import {
   MenuPopover,
   MenuTrigger,
   mergeClasses,
+  MessageBar,
+  MessageBarBody,
   Spinner,
   Switch,
   Text,
@@ -20,12 +22,13 @@ import {
   useRestoreFocusTarget,
 } from '@fluentui/react-components'
 import type { SwitchOnChangeData } from '@fluentui/react-components'
-import { AddRegular, ArrowDownloadRegular, PanelRightRegular } from '@fluentui/react-icons'
+import { AddRegular, ArrowDownloadRegular, BranchForkRegular, ChatRegular, PanelRightRegular } from '@fluentui/react-icons'
 import { Link } from 'react-router'
 import MessageList from './MessageList'
 import SystemPromptBanner from './SystemPromptBanner'
 import ChatInputArea from './ChatInputArea'
 import ConversationPanel from './ConversationPanel'
+import MessageBatchProgress from './MessageBatchProgress'
 import ConverterPanel from './ConverterPanel'
 import TargetBadge from './TargetBadge'
 import ObjectiveHeader from './ObjectiveHeader'
@@ -47,6 +50,8 @@ import type {
   CreateAttackRequest,
   Message,
   MessageAttachment,
+  MessageBatchStatus,
+  MultiSendOptions,
   TargetInstance,
   TargetInfo,
 } from '../../types'
@@ -54,7 +59,9 @@ import { isTargetResolutionBlocking, targetInfoMatchesTarget } from '../../utils
 import { scenarioRunRoutePath } from '../../utils/routeParams'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
+import { MessageBatchTrackingError, useMessageBatch } from '@/hooks/useMessageBatch'
 
+const ConversationTree = lazy(() => import('./ConversationTree/ConversationTree'))
 const NARROW_SCREEN_QUERY = '(max-width: 600px)'
 const MARKDOWN_PREFERENCE_STORAGE_KEY = 'pyrit.chatMarkdownMode'
 
@@ -158,8 +165,13 @@ export default function ChatWindow({
   const [isLoadingMessages, setIsLoadingMessages] = useState(false)
   /** Which conversation's messages are currently loaded (set after fetch completes) */
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null)
-  const isSending = activeConversationId ? sendingConversations.has(activeConversationId) : Boolean(sendingConversations.size)
+  const [unboundConversationId, setUnboundConversationId] = useState<string | null>(null)
+  const effectiveConversationId = activeConversationId ?? conversationId
+  const isSending = sendingConversations.has(effectiveConversationId ?? unboundConversationId ?? '__pending__')
   const [isPanelOpen, setIsPanelOpen] = useState(false)
+  const [isTreeView, setIsTreeView] = useState(false)
+  const [hasOpenedTree, setHasOpenedTree] = useState(false)
+  const [readError, setReadError] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const isExportingRef = useRef(false)
   const [isNarrowScreen, setIsNarrowScreen] = useState(matchesNarrowScreen)
@@ -173,6 +185,13 @@ export default function ChatWindow({
   const [pieceConversions, setPieceConversions] = useState<Record<string, PieceConversion>>({})
   const [panelRefreshKey, setPanelRefreshKey] = useState(0)
   const inputBoxRef = useRef<ChatInputAreaHandle>(null)
+  const { batches, executeBatch, retryTracking, dismissBatch } = useMessageBatch()
+  const componentMountedRef = useRef(true)
+
+  useEffect(() => {
+    componentMountedRef.current = true
+    return () => { componentMountedRef.current = false }
+  }, [])
 
   const handleMarkdownChange = useCallback((
     _event: ChangeEvent<HTMLInputElement>,
@@ -246,9 +265,14 @@ export default function ChatWindow({
   // Always-current ref of the conversation being viewed so async callbacks can
   // check whether the user navigated away while a request was in-flight.
   const viewedConvRef = useRef(activeConversationId ?? conversationId)
-  useEffect(() => { viewedConvRef.current = activeConversationId ?? conversationId }, [activeConversationId, conversationId])
+  const viewedAttackRef = useRef(attackResultId)
+  useLayoutEffect(() => {
+    viewedConvRef.current = activeConversationId ?? conversationId
+    viewedAttackRef.current = attackResultId
+  }, [activeConversationId, conversationId, attackResultId])
   // Synchronous ref tracking which conversations have an in-flight send.
   const sendingConvIdsRef = useRef<Set<string>>(new Set())
+  const sendTokensRef = useRef(new Map<string, symbol>())
   // Pending user messages per conversation that may not be stored server-side yet.
   // Used to restore the user's input when switching back to an in-flight conversation.
   const pendingUserMessagesRef = useRef<Map<string, Message[]>>(new Map())
@@ -280,9 +304,13 @@ export default function ChatWindow({
   const [prevAttackResultId, setPrevAttackResultId] = useState<string | null>(attackResultId)
   if (attackResultId !== prevAttackResultId) {
     setPrevAttackResultId(attackResultId)
+    setIsTreeView(false)
+    setHasOpenedTree(false)
+    setReadError(null)
     if (!attackResultId) {
       setMessages([])
       setLoadedConversationId(null)
+      setUnboundConversationId(null)
       setSystemPrompt('')
       setPendingObjective('')
     }
@@ -307,6 +335,7 @@ export default function ChatWindow({
       // Discard stale response if user navigated away while loading
       if (viewedConvRef.current !== convId) { return }
       const frontendMessages = backendMessagesToFrontend(response.messages)
+      setReadError(null)
       // If this conversation has an in-flight send, append any pending user
       // messages (that the server may not have stored yet) and a loading indicator.
       if (sendingConvIdsRef.current.has(convId)) {
@@ -321,8 +350,9 @@ export default function ChatWindow({
       }
       setMessages(frontendMessages)
       setLoadedConversationId(convId)
-    } catch {
+    } catch (error: unknown) {
       if (viewedConvRef.current !== convId) { return }
+      setReadError(`Could not load this conversation: ${toApiError(error).detail}`)
       setMessages([])
       setLoadedConversationId(convId)
     } finally {
@@ -355,6 +385,8 @@ export default function ChatWindow({
   // Handle conversation selection from the panel
   // For a different ID the useEffect handles loading; for same ID force a refresh
   const handlePanelSelectConversation = useCallback((convId: string) => {
+    setIsTreeView(false)
+    viewedConvRef.current = convId
     forceLoadRef.current = true
     onSelectConversation(convId)
     if (isNarrowScreen) {
@@ -365,11 +397,18 @@ export default function ChatWindow({
     }
   }, [attackResultId, activeConversationId, isNarrowScreen, onSelectConversation, loadConversation])
 
-  const handleSend = async (originalValue: string, convertedValue: string | undefined, attachments: MessageAttachment[]) => {
+  const handleSend = async (
+    originalValue: string,
+    convertedValue: string | undefined,
+    attachments: MessageAttachment[],
+    options?: MultiSendOptions,
+  ) => {
+    const sendCount = options?.count ?? 1
     if (
       !activeTarget
       || isLoadingAttack
       || isMutationLocked
+      || sendingConvIdsRef.current.has(activeConversationId ?? conversationId ?? '__pending__')
     ) {
       return
     }
@@ -381,16 +420,38 @@ export default function ChatWindow({
     const isTextFileConversion = Boolean(textConversion) && !isTextTextConversion
 
     // Track which conversation this send belongs to (may be updated after attack creation)
-    let sendConvId = activeConversationId || '__pending__'
+    let sendConvId = activeConversationId ?? conversationId ?? '__pending__'
+    let sendAttackId = attackResultId
+    let batchSubmitted = false
+    let preparationFailed = false
+    const sendToken = Symbol('send')
+    const trackedConversations = new Set([sendConvId])
+    const finishedConversations = new Set<string>()
+    sendTokensRef.current.set(sendConvId, sendToken)
+    const releaseConversation = (id: string): void => {
+      if (sendTokensRef.current.get(id) !== sendToken) return
+      sendTokensRef.current.delete(id)
+      sendingConvIdsRef.current.delete(id)
+      pendingUserMessagesRef.current.delete(id)
+      if (componentMountedRef.current) {
+        setSendingConversations((previous: Set<string>) => {
+          const next = new Set(previous)
+          next.delete(id)
+          return next
+        })
+      }
+    }
     // Mark synchronously so the useEffect guard sees it immediately
     sendingConvIdsRef.current.add(sendConvId)
 
     // When a text→text converter is active, show the converted text as the bubble's
     // primary content. When a text→file converter is active, keep the typed text
     // as content and synthesize a file attachment so the bubble shows both.
-    const displayContent = isTextTextConversion && convertedValue != null ? convertedValue : originalValue
+    const displayContent = sendCount === 1 && isTextTextConversion && convertedValue != null
+      ? convertedValue
+      : originalValue
     const optimisticAttachments: MessageAttachment[] = [...attachments]
-    if (isTextFileConversion && textConversion) {
+    if (sendCount === 1 && isTextFileConversion && textConversion) {
       const url = buildMediaUrl(textConversion.convertedValue)
       const kind = dataTypeToAttachmentKind(textConversion.convertedDataType)
       optimisticAttachments.push({
@@ -407,7 +468,7 @@ export default function ChatWindow({
       content: displayContent,
       timestamp: new Date().toISOString(),
       attachments: optimisticAttachments.length > 0 ? optimisticAttachments : undefined,
-      originalContent: isTextTextConversion ? originalValue : undefined,
+      originalContent: sendCount === 1 && isTextTextConversion ? originalValue : undefined,
     }
     setMessages(prev => [...prev, userMessage])
 
@@ -459,22 +520,29 @@ export default function ChatWindow({
         }
         const createResponse = await attacksApi.createAttack(createRequest)
         currentAttackResultId = createResponse.attack_result_id
+        sendAttackId = currentAttackResultId
         currentConversationId = createResponse.conversation_id
         currentActiveConversationId = currentConversationId
         // Mark new ID in synchronous ref *before* triggering the state
         // update that changes activeConversationId (and fires the useEffect)
         sendingConvIdsRef.current.delete('__pending__')
         sendingConvIdsRef.current.add(currentConversationId!)
+        sendTokensRef.current.delete('__pending__')
+        sendTokensRef.current.set(currentConversationId, sendToken)
+        trackedConversations.delete('__pending__')
+        trackedConversations.add(currentConversationId)
         // Move pending messages to the real conversation ID
         const pendingMsgs = pendingUserMessagesRef.current.get('__pending__')
         if (pendingMsgs) {
           pendingUserMessagesRef.current.delete('__pending__')
           pendingUserMessagesRef.current.set(currentConversationId!, pendingMsgs)
         }
-        onConversationCreated(currentAttackResultId, currentConversationId, pendingObjective || undefined)
-        // Update the viewed-conversation ref so the success/error guards
-        // below recognise this as the active conversation.
-        viewedConvRef.current = currentConversationId!
+        if (componentMountedRef.current && viewedAttackRef.current === attackResultId) {
+          viewedConvRef.current = currentConversationId
+          viewedAttackRef.current = currentAttackResultId
+          setUnboundConversationId(currentConversationId)
+          onConversationCreated(currentAttackResultId, currentConversationId, pendingObjective || undefined)
+        }
         // Update sending tracker to use real ID instead of __pending__
         setSendingConversations(prev => {
           const next = new Set(prev)
@@ -498,16 +566,90 @@ export default function ChatWindow({
         target_conversation_id: effectiveConvId!,
         converter_ids: converterIds,
       }
+      if (sendCount > 1) {
+        batchSubmitted = true
+        const status = await executeBatch(currentAttackResultId, {
+          ...addMessageRequest,
+          count: sendCount,
+          request_converter_mode: options?.requestConverterMode ?? 'shared',
+        }, async (progress: MessageBatchStatus): Promise<void> => {
+          let changed = false
+          const failedPreparation = progress.state === 'failed'
+            && progress.branches.length < progress.requested_count
+          for (const branch of progress.branches) {
+            const id = branch.conversation_id
+            if (branch.state === 'queued' || branch.state === 'sending') {
+              if (!trackedConversations.has(id) && !sendTokensRef.current.has(id)) {
+                trackedConversations.add(id)
+                sendTokensRef.current.set(id, sendToken)
+                sendingConvIdsRef.current.add(id)
+                pendingUserMessagesRef.current.set(id, [userMessage])
+                setSendingConversations((previous: Set<string>) => new Set(previous).add(id))
+                changed = true
+              }
+            } else if (!finishedConversations.has(id)) {
+              finishedConversations.add(id)
+              if (!failedPreparation || id !== sendConvId) releaseConversation(id)
+              changed = true
+              if (
+                componentMountedRef.current
+                && viewedAttackRef.current === progress.attack_result_id
+                && viewedConvRef.current === id
+                && !sendingConvIdsRef.current.has(id)
+              ) {
+                await loadConversation(progress.attack_result_id, id)
+              }
+            }
+          }
+          if (changed && componentMountedRef.current && viewedAttackRef.current === progress.attack_result_id) {
+            setPanelRefreshKey((key: number) => key + 1)
+          }
+        })
+        if (status.state === 'failed' && status.branches.length < status.requested_count) {
+          preparationFailed = true
+          throw new Error(status.error || 'Could not prepare these sends. No prompts were sent to the objective target.')
+        }
+        if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+          setPieceConversions((current: Record<string, PieceConversion>) => {
+            const next = { ...current }
+            for (const [key, conversion] of Object.entries(conversions)) {
+              if (next[key] === conversion) delete next[key]
+            }
+            return next
+          })
+          try {
+            const attack = await attacksApi.getAttack(currentAttackResultId)
+            if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+              onAttackChange?.(attack)
+            }
+          } catch (error: unknown) {
+            if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+              setReadError(`Sends finished, but attack details could not be refreshed: ${toApiError(error).detail}`)
+            }
+          }
+        }
+        return
+      }
       const response = await attacksApi.addMessage(currentAttackResultId!, addMessageRequest)
-      onAttackChange?.(response.attack)
+      if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+        onAttackChange?.(response.attack)
+      }
 
       // Clear converter state after successful send
-      setPieceConversions({})
+      if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+        setPieceConversions((current: Record<string, PieceConversion>) => {
+          const next = { ...current }
+          for (const [key, conversion] of Object.entries(conversions)) {
+            if (next[key] === conversion) delete next[key]
+          }
+          return next
+        })
+      }
 
       // Only update displayed messages if the user is still viewing this conversation.
       // If they switched away the response is persisted server-side and will appear
       // when they navigate back.
-      if (viewedConvRef.current === effectiveConvId) {
+      if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId && viewedConvRef.current === effectiveConvId) {
         // Replace the entire message list with authoritative server data.
         // This correctly handles the case where the user switched away and
         // back during the request — the full conversation is restored.
@@ -516,13 +658,18 @@ export default function ChatWindow({
         setLoadedConversationId(effectiveConvId!)
       }
     } catch (err) {
+      if (!componentMountedRef.current) return
       const viewedConversationId = viewedConvRef.current
       const isViewingFailedConversation = viewedConversationId === sendConvId
         || viewedConversationId === (activeConversationId ?? conversationId)
         || (viewedConversationId == null && sendConvId !== '__pending__')
 
       // Only show error in UI if user is still on this conversation
-      if (isViewingFailedConversation) {
+      if (
+        isViewingFailedConversation
+        && viewedAttackRef.current === sendAttackId
+        && sendTokensRef.current.get(sendConvId) === sendToken
+      ) {
         // Mark the viewed conversation as loaded so first-send failures do not
         // get stuck behind the "Loading conversation..." placeholder.
         if (viewedConversationId) {
@@ -532,8 +679,17 @@ export default function ChatWindow({
         }
 
         const apiError = toApiError(err)
+        const uncertainBatch = batchSubmitted && !preparationFailed && (
+          err instanceof MessageBatchTrackingError
+          || apiError.status === null
+          || apiError.status >= 500
+        )
         let description: string
-        if (apiError.isNetworkError) {
+        if (uncertainBatch) {
+          description = err instanceof MessageBatchTrackingError
+            ? err.message
+            : 'The send status is unknown. Some prompts may already have been sent. Refresh the conversation tree before trying again.'
+        } else if (apiError.isNetworkError) {
           description = 'Network error — check that the backend is running and reachable.'
         } else if (apiError.isTimeout) {
           description = 'Request timed out. The server may be busy — please try again.'
@@ -558,19 +714,16 @@ export default function ChatWindow({
         })
 
         // Preserve the failed message text in the input box for easy re-send
-        if (originalValue && inputBoxRef.current) {
-          inputBoxRef.current.setText(originalValue)
+        if (!uncertainBatch && inputBoxRef.current) {
+          inputBoxRef.current.restoreDraft(originalValue, attachments)
         }
       }
     } finally {
-      sendingConvIdsRef.current.delete(sendConvId)
-      pendingUserMessagesRef.current.delete(sendConvId)
-      setSendingConversations(prev => {
-        const next = new Set(prev)
-        next.delete(sendConvId)
-        return next
-      })
-      setPanelRefreshKey(k => k + 1)
+      for (const id of trackedConversations) releaseConversation(id)
+      releaseConversation(sendConvId)
+      if (componentMountedRef.current && viewedAttackRef.current === sendAttackId) {
+        setPanelRefreshKey((key: number) => key + 1)
+      }
     }
   }
 
@@ -840,8 +993,8 @@ export default function ChatWindow({
 
   return (
     <div className={styles.root}>
-      <h1 className={styles.pageHeading}>Chat</h1>
-      {isConverterPanelOpen && (
+      <h1 className={styles.pageHeading}>{isTreeView ? 'Conversation tree' : 'Chat'}</h1>
+      {isConverterPanelOpen && !isTreeView && (
         <ConverterPanel
           onClose={() => setIsConverterPanelOpen(false)}
           previewText={chatInputText}
@@ -886,6 +1039,7 @@ export default function ChatWindow({
             )}
           </div>
           <div className={styles.ribbonActions}>
+            {!isTreeView && <>
             <Tooltip content="Render all messages as Markdown by default" relationship="label">
               <Switch
                 checked={globalMarkdown}
@@ -925,6 +1079,26 @@ export default function ChatWindow({
                 </MenuList>
               </MenuPopover>
             </Menu>
+            </>}
+            <Tooltip
+              content={isTreeView ? 'Return to conversation' : 'Show conversation tree'}
+              relationship="label"
+            >
+              <Button
+                appearance={isTreeView ? 'secondary' : 'subtle'}
+                className={styles.ribbonAction}
+                icon={isTreeView ? <ChatRegular /> : <BranchForkRegular />}
+                disabled={!attackResultId}
+                aria-label={isTreeView ? 'Return to conversation' : 'Show conversation tree'}
+                aria-pressed={isTreeView}
+                data-testid="toggle-tree-btn"
+                onClick={() => {
+                  setHasOpenedTree(true)
+                  setIsTreeView((previous: boolean) => !previous)
+                }}
+              />
+            </Tooltip>
+            {!isTreeView &&
             <Tooltip content="Toggle conversations panel" relationship="label">
               <Button
                 {...restoreFocusTargetAttributes}
@@ -939,11 +1113,19 @@ export default function ChatWindow({
                 aria-controls="conversation-panel"
               />
             </Tooltip>
+            }
             <Tooltip content="New Attack" relationship="label">
               <Button
                 appearance="primary"
                 icon={<AddRegular />}
-                onClick={() => { setIsPanelOpen(false); onNewAttack() }}
+                onClick={() => {
+                  setIsPanelOpen(false)
+                  setIsTreeView(false)
+                  setUnboundConversationId(null)
+                  viewedAttackRef.current = null
+                  viewedConvRef.current = null
+                  onNewAttack()
+                }}
                 disabled={!attackResultId}
                 data-testid="new-attack-btn"
                 aria-label="New Attack"
@@ -981,6 +1163,50 @@ export default function ChatWindow({
           }
           onAdd={handleAddObjective}
         />
+        <MessageBatchProgress
+          batches={batches}
+          attackResultId={attackResultId}
+          onSelectConversation={handlePanelSelectConversation}
+          onRetry={retryTracking}
+          onDismiss={dismissBatch}
+        />
+        {readError && (
+          <MessageBar intent="error">
+            <MessageBarBody>{readError}</MessageBarBody>
+            <Button
+              appearance="transparent"
+              className={styles.ribbonAction}
+              onClick={() => {
+                if (attackResultId && effectiveConversationId) {
+                  void loadConversation(attackResultId, effectiveConversationId)
+                }
+              }}
+            >
+              Reload conversation
+            </Button>
+          </MessageBar>
+        )}
+        {hasOpenedTree && attackResultId && (
+          <div
+            hidden={!isTreeView}
+            className={mergeClasses(styles.viewPane, !isTreeView && styles.hiddenPane)}
+          >
+            <Suspense fallback={<Spinner label="Loading conversation tree..." />}>
+              <ConversationTree
+                key={attackResultId}
+                attackResultId={attackResultId}
+                activeConversationId={effectiveConversationId}
+                active={isTreeView}
+                refreshKey={panelRefreshKey}
+                onSelectConversation={handlePanelSelectConversation}
+              />
+            </Suspense>
+          </div>
+        )}
+        <div
+          hidden={isTreeView}
+          className={mergeClasses(styles.viewPane, isTreeView && styles.hiddenPane)}
+        >
         {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
         <MessageList
           messages={messages}
@@ -1053,6 +1279,7 @@ export default function ChatWindow({
             return next
           })}
         />
+        </div>
       </div>
       <Drawer
         as="aside"
@@ -1060,7 +1287,7 @@ export default function ChatWindow({
         type={isNarrowScreen ? 'overlay' : 'inline'}
         position="end"
         separator
-        open={isPanelOpen}
+        open={isPanelOpen && !isTreeView}
         onOpenChange={(_, { open }) => setIsPanelOpen(open)}
         className={mergeClasses(
           styles.conversationDrawer,
@@ -1068,7 +1295,7 @@ export default function ChatWindow({
         )}
         aria-label="Attack Conversations"
       >
-        <ConversationPanel
+        {!isTreeView && <ConversationPanel
           attackResultId={attackResultId}
           activeConversationId={activeConversationId}
           onSelectConversation={handlePanelSelectConversation}
@@ -1083,7 +1310,7 @@ export default function ChatWindow({
             : undefined
           }
           refreshKey={panelRefreshKey}
-        />
+        />}
       </Drawer>
     </div>
   )

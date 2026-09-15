@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Text,
   Avatar,
@@ -39,6 +39,7 @@ import type {
   MessageDisplayPiece,
 } from '../../types'
 import { useMessageListStyles } from './MessageList.styles'
+import { ImageWithSpinner, MediaWithFallback } from './MediaPreview'
 
 interface MessageListProps {
   messages: Message[]
@@ -62,51 +63,6 @@ interface MessageListProps {
   noTargetSelected?: boolean
   /** Conversation-wide default: render message text as Markdown. */
   globalMarkdown?: boolean
-}
-
-/** Image that shows a spinner while loading. */
-function ImageWithSpinner({ src, alt, className, hiddenClassName, containerClassName, spinnerClassName }: {
-  src: string
-  alt: string
-  className: string
-  hiddenClassName: string
-  containerClassName: string
-  spinnerClassName: string
-}) {
-  const [loaded, setLoaded] = useState(false)
-  const [error, setError] = useState(false)
-  const onLoad = useCallback(() => setLoaded(true), [])
-  const onError = useCallback(() => { setError(true); setLoaded(true) }, [])
-
-  return (
-    <div className={containerClassName}>
-      {!loaded && <Spinner size="small" className={spinnerClassName} />}
-      {error
-        ? <Text size={200} italic>Image failed to load</Text>
-        : <img
-            src={src}
-            alt={alt}
-            className={loaded ? className : hiddenClassName}
-            onLoad={onLoad}
-            onError={onError}
-          />
-      }
-    </div>
-  )
-}
-
-function MediaWithFallback({ type, src, className }: { type: 'video' | 'audio'; src: string; className?: string }) {
-  const [error, setError] = useState(false)
-  const handleError = useCallback(() => setError(true), [])
-
-  if (error) {
-    return <Text size={200} italic data-testid={`${type}-error`}>{type === 'video' ? 'Video' : 'Audio'} failed to load</Text>
-  }
-
-  if (type === 'video') {
-    return <video src={src} controls className={className} onError={handleError} data-testid="video-player" />
-  }
-  return <audio src={src} controls className={className} onError={handleError} data-testid="audio-player" />
 }
 
 function scoreDisplayValue(score: DisplayScore): string {

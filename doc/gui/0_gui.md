@@ -46,6 +46,32 @@ The Chat view is the primary workspace for running interactive attacks against c
 
 Type a message and press Enter (or click Send) to send it to the active target. The response appears below. Shift+Enter inserts a newline without sending.
 
+#### Repeating the Next Prompt
+
+Click **n=1** beside Send to choose between 1 and 10 repetitions. With a count greater than
+1, CoPyRIT copies the current conversation's history into additional conversations and sends
+the next prompt once in each, including the current conversation. All conversations belong
+to the same attack result. Repeating a prompt from one branch does not resend it on the
+attack's other existing branches.
+
+The count resets to **n=1** after submission. Enter and the Send button use the same settings.
+Request converters have two modes:
+
+- **Convert once, reuse for all** (default): each conversation receives the same prepared
+  prompt and attachments.
+- **Convert independently for each**: request converters run separately for each conversation,
+  which can produce different converted prompts.
+
+Response converters process each reply independently. Sends run in parallel within the
+available target capacity; queued work and individual failures are shown in the progress
+banner. A failed branch does not discard successful replies or automatically resend them.
+Use its conversation link to inspect the saved error.
+
+You can inspect the conversation tree while sends are running. Progress handles are temporary,
+but the conversations and saved messages remain accessible through the attack result. If
+progress becomes unavailable, refresh it or inspect the saved conversations before sending
+again: a disconnected browser does not imply that the target received nothing.
+
 #### Attachments
 
 Click the attachment button to add images, audio, video, or documents to your message. Supported types include `image/*`, `audio/*`, `video/*`, `.pdf`, `.doc`, `.docx`, and `.txt`. Attachments are displayed as chips below the input with type icons and file sizes.
@@ -75,6 +101,29 @@ Each assistant message has four action buttons:
 #### Conversations Panel
 
 Click the panel toggle in the ribbon to open the conversations sidebar. This panel shows all conversations within the current attack, including message counts and last-message previews. You can switch between conversations, create new ones, and promote a conversation to be the "main" conversation.
+
+#### Conversation Tree
+
+Click **Show conversation tree** in the ribbon to replace the chat pane with a top-down tree.
+Each node is one message, with that message's pieces kept together. Shared cloned history
+appears once; independently generated responses remain separate even when their text matches.
+Only conversations with the objective target are included, not internal adversarial conversations.
+
+Pan and zoom to inspect branches, collapse portions you are not working on, or use **Fit to view**.
+Select a conversation endpoint to return to its chat. A shared message can belong to several
+conversations, so its chooser lets you select the one to open. The ribbon's chat-bubble button
+returns to the previously viewed conversation without changing your draft.
+
+The tree loads progressively. Known message nodes remain usable while more branches are
+loading, and visible text excerpts load separately from the structure. Loading indicators
+distinguish incomplete structure from content that has not been requested yet. A loading
+failure does not remove the already available tree.
+
+Text previews are limited to 200 characters per message. Media begins with small previews
+or type placeholders; large images and audio/video originals are not loaded for every node.
+Open a media piece to view it at a larger size or play it. Close with **X** or **Escape** to
+return to the same tree position. Requesting a piece explicitly takes priority over background
+loading, so you do not have to wait for the entire tree.
 
 #### Exporting a Conversation
 

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/graphLicenses.mjs",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "type-check": "tsc --noEmit",
@@ -22,10 +22,12 @@
     "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
+    "@dagrejs/dagre": "3.1.1",
     "@azure/msal-browser": "^5.20.0",
     "@azure/msal-react": "^5.7.0",
     "@fluentui/react-components": "9.74.7",
     "@fluentui/react-icons": "2.0.339",
+    "@xyflow/react": "12.11.6",
     "axios": "1.20.0",
     "prismjs": "^1.30.0",
     "react": "19.2.8",

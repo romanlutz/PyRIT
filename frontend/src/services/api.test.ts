@@ -119,6 +119,17 @@ describe("api service", () => {
 
       consoleSpy.mockRestore();
     });
+
+    it("does not report intentionally cancelled reads as network failures", async () => {
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+      const error = { code: "ERR_CANCELED", isAxiosError: true };
+      try {
+        await expect(responseOnError(error)).rejects.toBe(error);
+        expect(consoleSpy).not.toHaveBeenCalled();
+      } finally {
+        consoleSpy.mockRestore();
+      }
+    });
   });
 
   describe("healthApi", () => {

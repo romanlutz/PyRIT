@@ -15,6 +15,7 @@ const config: Config = {
   testMatch: ["**/*.test.ts", "**/*.test.tsx"],
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/src/$1",
+    "^\\./treeLayout\\.worker\\?worker$": "<rootDir>/src/components/Chat/ConversationTree/__mocks__/treeLayoutWorker.ts",
     "\\.(css|less|scss|sass)$": "identity-obj-proxy",
   },
   setupFilesAfterEnv: ["<rootDir>/src/setupTests.ts"],

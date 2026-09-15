@@ -1,0 +1,11 @@
+# Offline browser-test configuration, separate from credentialed scenario tests.
+memory_db_type: in_memory
+env_files: []
+env_akv_ref: []
+allow_custom_initializers: false
+operator: e2e
+operation: conversation-tree
+initializers:
+  - technique
+initialization_scripts:
+  - tests/end_to_end/frontend_targets.py

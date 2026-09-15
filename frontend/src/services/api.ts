@@ -22,7 +22,14 @@ import type {
   ConversationMessagesResponse,
   AddMessageRequest,
   AddMessageResponse,
+  MessageBatchInput,
+  MessageBatchStatus,
   AttackConversationsResponse,
+  ConversationTreePage,
+  ConversationTreeQuery,
+  ConversationTreePreviewResponse,
+  TreeMessageReference,
+  TreePreviewLevel,
   CreateConversationRequest,
   CreateConversationResponse,
   ChangeMainConversationResponse,
@@ -124,6 +131,7 @@ apiClient.interceptors.request.use(async (config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
+    if (error?.code === 'ERR_CANCELED') return Promise.reject(error)
     const originalRequest = error?.config
     if (error?.response?.status === 401 && originalRequest && !originalRequest._retried) {
       originalRequest._retried = true
@@ -313,6 +321,52 @@ export const attacksApi = {
     const response = await apiClient.post(
       `/attacks/${encodeURIComponent(attackResultId)}/messages`,
       request
+    )
+    return response.data
+  },
+
+  startMessageBatch: async (attackResultId: string, request: MessageBatchInput): Promise<MessageBatchStatus> => {
+    const response = await apiClient.post<MessageBatchStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/messages/batch`,
+      { ...request, submission_id: request.submission_id ?? generateRequestId() },
+    )
+    return response.data
+  },
+
+  getMessageBatch: async (
+    attackResultId: string,
+    batchId: string,
+    signal?: AbortSignal,
+  ): Promise<MessageBatchStatus> => {
+    const response = await apiClient.get<MessageBatchStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/message-batches/${encodeURIComponent(batchId)}`,
+      { signal },
+    )
+    return response.data
+  },
+
+  getConversationTree: async (
+    attackResultId: string,
+    query: ConversationTreeQuery = {},
+    signal?: AbortSignal,
+  ): Promise<ConversationTreePage> => {
+    const response = await apiClient.get<ConversationTreePage>(
+      `/attacks/${encodeURIComponent(attackResultId)}/conversation-tree`,
+      { params: query, signal },
+    )
+    return response.data
+  },
+
+  getTreePreviews: async (
+    attackResultId: string,
+    messages: TreeMessageReference[],
+    level: TreePreviewLevel = 'text',
+    signal?: AbortSignal,
+  ): Promise<ConversationTreePreviewResponse> => {
+    const response = await apiClient.post<ConversationTreePreviewResponse>(
+      `/attacks/${encodeURIComponent(attackResultId)}/conversation-tree/previews`,
+      { messages, level },
+      { signal },
     )
     return response.data
   },

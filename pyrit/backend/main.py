@@ -27,12 +27,14 @@ from pyrit.backend.routes import (
     attacks,
     auth,
     configuration,
+    conversation_tree,
     converters,
     datasets,
     health,
     initializers,
     labels,
     media,
+    message_batches,
     scenarios,
     scores,
     targets,
@@ -40,6 +42,7 @@ from pyrit.backend.routes import (
 )
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
+from pyrit.backend.services.multi_send_service import shutdown_message_batches_async
 from pyrit.common.path import CONFIGURATION_DIRECTORY_PATH
 from pyrit.registry import InitializerRegistry
 from pyrit.setup.configuration_loader import ConfigurationLoader
@@ -110,7 +113,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # don't emit noise and don't perform filesystem side effects.
     setup_frontend()
 
-    yield
+    try:
+        yield
+    finally:
+        await shutdown_message_batches_async()
 
 
 app = FastAPI(
@@ -153,6 +159,8 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(attacks.router, prefix="/api", tags=["attacks"])
+app.include_router(message_batches.router, prefix="/api", tags=["attacks"])
+app.include_router(conversation_tree.router, prefix="/api", tags=["attacks"])
 app.include_router(configuration.router, prefix="/api", tags=["config"])
 app.include_router(targets.router, prefix="/api", tags=["targets"])
 app.include_router(converters.router, prefix="/api", tags=["converters"])

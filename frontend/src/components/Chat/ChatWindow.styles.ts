@@ -19,6 +19,17 @@ export const useChatWindowStyles = makeStyles({
     whiteSpace: 'nowrap',
     border: 0,
   },
+  viewPane: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+    minWidth: 0,
+    overflow: 'hidden',
+  },
+  hiddenPane: {
+    display: 'none',
+  },
   chatArea: {
     display: 'flex',
     flexDirection: 'column',

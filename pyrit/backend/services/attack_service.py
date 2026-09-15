@@ -51,6 +51,7 @@ from pyrit.backend.models.attacks import (
 )
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.services.converter_service import get_converter_service
+from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.media_persistence import persist_media_value_async
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
@@ -71,8 +72,9 @@ from pyrit.models import (
     ComponentIdentifier,
     Conversation,
     ConversationStats,
-    ConversationType,
     ConverterIdentifier,
+    Message,
+    MessagePiece,
     PromptDataType,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
@@ -94,6 +96,7 @@ class AttackService:
     def __init__(self) -> None:
         """Initialize the attack service."""
         self._memory = CentralMemory.get_memory_instance()
+        self._message_metadata_lock = asyncio.Lock()
 
     # ========================================================================
     # Public API Methods
@@ -586,7 +589,7 @@ class AttackService:
         Returns:
             CreateConversationResponse if attack found, None otherwise.
         """
-        results = self._memory.get_attack_results(attack_result_ids=[attack_result_id])
+        results = await asyncio.to_thread(self._memory.get_attack_results, attack_result_ids=[attack_result_id])
         if not results:
             return None
 
@@ -598,34 +601,45 @@ class AttackService:
             raise ValueError("Both source_conversation_id and cutoff_index must be provided together")
 
         # Validate source_conversation_id belongs to this attack
-        if request.source_conversation_id is not None and not ar.includes_conversation(request.source_conversation_id):
+        if (
+            request.source_conversation_id is not None
+            and request.source_conversation_id not in ar.get_active_conversation_ids()
+        ):
             raise ValueError(
                 f"Conversation '{request.source_conversation_id}' is not part of attack '{attack_result_id}'"
             )
 
-        # --- Branch via duplication (preferred for tracking) ---------------
+        source_metadata: Conversation | None = None
+        all_pieces: Sequence[MessagePiece] = []
         if request.source_conversation_id is not None and request.cutoff_index is not None:
-            source_metadata = self._memory._get_conversation(conversation_id=request.source_conversation_id)
-            new_conversation_id = self._duplicate_conversation_up_to(
+            source_metadata = await asyncio.to_thread(
+                self._memory._get_conversation, conversation_id=request.source_conversation_id
+            )
+            source_metadata = source_metadata or Conversation(conversation_id=request.source_conversation_id)
+            conversation, all_pieces = await asyncio.to_thread(
+                self._prepare_conversation_up_to,
                 source_conversation_id=request.source_conversation_id,
                 cutoff_index=request.cutoff_index,
-                target_identifier=source_metadata.target_identifier if source_metadata else None,
+                target_identifier=source_metadata.target_identifier,
             )
         else:
-            new_conversation_id = str(uuid.uuid4())
+            attack_identifier = ar.get_attack_strategy_identifier()
+            conversation = Conversation(
+                conversation_id=str(uuid.uuid4()),
+                target_identifier=attack_identifier.get_child("objective_target") if attack_identifier else None,
+            )
 
-        # Add to pruned_conversation_ids so user-created branches are visible in the GUI history panel.
-        existing_pruned = ar.get_pruned_conversation_ids()
-
-        self._memory.update_attack_result_by_id(
+        stored = await asyncio.to_thread(
+            self._memory.add_conversation_branches_to_attack,
             attack_result_id=attack_result_id,
-            update_fields={
-                "pruned_conversation_ids": existing_pruned + [new_conversation_id],
-                "timestamp": now,
-            },
+            conversations=[conversation],
+            message_pieces=all_pieces,
+            source_conversation=source_metadata,
         )
+        if not stored:
+            return None
 
-        return CreateConversationResponse(conversation_id=new_conversation_id, created_at=now)
+        return CreateConversationResponse(conversation_id=conversation.conversation_id, created_at=now)
 
     async def update_main_conversation_async(
         self, *, attack_result_id: str, request: UpdateMainConversationRequest
@@ -641,52 +655,25 @@ class AttackService:
         Returns:
             UpdateMainConversationResponse if the source attack exists, None otherwise.
         """
-        results = self._memory.get_attack_results(attack_result_ids=[attack_result_id])
+        results = await asyncio.to_thread(self._memory.get_attack_results, attack_result_ids=[attack_result_id])
         if not results:
             return None
 
         ar = results[0]
         target_conv_id = request.conversation_id
 
-        # If the target is already the main conversation, nothing to do.
-        if target_conv_id == ar.conversation_id:
-            return UpdateMainConversationResponse(
-                attack_result_id=attack_result_id,
-                conversation_id=target_conv_id,
-                updated_at=datetime.now(UTC),
-            )
-
         # Verify the conversation belongs to this attack (main or related)
         if not ar.includes_conversation(target_conv_id):
             raise ValueError(f"Conversation '{target_conv_id}' is not part of this attack")
 
-        # Build updated DB columns: remove target from its list, add old main
-        # to pruned list (user-visible GUI conversations are PRUNED, not ADVERSARIAL).
-        updated_pruned = [
-            ref.conversation_id
-            for ref in ar.related_conversations
-            if ref.conversation_id != target_conv_id and ref.conversation_type == ConversationType.PRUNED
-        ]
-        updated_adversarial = [
-            ref.conversation_id
-            for ref in ar.related_conversations
-            if ref.conversation_id != target_conv_id and ref.conversation_type == ConversationType.ADVERSARIAL
-        ]
-        # The old main becomes a pruned related conversation so it remains
-        # visible in the GUI and fetchable via get_conversation_messages.
-        updated_pruned.append(ar.conversation_id)
-
         now = datetime.now(UTC)
-
-        self._memory.update_attack_result_by_id(
+        stored = await asyncio.to_thread(
+            self._memory.promote_attack_conversation,
             attack_result_id=attack_result_id,
-            update_fields={
-                "conversation_id": target_conv_id,
-                "pruned_conversation_ids": updated_pruned if updated_pruned else None,
-                "adversarial_chat_conversation_ids": updated_adversarial if updated_adversarial else None,
-                "timestamp": now,
-            },
+            conversation_id=target_conv_id,
         )
+        if not stored:
+            return None
 
         return UpdateMainConversationResponse(
             attack_result_id=attack_result_id,
@@ -705,13 +692,26 @@ class AttackService:
         Returns:
             AddMessageResponse containing the updated attack detail.
         """
-        results = self._memory.get_attack_results(attack_result_ids=[attack_result_id])
+        reservation = get_manual_send_scheduler().reserve(conversation_id=request.target_conversation_id)
+        try:
+            return await self._add_message_reserved_async(attack_result_id=attack_result_id, request=request)
+        finally:
+            reservation.release()
+
+    async def _add_message_reserved_async(
+        self, *, attack_result_id: str, request: AddMessageRequest
+    ) -> AddMessageResponse:
+        """
+        Execute the existing single-message contract while owning the conversation.
+
+        Returns:
+            AddMessageResponse: The unchanged single-send response shape.
+        """
+        results = await asyncio.to_thread(self._memory.get_attack_results, attack_result_ids=[attack_result_id])
         if not results:
             raise ValueError(f"Attack '{attack_result_id}' not found")
 
         ar = results[0]
-        main_conversation_id = ar.conversation_id
-
         self._validate_target_match(attack_identifier=ar.get_attack_strategy_identifier(), request=request)
 
         msg_conversation_id = request.target_conversation_id
@@ -733,11 +733,7 @@ class AttackService:
         }
         last_response_id: str | None = None
 
-        # Get existing messages to determine sequence.
-        # NOTE: This read-then-write is not atomic (TOCTOU). Fine for the
-        # current single-user UI, but would need a DB-level sequence
-        # generator or optimistic locking if concurrent writes are supported.
-        existing = self._memory.get_message_pieces(conversation_id=msg_conversation_id)
+        existing = await asyncio.to_thread(self._memory.get_message_pieces, conversation_id=msg_conversation_id)
         sequence = max((p.sequence for p in existing), default=-1) + 1
 
         if request.send:
@@ -761,7 +757,9 @@ class AttackService:
                 # generic 500. If no new error piece was stored (the failure
                 # happened before the send, e.g. target lookup), re-raise so the
                 # route still reports a real error.
-                current_pieces = self._memory.get_message_pieces(conversation_id=msg_conversation_id)
+                current_pieces = await asyncio.to_thread(
+                    self._memory.get_message_pieces, conversation_id=msg_conversation_id
+                )
                 if not any(p.id not in prior_ids and p.has_error() for p in current_pieces):
                     raise
                 logger.exception(
@@ -779,7 +777,9 @@ class AttackService:
             )
             last_response_id = str(last_response.id) if last_response else None
         else:
-            existing_metadata = self._memory._get_conversation(conversation_id=msg_conversation_id)
+            existing_metadata = await asyncio.to_thread(
+                self._memory._get_conversation, conversation_id=msg_conversation_id
+            )
             await self._store_message_only_async(
                 conversation_id=msg_conversation_id,
                 request=request,
@@ -789,7 +789,6 @@ class AttackService:
 
         await self._update_attack_after_message_async(
             attack_result_id=attack_result_id,
-            ar=ar,
             last_response_id=last_response_id,
             request_converter_configurations=request_converter_configs,
             response_converter_configurations=response_converter_configs,
@@ -841,7 +840,6 @@ class AttackService:
         self,
         *,
         attack_result_id: str,
-        ar: AttackResult,
         last_response_id: str | None,
         request_converter_configurations: list[ConverterConfiguration],
         response_converter_configurations: list[ConverterConfiguration],
@@ -854,10 +852,44 @@ class AttackService:
 
         Args:
             attack_result_id: The attack result to update.
-            ar: The current attack result.
             last_response_id: The latest target response piece ID, if one was stored.
             request_converter_configurations: Resolved request converter configurations used for this message.
             response_converter_configurations: Resolved response converter configurations used for this message.
+
+        Raises:
+            ValueError: If the attack disappeared before its metadata could be updated.
+        """
+        async with self._message_metadata_lock:
+            results = await asyncio.to_thread(self._memory.get_attack_results, attack_result_ids=[attack_result_id])
+            if not results:
+                raise ValueError(f"Attack '{attack_result_id}' not found after message send")
+            update_fields = self._build_message_update_fields(
+                ar=results[0],
+                last_response_id=last_response_id,
+                request_converter_configurations=request_converter_configurations,
+                response_converter_configurations=response_converter_configurations,
+            )
+            stored = await asyncio.to_thread(
+                self._memory.update_attack_result_by_id,
+                attack_result_id=attack_result_id,
+                update_fields=update_fields,
+            )
+            if not stored:
+                raise ValueError(f"Attack '{attack_result_id}' not found after message send")
+
+    def _build_message_update_fields(
+        self,
+        *,
+        ar: AttackResult,
+        last_response_id: str | None,
+        request_converter_configurations: list[ConverterConfiguration],
+        response_converter_configurations: list[ConverterConfiguration],
+    ) -> dict[str, Any]:
+        """
+        Merge converter usage into the latest attack metadata without changing its membership.
+
+        Returns:
+            dict[str, Any]: Recency, response, and converter fields to update.
         """
         update_fields: dict[str, Any] = {"timestamp": datetime.now(UTC)}
         if last_response_id:
@@ -892,10 +924,7 @@ class AttackService:
                     )
                     update_fields["atomic_attack_identifier"] = new_atomic.model_dump()
 
-        self._memory.update_attack_result_by_id(
-            attack_result_id=attack_result_id,
-            update_fields=update_fields,
-        )
+        return update_fields
 
     @staticmethod
     def _replace_converter_pipelines(
@@ -1029,10 +1058,11 @@ class AttackService:
         Returns:
             The new conversation ID containing the duplicated messages.
         """
-        messages = self._memory.get_conversation_messages(conversation_id=source_conversation_id)
-        messages_to_copy = [m for m in messages if m.sequence <= cutoff_index]
-
-        new_conversation_id, all_pieces = self._memory.duplicate_messages(messages=messages_to_copy)
+        conversation, all_pieces = self._prepare_conversation_up_to(
+            source_conversation_id=source_conversation_id,
+            cutoff_index=cutoff_index,
+            target_identifier=target_identifier,
+        )
 
         # Apply optional overrides to the fresh pieces before persisting
         for piece in all_pieces:
@@ -1040,12 +1070,29 @@ class AttackService:
                 piece.role = "simulated_assistant"
 
         if all_pieces:
-            self._memory.add_conversation_to_memory(
-                conversation=Conversation(conversation_id=new_conversation_id, target_identifier=target_identifier)
-            )
+            self._memory.add_conversation_to_memory(conversation=conversation)
             self._memory.add_message_pieces_to_memory(message_pieces=list(all_pieces))
 
-        return new_conversation_id
+        return conversation.conversation_id
+
+    def _prepare_conversation_up_to(
+        self,
+        *,
+        source_conversation_id: str,
+        cutoff_index: int,
+        target_identifier: ComponentIdentifier | None = None,
+    ) -> tuple[Conversation, Sequence[MessagePiece]]:
+        """
+        Prepare a history copy without writing any rows.
+
+        Returns:
+            tuple[Conversation, Sequence[MessagePiece]]: New metadata and lineage-preserving pieces.
+        """
+        messages = self._memory.get_conversation_messages(conversation_id=source_conversation_id)
+        new_id, pieces = self._memory.duplicate_messages(
+            messages=[message for message in messages if message.sequence <= cutoff_index]
+        )
+        return Conversation(conversation_id=new_id, target_identifier=target_identifier), pieces
 
     # ========================================================================
     # Private Helper Methods - Store Messages
@@ -1123,31 +1170,41 @@ class AttackService:
         if not target_obj:
             raise ValueError(f"Target object for '{target_registry_name}' not found")
 
-        await self._persist_base64_pieces_async(request)
-
-        self._resolve_video_remix_metadata(request)
-
-        pyrit_message = request_to_pyrit_message(
-            request=request,
-            conversation_id=conversation_id,
-            sequence=sequence,
-        )
-
         request_converter_configurations = self._exclude_preconverted_piece_indexes(
             configurations=request_converter_configurations,
             preconverted_indexes=preconverted_indexes,
             piece_count=len(request.pieces),
         )
 
-        normalizer = PromptNormalizer()
-        await normalizer.send_prompt_async(
-            message=pyrit_message,
-            target=target_obj,
-            conversation_id=conversation_id,
-            request_converter_configurations=request_converter_configurations,
-            response_converter_configurations=response_converter_configurations,
+        exclusive = bool(
+            target_obj._max_requests_per_minute or request_converter_configurations or response_converter_configurations
         )
+        async with get_manual_send_scheduler().operation_async(exclusive=exclusive):
+            pyrit_message = await self._prepare_message_async(
+                request=request, conversation_id=conversation_id, sequence=sequence
+            )
+            normalizer = PromptNormalizer()
+            await normalizer.send_prompt_async(
+                message=pyrit_message,
+                target=target_obj,
+                conversation_id=conversation_id,
+                request_converter_configurations=request_converter_configurations,
+                response_converter_configurations=response_converter_configurations,
+            )
         # PromptNormalizer stores both request and response in memory automatically
+
+    async def _prepare_message_async(
+        self, *, request: AddMessageRequest, conversation_id: str, sequence: int
+    ) -> Message:
+        """
+        Resolve uploaded media once, then map the request through the canonical mapper.
+
+        Returns:
+            Message: A fresh request ready for conversion.
+        """
+        await self._persist_base64_pieces_async(request)
+        await asyncio.to_thread(self._resolve_video_remix_metadata, request)
+        return request_to_pyrit_message(request=request, conversation_id=conversation_id, sequence=sequence)
 
     async def _store_message_only_async(
         self,
@@ -1159,8 +1216,9 @@ class AttackService:
     ) -> None:
         """Store message without sending (send=False)."""
         await self._persist_base64_pieces_async(request)
-        self._memory.add_conversation_to_memory(
-            conversation=Conversation(conversation_id=conversation_id, target_identifier=target_identifier)
+        await asyncio.to_thread(
+            self._memory.add_conversation_to_memory,
+            conversation=Conversation(conversation_id=conversation_id, target_identifier=target_identifier),
         )
         for p in request.pieces:
             piece = request_piece_to_pyrit_message_piece(
@@ -1169,7 +1227,7 @@ class AttackService:
                 conversation_id=conversation_id,
                 sequence=sequence,
             )
-            self._memory.add_message_pieces_to_memory(message_pieces=[piece])
+            await asyncio.to_thread(self._memory.add_message_pieces_to_memory, message_pieces=[piece])
 
     def _resolve_video_remix_metadata(self, request: AddMessageRequest) -> None:
         """

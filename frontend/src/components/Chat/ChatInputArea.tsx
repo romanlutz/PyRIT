@@ -8,10 +8,11 @@ import {
   mergeClasses,
 } from '@fluentui/react-components'
 import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular, OpenRegular, ArrowSyncRegular } from '@fluentui/react-icons'
-import type { AttackTargetResolutionStatus, MessageAttachment, TargetInstance } from '../../types'
+import type { AttackTargetResolutionStatus, MessageAttachment, MultiSendOptions, TargetInstance } from '../../types'
 import { isTargetResolutionBlocking } from '../../utils/targetIdentity'
 import { useChatInputAreaStyles } from './ChatInputArea.styles'
 import SystemPromptSetup from './SystemPromptSetup'
+import MultiSendSettings from './MultiSendSettings'
 import { PIECE_TYPE_TO_DATA_TYPE } from './converterTypes'
 
 // ---------------------------------------------------------------------------
@@ -406,10 +407,16 @@ const formatModalityLabel = (modality: string): string => modality.replace('_pat
 export interface ChatInputAreaHandle {
   addAttachment: (att: MessageAttachment) => void
   setText: (text: string) => void
+  restoreDraft: (text: string, attachments: MessageAttachment[]) => boolean
 }
 
 interface ChatInputAreaProps {
-  onSend: (originalValue: string, convertedValue: string | undefined, attachments: MessageAttachment[]) => void
+  onSend: (
+    originalValue: string,
+    convertedValue: string | undefined,
+    attachments: MessageAttachment[],
+    options?: MultiSendOptions,
+  ) => void
   disabled?: boolean
   activeTarget?: TargetInstance | null
   singleTurnLimitReached?: boolean
@@ -448,6 +455,10 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const styles = useChatInputAreaStyles()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
+  const [multiSendOptions, setMultiSendOptions] = useState<MultiSendOptions>({
+    count: 1,
+    requestConverterMode: 'shared',
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const convertedRef = useRef<HTMLTextAreaElement>(null)
@@ -469,6 +480,13 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     },
     setText: (text: string) => {
       setInput(text)
+    },
+    restoreDraft: (text: string, restoredAttachments: MessageAttachment[]) => {
+      if ((input && input !== text) || (attachments.length > 0 && attachments !== restoredAttachments)) return false
+      setInput(text)
+      setAttachments(restoredAttachments)
+      onInputChange(text)
+      return true
     },
   }))
 
@@ -512,7 +530,12 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
 
   const handleSend = () => {
     if ((input || attachments.length > 0) && !disabled && !hasUnsupportedModalities) {
-      onSend(input, convertedValue ?? undefined, attachments)
+      if (multiSendOptions.count > 1) {
+        onSend(input, convertedValue ?? undefined, attachments, { ...multiSendOptions })
+      } else {
+        onSend(input, convertedValue ?? undefined, attachments)
+      }
+      setMultiSendOptions((previous) => ({ ...previous, count: 1 }))
       setInput('')
       setAttachments([])
       onClearConversion()
@@ -750,6 +773,11 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
               />
             </div>
             <div className={styles.columnRight}>
+              <MultiSendSettings
+                options={multiSendOptions}
+                disabled={disabled}
+                onChange={setMultiSendOptions}
+              />
               {activeTarget && activeTarget.capabilities?.supports_multi_turn === false && (
                 <Tooltip
                   content="This target does not track conversation history — each turn is sent independently."
@@ -760,14 +788,17 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                   </span>
                 </Tooltip>
               )}
-              <Tooltip content="Send message" relationship="label">
+              <Tooltip
+                content={multiSendOptions.count === 1 ? 'Send message' : `Send in ${multiSendOptions.count} conversations`}
+                relationship="label"
+              >
                 <Button
                   className={styles.sendButton}
                   appearance="primary"
                   icon={<SendRegular />}
                   onClick={handleSend}
                   disabled={disabled || (!input && attachments.length === 0) || hasUnsupportedModalities}
-                  aria-label="Send message"
+                  aria-label={multiSendOptions.count === 1 ? 'Send message' : `Send in ${multiSendOptions.count} conversations`}
                   data-testid="send-message-btn"
                 />
               </Tooltip>

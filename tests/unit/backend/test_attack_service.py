@@ -33,6 +33,7 @@ from pyrit.backend.services.attack_service import (
     AttackService,
     get_attack_service,
 )
+from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
     encode_keyset_cursor,
@@ -63,6 +64,8 @@ def mock_memory():
     memory.get_conversation_stats.return_value = {}
     memory._get_conversation.return_value = None
     memory.get_prompt_scores.return_value = []
+    memory.add_conversation_branches_to_attack.return_value = True
+    memory.promote_attack_conversation.return_value = True
 
     return memory
 
@@ -70,10 +73,12 @@ def mock_memory():
 @pytest.fixture
 def attack_service(mock_memory):
     """Create an attack service with mocked memory."""
+    get_manual_send_scheduler.cache_clear()
     with patch("pyrit.backend.services.attack_service.CentralMemory") as mock_central:
         mock_central.get_memory_instance.return_value = mock_memory
         service = AttackService()
         yield service
+    get_manual_send_scheduler.cache_clear()
 
 
 def make_attack_result(
@@ -2674,12 +2679,14 @@ class TestCreateRelatedConversation:
         assert result.conversation_id is not None
         assert result.conversation_id != "attack-1"
 
-        # Should have called update_attack_result to persist in DB column
-        mock_memory.update_attack_result_by_id.assert_called_once()
-        call_kwargs = mock_memory.update_attack_result_by_id.call_args[1]
+        mock_memory.add_conversation_branches_to_attack.assert_called_once()
+        call_kwargs = mock_memory.add_conversation_branches_to_attack.call_args.kwargs
         assert call_kwargs["attack_result_id"] == "attack-1"
-        assert result.conversation_id in call_kwargs["update_fields"]["pruned_conversation_ids"]
-        assert isinstance(call_kwargs["update_fields"]["timestamp"], datetime)
+        assert [conversation.conversation_id for conversation in call_kwargs["conversations"]] == [
+            result.conversation_id
+        ]
+        assert call_kwargs["message_pieces"] == []
+        mock_memory.update_attack_result_by_id.assert_not_called()
 
     async def test_rejects_source_conversation_from_different_attack(self, attack_service, mock_memory):
         """Should raise ValueError when source_conversation_id doesn't belong to the attack."""
@@ -2765,16 +2772,11 @@ class TestUpdateMainConversation:
         assert result.attack_result_id == "ar-attack-1"
         assert result.conversation_id == "branch-1"
 
-        # Should update via update_attack_result_by_id
-        mock_memory.update_attack_result_by_id.assert_called_once()
-        call_kwargs = mock_memory.update_attack_result_by_id.call_args[1]
+        mock_memory.promote_attack_conversation.assert_called_once()
+        call_kwargs = mock_memory.promote_attack_conversation.call_args.kwargs
         assert call_kwargs["attack_result_id"] == "ar-attack-1"
-        assert call_kwargs["update_fields"]["conversation_id"] == "branch-1"
-
-        # Old main should now be in pruned_conversation_ids (user-visible)
-        pruned = call_kwargs["update_fields"]["pruned_conversation_ids"]
-        assert "attack-1" in pruned
-        assert "branch-1" not in pruned
+        assert call_kwargs["conversation_id"] == "branch-1"
+        mock_memory.update_attack_result_by_id.assert_not_called()
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -2895,8 +2897,8 @@ class TestConversationCount:
             request=CreateConversationRequest(),
         )
 
-        call_kwargs = mock_memory.update_attack_result_by_id.call_args[1]
-        ids = call_kwargs["update_fields"]["pruned_conversation_ids"]
+        call_kwargs = mock_memory.add_conversation_branches_to_attack.call_args.kwargs
+        ids = [conversation.conversation_id for conversation in call_kwargs["conversations"]]
         assert result.conversation_id in ids
         assert len(ids) == 1
 
@@ -2920,11 +2922,11 @@ class TestConversationCount:
             request=CreateConversationRequest(),
         )
 
-        call_kwargs = mock_memory.update_attack_result_by_id.call_args[1]
-        ids = call_kwargs["update_fields"]["pruned_conversation_ids"]
-        assert "conv-existing" in ids
+        call_kwargs = mock_memory.add_conversation_branches_to_attack.call_args.kwargs
+        ids = [conversation.conversation_id for conversation in call_kwargs["conversations"]]
         assert result.conversation_id in ids
-        assert len(ids) == 2
+        assert len(ids) == 1
+        mock_memory.update_attack_result_by_id.assert_not_called()
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -3023,7 +3025,8 @@ class TestAttackServiceAdditionalCoverage:
             conversation_id="attack-1", target_identifier=expected_target
         )
 
-        with patch.object(attack_service, "_duplicate_conversation_up_to", return_value="branch-dup") as mock_dup:
+        prepared = Conversation(conversation_id="branch-dup", target_identifier=expected_target)
+        with patch.object(attack_service, "_prepare_conversation_up_to", return_value=(prepared, [])) as mock_dup:
             result = await attack_service.create_related_conversation_async(
                 attack_result_id="attack-1",
                 request=CreateConversationRequest(source_conversation_id="attack-1", cutoff_index=2),

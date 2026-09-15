@@ -390,6 +390,7 @@ export interface DisplayScore extends BackendScore {
 
 export interface BackendMessagePiece {
   id: string
+  original_prompt_id?: string
   original_value_data_type: string
   converted_value_data_type: string
   original_value?: string | null
@@ -438,7 +439,55 @@ export interface AddMessageRequest {
   send: boolean
   target_registry_name?: string
   converter_ids?: string[]
+  request_converter_configurations?: ConverterConfigurationRequest[]
+  response_converter_configurations?: ConverterConfigurationRequest[]
   target_conversation_id: string
+}
+
+export interface ConverterConfigurationRequest {
+  converter_ids: string[]
+  indexes_to_apply?: number[]
+  prompt_data_types_to_apply?: string[]
+}
+
+export type RequestConverterMode = 'shared' | 'per_branch'
+
+export interface MultiSendOptions {
+  count: number
+  requestConverterMode: RequestConverterMode
+}
+
+export type MessageBatchState = 'preparing' | 'queued' | 'running' | 'completed' | 'failed'
+export type MessageBatchBranchState = 'queued' | 'sending' | 'completed' | 'failed'
+
+export interface MessageBatchRequest extends AddMessageRequest {
+  count: number
+  request_converter_mode: RequestConverterMode
+  submission_id: string
+}
+
+export type MessageBatchInput = Omit<MessageBatchRequest, 'submission_id'> & { submission_id?: string }
+
+export interface MessageBatchBranch {
+  conversation_id: string
+  state: MessageBatchBranchState
+  new_message_piece_ids: string[]
+  error: string | null
+}
+
+export interface MessageBatchStatus {
+  batch_id: string
+  attack_result_id: string
+  source_conversation_id: string
+  requested_count: number
+  state: MessageBatchState
+  branches: MessageBatchBranch[]
+  error: string | null
+}
+
+export interface TrackedMessageBatch {
+  status: MessageBatchStatus
+  trackingError: string | null
 }
 
 export interface LabelOptionsResponse {
@@ -487,6 +536,68 @@ export interface CreateConversationResponse {
 export interface ChangeMainConversationResponse {
   attack_result_id: string
   conversation_id: string
+}
+
+export interface TreeMessageReference {
+  conversation_id: string
+  sequence: number
+}
+
+export interface ConversationTreeNode {
+  node_id: string
+  parent_node_id: string | null
+  message: TreeMessageReference
+  role: string
+  piece_types: string[]
+  piece_count: number
+  preview_key: string
+  created_at: string
+}
+
+export interface ConversationTreeEndpoint {
+  conversation_id: string
+  node_id: string | null
+}
+
+export interface ConversationTreePage {
+  attack_result_id: string
+  main_conversation_id: string
+  revision: string
+  nodes: ConversationTreeNode[]
+  conversations: ConversationTreeEndpoint[]
+  processed_conversations: number
+  total_conversations: number
+  next_cursor: string | null
+  complete: boolean
+}
+
+export interface ConversationTreeQuery {
+  cursor?: string
+  limit?: number
+  prioritize_conversation_id?: string
+}
+
+export type TreePreviewLevel = 'text' | 'thumbnail' | 'full'
+
+export interface ConversationTreePiecePreview {
+  piece_id: string
+  data_type: string
+  text: string | null
+  truncated: boolean
+  media_url: string | null
+  thumbnail_url: string | null
+  mime_type: string | null
+  filename: string | null
+  response_error: string
+}
+
+export interface ConversationTreePreview {
+  message: TreeMessageReference
+  pieces: ConversationTreePiecePreview[]
+}
+
+export interface ConversationTreePreviewResponse {
+  previews: ConversationTreePreview[]
 }
 
 // --- Scenarios ---
