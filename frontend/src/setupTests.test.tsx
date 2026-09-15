@@ -15,6 +15,8 @@ describe('JSDOM focus layout', () => {
     expect(screen.getByRole('button', { name: 'Visible control' }).offsetParent).not.toBeNull()
     expect(document.body.getBoundingClientRect().width).toBe(window.innerWidth)
     expect(document.body.getBoundingClientRect().height).toBe(window.innerHeight)
+    expect(document.body.offsetParent).toBeNull()
+    expect(document.documentElement.offsetParent).toBeNull()
   })
 
   it('should not provide layout for detached controls', () => {
@@ -24,7 +26,7 @@ describe('JSDOM focus layout', () => {
   })
 
   it('should not provide layout for hidden controls or their descendants', () => {
-    render(
+    const { rerender } = render(
       <>
         <button type="button" hidden>Hidden control</button>
         <div hidden><button type="button">Hidden descendant</button></div>
@@ -34,17 +36,44 @@ describe('JSDOM focus layout', () => {
     expect(screen.getByText('Hidden control').offsetParent).toBeNull()
     expect(screen.getByText('Hidden descendant').offsetParent).toBeNull()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
+
+    rerender(
+      <>
+        <button type="button">Hidden control</button>
+        <div><button type="button">Hidden descendant</button></div>
+      </>,
+    )
+    expect(screen.getByRole('button', { name: 'Hidden control' }).offsetParent).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Hidden descendant' }).offsetParent).not.toBeNull()
   })
 
   it.each<CSSProperties>([
     { display: 'none' },
     { visibility: 'hidden' },
   ])('should preserve CSS-hidden controls (%j)', (style: CSSProperties) => {
-    render(<div style={style}><button type="button">CSS-hidden control</button></div>)
+    const { rerender } = render(<div style={style}><button type="button">CSS-hidden control</button></div>)
 
     expect(screen.queryByRole('button', { name: 'CSS-hidden control' })).not.toBeInTheDocument()
     if (style.display === 'none') {
       expect(screen.getByText('CSS-hidden control').offsetParent).toBeNull()
+    }
+
+    rerender(<div><button type="button">CSS-hidden control</button></div>)
+    expect(screen.getByRole('button', { name: 'CSS-hidden control' }).offsetParent).not.toBeNull()
+  })
+
+  it('should keep a hidden body zero-sized', () => {
+    render(<button type="button">Body descendant</button>)
+    const button = screen.getByRole('button', { name: 'Body descendant' })
+    const originalDisplay = document.body.style.display
+    try {
+      document.body.style.display = 'none'
+
+      expect(document.body.getBoundingClientRect().width).toBe(0)
+      expect(document.body.getBoundingClientRect().height).toBe(0)
+      expect(button.offsetParent).toBeNull()
+    } finally {
+      document.body.style.display = originalDisplay
     }
   })
 
