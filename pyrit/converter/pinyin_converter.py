@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
 import re
 from typing import Literal
 
@@ -50,7 +51,7 @@ class PinyinConverter(Converter):
     always left unchanged, as are Hanzi without a dictionary reading. Pass ``seed`` for
     reproducible selection.
 
-    Pinyin dictionaries are loaded lazily when converting prompts.
+    Pinyin dictionaries are loaded lazily, and phrase lookup runs in a worker thread.
     """
 
     SUPPORTED_INPUT_TYPES = ("text",)
@@ -155,7 +156,7 @@ class PinyinConverter(Converter):
         if not selected:
             return ConverterResult(output_text=prompt, output_type="text")
 
-        readings = self._get_pinyin_readings(prompt)
+        readings = await asyncio.to_thread(self._get_pinyin_readings, prompt)
         out: list[str] = []
         for i, (ch, reading) in enumerate(zip(prompt, readings, strict=True)):
             if i not in selected:

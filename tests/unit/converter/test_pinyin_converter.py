@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import asyncio
+import threading
 from random import Random
 from unittest.mock import MagicMock, patch
 
@@ -227,3 +229,39 @@ async def test_pinyin_preserves_extended_hanzi_without_readings_async(mode: Piny
 
     readings.assert_called_once()
     assert result.output_text == prompt
+
+
+async def test_pinyin_readings_do_not_block_event_loop_async() -> None:
+    converter = PinyinConverter()
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started = asyncio.Event()
+    release = threading.Event()
+
+    def blocking_readings(prompt: str) -> list[str]:
+        assert threading.get_ident() != loop_thread
+        assert prompt == "中心"
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(timeout=5):
+            raise TimeoutError("The event loop did not release the dictionary lookup")
+        return ["zhong", "xin"]
+
+    with patch.object(converter, "_get_pinyin_readings", side_effect=blocking_readings):
+        conversion = asyncio.create_task(converter.convert_async(prompt="中心"))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            assert not conversion.done()
+        finally:
+            release.set()
+            result = await asyncio.wait_for(conversion, timeout=5)
+
+    assert result.output_text == "zhongxin"
+
+
+async def test_pinyin_reading_errors_propagate_async() -> None:
+    converter = PinyinConverter()
+    with (
+        patch.object(converter, "_get_pinyin_readings", side_effect=RuntimeError("Dictionary lookup failed")),
+        pytest.raises(RuntimeError, match="Dictionary lookup failed"),
+    ):
+        await converter.convert_async(prompt="中心")

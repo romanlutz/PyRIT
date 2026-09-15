@@ -4917,7 +4917,7 @@ requires-dist = [
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
     { name = "pyodbc", specifier = ">=5.1.0" },
     { name = "pypdf", specifier = ">=6.10.2" },
-    { name = "pypinyin", specifier = ">=0.53.0" },
+    { name = "pypinyin", specifier = ">=0.55.0" },
     { name = "python-docx", specifier = ">=1.1.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "reportlab", specifier = ">=4.4.4" },
