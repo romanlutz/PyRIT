@@ -656,8 +656,8 @@ class AttackService:
                 updated_at=datetime.now(UTC),
             )
 
-        # Verify the conversation belongs to this attack (main or related)
-        if not ar.includes_conversation(target_conv_id):
+        # Only user-visible conversations can become the main conversation.
+        if target_conv_id not in ar.get_active_conversation_ids():
             raise ValueError(f"Conversation '{target_conv_id}' is not part of this attack")
 
         # Build updated DB columns: remove target from its list, add old main
@@ -672,6 +672,11 @@ class AttackService:
             for ref in ar.related_conversations
             if ref.conversation_id != target_conv_id and ref.conversation_type == ConversationType.ADVERSARIAL
         ]
+        updated_preparation = [
+            ref.conversation_id
+            for ref in ar.related_conversations
+            if ref.conversation_id != target_conv_id and ref.conversation_type == ConversationType.PREPARATION
+        ]
         # The old main becomes a pruned related conversation so it remains
         # visible in the GUI and fetchable via get_conversation_messages.
         updated_pruned.append(ar.conversation_id)
@@ -684,6 +689,7 @@ class AttackService:
                 "conversation_id": target_conv_id,
                 "pruned_conversation_ids": updated_pruned if updated_pruned else None,
                 "adversarial_chat_conversation_ids": updated_adversarial if updated_adversarial else None,
+                "preparation_conversation_ids": updated_preparation if updated_preparation else None,
                 "timestamp": now,
             },
         )

@@ -2608,6 +2608,13 @@ class TestGetConversations:
                 description="Scoring conversation",
             )
         )
+        ar.related_conversations.add(
+            ConversationReference(
+                conversation_id="preparation-1",
+                conversation_type=ConversationType.PREPARATION,
+                description="Preparation conversation",
+            )
+        )
 
         mock_memory.get_attack_results.return_value = [ar]
 
@@ -2618,6 +2625,7 @@ class TestGetConversations:
             "attack-1": ConversationStats(message_count=1, last_message_preview="test", created_at=t1),
             "branch-1": ConversationStats(message_count=2, last_message_preview="test", created_at=t2),
             "score-1": ConversationStats(message_count=0),
+            "preparation-1": ConversationStats(message_count=2),
         }
 
         result = await attack_service.get_conversations_async(attack_result_id="attack-1")
@@ -2750,7 +2758,7 @@ class TestUpdateMainConversation:
         ar.related_conversations = {
             ConversationReference(
                 conversation_id="branch-1",
-                conversation_type=ConversationType.ADVERSARIAL,
+                conversation_type=ConversationType.PRUNED,
                 description="Branch 1",
             ),
         }
@@ -2775,6 +2783,28 @@ class TestUpdateMainConversation:
         pruned = call_kwargs["update_fields"]["pruned_conversation_ids"]
         assert "attack-1" in pruned
         assert "branch-1" not in pruned
+
+    @pytest.mark.parametrize("conversation_type", ["preparation", "adversarial"])
+    async def test_rejects_promoting_diagnostic_conversation(self, attack_service, mock_memory, conversation_type):
+        """Diagnostic conversations cannot replace the evaluated main conversation."""
+        from pyrit.models import ConversationReference, ConversationType
+
+        ar = make_attack_result(conversation_id="attack-1")
+        ar.related_conversations = {
+            ConversationReference(
+                conversation_id="diagnostic-1",
+                conversation_type=ConversationType(conversation_type),
+            ),
+        }
+        mock_memory.get_attack_results.return_value = [ar]
+
+        with pytest.raises(ValueError, match="not part of this attack"):
+            await attack_service.update_main_conversation_async(
+                attack_result_id="ar-attack-1",
+                request=UpdateMainConversationRequest(conversation_id="diagnostic-1"),
+            )
+
+        mock_memory.update_attack_result_by_id.assert_not_called()
 
 
 @pytest.mark.usefixtures("patch_central_database")
