@@ -169,7 +169,8 @@ its values. Dropdown options are fetched only when the control is opened.
 
 Choose an outcome breakdown, an ASR comparison, or a two-dimension heatmap. Select
 a group or cell to add its filters and inspect the exact matching result rows.
-Open a result to continue to its existing Chat view. Filters and chart selections
+Click a result row, or focus it and press Enter or Space, to open its existing
+Chat view. Filters and chart selections
 are stored in the URL, so links and browser Back preserve the exploration.
 
 **Attack success rate (ASR)** is successes divided by successes plus failures.
@@ -183,6 +184,7 @@ unfiltered measure of target safety.
 
 Outcome badges, icons, and chart markers share one palette: green for success,
 red for failure, blue for execution errors, and gray for undetermined results.
+The summary badges use the same fill colors as their corresponding bar segments.
 Labels and icons remain available when high-contrast settings replace these colors.
 
 Targeted harm categories describe what an attack intended to test, not harms

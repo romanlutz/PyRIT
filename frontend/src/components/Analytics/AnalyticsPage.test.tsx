@@ -95,7 +95,7 @@ describe('AnalyticsPage', () => {
     }), expect.any(AbortSignal))
     expect(mockResults).not.toHaveBeenCalled()
     expect(mockFacets).not.toHaveBeenCalled()
-    await user.click(screen.getByRole('button', { name: 'Open result result-1' }))
+    await user.click(screen.getByRole('row', { name: 'Open result result-1' }))
     expect(onOpenAttack).toHaveBeenCalledWith('result-1')
   })
 

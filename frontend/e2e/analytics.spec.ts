@@ -200,7 +200,7 @@ async function mockAnalytics(page: Page): Promise<AnalyticsMocks> {
 
 test.describe('Saved AttackResult analytics', () => {
   for (const theme of ['light', 'dark']) {
-    test(`uses matching accessible outcome colors in ${theme} badges, icons, bars and swatches`, async ({ page }) => {
+    test(`matches the actual outcome fills in ${theme} summary badges, bars, swatches and rows`, async ({ page }) => {
       await mockAnalytics(page)
       await page.addInitScript((mode: string) => { localStorage.setItem('pyrit.themeMode', mode) }, theme)
       await page.goto('/analytics')
@@ -214,16 +214,16 @@ test.describe('Saved AttackResult analytics', () => {
           background: getComputedStyle(element).backgroundColor,
           icon: getComputedStyle(element.querySelector('svg') ?? element).color,
         }))
-        markerColors[outcome] = colors.color
+        markerColors[outcome] = colors.background
         const bar = page.getByRole('button', { name: new RegExp(`Nightly: ${outcome} segment;`) })
         const swatch = page.getByRole('button', { name: new RegExp(`Nightly: \\d+ ${outcome};`) })
           .locator('[aria-hidden="true"]').first()
-        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
-        expect(await swatch.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
+        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.background)
+        expect(await swatch.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.background)
         expect(colors.icon).toBe(colors.color)
         expect(colorContrast(colors.color, colors.background)).toBeGreaterThanOrEqual(4.5)
         await bar.hover()
-        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
+        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.background)
       }
       const blue = rgbChannels(markerColors.error ?? '')
       const red = rgbChannels(markerColors.failure ?? '')
@@ -269,7 +269,7 @@ test.describe('Saved AttackResult analytics', () => {
     const mocks = await mockAnalytics(page)
     await page.goto('/analytics')
     await expect(page.getByRole('heading', { name: 'Analytics', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Open result result-1', exact: true })).toBeVisible()
+    await expect(page.getByRole('row', { name: 'Open result result-1', exact: true })).toBeVisible()
     expect(mocks.reportRequests).toHaveLength(1)
     expect(mocks.facetRequests).toHaveLength(0)
     expect(mocks.resultRequests).toHaveLength(0)
@@ -290,9 +290,10 @@ test.describe('Saved AttackResult analytics', () => {
     await expect.poll(() => mocks.reportRequests.at(-1)?.filters).toMatchObject({
       dimensions: [ANALYTICS_OPERATION_FILTER, HARM_FILTER, ATTACK_TYPE_FILTER],
     })
-    await expect(page.getByRole('button', { name: 'Open result result-1', exact: true })).toBeVisible()
+    await expect(page.getByRole('row', { name: 'Open result result-1', exact: true })).toBeVisible()
     const analyticsUrl = page.url()
-    await page.getByRole('button', { name: 'Open result result-1', exact: true }).click()
+    await page.getByRole('row', { name: 'Open result result-1', exact: true })
+      .getByRole('cell', { name: 'Alice', exact: true }).click()
     await expect(page).toHaveURL(/\/attacks\/result-1$/)
     await expect(page.getByText('Saved analytics objective', { exact: true })).toBeVisible()
     await expect(page.getByText(/read.only/i).first()).toBeVisible()
@@ -301,6 +302,25 @@ test.describe('Saved AttackResult analytics', () => {
     await expect(page.getByRole('region', { name: 'Heatmap', exact: true })).toBeVisible()
     expect(mocks.unexpectedRequests).toEqual([])
   })
+
+  for (const key of ['Enter', 'Space']) {
+    test(`opens a matching result row with ${key}, without a separate link button`, async ({ page }) => {
+      const mocks = await mockAnalytics(page)
+      await page.goto('/analytics')
+      const results = page.getByRole('region', { name: 'Matching AttackResults' })
+      const row = results.getByRole('row', { name: 'Open result result-1', exact: true })
+      await expect(row).toBeVisible()
+      await expect(row).toHaveAccessibleDescription('Saved success result 1')
+      await expect(results.getByRole('button', { name: /^Open result / })).toHaveCount(0)
+      await expect(results.getByRole('columnheader', { name: 'Open', exact: true })).toHaveCount(0)
+      await row.focus()
+      await expect(row).toBeFocused()
+      await page.keyboard.press(key)
+      await expect(page).toHaveURL(/\/attacks\/result-1$/)
+      await expect(page.getByText('Saved analytics objective', { exact: true })).toBeVisible()
+      expect(mocks.unexpectedRequests).toEqual([])
+    })
+  }
 
   test('marks ASR everywhere for a success-only cohort and keeps error-only ASR unavailable', async ({ page }) => {
     await mockAnalytics(page)
@@ -334,7 +354,7 @@ test.describe('Saved AttackResult analytics', () => {
     await expect(results.getByText(/Still showing page 1/)).toBeVisible()
     await results.getByRole('button', { name: 'Retry results' }).click()
     await expect(results.getByText('Page 2', { exact: true })).toBeVisible()
-    await expect(results.getByRole('button', { name: 'Open result result-26', exact: true })).toBeVisible()
+    await expect(results.getByRole('row', { name: 'Open result result-26', exact: true })).toBeVisible()
     expect(mocks.reportRequests).toHaveLength(1)
     expect(mocks.facetRequests).toHaveLength(0)
     expect(mocks.resultRequests).toHaveLength(2)
@@ -357,7 +377,7 @@ test.describe('Saved AttackResult analytics', () => {
     await page.getByRole('button', { name: 'Reload', exact: true }).click()
     await expect(page.getByText(/Reload failed.*data may be stale/)).toBeVisible()
     expect(await page.getByText(/Last refreshed:/).innerText()).toBe(refreshed)
-    await expect(page.getByRole('button', { name: 'Open result result-1', exact: true })).toBeVisible()
+    await expect(page.getByRole('row', { name: 'Open result result-1', exact: true })).toBeVisible()
     mocks.computedAt = ANALYTICS_PAGE_TIME
     await page.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(page.getByText(/data may be stale/)).toHaveCount(0)
@@ -431,6 +451,9 @@ test.describe('Saved AttackResult analytics', () => {
         width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth,
       }))
       expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.width)
+      const resultRow = page.getByRole('row', { name: 'Open result result-1', exact: true })
+      await resultRow.scrollIntoViewIfNeeded()
+      expect((await resultRow.boundingBox())?.height).toBeGreaterThanOrEqual(44)
       await page.screenshot({ path: testInfo.outputPath('analytics-mobile.png') })
     })
   })

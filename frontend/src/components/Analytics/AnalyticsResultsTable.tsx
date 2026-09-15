@@ -2,7 +2,6 @@ import {
   Button, MessageBar, MessageBarBody, Spinner, Table, TableBody,
   TableCell, TableHeader, TableHeaderCell, TableRow, Text,
 } from '@fluentui/react-components'
-import { OpenRegular } from '@fluentui/react-icons'
 
 import HistoryPagination from '@/components/History/HistoryPagination'
 import OutcomeBadge from '@/components/OutcomeBadge'
@@ -47,14 +46,29 @@ export default function AnalyticsResultsTable({
             <TableHeaderCell>Outcome</TableHeaderCell><TableHeaderCell>Objective</TableHeaderCell>
             <TableHeaderCell>Operation</TableHeaderCell><TableHeaderCell>Operator</TableHeaderCell>
             <TableHeaderCell>Attack type / targeted harms</TableHeaderCell><TableHeaderCell>Target model / identity</TableHeaderCell>
-            <TableHeaderCell>Last updated</TableHeaderCell><TableHeaderCell>Open</TableHeaderCell>
+            <TableHeaderCell>Last updated</TableHeaderCell>
           </TableRow></TableHeader>
           <TableBody>
             {results.items.map((result: AttackAnalyticsResultRow) => (
-              <TableRow key={result.attack_result_id}>
+              <TableRow
+                key={result.attack_result_id}
+                className={styles.clickableRow}
+                tabIndex={0}
+                aria-label={`Open result ${result.attack_result_id}`}
+                aria-describedby={`analytics-objective-${result.attack_result_id}`}
+                onClick={() => { onOpenAttack(result.attack_result_id) }}
+                onKeyDown={(event: KeyboardEvent<HTMLElement>) => {
+                  if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault()
+                    onOpenAttack(result.attack_result_id)
+                  }
+                }}
+              >
                 <TableCell><OutcomeBadge outcome={result.outcome} /></TableCell>
                 <TableCell className={styles.objective}>
-                  {result.objective_preview || '(No objective recorded)'}
+                  <span id={`analytics-objective-${result.attack_result_id}`}>
+                    {result.objective_preview || '(No objective recorded)'}
+                  </span>
                   <Text size={100} className={styles.secondary}>{result.attack_result_id}</Text>
                 </TableCell>
                 <TableCell className={styles.metadata}>{result.operation ?? '(Missing operation)'}</TableCell>
@@ -68,11 +82,6 @@ export default function AnalyticsResultsTable({
                   <Text size={100} className={styles.secondary}>{result.target_identifier_hash ?? '(Missing target identity)'}</Text>
                 </TableCell>
                 <TableCell className={styles.date}><time dateTime={result.updated_at}>{formatAnalyticsTime(result.updated_at)}</time></TableCell>
-                <TableCell>
-                  <Button className={styles.button} appearance="subtle" icon={<OpenRegular />}
-                    aria-label={`Open result ${result.attack_result_id}`}
-                    onClick={() => { onOpenAttack(result.attack_result_id) }} />
-                </TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -93,3 +102,4 @@ export default function AnalyticsResultsTable({
     </section>
   )
 }
+import type { KeyboardEvent } from 'react'

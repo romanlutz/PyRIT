@@ -71,7 +71,7 @@ export default function AnalyticsStats({ statistics, marked, onOutcome }: Analyt
             aria-label={`Filter to ${item.outcome}: ${formatAnalyticsCount(item.count)}`}
             onClick={() => { onOutcome(item.outcome) }}
           >
-            <OutcomeBadge outcome={item.outcome} appearance="tint" /> {formatAnalyticsCount(item.count)}
+            <OutcomeBadge outcome={item.outcome} appearance="filled" /> {formatAnalyticsCount(item.count)}
           </Button>
         ))}
       </div>
