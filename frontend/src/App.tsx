@@ -10,6 +10,7 @@ import Home from './components/Home/Home'
 import TargetConfig from './components/Config/TargetConfig'
 import Configuration from './components/Configuration/Configuration'
 import AttackHistory from './components/History/AttackHistory'
+import AnalyticsPage from './components/Analytics/AnalyticsPage'
 import HistoryPage from './components/History/HistoryPage'
 import type { HistoryTab } from './components/History/HistoryPage'
 import ScenarioHistory from './components/History/ScenarioHistory'
@@ -58,6 +59,7 @@ const VIEW_PATHS: Record<ViewName, string> = {
   home: '/',
   chat: '/chat',
   history: HISTORY_ATTACKS_PATH,
+  analytics: '/analytics',
   targets: '/targets',
   scenarios: '/scanner',
   configuration: '/config',
@@ -210,12 +212,16 @@ function App() {
   )
   const lastHistorySearch = useRef('')
   const lastScenarioHistorySearch = useRef('')
+  const lastAnalyticsSearch = useRef('')
   useEffect(() => {
     if (location.pathname === HISTORY_ATTACKS_PATH) {
       lastHistorySearch.current = location.search
     }
     if (location.pathname === HISTORY_SCANNER_PATH) {
       lastScenarioHistorySearch.current = location.search
+    }
+    if (location.pathname === VIEW_PATHS.analytics) {
+      lastAnalyticsSearch.current = location.search
     }
   }, [location.pathname, location.search])
 
@@ -427,6 +433,10 @@ function App() {
       navigate(VIEW_PATHS.history + lastHistorySearch.current)
       return
     }
+    if (view === 'analytics') {
+      navigate(VIEW_PATHS.analytics + lastAnalyticsSearch.current)
+      return
+    }
     navigate(VIEW_PATHS[view])
   }, [navigate])
 
@@ -627,6 +637,7 @@ function App() {
               <Route path="/scenario-history" element={<LegacyScenarioHistoryRedirect />} />
               <Route path="/scenario-history/:scenarioResultId" element={<LegacyScenarioRunRedirect />} />
               <Route path="/config" element={<Configuration />} />
+              <Route path="/analytics" element={<AnalyticsPage onOpenAttack={handleOpenAttack} />} />
               <Route path="/history" element={<LegacyAttackHistoryRedirect />} />
               <Route
                 path={HISTORY_ATTACKS_PATH}

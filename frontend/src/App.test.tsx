@@ -11,6 +11,7 @@ import { ThemeProvider } from "./hooks/useTheme";
 
 import { attacksApi, targetsApi } from "./services/api";
 import { makeTarget } from "./test-utils/targetFixtures";
+import { DEFAULT_ANALYTICS_VIEW, analyticsViewToSearchParams } from "./utils/attackAnalytics";
 
 const mockGetActiveAccount = jest.fn();
 
@@ -111,6 +112,9 @@ jest.mock("./components/Layout/MainLayout", () => {
         </button>
         <button onClick={() => onNavigate("history")} data-testid="nav-history">
           History
+        </button>
+        <button onClick={() => onNavigate("analytics")} data-testid="nav-analytics">
+          Analytics
         </button>
         <button onClick={() => onNavigate("scenarios")} data-testid="nav-scenarios">
           Scenarios
@@ -247,6 +251,17 @@ jest.mock("./components/Configuration/Configuration", () => ({
   __esModule: true,
   default: () => <div data-testid="configuration">Configuration</div>,
 }));
+
+jest.mock("./components/Analytics/AnalyticsPage", () => {
+  const { useLocation } = jest.requireActual<typeof import("react-router")>("react-router");
+  function MockAnalyticsPage({ onOpenAttack }: { onOpenAttack: (id: string) => void }) {
+    const location = useLocation();
+    return <section aria-label="Analytics page" data-location={location.pathname + location.search}>
+      <button onClick={() => { onOpenAttack("analytics-result-1"); }}>Open analytics result</button>
+    </section>;
+  }
+  return { __esModule: true, default: MockAnalyticsPage };
+});
 
 jest.mock("./components/History/AttackHistory", () => {
   const MockAttackHistory = ({
@@ -428,6 +443,42 @@ describe("App", () => {
     renderApp();
     expect(screen.getByTestId("main-layout")).toBeInTheDocument();
     expect(screen.getByTestId("home-view")).toBeInTheDocument();
+  });
+
+  it("restores the analytics URL when returning through its navigation button", async () => {
+    const user = userEvent.setup();
+    const path = `/analytics?${analyticsViewToSearchParams({
+      ...DEFAULT_ANALYTICS_VIEW,
+      filters: { dimensions: [], outcomes: ["success"] },
+    })}`;
+    renderApp(path);
+    expect(screen.getByTestId("main-layout")).toHaveAttribute("data-current-view", "analytics");
+    expect(screen.getByRole("region", { name: "Analytics page" })).toHaveAttribute("data-location", path);
+    await user.click(screen.getByTestId("nav-config"));
+    await user.click(screen.getByTestId("nav-analytics"));
+    expect(screen.getByRole("region", { name: "Analytics page" })).toHaveAttribute("data-location", path);
+  });
+
+  it("opens an analytics result through the existing persisted attack loader", async () => {
+    const user = userEvent.setup();
+    mockGetAttack.mockResolvedValueOnce({
+      attack_result_id: "analytics-result-1",
+      conversation_id: "analytics-conversation",
+      objective: "Saved analytics result",
+      attack_type: "ManualAttack",
+      outcome: "undetermined",
+      target: null,
+      operator: "Alice",
+      operation: "Nightly",
+      labels: {},
+      related_conversation_ids: [],
+    });
+    renderApp("/analytics");
+    await user.click(screen.getByRole("button", { name: "Open analytics result" }));
+    await waitFor(() => { expect(screen.getByTestId("objective")).toHaveTextContent("Saved analytics result"); });
+    expect(screen.getByTestId("main-layout")).toHaveAttribute("data-current-view", "chat");
+    expect(mockGetAttack).toHaveBeenCalledWith("analytics-result-1");
+    expect(screen.getByTestId("route-location")).toHaveTextContent("/attacks/analytics-result-1");
   });
 
   it("starts in home view", () => {

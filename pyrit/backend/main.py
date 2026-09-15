@@ -24,6 +24,7 @@ from pyrit.backend.middleware import RequestIdMiddleware, SecurityHeadersMiddlew
 from pyrit.backend.middleware.auth import EntraAuthMiddleware
 from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.routes import (
+    analytics,
     attacks,
     auth,
     configuration,
@@ -38,6 +39,7 @@ from pyrit.backend.routes import (
     targets,
     version,
 )
+from pyrit.backend.services.analytics_service import shutdown_analytics_service
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
 from pyrit.common.path import CONFIGURATION_DIRECTORY_PATH
@@ -110,7 +112,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # don't emit noise and don't perform filesystem side effects.
     setup_frontend()
 
-    yield
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(shutdown_analytics_service)
 
 
 app = FastAPI(
@@ -152,6 +157,7 @@ app.add_middleware(
 
 
 # Include API routes
+app.include_router(analytics.router, prefix="/api", tags=["analytics"])
 app.include_router(attacks.router, prefix="/api", tags=["attacks"])
 app.include_router(configuration.router, prefix="/api", tags=["config"])
 app.include_router(targets.router, prefix="/api", tags=["targets"])

@@ -12,12 +12,35 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from pyrit.backend.models.common import FieldError, ProblemDetail
+from pyrit.exceptions.analytics_exception import AnalyticsException
 
 logger = logging.getLogger(__name__)
 
 
 def register_error_handlers(app: FastAPI) -> None:
     """Register all error handlers with the FastAPI app."""
+
+    @app.exception_handler(AnalyticsException)
+    async def analytics_exception_handler_async(request: Request, exc: AnalyticsException) -> JSONResponse:
+        """
+        Surface bounded-capacity and stored-data failures without false empty reports.
+
+        Returns:
+            JSONResponse: An actionable problem detail response.
+        """
+        logger.warning("Analytics request failed: %s", exc.message)
+        problem = ProblemDetail(
+            type="/errors/analytics",
+            title="Analytics unavailable",
+            status=exc.status_code,
+            detail=exc.message,
+            instance=str(request.url.path),
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=problem.model_dump(exclude_none=True),
+            headers={"Retry-After": "1"} if exc.status_code == 503 else None,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(  # pyrit-async-suffix-exempt

@@ -137,6 +137,7 @@ describe("Navigation", () => {
       "Home",
       "Chat",
       "History",
+      "Analytics",
       "Scanner",
       "Targets",
       "Configuration",
@@ -158,6 +159,18 @@ describe("Navigation", () => {
     expect(button).toHaveAttribute("aria-current", "page");
     await user.click(button);
     expect(onNavigate).toHaveBeenCalledWith("history");
+  });
+
+  it("opens Analytics and marks it current without administrator access", async () => {
+    const user = userEvent.setup();
+    const onNavigate = jest.fn();
+    renderWithProvider(
+      <Navigation {...defaultProps} currentView="analytics" onNavigate={onNavigate} canManageConfiguration={false} />,
+    );
+    const analytics = screen.getByRole("button", { name: "Analytics" });
+    expect(analytics).toHaveAttribute("aria-current", "page");
+    await user.click(analytics);
+    expect(onNavigate).toHaveBeenCalledWith("analytics");
   });
 
   it("calls onNavigate with 'scenarios' when the scenarios button is clicked", async () => {

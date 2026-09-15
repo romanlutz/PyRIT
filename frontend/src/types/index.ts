@@ -296,6 +296,171 @@ export type AttackTargetResolutionStatus =
 
 export type AttackOutcome = 'undetermined' | 'success' | 'failure' | 'error'
 
+// Saved-result analytics contracts from pyrit.models.analytics.
+export type AttackAnalyticsDimensionName =
+  | 'operation'
+  | 'operator'
+  | 'targeted_harm_category'
+  | 'attack_type'
+  | 'converter_type'
+  | 'objective_target'
+  | 'model'
+  | 'scenario'
+  | 'label'
+
+export type AttackAnalyticsConverterDirection = 'request' | 'response'
+export type AttackAnalyticsMatchMode = 'any' | 'all'
+export type AttackAnalyticsValueKind = 'value' | 'missing' | 'no_converters'
+
+export type AttackAnalyticsDimension =
+  | {
+    readonly name: 'label'
+    readonly label_key: string
+    readonly converter_direction?: 'request'
+  }
+  | {
+    readonly name: 'converter_type'
+    readonly label_key?: null
+    readonly converter_direction?: AttackAnalyticsConverterDirection
+  }
+  | {
+    readonly name: Exclude<AttackAnalyticsDimensionName, 'label' | 'converter_type'>
+    readonly label_key?: null
+    readonly converter_direction?: 'request'
+  }
+
+export type AttackAnalyticsValue =
+  | { readonly kind: 'value'; readonly value: string }
+  | { readonly kind: 'missing' | 'no_converters'; readonly value: null }
+
+export interface AttackAnalyticsFilter {
+  readonly dimension: AttackAnalyticsDimension
+  readonly values: AttackAnalyticsValue[]
+  readonly match_mode: AttackAnalyticsMatchMode
+}
+
+export interface AttackAnalyticsFilters {
+  readonly dimensions: AttackAnalyticsFilter[]
+  readonly outcomes: AttackOutcome[]
+  readonly updated_after?: string | null
+  readonly updated_before?: string | null
+}
+
+export interface AttackAnalyticsStatistics {
+  readonly success_rate: number | null
+  readonly total_decided: number
+  readonly successes: number
+  readonly failures: number
+  readonly undetermined: number
+  readonly errors: number
+  readonly total_results: number
+  readonly decided_share: number | null
+  readonly outcome_shares: Record<AttackOutcome, number>
+}
+
+export interface AttackAnalyticsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly group_by?: AttackAnalyticsDimension
+  readonly compare_by?: AttackAnalyticsDimension | null
+  readonly group_limit?: number
+  readonly group_offset?: number
+  readonly axis_limit?: number
+  readonly result_limit?: number
+}
+
+export interface AttackAnalyticsResultsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly cursor?: string | null
+  readonly limit?: number
+}
+
+export interface AttackAnalyticsFacetQuery {
+  readonly dimension: AttackAnalyticsDimension
+  readonly filters?: AttackAnalyticsFilters
+  readonly search?: string
+  readonly offset?: number
+  readonly limit?: number
+}
+
+export interface AttackAnalyticsOption {
+  readonly key: AttackAnalyticsValue
+  readonly label: string
+}
+
+export interface AttackAnalyticsGroup extends AttackAnalyticsOption {
+  readonly statistics: AttackAnalyticsStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+export interface AttackAnalyticsCell {
+  readonly row: AttackAnalyticsValue
+  readonly column: AttackAnalyticsValue
+  readonly statistics: AttackAnalyticsStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+export interface AttackAnalyticsResultRow {
+  readonly attack_result_id: string
+  readonly objective_preview: string
+  readonly outcome: AttackOutcome
+  readonly updated_at: string
+  readonly operation: string | null
+  readonly operator: string | null
+  readonly attack_type: string | null
+  readonly target_model: string | null
+  readonly target_identifier_hash: string | null
+  readonly scenario_result_id: string | null
+  readonly targeted_harm_categories: string[]
+  readonly request_converters: string[]
+  readonly response_converters: string[]
+  readonly labels: Record<string, string>
+}
+
+export interface AttackAnalyticsResults {
+  readonly items: AttackAnalyticsResultRow[]
+  readonly has_more: boolean
+  readonly next_cursor: string | null
+  readonly computed_at: string
+}
+
+export interface AttackAnalyticsFacets {
+  readonly items: AttackAnalyticsOption[]
+  readonly has_more: boolean
+  readonly next_offset: number | null
+  readonly computed_at: string
+}
+
+export interface AttackAnalyticsReport {
+  readonly filters: AttackAnalyticsFilters
+  readonly group_by: AttackAnalyticsDimension
+  readonly compare_by: AttackAnalyticsDimension | null
+  readonly summary: AttackAnalyticsStatistics
+  readonly outcome_filter_applied: boolean
+  readonly groups_overlap: boolean
+  readonly groups: AttackAnalyticsGroup[]
+  readonly has_more_groups: boolean
+  readonly next_group_offset: number | null
+  readonly rows: AttackAnalyticsOption[]
+  readonly columns: AttackAnalyticsOption[]
+  readonly cells: AttackAnalyticsCell[]
+  readonly axes_truncated: boolean
+  readonly results: AttackAnalyticsResults
+  readonly computed_at: string
+  readonly warnings: string[]
+}
+
+export type AttackAnalyticsChart = 'outcomes' | 'success-rate' | 'heatmap'
+export type AttackAnalyticsHeatmapMetric = 'success_rate' | 'total_results'
+
+export interface AttackAnalyticsViewState {
+  readonly filters: AttackAnalyticsFilters
+  readonly groupBy: AttackAnalyticsDimension
+  readonly heatmapRow: AttackAnalyticsDimension
+  readonly heatmapColumn: AttackAnalyticsDimension
+  readonly chart: AttackAnalyticsChart
+  readonly heatmapMetric: AttackAnalyticsHeatmapMetric
+}
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string

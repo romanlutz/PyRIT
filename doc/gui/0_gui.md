@@ -34,7 +34,7 @@ To deploy an isolated instance for an external team, see [Deploy a New Instance]
 
 ## Views
 
-CoPyRIT has three main views, accessible from the left sidebar: **Chat**, **Attack History**, and **Target Configuration**. A dark/light theme toggle is available at the bottom of the sidebar.
+Use the left sidebar to navigate between Chat, History, Analytics, Scanner, Targets, and Configuration. A theme selector is available at the bottom of the sidebar.
 
 ### Chat View
 
@@ -151,6 +151,54 @@ Click any row to open the attack in the Chat view.
 #### Pagination
 
 Results are paginated (25 per page) with "First" and "Next" navigation buttons.
+
+History lists distinct AttackResult IDs. Different IDs are not merged merely because
+they reference the same main conversation. This matches Analytics; historical
+duplicate-data cleanup is a separate operation.
+
+### Analytics
+
+Analytics explores **saved AttackResult outcomes**. Counts, filtering, grouping,
+and rates are calculated by the SDK, not by the browser. It does not inspect
+individual scores or traverse conversations to calculate results.
+
+Filter by operation, operator, targeted harm category, attack type, request or
+response converter, persisted objective target/model, scenario run, custom labels,
+outcome, or last-updated range. A custom label requires its key before looking up
+its values. Dropdown options are fetched only when the control is opened.
+
+Choose an outcome breakdown, an ASR comparison, or a two-dimension heatmap. Select
+a group or cell to add its filters and inspect the exact matching result rows.
+Open a result to continue to its existing Chat view. Filters and chart selections
+are stored in the URL, so links and browser Back preserve the exploration.
+
+**Attack success rate (ASR)** is successes divided by successes plus failures.
+Errors and undetermined results remain visible but are excluded from that
+denominator. When there are no decided results, ASR is unavailable, not zero.
+
+Outcome filters apply to the **entire dashboard**. An active outcome restriction
+adds an asterisk to **ASR*** and an explanatory note. Selecting only successes can
+therefore display **100%***. This describes the selected outcomes, not an
+unfiltered measure of target safety.
+
+Targeted harm categories describe what an attack intended to test, not harms
+detected by a scorer. Harm and converter groups can overlap: a result can belong
+to several groups, but counts only once in the overall total and once in each
+matching cell. Do not add overlapping group totals together. Missing metadata is
+kept separate from a known empty converter list.
+
+**Reload** preserves filters and updates the report's **Last refreshed** timestamp
+only after a successful read. There is no polling. A failed reload keeps the old
+report with a stale/error indication. Result pagination fetches only another page,
+not the charts; its separate read timestamp does not advance the report timestamp.
+Saved records can change between page requests.
+
+The page has bounded chart axes, grouped-data and cell-data views, and a paginated
+result table. Larger groups can be explored by narrowing filters or requesting
+another group page. Display limits never sample the underlying cohort.
+
+See [SDK attack-result analytics](../code/analytics/0_attack_results.md) for Python
+usage, endpoint contracts, resource limits, and the reproducible performance workload.
 
 ### Target Configuration
 

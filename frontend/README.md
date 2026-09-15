@@ -114,3 +114,49 @@ E2E tests use `dev.py` to automatically start both frontend and backend servers.
 
 The frontend proxies API requests to `http://localhost:8000` in development.
 Configure this in `vite.config.ts` if needed.
+
+## Saved-result analytics
+
+Open **Analytics** (`/analytics`) to explore saved AttackResults across operations,
+operators, persisted targets/models, targeted harms, attack types, request/response
+converters, scenario runs, custom labels, and outcomes. It starts with all saved
+results, not the current operation or active target. The optional **Last updated**
+range describes edits to stored results, not attack execution dates.
+
+Counts, outcome shares, decided share, ASR, grouping, and matching result pages
+come from the analytics API. ASR is attacker successes among decided results;
+errors and undetermined results are not defensive failures. An unavailable ASR
+is not 0%. An outcome restriction applies to the whole dashboard and adds
+**ASR\*** with an explanation, including when the rate is unavailable.
+
+Group and heatmap selections append the server's drill-down predicates. Separate
+filter chips are ANDed, even for the same converter dimension. Values within a
+chip use ANY matching, or explicit ALL matching for converters. Missing metadata
+and known-empty converter pipelines are distinct from literal values such as
+`Unknown`. Overlapping groups must not be added together.
+
+The active chart is an outcome composition, success-rate comparison, or bounded
+heatmap. Each has a semantic data table, and heatmap cells are keyboard-operable.
+**Show all groups** browses paginated groups; heatmap truncation is reported
+explicitly. Custom-label values are fetched only after entering a key. Facets
+are searched and paged only while their control is open.
+
+Filters and chart settings are shareable in the URL and restore with browser
+Back. **Reload** retains them, resets pagination, and refreshes the report and
+opened facet. A failed reload keeps the last successful report with a stale
+warning and Retry. Result pagination uses only the results endpoint and has
+its own read time; it does not advance the report's **Last refreshed** time.
+Opening a result uses the existing attack route and its read-only guards.
+
+Focused frontend verification (PowerShell):
+
+```powershell
+npm run type-check
+npm run lint
+npm test -- --runInBand --testPathPatterns "Analytics|attackAnalytics"
+$env:E2E_FRONTEND_PORT = '4177'
+npm run test:e2e -- analytics.spec.ts --project=mock --workers=1
+```
+
+The analytics browser tests mock every API request and use a dedicated,
+automatically stopped Vite server. They do not start attacks or access a database.
