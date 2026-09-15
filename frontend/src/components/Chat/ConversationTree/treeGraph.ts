@@ -5,14 +5,12 @@ export const TREE_NODE_HEIGHT = 336
 export const TREE_COLUMN_GAP = 48
 export const TREE_ROW_GAP = 64
 export const COMPACT_PIECE_COUNT = 3
-const AUTO_COLLAPSE_MESSAGES = 12
 
 export interface TreeIndex {
   readonly nodes: ReadonlyMap<string, ConversationTreeNode>
   readonly roots: string[]
   readonly children: ReadonlyMap<string, string[]>
   readonly endpoints: ReadonlyMap<string, ConversationTreeEndpoint[]>
-  readonly messageCounts: ReadonlyMap<string, number>
   readonly conversationCounts: ReadonlyMap<string, number>
   readonly start: ReadonlyMap<string, number>
   readonly end: ReadonlyMap<string, number>
@@ -58,7 +56,6 @@ export function indexTree(
       endpoints.set(endpoint.node_id, sameNode)
     }
   }
-  const messageCounts = new Map<string, number>()
   const conversationCounts = new Map<string, number>()
   const start = new Map<string, number>()
   const end = new Map<string, number>()
@@ -69,13 +66,10 @@ export function indexTree(
     if (!current) break
     if (current.exit) {
       const descendants = children.get(current.id) ?? []
-      let messages = 0
       let count = endpoints.get(current.id)?.length ?? 0
       for (const child of descendants) {
-        messages += 1 + (messageCounts.get(child) ?? 0)
         count += conversationCounts.get(child) ?? 0
       }
-      messageCounts.set(current.id, messages)
       conversationCounts.set(current.id, count)
       end.set(current.id, ordinal)
     } else if (!start.has(current.id)) {
@@ -84,7 +78,7 @@ export function indexTree(
       for (const id of [...(children.get(current.id) ?? [])].reverse()) stack.push({ id, exit: false })
     }
   }
-  return { nodes, roots, children, endpoints, messageCounts, conversationCounts, start, end }
+  return { nodes, roots, children, endpoints, conversationCounts, start, end }
 }
 
 export function conversationPath(
@@ -109,37 +103,18 @@ export function conversationPath(
   return path
 }
 
-export function collapsedBranches(
-  index: TreeIndex,
-  activePath: ReadonlySet<string>,
-  overrides: ReadonlyMap<string, boolean>,
-): Set<string> {
-  const collapsed = new Set<string>()
-  for (const node of index.nodes.values()) {
-    const override = overrides.get(node.node_id)
-    const boundary = !node.parent_node_id || activePath.has(node.parent_node_id)
-    if (override === true || (override === undefined && boundary && !activePath.has(node.node_id)
-      && (index.messageCounts.get(node.node_id) ?? 0) >= AUTO_COLLAPSE_MESSAGES)) {
-      collapsed.add(node.node_id)
-    }
-  }
-  return collapsed
-}
-
-export function expandedTree(index: TreeIndex, collapsed: ReadonlySet<string>): ConversationTreeNode[] {
-  const expanded: ConversationTreeNode[] = []
+export function orderedTreeNodes(index: TreeIndex): ConversationTreeNode[] {
+  const ordered: ConversationTreeNode[] = []
   const stack = [...index.roots].reverse()
   while (stack.length > 0) {
     const id = stack.pop()
     if (!id) break
     const node = index.nodes.get(id)
     if (!node) continue
-    expanded.push(node)
-    if (!collapsed.has(id)) {
-      for (const child of [...(index.children.get(id) ?? [])].reverse()) stack.push(child)
-    }
+    ordered.push(node)
+    for (const child of [...(index.children.get(id) ?? [])].reverse()) stack.push(child)
   }
-  return expanded
+  return ordered
 }
 
 export function isInBranch(index: TreeIndex, nodeId: string, ancestorId: string): boolean {

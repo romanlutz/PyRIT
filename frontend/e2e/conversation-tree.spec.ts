@@ -153,6 +153,9 @@ test.describe('Progressive conversations with the real backend', () => {
     await page.getByRole('button', { name: 'Show conversation tree' }).click()
     await expect(page.getByTestId('conversation-tree')).toBeVisible()
     expect((await conversations(request, attack)).conversations).toHaveLength(7)
+    await expect(page.getByTestId('conversation-tree').getByRole('button', {
+      name: /(?:expand|collapse) branch/i,
+    })).toHaveCount(0)
     await expectClearTreeGeometry(page)
   })
 

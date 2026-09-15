@@ -17,10 +17,9 @@ import MediaLightbox from './MediaLightbox'
 import MessagePiecesDialog from './MessagePiecesDialog'
 import {
   TREE_NODE_WIDTH,
-  collapsedBranches,
   conversationPath,
-  expandedTree,
   indexTree,
+  orderedTreeNodes,
   reservePositions,
   treeNodeHeight,
   type LayoutNode,
@@ -32,7 +31,6 @@ import { initialTreeFocus, useTreePaneSize, visibleTreeNodes } from './useTreeVi
 
 const NODE_TYPES: NodeTypes = { message: ConversationTreeNode }
 const EDGE_TYPES: EdgeTypes = { tree: ConversationTreeEdge }
-const INITIAL_PATH_MESSAGES = 4
 const EMPTY_CONVERSATION_BUTTONS = 3
 const MIN_ZOOM = 0.2
 const MAX_ZOOM = 2
@@ -69,7 +67,6 @@ function ConversationTreePane({
   const styles = useConversationTreeStyles()
   const restoreFocusTargetAttributes = useRestoreFocusTarget()
   const { reads, snapshot } = useConversationTreeData(attackResultId, activeConversationId, active, refreshKey)
-  const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map())
   const [focusedId, setFocusedId] = useState<string | null>(null)
   const [chooser, setChooser] = useState<ChooserDialog | null>(null)
   const [media, setMedia] = useState<MediaDialog | null>(null)
@@ -95,31 +92,14 @@ function ConversationTreePane({
     () => conversationPath(index, snapshot.conversations, activeConversationId ?? snapshot.mainConversationId),
     [index, snapshot.conversations, snapshot.mainConversationId, activeConversationId],
   )
-  const [initialCollapses, setInitialCollapses] = useState<ReadonlyMap<string, boolean>>(() => new Map())
-  const automaticChoices = useMemo(() => {
-    const proposals = collapsedBranches(index, currentPath, new Map())
-    const choices = new Map(initialCollapses)
-    for (const id of index.nodes.keys()) {
-      if (!choices.has(id)) choices.set(id, proposals.has(id))
-    }
-    return choices.size === initialCollapses.size ? initialCollapses : choices
-  }, [index, currentPath, initialCollapses])
-  // Arriving pages must not fold a branch the operator was already reading.
-  if (automaticChoices !== initialCollapses) setInitialCollapses(automaticChoices)
-  const collapsed = useMemo(() => {
-    const choices = new Map(automaticChoices)
-    for (const id of currentPath) choices.set(id, false)
-    for (const [id, choice] of overrides) choices.set(id, choice)
-    return collapsedBranches(index, currentPath, choices)
-  }, [index, currentPath, overrides, automaticChoices])
-  const expanded = useMemo(() => expandedTree(index, collapsed), [index, collapsed])
-  const expandedIds = useMemo(() => new Set(expanded.map((node: TreeNode) => node.node_id)), [expanded])
-  const layoutNodes = useMemo(() => expanded.map((node: TreeNode): LayoutNode => ({
+  const orderedNodes = useMemo(() => orderedTreeNodes(index), [index])
+  const nodeIds = useMemo(() => new Set(orderedNodes.map((node: TreeNode) => node.node_id)), [orderedNodes])
+  const layoutNodes = useMemo(() => orderedNodes.map((node: TreeNode): LayoutNode => ({
     id: node.node_id, parentId: node.parent_node_id, height: treeNodeHeight(node.piece_count),
-  })), [expanded])
-  const anchorId = focusedId && expandedIds.has(focusedId)
+  })), [orderedNodes])
+  const anchorId = focusedId && nodeIds.has(focusedId)
     ? focusedId
-    : [...currentPath].find((id: string) => expandedIds.has(id)) ?? expanded[0]?.node_id ?? null
+    : [...currentPath].find((id: string) => nodeIds.has(id)) ?? orderedNodes[0]?.node_id ?? null
   const layout = useTreeLayout(layoutNodes, anchorId, active)
   const positions = useMemo(() => reservePositions(layoutNodes, layout.positions), [layoutNodes, layout.positions])
   const edgeLanes = useMemo(
@@ -127,20 +107,20 @@ function ConversationTreePane({
     [layoutNodes, layout.arrangedNodeIds, positions],
   )
   const visible = useMemo(
-    () => visibleTreeNodes(expanded, positions, viewport, size),
-    [expanded, positions, viewport, size],
+    () => visibleTreeNodes(orderedNodes, positions, viewport, size),
+    [orderedNodes, positions, viewport, size],
   )
 
   useEffect(() => { reads.setVisibleNodes(active ? visible : []) }, [reads, active, visible])
 
   const reportNavigationError = useCallback((error: unknown) => { setNavigationError(toApiError(error).detail) }, [])
   useEffect(() => {
-    if (!active || !flowReady || fitted.current || expanded.length === 0 || !size.width || !size.height || (!layout.ready && !layout.error)) return
+    if (!active || !flowReady || fitted.current || orderedNodes.length === 0 || !size.width || !size.height || (!layout.ready && !layout.error)) return
     fitted.current = true
-    const nodes = initialTreeFocus(expanded, positions, currentPath, size).map((id: string) => ({ id }))
+    const nodes = initialTreeFocus(orderedNodes, positions, currentPath, size).map((id: string) => ({ id }))
     void flow.fitView({ nodes, maxZoom: 1, minZoom: MIN_ZOOM, padding: 0.12 })
       .then(() => { setViewport(flow.getViewport()) }).catch(reportNavigationError)
-  }, [active, flowReady, expanded, positions, size, currentPath, flow, layout.ready, layout.error, reportNavigationError])
+  }, [active, flowReady, orderedNodes, positions, size, currentPath, flow, layout.ready, layout.error, reportNavigationError])
 
   const choose = useCallback((nodeId: string, opener: HTMLElement, endpointsOnly = false): void => {
     setChooser({ scope: { kind: 'branch', nodeId, endpointsOnly }, opener })
@@ -149,15 +129,6 @@ function ConversationTreePane({
     setChooser(null)
     onSelectConversation(id)
   }, [onSelectConversation])
-  const collapse = useCallback((id: string): void => {
-    setOverrides((previous: ReadonlyMap<string, boolean>) => new Map(previous).set(id, !collapsed.has(id)))
-    if (collapsed.has(id)) {
-      const children = (index.children.get(id) ?? []).slice(0, INITIAL_PATH_MESSAGES)
-        .map((childId: string) => snapshot.nodes.get(childId))
-        .filter((node: TreeNode | undefined): node is TreeNode => node !== undefined)
-      reads.requestPreviews(children)
-    }
-  }, [collapsed, index.children, snapshot.nodes, reads])
   const openMedia = useCallback((nodeId: string, pieceIndex: number, opener: HTMLElement): void => {
     const node = snapshot.nodes.get(nodeId)
     if (!node) {
@@ -181,7 +152,7 @@ function ConversationTreePane({
     if (snapshot.previews.get(node.preview_key)?.thumbnail?.error) reads.requestPreviews([node], 'thumbnail', true)
   }, [reads, snapshot.previews])
   const focus = useCallback((id: string): void => { setFocusedId(id) }, [])
-  const nodes = useMemo(() => expanded.map((node: TreeNode): MessageFlowNode => ({
+  const nodes = useMemo(() => orderedNodes.map((node: TreeNode): MessageFlowNode => ({
     id: node.node_id,
     type: 'message',
     position: positions.get(node.node_id) ?? { x: 0, y: 0 },
@@ -198,23 +169,21 @@ function ConversationTreePane({
       currentEndpoint: snapshot.conversations.get(activeConversationId ?? '')?.node_id === node.node_id,
       mainEndpoint: snapshot.conversations.get(snapshot.mainConversationId ?? '')?.node_id === node.node_id,
       endpointIds: (index.endpoints.get(node.node_id) ?? []).map((endpoint: ConversationTreeEndpoint) => endpoint.conversation_id),
-      collapsed: collapsed.has(node.node_id),
-      descendantCount: index.messageCounts.get(node.node_id) ?? 0,
+      hasChildren: (index.children.get(node.node_id)?.length ?? 0) > 0,
       conversationCount: index.conversationCounts.get(node.node_id) ?? 0,
       complete: snapshot.complete,
       onChoose: choose,
       onSelect: select,
-      onCollapse: collapse,
       onMedia: openMedia,
       onPieces: openPieces,
       onRetry: retryPreviews,
       onFocus: focus,
     },
-  })), [expanded, positions, snapshot.previews, snapshot.conversations, snapshot.mainConversationId, snapshot.complete,
-    currentPath, activeConversationId, index, collapsed, choose, select, collapse, openMedia, openPieces, retryPreviews, focus])
-  const edges = useMemo(() => expanded.flatMap((node: TreeNode): Edge<{ centerY: number }>[] => {
+  })), [orderedNodes, positions, snapshot.previews, snapshot.conversations, snapshot.mainConversationId, snapshot.complete,
+    currentPath, activeConversationId, index, choose, select, openMedia, openPieces, retryPreviews, focus])
+  const edges = useMemo(() => orderedNodes.flatMap((node: TreeNode): Edge<{ centerY: number }>[] => {
     const centerY = edgeLanes.get(node.node_id)
-    return node.parent_node_id && expandedIds.has(node.parent_node_id)
+    return node.parent_node_id && nodeIds.has(node.parent_node_id)
       && layout.arrangedNodeIds.has(node.parent_node_id) && centerY !== undefined
       ? [{
           id: `${node.parent_node_id}:${node.node_id}`,
@@ -227,7 +196,7 @@ function ConversationTreePane({
           className: currentPath.has(node.node_id) ? styles.pathEdge : undefined,
         }]
       : []
-  }), [expanded, expandedIds, currentPath, styles.pathEdge, layout.arrangedNodeIds, edgeLanes])
+  }), [orderedNodes, nodeIds, currentPath, styles.pathEdge, layout.arrangedNodeIds, edgeLanes])
   const emptyConversations = [...snapshot.conversations.values()].filter((endpoint: ConversationTreeEndpoint) => endpoint.node_id === null)
   const mediaNode = media ? snapshot.nodes.get(media.nodeId) : undefined
   const detailsNode = details ? snapshot.nodes.get(details.nodeId) : undefined

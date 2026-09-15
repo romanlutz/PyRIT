@@ -233,7 +233,7 @@ describe('ConversationTree', () => {
     }))
   })
 
-  it('should preserve counted collapse across toggles and keep collapsed conversation endpoints searchable', async () => {
+  it('should keep every loaded branch expanded across toggles and retain conversation search', async () => {
     const user = userEvent.setup()
     const branch = Array.from({ length: 14 }, (_: unknown, index: number) => treeNode(`other-${index}`, {
       parent_node_id: index === 0 ? 'root' : `other-${index - 1}`,
@@ -244,8 +244,9 @@ describe('ConversationTree', () => {
       total_conversations: 2, processed_conversations: 2,
     }))
     const { rerender } = render(<TestWrapper><ConversationTree {...defaultProps} /></TestWrapper>)
-    expect(await screen.findByRole('button', { name: /expand branch, 13 messages/i })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByTestId('tree-message-other-13')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('tree-message-other-13')).toBeInTheDocument()
+    expect(screen.getAllByRole('article')).toHaveLength(16)
+    expect(screen.queryByRole('button', { name: /(?:expand|collapse) branch/i })).not.toBeInTheDocument()
     const opener = screen.getByRole('button', { name: /conversations \(2\)/i })
     await user.click(opener)
     const dialog = screen.getByRole('dialog')
@@ -255,11 +256,13 @@ describe('ConversationTree', () => {
     await user.click(within(dialog).getByRole('button', { name: /close conversation chooser/i }))
     expect(await screen.findByRole('region', { name: 'Conversation tree' })).toBeInTheDocument()
     await waitFor(() => { expect(opener).toHaveFocus() })
-    await user.click(await screen.findByRole('button', { name: /expand branch, 13 messages/i }))
     expect(screen.getByTestId('tree-message-other-13')).toBeInTheDocument()
     rerender(<TestWrapper><ConversationTree {...defaultProps} active={false} /></TestWrapper>)
     rerender(<TestWrapper><ConversationTree {...defaultProps} active /></TestWrapper>)
-    expect(screen.getByRole('button', { name: /collapse branch, 13 messages/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getAllByRole('article')).toHaveLength(16)
+    expect(screen.getByTestId('tree-message-other-13')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /(?:expand|collapse) branch/i })).not.toBeInTheDocument()
+    expect(mockGraph).toHaveBeenLastCalledWith(expect.objectContaining({ onlyRenderVisibleElements: true }))
   })
 
   it('should abort obsolete attack reads and ignore their eventual responses', async () => {
@@ -274,7 +277,7 @@ describe('ConversationTree', () => {
     expect(screen.queryByRole('article', { name: /user message/i })).not.toBeInTheDocument()
   })
 
-  it('should not automatically fold an already visible branch as more descendants arrive', async () => {
+  it('should keep newly arriving messages expanded without branch controls', async () => {
     const later = deferred<ConversationTreePage>()
     const branch = Array.from({ length: 14 }, (_: unknown, index: number) => treeNode(`growing-${index}`, {
       parent_node_id: index === 0 ? 'root' : `growing-${index - 1}`,
@@ -284,14 +287,15 @@ describe('ConversationTree', () => {
       complete: false, next_cursor: 'later',
     })).mockReturnValueOnce(later.promise)
     render(<TestWrapper><ConversationTree {...defaultProps} /></TestWrapper>)
-    expect(await screen.findByRole('button', { name: /collapse branch, 1\+ messages/i })).toBeInTheDocument()
+    expect(await screen.findByTestId('tree-message-growing-1')).toBeInTheDocument()
     await act(async () => {
       later.resolve(treePage(branch.slice(2), {
         conversations: [{ conversation_id: 'other', node_id: 'growing-13' }],
       }))
     })
     expect(await screen.findByTestId('tree-message-growing-13')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /collapse branch, 13 messages/i })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getAllByRole('article')).toHaveLength(16)
+    expect(screen.queryByRole('button', { name: /(?:expand|collapse) branch/i })).not.toBeInTheDocument()
   })
 
   it('should defer all tree requests when initially inactive and abort reads on hiding', async () => {

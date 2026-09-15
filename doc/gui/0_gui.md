@@ -109,7 +109,7 @@ Each node is one message, with that message's pieces kept together. Shared clone
 appears once; independently generated responses remain separate even when their text matches.
 Only conversations with the objective target are included, not internal adversarial conversations.
 
-Pan and zoom to inspect branches, collapse portions you are not working on, or use **Fit to view**.
+All loaded branches remain expanded. Pan and zoom to inspect them, or use **Fit to view**.
 Select a conversation endpoint to return to its chat. A shared message can belong to several
 conversations, so its chooser lets you select the one to open. The ribbon's chat-bubble button
 returns to the previously viewed conversation without changing your draft.

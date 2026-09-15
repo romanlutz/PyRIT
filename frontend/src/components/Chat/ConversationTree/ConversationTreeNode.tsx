@@ -5,8 +5,6 @@ import {
   ArrowExpandRegular,
   ArrowSyncRegular,
   ChatMultipleRegular,
-  ChevronDownRegular,
-  ChevronRightRegular,
 } from '@fluentui/react-icons'
 import { Handle, Position, type Node } from '@xyflow/react'
 
@@ -24,13 +22,11 @@ export interface ConversationTreeNodeData extends Record<string, unknown> {
   readonly currentEndpoint: boolean
   readonly mainEndpoint: boolean
   readonly endpointIds: string[]
-  readonly collapsed: boolean
-  readonly descendantCount: number
+  readonly hasChildren: boolean
   readonly conversationCount: number
   readonly complete: boolean
   readonly onChoose: (nodeId: string, opener: HTMLElement, endpointsOnly?: boolean) => void
   readonly onSelect: (conversationId: string) => void
-  readonly onCollapse: (nodeId: string) => void
   readonly onMedia: (nodeId: string, pieceIndex: number, opener: HTMLElement) => void
   readonly onPieces: (nodeId: string, opener: HTMLElement) => void
   readonly onRetry: (node: TreeNode) => void
@@ -150,7 +146,7 @@ function ConversationTreeNode({ data }: ConversationTreeNodeProps) {
       >
         {node.piece_count > COMPACT_PIECE_COUNT ? `View all ${node.piece_count} pieces` : 'Message details'}
       </Button>
-      <div className={styles.footer}>
+      {data.endpointIds.length > 0 && <div className={styles.footer}>
         {data.endpointIds.length === 1 && (
           <Button
             appearance="secondary"
@@ -173,22 +169,9 @@ function ConversationTreeNode({ data }: ConversationTreeNodeProps) {
             {data.endpointIds.length} end here
           </Button>
         )}
-        {data.descendantCount > 0 && (
-          <Button
-            appearance="subtle"
-            size="small"
-            className={styles.button}
-            icon={data.collapsed ? <ChevronRightRegular /> : <ChevronDownRegular />}
-            aria-expanded={!data.collapsed}
-            aria-label={`${data.collapsed ? 'Expand' : 'Collapse'} branch, ${data.descendantCount}${data.complete ? '' : '+'} messages`}
-            onClick={() => { data.onCollapse(node.node_id) }}
-          >
-            {data.descendantCount}{data.complete ? '' : '+'}
-          </Button>
-        )}
-      </div>
+      </div>}
       {!data.complete && <Text size={100} className={styles.detail}>More branches may appear</Text>}
-      {data.complete && data.descendantCount === 0 && node.role === 'user' && (
+      {data.complete && !data.hasChildren && node.role === 'user' && (
         <Text size={100} className={styles.detail}>No response stored</Text>
       )}
       <Handle type="source" position={Position.Bottom} isConnectable={false} className={styles.handle} />
