@@ -181,6 +181,10 @@ adds an asterisk to **ASR*** and an explanatory note. Selecting only successes c
 therefore display **100%***. This describes the selected outcomes, not an
 unfiltered measure of target safety.
 
+Outcome badges, icons, and chart markers share one palette: green for success,
+red for failure, blue for execution errors, and gray for undetermined results.
+Labels and icons remain available when high-contrast settings replace these colors.
+
 Targeted harm categories describe what an attack intended to test, not harms
 detected by a scorer. Harm and converter groups can overlap: a result can belong
 to several groups, but counts only once in the overall total and once in each

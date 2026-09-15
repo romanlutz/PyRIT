@@ -39,6 +39,25 @@ function deferred() {
   return { promise, release: (): void => { if (release) release() } }
 }
 
+function rgbChannels(color: string): number[] {
+  const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number)
+  if (!channels || channels.length !== 3) throw new Error(`Expected a computed RGB color, got ${color}`)
+  return channels
+}
+
+function colorContrast(foreground: string, background: string): number {
+  const luminance = (color: string): number => {
+    const channels = rgbChannels(color).map((channel: number) => {
+      const value = channel / 255
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+    })
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+  }
+  const first = luminance(foreground)
+  const second = luminance(background)
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+}
+
 interface AnalyticsMocks {
   reportRequests: Array<Record<string, unknown>>
   resultRequests: Array<Record<string, unknown>>
@@ -180,6 +199,54 @@ async function mockAnalytics(page: Page): Promise<AnalyticsMocks> {
 }
 
 test.describe('Saved AttackResult analytics', () => {
+  for (const theme of ['light', 'dark']) {
+    test(`uses matching accessible outcome colors in ${theme} badges, icons, bars and swatches`, async ({ page }) => {
+      await mockAnalytics(page)
+      await page.addInitScript((mode: string) => { localStorage.setItem('pyrit.themeMode', mode) }, theme)
+      await page.goto('/analytics')
+      const summary = page.getByRole('region', { name: 'Outcome summary' })
+      const markerColors: Partial<Record<AttackOutcome, string>> = {}
+      for (const outcome of ['success', 'failure', 'error', 'undetermined'] as const) {
+        const badge = summary.getByText(outcome, { exact: true })
+        await expect(badge).toBeVisible()
+        const colors = await badge.evaluate((element: HTMLElement) => ({
+          color: getComputedStyle(element).color,
+          background: getComputedStyle(element).backgroundColor,
+          icon: getComputedStyle(element.querySelector('svg') ?? element).color,
+        }))
+        markerColors[outcome] = colors.color
+        const bar = page.getByRole('button', { name: new RegExp(`Nightly: ${outcome} segment;`) })
+        const swatch = page.getByRole('button', { name: new RegExp(`Nightly: \\d+ ${outcome};`) })
+          .locator('[aria-hidden="true"]').first()
+        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
+        expect(await swatch.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
+        expect(colors.icon).toBe(colors.color)
+        expect(colorContrast(colors.color, colors.background)).toBeGreaterThanOrEqual(4.5)
+        await bar.hover()
+        expect(await bar.evaluate((element: HTMLElement) => getComputedStyle(element).backgroundColor)).toBe(colors.color)
+      }
+      const blue = rgbChannels(markerColors.error ?? '')
+      const red = rgbChannels(markerColors.failure ?? '')
+      expect(blue[2]).toBeGreaterThan(blue[0])
+      expect(blue[2]).toBeGreaterThan(blue[1])
+      expect(red[0]).toBeGreaterThan(red[1])
+      expect(red[0]).toBeGreaterThan(red[2])
+      for (const outcome of ['failure', 'error'] as const) {
+        await summary.getByRole('button', { name: new RegExp(`Filter to ${outcome}:`) }).click()
+        const badge = page.getByRole('table', { name: 'Saved attack results' }).getByText(outcome, { exact: true }).first()
+        await expect(badge).toBeVisible()
+        const colors = await badge.evaluate((element: HTMLElement) => ({
+          color: getComputedStyle(element).color,
+          background: getComputedStyle(element).backgroundColor,
+          icon: getComputedStyle(element.querySelector('svg') ?? element).color,
+        }))
+        expect(colors.background).toBe(markerColors[outcome])
+        expect(colors.icon).toBe(colors.color)
+        expect(colorContrast(colors.color, colors.background)).toBeGreaterThanOrEqual(4.5)
+      }
+    })
+  }
+
   test('drills into the actual outcome segment and success-rate bar', async ({ page }) => {
     const mocks = await mockAnalytics(page)
     await page.goto('/analytics')

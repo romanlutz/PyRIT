@@ -1,6 +1,15 @@
 import { makeStyles, shorthands, tokens } from '@fluentui/react-components'
 
 import { mobileTouchTargetHeight, NARROW_VIEWPORT_QUERY } from '@/styles/touchTargets'
+import { OUTCOME_PALETTE } from '@/styles/outcomePalette'
+
+function outcomeFill(color: string) {
+  return {
+    backgroundColor: color,
+    ':hover': { backgroundColor: color },
+    ':active': { backgroundColor: color },
+  }
+}
 
 export const useAnalyticsGroupsStyles = makeStyles({
   root: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalM, minWidth: 0 },
@@ -57,10 +66,10 @@ export const useAnalyticsGroupsStyles = makeStyles({
     borderRadius: 0,
     justifyContent: 'flex-start',
   },
-  success: { backgroundColor: tokens.colorPaletteGreenBackground3 },
-  failure: { backgroundColor: tokens.colorPaletteRedBackground3 },
-  error: { backgroundColor: tokens.colorPaletteDarkOrangeBackground3 },
-  undetermined: { backgroundColor: tokens.colorNeutralForeground3 },
+  success: outcomeFill(OUTCOME_PALETTE.success.color),
+  failure: outcomeFill(OUTCOME_PALETTE.failure.color),
+  error: outcomeFill(OUTCOME_PALETTE.error.color),
+  undetermined: outcomeFill(OUTCOME_PALETTE.undetermined.color),
   rate: { backgroundColor: tokens.colorBrandBackground },
   unavailable: { ...shorthands.borderStyle('dashed'), backgroundColor: tokens.colorNeutralBackground2 },
   outcomes: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalXS },
