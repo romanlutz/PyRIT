@@ -11,7 +11,7 @@ import {
 
 export function layoutTree(nodes: LayoutNode[]): Array<[string, TreePosition]> {
   const graph = new dagre.graphlib.Graph()
-    .setGraph({ rankdir: 'TB', nodesep: TREE_COLUMN_GAP, ranksep: TREE_ROW_GAP, ranker: 'longest-path' })
+    .setGraph({ rankdir: 'TB', nodesep: TREE_COLUMN_GAP, ranksep: TREE_ROW_GAP, ranker: 'tight-tree' })
     .setDefaultEdgeLabel(() => ({}))
   for (const node of nodes) {
     graph.setNode(node.id, { width: TREE_NODE_WIDTH, height: node.height ?? TREE_NODE_HEIGHT })

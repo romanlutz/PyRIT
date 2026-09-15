@@ -5,13 +5,14 @@ const LAYOUT_COALESCE_MS = 32
 
 interface LayoutSnapshot {
   readonly positions: ReadonlyMap<string, TreePosition>
+  readonly arrangedNodeIds: ReadonlySet<string>
   readonly busy: boolean
   readonly ready: boolean
   readonly error?: string
 }
 
 export class TreeLayoutCoordinator {
-  private snapshot: LayoutSnapshot = { positions: new Map(), busy: false, ready: false }
+  private snapshot: LayoutSnapshot = { positions: new Map(), arrangedNodeIds: new Set(), busy: false, ready: false }
   private readonly listeners = new Set<() => void>()
   private worker: TreeLayoutWorkerPort | null = null
   private active = false
@@ -101,7 +102,12 @@ export class TreeLayoutCoordinator {
               for (const [id, position] of next) next.set(id, { x: position.x + delta.x, y: position.y + delta.y })
             }
             this.acceptedVersion = this.version
-            this.publish({ positions: next, busy: false, ready: true })
+            this.publish({
+              positions: next,
+              arrangedNodeIds: new Set(this.nodes.map((node: LayoutNode) => node.id)),
+              busy: false,
+              ready: true,
+            })
           }
           this.schedule()
         }

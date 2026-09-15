@@ -16,6 +16,7 @@ import type {
 import { attackConversationRoutePath } from '@/utils/routeParams'
 
 import { BLACK_FRAME_MP4 } from './fixtures/blackFrame'
+import { expectClearTreeGeometry } from './_treeGeometry'
 
 const TARGET = 'conversation_tree_test'
 const IMAGE = readFileSync(new URL('../public/roakey.png', import.meta.url)).toString('base64')
@@ -141,10 +142,18 @@ test.describe('Progressive conversations with the real backend', () => {
       const body: ConversationMessagesResponse = await response.json()
       expect(body.messages).toHaveLength(conversation.conversation_id === attack.conversation_id ? 6 : 4)
     }
+    const mediaBranch = first.conversations.find((conversation) => conversation.conversation_id !== attack.conversation_id)
+    if (!mediaBranch) throw new Error('No copied conversation was created')
+    await store(request, attack, mediaBranch.conversation_id, 'assistant', [
+      { data_type: 'text', original_value: 'A taller media message beside the deeper branch.' },
+      { data_type: 'image_path', original_value: IMAGE, mime_type: 'image/png' },
+      { data_type: 'audio_path', original_value: silentWav(), mime_type: 'audio/wav' },
+    ])
     await page.reload()
     await page.getByRole('button', { name: 'Show conversation tree' }).click()
     await expect(page.getByTestId('conversation-tree')).toBeVisible()
     expect((await conversations(request, attack)).conversations).toHaveLength(7)
+    await expectClearTreeGeometry(page)
   })
 
   test('keeps multipart messages together and defers original audio/video until expansion @seeded', async ({ page, request }) => {

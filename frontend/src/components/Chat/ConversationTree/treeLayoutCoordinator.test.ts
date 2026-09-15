@@ -38,6 +38,7 @@ describe('TreeLayoutCoordinator', () => {
     expect(worker.postMessage).toHaveBeenCalledTimes(1)
     expect(worker.postMessage.mock.calls[0][0].nodes).toHaveLength(2)
     expect(layout.getSnapshot().positions.size).toBe(2)
+    expect(layout.getSnapshot().arrangedNodeIds.size).toBe(0)
   })
 
   it('should discard stale worker replies and keep the active anchor at the same position', () => {
@@ -54,6 +55,23 @@ describe('TreeLayoutCoordinator', () => {
     expect(layout.getSnapshot().positions.get('root')).toEqual({ x: 0, y: 0 })
     expect(layout.getSnapshot().positions.get('child')).toEqual({ x: 100, y: 450 })
     expect(layout.getSnapshot().ready).toBe(true)
+    expect([...layout.getSnapshot().arrangedNodeIds]).toEqual(['root', 'child'])
+  })
+
+  it('keeps existing routed branches but does not connect provisional nodes through them', () => {
+    layout.setActive(true)
+    layout.setGraph([{ id: 'root', parentId: null }], 'root')
+    jest.advanceTimersByTime(32)
+    worker.reply(worker.postMessage.mock.calls[0][0].requestId, [['root', { x: 0, y: 0 }]])
+    layout.setGraph([{ id: 'root', parentId: null }, { id: 'new-child', parentId: 'root' }], 'root')
+    expect(layout.getSnapshot().positions.has('new-child')).toBe(true)
+    expect([...layout.getSnapshot().arrangedNodeIds]).toEqual(['root'])
+    jest.advanceTimersByTime(32)
+    worker.reply(worker.postMessage.mock.calls[1][0].requestId, [
+      ['root', { x: 0, y: 0 }],
+      ['new-child', { x: 0, y: 400 }],
+    ])
+    expect([...layout.getSnapshot().arrangedNodeIds]).toEqual(['root', 'new-child'])
   })
 
   it('should suspend worker work while hidden and preserve accepted positions on return', () => {

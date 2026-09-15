@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button, MessageBar, MessageBarBody, Text, mergeClasses, useRestoreFocusTarget } from '@fluentui/react-components'
 import { AddRegular, ChatMultipleRegular, SubtractRegular } from '@fluentui/react-icons'
-import { ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type NodeTypes, type Viewport } from '@xyflow/react'
+import { ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type EdgeTypes, type NodeTypes, type Viewport } from '@xyflow/react'
 import { ErrorBoundary } from 'react-error-boundary'
 import '@xyflow/react/dist/style.css'
 
@@ -12,6 +12,7 @@ import type { ConversationTreeEndpoint, ConversationTreeNode as TreeNode } from 
 import ConversationChooser, { type ConversationChooserScope } from './ConversationChooser'
 import { useConversationTreeStyles } from './ConversationTree.styles'
 import ConversationTreeNode, { type MessageFlowNode } from './ConversationTreeNode'
+import ConversationTreeEdge from './ConversationTreeEdge'
 import MediaLightbox from './MediaLightbox'
 import MessagePiecesDialog from './MessagePiecesDialog'
 import {
@@ -26,9 +27,11 @@ import {
 } from './treeGraph'
 import { useConversationTreeData } from './useConversationTreeData'
 import { useTreeLayout } from './useTreeLayout'
+import { treeEdgeLanes } from './treeEdgeRouting'
 import { initialTreeFocus, useTreePaneSize, visibleTreeNodes } from './useTreeViewport'
 
 const NODE_TYPES: NodeTypes = { message: ConversationTreeNode }
+const EDGE_TYPES: EdgeTypes = { tree: ConversationTreeEdge }
 const INITIAL_PATH_MESSAGES = 4
 const EMPTY_CONVERSATION_BUTTONS = 3
 const MIN_ZOOM = 0.2
@@ -119,6 +122,10 @@ function ConversationTreePane({
     : [...currentPath].find((id: string) => expandedIds.has(id)) ?? expanded[0]?.node_id ?? null
   const layout = useTreeLayout(layoutNodes, anchorId, active)
   const positions = useMemo(() => reservePositions(layoutNodes, layout.positions), [layoutNodes, layout.positions])
+  const edgeLanes = useMemo(
+    () => treeEdgeLanes(layoutNodes.filter((node: LayoutNode) => layout.arrangedNodeIds.has(node.id)), positions),
+    [layoutNodes, layout.arrangedNodeIds, positions],
+  )
   const visible = useMemo(
     () => visibleTreeNodes(expanded, positions, viewport, size),
     [expanded, positions, viewport, size],
@@ -205,18 +212,22 @@ function ConversationTreePane({
     },
   })), [expanded, positions, snapshot.previews, snapshot.conversations, snapshot.mainConversationId, snapshot.complete,
     currentPath, activeConversationId, index, collapsed, choose, select, collapse, openMedia, openPieces, retryPreviews, focus])
-  const edges = useMemo(() => expanded.flatMap((node: TreeNode): Edge[] =>
-    node.parent_node_id && expandedIds.has(node.parent_node_id)
+  const edges = useMemo(() => expanded.flatMap((node: TreeNode): Edge<{ centerY: number }>[] => {
+    const centerY = edgeLanes.get(node.node_id)
+    return node.parent_node_id && expandedIds.has(node.parent_node_id)
+      && layout.arrangedNodeIds.has(node.parent_node_id) && centerY !== undefined
       ? [{
           id: `${node.parent_node_id}:${node.node_id}`,
           source: node.parent_node_id,
           target: node.node_id,
-          type: 'smoothstep',
+          type: 'tree',
+          data: { centerY },
           selectable: false,
           focusable: false,
           className: currentPath.has(node.node_id) ? styles.pathEdge : undefined,
         }]
-      : []), [expanded, expandedIds, currentPath, styles.pathEdge])
+      : []
+  }), [expanded, expandedIds, currentPath, styles.pathEdge, layout.arrangedNodeIds, edgeLanes])
   const emptyConversations = [...snapshot.conversations.values()].filter((endpoint: ConversationTreeEndpoint) => endpoint.node_id === null)
   const mediaNode = media ? snapshot.nodes.get(media.nodeId) : undefined
   const detailsNode = details ? snapshot.nodes.get(details.nodeId) : undefined
@@ -227,7 +238,7 @@ function ConversationTreePane({
         : snapshot.nodes.size > 0 ? `Loading more branches${progress}` : `Loading branches${progress}`
 
   return (
-    <section className={mergeClasses(styles.root, !active && styles.inactive)} aria-label="Conversation tree" hidden={!active} data-testid="conversation-tree">
+    <section className={mergeClasses(styles.root, !active && styles.inactive)} aria-label="Conversation tree" hidden={!active} data-testid="conversation-tree" data-layout-pending={layout.busy}>
       <div className={styles.toolbar}>
         <Button {...restoreFocusTargetAttributes} icon={<ChatMultipleRegular />} className={styles.textButton} onClick={(event) => { setChooser({ scope: { kind: 'all' }, opener: event.currentTarget }) }}>
           Conversations ({snapshot.conversations.size}{snapshot.complete ? '' : '+'})
@@ -239,7 +250,7 @@ function ConversationTreePane({
           <Button className={styles.textButton} disabled={nodes.length === 0} onClick={() => { void flow.fitView({ maxZoom: 1, minZoom: MIN_ZOOM, padding: 0.2 }).then(() => { setViewport(flow.getViewport()) }).catch(reportNavigationError) }}>Fit to view</Button>
         </div>
       </div>
-      <div className={styles.status} role="status" aria-live="polite" aria-atomic="true">{status}</div>
+      <div className={styles.status} role="status" aria-live="polite" aria-atomic="true">{status}{layout.busy ? '; arranging branches' : ''}</div>
       {snapshot.error && <MessageBar intent="error"><MessageBarBody>{snapshot.error}</MessageBarBody><Button className={styles.textButton} onClick={reads.retryTopology}>{snapshot.needsRefresh ? 'Refresh tree' : 'Retry loading branches'}</Button></MessageBar>}
       {layout.error && <MessageBar intent="warning"><MessageBarBody>Branches could not be arranged. Known messages remain available. {layout.error}</MessageBarBody><Button className={styles.textButton} onClick={layout.retry}>Retry layout</Button></MessageBar>}
       {navigationError && <MessageBar intent="error"><MessageBarBody>{navigationError}</MessageBarBody></MessageBar>}
@@ -267,6 +278,7 @@ function ConversationTreePane({
           nodes={nodes}
           edges={edges}
           nodeTypes={NODE_TYPES}
+          edgeTypes={EDGE_TYPES}
           nodesDraggable={false}
           nodesConnectable={false}
           nodesFocusable={false}

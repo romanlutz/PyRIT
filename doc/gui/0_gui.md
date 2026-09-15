@@ -118,6 +118,8 @@ The tree loads progressively. Known message nodes remain usable while more branc
 loading, and visible text excerpts load separately from the structure. Loading indicators
 distinguish incomplete structure from content that has not been requested yet. A loading
 failure does not remove the already available tree.
+Children are arranged in the next row, with connections routed through the gaps between
+rows. New message cards can appear while their connections are still being arranged.
 
 Text previews are limited to 200 characters per message. Media begins with small previews
 or type placeholders; large images and audio/video originals are not loaded for every node.
