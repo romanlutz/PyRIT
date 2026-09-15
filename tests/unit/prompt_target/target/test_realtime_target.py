@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import gc
 import wave
 from collections.abc import AsyncIterator
 from typing import Any
@@ -137,18 +138,26 @@ async def test_response_create_failure_cancels_receive_task(target):
     assert receive_cancelled.is_set()
 
 
-async def test_cancel_receive_task_async_gathers_completed_failure(target):
+async def test_cancel_receive_task_async_retrieves_completed_failure(target):
     async def fail_receive_async() -> RealtimeTargetResult:
         raise RuntimeError("receive failed")
 
     receive_task = asyncio.create_task(fail_receive_async())
-    with pytest.raises(RuntimeError, match="receive failed"):
-        await receive_task
+    await asyncio.sleep(0)
+    assert receive_task.done()
 
-    with patch.object(asyncio, "gather", new_callable=AsyncMock) as gather:
+    unhandled_exceptions: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled_exceptions.append(context))
+    try:
         await target._cancel_receive_task_async(receive_task=receive_task)
+        del receive_task
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
 
-    gather.assert_awaited_once_with(receive_task, return_exceptions=True)
+    assert not unhandled_exceptions
 
 
 async def test_send_prompt_async_propagates_interrupted_to_metadata(target):
