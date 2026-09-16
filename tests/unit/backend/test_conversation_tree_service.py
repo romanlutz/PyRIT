@@ -131,7 +131,9 @@ async def test_nested_cloning_empty_and_exact_prefix_endpoints(sqlite_instance: 
         }
 
 
-@pytest.mark.parametrize("difference", ["independent-reply", "second-lineage", "converted-value", "role", "error"])
+@pytest.mark.parametrize(
+    "difference", ["independent-reply", "second-lineage", "converted-value", "role", "error", "sequence"]
+)
 async def test_lineage_and_actual_representation_prevent_false_merges(
     *, sqlite_instance: SQLiteMemory, difference: str
 ) -> None:
@@ -154,6 +156,9 @@ async def test_lineage_and_actual_representation_prevent_false_merges(
     elif difference == "role":
         for piece in changed.message_pieces:
             piece.role = "tool"
+    elif difference == "sequence":
+        for piece in changed.message_pieces:
+            piece.sequence = 2
     else:
         changed.message_pieces[1].response_error = "blocked"
     store_tree_messages(memory=sqlite_instance, messages=[prompt, response, *copied])

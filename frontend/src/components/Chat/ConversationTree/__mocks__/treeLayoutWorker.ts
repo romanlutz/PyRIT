@@ -14,7 +14,7 @@ export default class TestLayoutWorker implements TreeLayoutWorkerPort {
       if (this.stopped) return
       try {
         this.onmessage?.(new MessageEvent<TreeLayoutReply>('message', {
-          data: { requestId: request.requestId, positions: layoutTree(request.nodes) },
+          data: { requestId: request.requestId, ...layoutTree(request.nodes) },
         }))
       } catch (error: unknown) {
         this.onerror?.(new ErrorEvent('error', { message: error instanceof Error ? error.message : 'Layout failed' }))

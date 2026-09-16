@@ -52,6 +52,8 @@ function ConversationTreeNode({ data }: ConversationTreeNodeProps) {
     <article
       aria-label={`${role} message ${node.message.sequence}, ${node.piece_count} pieces`}
       data-testid={`tree-message-${node.node_id}`}
+      data-sequence={node.message.sequence}
+      data-parent-node-id={node.parent_node_id ?? undefined}
       className={mergeClasses(styles.root, node.piece_count === 1 && styles.singlePiece, node.piece_count === 2 && styles.twoPieces, node.role === 'user' && styles.user, data.currentPath && styles.currentPath, 'nodrag nopan')}
       onFocus={() => { data.onFocus(node.node_id) }}
     >

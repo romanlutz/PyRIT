@@ -8,8 +8,8 @@ class ControlledWorker implements TreeLayoutWorkerPort {
   postMessage = jest.fn<void, [TreeLayoutRequest]>()
   terminate = jest.fn()
 
-  reply(requestId: number, positions: Array<[string, TreePosition]>): void {
-    this.onmessage?.(new MessageEvent<TreeLayoutReply>('message', { data: { requestId, positions } }))
+  reply(requestId: number, positions: Array<[string, TreePosition]>, edgeRoutes: Array<[string, TreePosition[]]> = []): void {
+    this.onmessage?.(new MessageEvent<TreeLayoutReply>('message', { data: { requestId, positions, edgeRoutes } }))
   }
 }
 
@@ -31,9 +31,9 @@ describe('TreeLayoutCoordinator', () => {
 
   it('should coalesce pages without delaying the first useful layout indefinitely', () => {
     layout.setActive(true)
-    layout.setGraph([{ id: 'root', parentId: null }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], 'root')
     jest.advanceTimersByTime(16)
-    layout.setGraph([{ id: 'root', parentId: null }, { id: 'child', parentId: 'root' }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }, { id: 'child', parentId: 'root', sequence: 1 }], 'root')
     jest.advanceTimersByTime(16)
     expect(worker.postMessage).toHaveBeenCalledTimes(1)
     expect(worker.postMessage.mock.calls[0][0].nodes).toHaveLength(2)
@@ -43,10 +43,10 @@ describe('TreeLayoutCoordinator', () => {
 
   it('should discard stale worker replies and keep the active anchor at the same position', () => {
     layout.setActive(true)
-    layout.setGraph([{ id: 'root', parentId: null }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], 'root')
     jest.advanceTimersByTime(32)
     const first = worker.postMessage.mock.calls[0][0].requestId
-    layout.setGraph([{ id: 'root', parentId: null }, { id: 'child', parentId: 'root' }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }, { id: 'child', parentId: 'root', sequence: 1 }], 'root')
     worker.reply(first, [['root', { x: 999, y: 999 }]])
     expect(layout.getSnapshot().positions.get('root')).toEqual({ x: 0, y: 0 })
     jest.advanceTimersByTime(32)
@@ -60,10 +60,10 @@ describe('TreeLayoutCoordinator', () => {
 
   it('keeps existing routed branches but does not connect provisional nodes through them', () => {
     layout.setActive(true)
-    layout.setGraph([{ id: 'root', parentId: null }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], 'root')
     jest.advanceTimersByTime(32)
     worker.reply(worker.postMessage.mock.calls[0][0].requestId, [['root', { x: 0, y: 0 }]])
-    layout.setGraph([{ id: 'root', parentId: null }, { id: 'new-child', parentId: 'root' }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }, { id: 'new-child', parentId: 'root', sequence: 1 }], 'root')
     expect(layout.getSnapshot().positions.has('new-child')).toBe(true)
     expect([...layout.getSnapshot().arrangedNodeIds]).toEqual(['root'])
     jest.advanceTimersByTime(32)
@@ -75,7 +75,7 @@ describe('TreeLayoutCoordinator', () => {
   })
 
   it('should suspend worker work while hidden and preserve accepted positions on return', () => {
-    layout.setGraph([{ id: 'root', parentId: null }], 'root')
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], 'root')
     jest.advanceTimersByTime(100)
     expect(worker.postMessage).not.toHaveBeenCalled()
     layout.setActive(true)
@@ -92,7 +92,7 @@ describe('TreeLayoutCoordinator', () => {
   })
 
   it('should report worker failures locally and permit a targeted retry', () => {
-    layout.setGraph([{ id: 'root', parentId: null }], null)
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], null)
     layout.setActive(true)
     jest.advanceTimersByTime(32)
     worker.onerror?.(new ErrorEvent('error', { message: 'Worker failed' }))
@@ -105,10 +105,40 @@ describe('TreeLayoutCoordinator', () => {
 
   it('should retain selectable placeholders if the browser cannot create a worker', () => {
     layout = new TreeLayoutCoordinator(() => { throw new Error('Workers unavailable') })
-    layout.setGraph([{ id: 'root', parentId: null }], null)
+    layout.setGraph([{ id: 'root', parentId: null, sequence: 0 }], null)
     layout.setActive(true)
     jest.advanceTimersByTime(32)
     expect(layout.getSnapshot().error).toBe('Workers unavailable')
     expect(layout.getSnapshot().positions.has('root')).toBe(true)
+  })
+
+  it('should translate accepted routes with the anchor and withhold them when an intermediate band arrives', () => {
+    const root = { id: 'root', parentId: null, sequence: 5 }
+    const child = { id: 'child', parentId: 'root', sequence: 9 }
+    layout.setGraph([root, child], 'child')
+    layout.setActive(true)
+    jest.advanceTimersByTime(32)
+    const points = [{ x: 260, y: 386 }, { x: 260, y: 418 }, { x: 360, y: 418 }, { x: 360, y: 450 }]
+    worker.reply(worker.postMessage.mock.calls[0][0].requestId, [
+      ['root', { x: 100, y: 50 }], ['child', { x: 200, y: 450 }],
+    ], [['child', points]])
+    expect(layout.getSnapshot().positions.get('child')).toEqual({ x: 0, y: 400 })
+    expect(layout.getSnapshot().edgeRoutes.get('child')).toEqual(
+      points.map((point: TreePosition) => ({ x: point.x - 200, y: point.y - 50 })),
+    )
+
+    layout.setGraph([root, { id: 'new-root', parentId: null, sequence: 7 }, child], 'child')
+    expect(layout.getSnapshot().positions.get('child')).toEqual({ x: 0, y: 400 })
+    expect(layout.getSnapshot().positions.get('root')?.y).toBe(-400)
+    expect(layout.getSnapshot().edgeRoutes.size).toBe(0)
+    expect(layout.getSnapshot().arrangedNodeIds.size).toBe(0)
+    jest.advanceTimersByTime(32)
+    expect(worker.postMessage.mock.calls[1][0].nodes.map((node) => node.sequence)).toEqual([5, 7, 9])
+    worker.reply(worker.postMessage.mock.calls[1][0].requestId, [
+      ['root', { x: 100, y: 0 }], ['new-root', { x: 500, y: 400 }], ['child', { x: 100, y: 800 }],
+    ], [['child', [{ x: 260, y: 336 }, { x: 260, y: 800 }]]])
+    expect(layout.getSnapshot().positions.get('child')).toEqual({ x: 0, y: 400 })
+    expect(layout.getSnapshot().edgeRoutes.get('child')).toEqual([{ x: 160, y: -64 }, { x: 160, y: 400 }])
+    expect(layout.getSnapshot().arrangedNodeIds.size).toBe(3)
   })
 })

@@ -46,7 +46,9 @@ def project_tree_node(*, message: TreeMessageProjection, parent_node_id: str | N
         for piece in message.pieces
     ]
     preview_key = _digest(representations)
-    node_id = _digest([parent_node_id, [str(piece.lineage_id) for piece in message.pieces], preview_key])
+    node_id = _digest(
+        [parent_node_id, message.key.sequence, [str(piece.lineage_id) for piece in message.pieces], preview_key]
+    )
     return ConversationTreeNode(
         node_id=node_id,
         parent_node_id=parent_node_id,

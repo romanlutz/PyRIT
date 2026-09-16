@@ -2,7 +2,7 @@ import type { ConversationTreeEndpoint } from '@/types'
 
 import { treeNode } from './__fixtures__/treeFixtures'
 import { installStructuredClone } from './__mocks__/structuredClone'
-import { conversationPath, orderedTreeNodes, indexTree, isInBranch, reservePositions, TREE_NODE_HEIGHT, TREE_NODE_WIDTH } from './treeGraph'
+import { conversationPath, orderedTreeNodes, indexTree, isInBranch, reservePositions, TREE_NODE_HEIGHT, TREE_NODE_WIDTH, TREE_ROW_GAP, type LayoutNode } from './treeGraph'
 import { layoutTree } from './treeLayout'
 import { visibleTreeNodes } from './useTreeViewport'
 
@@ -43,10 +43,10 @@ describe('tree graph utilities', () => {
 
   it('should lay out whole message nodes with reserved dimensions', () => {
     const result = new Map(layoutTree([
-      { id: 'root', parentId: null },
-      { id: 'left', parentId: 'root' },
-      { id: 'right', parentId: 'root' },
-    ]))
+      { id: 'root', parentId: null, sequence: 0 },
+      { id: 'left', parentId: 'root', sequence: 1 },
+      { id: 'right', parentId: 'root', sequence: 1 },
+    ]).positions)
     const root = result.get('root')
     const left = result.get('left')
     const right = result.get('right')
@@ -73,8 +73,36 @@ describe('tree graph utilities', () => {
 
   it('should not cover existing selectable nodes with temporary positions for a new page', () => {
     const previous = new Map([['old-root', { x: 0, y: 0 }]])
-    const positions = reservePositions([{ id: 'new-root', parentId: null }, { id: 'old-root', parentId: null }], previous)
+    const positions = reservePositions([
+      { id: 'new-root', parentId: null, sequence: 0 }, { id: 'old-root', parentId: null, sequence: 0 },
+    ], previous)
     expect(positions.get('old-root')).toEqual(previous.get('old-root'))
     expect(positions.get('new-root')?.x).toBeGreaterThan(TREE_NODE_WIDTH)
+  })
+
+  it('should align provisional sequence rows and preserve a focused anchor as earlier bands arrive', () => {
+    const nodes: LayoutNode[] = [
+      { id: 'earlier', parentId: null, sequence: 3, height: 304 },
+      { id: 'old-root', parentId: null, sequence: 7, height: 208 },
+      { id: 'new-peer', parentId: 'earlier', sequence: 7, height: 304 },
+      { id: 'later', parentId: 'old-root', sequence: 15, height: 208 },
+    ]
+    const previous = new Map([['old-root', { x: 120, y: 100 }]])
+    const positions = reservePositions(nodes, previous, 'old-root')
+    expect(positions.get('old-root')).toEqual({ x: 120, y: 100 })
+    expect(positions.get('new-peer')?.y).toBe(52)
+    expect(positions.get('new-peer')?.x).toBeGreaterThan(120 + TREE_NODE_WIDTH)
+    expect(positions.get('earlier')?.y).toBe(52 - 304 - TREE_ROW_GAP)
+    expect(positions.get('later')?.y).toBe(52 + 304 + TREE_ROW_GAP)
+  })
+
+  it('should lay out a thousand stored sequence numbers without substituting their ordinal', () => {
+    const nodes = Array.from({ length: 1_000 }, (_: unknown, index: number): LayoutNode => ({
+      id: `node-${index}`, parentId: index === 0 ? null : `node-${index - 1}`, sequence: 7 + index * 3, height: 208,
+    }))
+    const result = layoutTree(nodes)
+    expect(result.positions).toHaveLength(1_000)
+    expect(result.edgeRoutes).toHaveLength(999)
+    expect(new Map(result.positions).get('node-999')?.y).toBe(999 * (208 + TREE_ROW_GAP))
   })
 })

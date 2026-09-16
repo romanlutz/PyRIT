@@ -47,6 +47,7 @@ interface MediaWithFallbackProps {
   className?: string
   preload?: 'none' | 'metadata' | 'auto'
   stopOnUnmount?: boolean
+  showLoadingStatus?: boolean
 }
 
 export function MediaWithFallback({
@@ -55,11 +56,14 @@ export function MediaWithFallback({
   className,
   preload,
   stopOnUnmount = false,
+  showLoadingStatus = false,
 }: MediaWithFallbackProps) {
   const [error, setError] = useState(false)
+  const [metadataSource, setMetadataSource] = useState<string | null>(null)
   const player = useRef<HTMLMediaElement | null>(null)
   const cleanupLifecycle = useRef({ generation: 0 })
   const handleError = useCallback(() => { setError(true) }, [])
+  const handleMetadata = useCallback(() => { setMetadataSource(src) }, [src])
   const setPlayer = useCallback((element: HTMLMediaElement | null) => { player.current = element }, [])
 
   useLayoutEffect(() => {
@@ -83,8 +87,12 @@ export function MediaWithFallback({
     return <Text size={200} italic data-testid={`${type}-error`}>{type === 'video' ? 'Video' : 'Audio'} failed to load</Text>
   }
 
-  if (type === 'video') {
-    return <video ref={setPlayer} src={src} controls preload={preload} className={className} onError={handleError} data-testid="video-player" />
-  }
-  return <audio ref={setPlayer} src={src} controls preload={preload} className={className} onError={handleError} data-testid="audio-player" />
+  return (
+    <>
+      {showLoadingStatus && metadataSource !== src && <Spinner size="small" label={`Loading ${type}...`} />}
+      {type === 'video'
+        ? <video ref={setPlayer} src={src} controls preload={preload} className={className} onLoadedMetadata={handleMetadata} onError={handleError} data-testid="video-player" />
+        : <audio ref={setPlayer} src={src} controls preload={preload} className={className} onLoadedMetadata={handleMetadata} onError={handleError} data-testid="audio-player" />}
+    </>
+  )
 }

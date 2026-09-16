@@ -113,6 +113,8 @@ appears once; independently generated responses remain separate even when their 
 Only conversations with the objective target are included, not internal adversarial conversations.
 
 All loaded branches remain expanded. Pan and zoom to inspect them, or use **Fit to view**.
+Subtle dashed lanes align messages by their stored sequence number across conversations,
+including messages from independent roots. The labels use the stored zero-based numbers.
 Select a conversation endpoint to return to its chat. A shared message can belong to several
 conversations, so its chooser lets you select the one to open. The ribbon's chat-bubble button
 returns to the previously viewed conversation without changing your draft.
@@ -121,14 +123,16 @@ The tree loads progressively. Known message nodes remain usable while more branc
 loading, and visible text excerpts load separately from the structure. Loading indicators
 distinguish incomplete structure from content that has not been requested yet. A loading
 failure does not remove the already available tree.
-Children are arranged in the next row, with connections routed through the gaps between
-rows. New message cards can appear while their connections are still being arranged.
+Messages are arranged in their sequence lanes, with connections routed through the gaps
+between rows. New message cards can appear while their connections are still being arranged.
 
 Text previews are limited to 200 characters per message. Media begins with small previews
 or type placeholders; large images and audio/video originals are not loaded for every node.
 Open a media piece to view it at a larger size or play it. Close with **X** or **Escape** to
 return to the same tree position. Requesting a piece explicitly takes priority over background
 loading, so you do not have to wait for the entire tree.
+Expanded audio and video show a loading indicator until their metadata is ready; playback
+starts only when you request it.
 
 #### Exporting a Conversation
 

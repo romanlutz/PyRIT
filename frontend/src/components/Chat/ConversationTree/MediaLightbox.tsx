@@ -74,7 +74,7 @@ export default function MediaLightbox({ node, pieceIndex, result, opener, onClos
                     spinnerClassName={styles.spinner}
                   />
                 : type === 'audio' || type === 'video'
-                  ? <MediaWithFallback key={`${piece.media_url}:${attempt}`} type={type} src={piece.media_url} preload="metadata" stopOnUnmount className={styles.player} />
+                  ? <MediaWithFallback key={`${piece.media_url}:${attempt}`} type={type} src={piece.media_url} preload="metadata" stopOnUnmount showLoadingStatus className={styles.player} />
                   : <Link href={piece.media_url} target="_blank" rel="noopener noreferrer">Open {title}</Link>
             )}
             {!loading && piece?.mime_type && <Text size={200}>{piece.mime_type}</Text>}

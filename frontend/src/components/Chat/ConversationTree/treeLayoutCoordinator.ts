@@ -4,7 +4,9 @@ import type { TreeLayoutReply, TreeLayoutWorkerPort } from './treeLayout.types'
 const LAYOUT_COALESCE_MS = 32
 
 interface LayoutSnapshot {
+  readonly graphSignature: string
   readonly positions: ReadonlyMap<string, TreePosition>
+  readonly edgeRoutes: ReadonlyMap<string, TreePosition[]>
   readonly arrangedNodeIds: ReadonlySet<string>
   readonly busy: boolean
   readonly ready: boolean
@@ -12,7 +14,9 @@ interface LayoutSnapshot {
 }
 
 export class TreeLayoutCoordinator {
-  private snapshot: LayoutSnapshot = { positions: new Map(), arrangedNodeIds: new Set(), busy: false, ready: false }
+  private snapshot: LayoutSnapshot = {
+    graphSignature: '', positions: new Map(), edgeRoutes: new Map(), arrangedNodeIds: new Set(), busy: false, ready: false,
+  }
   private readonly listeners = new Set<() => void>()
   private worker: TreeLayoutWorkerPort | null = null
   private active = false
@@ -58,9 +62,20 @@ export class TreeLayoutCoordinator {
     const signature = JSON.stringify(nodes)
     if (signature === this.signature) return
     this.signature = signature
+    const previousNodes = new Map(this.nodes.map((node: LayoutNode) => [node.id, node]))
+    const positions = reservePositions(nodes, this.snapshot.positions, anchorId)
+    const rowsChanged = nodes.some((node: LayoutNode) => {
+      const previous = previousNodes.get(node.id)
+      return previous && (previous.sequence !== node.sequence || previous.height !== node.height
+        || previous.parentId !== node.parentId
+        || this.snapshot.positions.get(node.id)?.y !== positions.get(node.id)?.y)
+    })
     this.nodes = nodes
     this.version += 1
-    this.publish({ positions: reservePositions(nodes, this.snapshot.positions), error: undefined })
+    this.publish({
+      positions, graphSignature: signature, error: undefined,
+      ...(rowsChanged ? { arrangedNodeIds: new Set<string>(), edgeRoutes: new Map<string, TreePosition[]>() } : {}),
+    })
     this.schedule()
   }
 
@@ -95,15 +110,20 @@ export class TreeLayoutCoordinator {
               return
             }
             const next = new Map(event.data.positions)
+            const edgeRoutes = new Map(event.data.edgeRoutes)
             const previousAnchor = this.anchorId ? this.snapshot.positions.get(this.anchorId) : undefined
             const nextAnchor = this.anchorId ? next.get(this.anchorId) : undefined
             if (previousAnchor && nextAnchor) {
               const delta = { x: previousAnchor.x - nextAnchor.x, y: previousAnchor.y - nextAnchor.y }
               for (const [id, position] of next) next.set(id, { x: position.x + delta.x, y: position.y + delta.y })
+              for (const [id, points] of edgeRoutes) {
+                edgeRoutes.set(id, points.map((point: TreePosition) => ({ x: point.x + delta.x, y: point.y + delta.y })))
+              }
             }
             this.acceptedVersion = this.version
             this.publish({
               positions: next,
+              edgeRoutes,
               arrangedNodeIds: new Set(this.nodes.map((node: LayoutNode) => node.id)),
               busy: false,
               ready: true,

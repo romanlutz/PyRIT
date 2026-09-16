@@ -15,28 +15,11 @@ import type {
 } from '@/types'
 import { attackConversationRoutePath } from '@/utils/routeParams'
 
-import { BLACK_FRAME_MP4 } from './fixtures/blackFrame'
+import { MOVING_PREVIEW_MP4, toneWav } from './fixtures/mediaFixtures'
 import { expectClearTreeGeometry } from './_treeGeometry'
 
 const TARGET = 'conversation_tree_test'
 const IMAGE = readFileSync(new URL('../public/roakey.png', import.meta.url)).toString('base64')
-
-function silentWav(): string {
-  const buffer = Buffer.alloc(1_644)
-  buffer.write('RIFF')
-  buffer.writeUInt32LE(buffer.length - 8, 4)
-  buffer.write('WAVEfmt ', 8)
-  buffer.writeUInt32LE(16, 16)
-  buffer.writeUInt16LE(1, 20)
-  buffer.writeUInt16LE(1, 22)
-  buffer.writeUInt32LE(8_000, 24)
-  buffer.writeUInt32LE(16_000, 28)
-  buffer.writeUInt16LE(2, 32)
-  buffer.writeUInt16LE(16, 34)
-  buffer.write('data', 36)
-  buffer.writeUInt32LE(buffer.length - 44, 40)
-  return buffer.toString('base64')
-}
 
 async function store(
   request: APIRequestContext,
@@ -204,7 +187,7 @@ test.describe('Progressive conversations with the real backend', () => {
     await store(request, attack, mediaBranch.conversation_id, 'assistant', [
       { data_type: 'text', original_value: 'A taller media message beside the deeper branch.' },
       { data_type: 'image_path', original_value: IMAGE, mime_type: 'image/png' },
-      { data_type: 'audio_path', original_value: silentWav(), mime_type: 'audio/wav' },
+      { data_type: 'audio_path', original_value: toneWav(), mime_type: 'audio/wav' },
     ])
     await page.reload()
     await page.getByRole('button', { name: 'Show conversation tree' }).click()
@@ -227,8 +210,8 @@ test.describe('Progressive conversations with the real backend', () => {
     await store(request, attack, related.conversation_id, 'assistant', [
       { data_type: 'text', original_value: longText },
       { data_type: 'image_path', original_value: IMAGE, mime_type: 'image/png' },
-      { data_type: 'audio_path', original_value: silentWav(), mime_type: 'audio/wav' },
-      { data_type: 'video_path', original_value: BLACK_FRAME_MP4, mime_type: 'video/mp4' },
+      { data_type: 'audio_path', original_value: toneWav(), mime_type: 'audio/wav' },
+      { data_type: 'video_path', original_value: MOVING_PREVIEW_MP4, mime_type: 'video/mp4' },
     ])
     const mediaRequests: string[] = []
     const fullPreviewRequests: string[] = []
@@ -266,6 +249,13 @@ test.describe('Progressive conversations with the real backend', () => {
         await expect.poll(() => dialog.locator('audio').evaluate((element) =>
           element instanceof HTMLMediaElement && element.readyState >= 1,
         )).toBe(true)
+        await dialog.locator('audio').evaluate(async (element) => {
+          if (!(element instanceof HTMLMediaElement)) throw new Error('Expected an audio player')
+          await element.play()
+        })
+        await expect.poll(() => dialog.locator('audio').evaluate((element) =>
+          element instanceof HTMLMediaElement ? element.currentTime : 0,
+        )).toBeGreaterThan(0.05)
       }
       await page.keyboard.press('Escape')
       await expect(dialog).not.toBeVisible()
@@ -279,6 +269,13 @@ test.describe('Progressive conversations with the real backend', () => {
     await expect.poll(() => videoDialog.locator('video').evaluate((element) =>
       element instanceof HTMLMediaElement && element.readyState >= 1,
     )).toBe(true)
+    await videoDialog.locator('video').evaluate(async (element) => {
+      if (!(element instanceof HTMLMediaElement)) throw new Error('Expected a video player')
+      await element.play()
+    })
+    await expect.poll(() => videoDialog.locator('video').evaluate((element) =>
+      element instanceof HTMLMediaElement ? element.currentTime : 0,
+    )).toBeGreaterThan(0.05)
     await videoDialog.getByRole('button', { name: 'Close media' }).click()
     await expect(videoDialog).not.toBeVisible()
     await expect(page.getByRole('dialog')).toHaveCount(0)

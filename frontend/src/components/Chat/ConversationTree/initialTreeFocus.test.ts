@@ -49,9 +49,9 @@ describe('Readable initial tree focus', () => {
 
   it('passes actual node heights to the layout engine', () => {
     const positions = new Map(layoutTree([
-      { id: 'parent', parentId: null, height: 208 },
-      { id: 'current', parentId: 'parent', height: 304 },
-    ]))
+      { id: 'parent', parentId: null, sequence: 0, height: 208 },
+      { id: 'current', parentId: 'parent', sequence: 1, height: 304 },
+    ]).positions)
     const parent = positions.get('parent')
     const current = positions.get('current')
     expect(parent).toBeDefined()

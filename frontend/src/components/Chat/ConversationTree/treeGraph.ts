@@ -24,7 +24,28 @@ export interface TreePosition {
 export interface LayoutNode {
   readonly id: string
   readonly parentId: string | null
+  readonly sequence: number
   readonly height?: number
+}
+
+export interface TreeSequenceRow {
+  readonly sequence: number
+  readonly top: number
+  readonly height: number
+}
+
+export function treeSequenceRows(nodes: LayoutNode[]): TreeSequenceRow[] {
+  const heights = new Map<number, number>()
+  for (const node of nodes) {
+    heights.set(node.sequence, Math.max(heights.get(node.sequence) ?? 0, node.height ?? TREE_NODE_HEIGHT))
+  }
+  let top = 0
+  return [...heights].sort(([a]: [number, number], [b]: [number, number]) => a - b)
+    .map(([sequence, height]: [number, number]): TreeSequenceRow => {
+      const row = { sequence, top, height }
+      top += height + TREE_ROW_GAP
+      return row
+    })
 }
 
 export function treeNodeHeight(pieceCount: number): number {
@@ -129,35 +150,38 @@ export function isInBranch(index: TreeIndex, nodeId: string, ancestorId: string)
 export function reservePositions(
   nodes: LayoutNode[],
   previous: ReadonlyMap<string, TreePosition>,
+  anchorId: string | null = null,
 ): Map<string, TreePosition> {
+  const rows = new Map(treeSequenceRows(nodes).map((row: TreeSequenceRow) => [row.sequence, row]))
   const positions = new Map<string, TreePosition>()
   const rightEdges = new Map<number, number>()
-  const rowHeight = TREE_NODE_HEIGHT + TREE_ROW_GAP
-  const occupy = (position: TreePosition): void => {
-    const firstRow = Math.floor(position.y / rowHeight)
-    const lastRow = Math.floor((position.y + TREE_NODE_HEIGHT) / rowHeight)
-    for (let row = firstRow; row <= lastRow; row += 1) {
-      rightEdges.set(row, Math.max(rightEdges.get(row) ?? -TREE_COLUMN_GAP, position.x + TREE_NODE_WIDTH))
-    }
+  const rowY = (node: LayoutNode): number => {
+    const row = rows.get(node.sequence)
+    if (!row) throw new Error(`No sequence row for message ${node.id}.`)
+    return row.top + (row.height - (node.height ?? TREE_NODE_HEIGHT)) / 2
   }
+  const anchor = nodes.find((node: LayoutNode) => node.id === anchorId && previous.has(node.id))
+    ?? nodes.find((node: LayoutNode) => previous.has(node.id))
+  const anchorPosition = anchor ? previous.get(anchor.id) : undefined
+  const offsetY = anchor && anchorPosition ? anchorPosition.y - rowY(anchor) : 0
+  let previousRight = -TREE_COLUMN_GAP
   for (const node of nodes) {
     const position = previous.get(node.id)
     if (position) {
-      positions.set(node.id, position)
-      occupy(position)
+      positions.set(node.id, { x: position.x, y: rowY(node) + offsetY })
+      const right = position.x + TREE_NODE_WIDTH
+      previousRight = Math.max(previousRight, right)
+      rightEdges.set(node.sequence, Math.max(rightEdges.get(node.sequence) ?? -TREE_COLUMN_GAP, right))
     }
   }
   for (const node of nodes) {
     if (positions.has(node.id)) continue
     const parent = node.parentId ? positions.get(node.parentId) : undefined
-    const y = parent ? parent.y + rowHeight : 0
-    let x = parent?.x ?? 0
-    for (let row = Math.floor(y / rowHeight); row <= Math.floor((y + TREE_NODE_HEIGHT) / rowHeight); row += 1) {
-      x = Math.max(x, (rightEdges.get(row) ?? -TREE_COLUMN_GAP) + TREE_COLUMN_GAP)
-    }
-    const position = { x, y }
-    positions.set(node.id, position)
-    occupy(position)
+    // New cards stay outside accepted routes until the worker can route their connections.
+    const x = Math.max(parent?.x ?? 0, previousRight + TREE_COLUMN_GAP,
+      (rightEdges.get(node.sequence) ?? -TREE_COLUMN_GAP) + TREE_COLUMN_GAP)
+    positions.set(node.id, { x, y: rowY(node) + offsetY })
+    rightEdges.set(node.sequence, x + TREE_NODE_WIDTH)
   }
   return positions
 }

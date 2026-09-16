@@ -11,10 +11,24 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
     type Segment = readonly [Point, Point]
     const epsilon = 0.1
     const nodes = [...tree.querySelectorAll<HTMLElement>('.react-flow__node')].map((element: HTMLElement) => {
-      const card = element.querySelector('article')
+      const card = element.querySelector<HTMLElement>('article')
       if (!card) throw new Error('A graph node has no message card')
       const box = card.getBoundingClientRect()
-      return { id: element.dataset.id ?? '', x: box.x, y: box.y, width: box.width, height: box.height }
+      const sequence = Number(card.dataset.sequence)
+      if (!Number.isSafeInteger(sequence)) throw new Error('A message card has no stored sequence number')
+      return {
+        id: element.dataset.id ?? '', sequence, parentId: card.dataset.parentNodeId,
+        x: box.x, y: box.y, width: box.width, height: box.height,
+      }
+    })
+    const lanes = [...tree.querySelectorAll<HTMLElement>('[data-testid^="tree-sequence-lane-"]')].map((element: HTMLElement) => {
+      const box = element.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      return {
+        sequence: Number(element.dataset.sequence), top: box.top, bottom: box.bottom,
+        dashed: style.borderTopStyle === 'dashed' && style.borderBottomStyle === 'dashed',
+        pointerTransparent: style.pointerEvents === 'none',
+      }
     })
     const edges = [...tree.querySelectorAll<SVGPathElement>('.react-flow__edge-path')].map((element: SVGPathElement) => {
       const id = element.closest<SVGGElement>('.react-flow__edge')?.dataset.id
@@ -44,7 +58,8 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
     const overlaps: string[] = []
     const blocked: string[] = []
     const crossings: string[] = []
-    const unevenSiblings: string[] = []
+    const unevenSequences: string[] = []
+    const outsideLanes: string[] = []
     const cross = (a: Point, b: Point): number => a.x * b.y - a.y * b.x
     const subtract = (a: Point, b: Point): Point => ({ x: a.x - b.x, y: a.y - b.y })
     const intersects = ([a, b]: Segment, [c, d]: Segment): boolean => {
@@ -67,6 +82,20 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
           && a.y < b.y + b.height - epsilon && a.y + a.height > b.y + epsilon) {
           overlaps.push(`${a.id}/${b.id}`)
         }
+        if (a.sequence === b.sequence && Math.abs(a.y + a.height / 2 - b.y - b.height / 2) > epsilon) {
+          unevenSequences.push(`${a.id}/${b.id}`)
+        }
+        if (a.sequence < b.sequence && a.y + a.height > b.y + epsilon) unevenSequences.push(`${a.id}/${b.id}`)
+        if (b.sequence < a.sequence && b.y + b.height > a.y + epsilon) unevenSequences.push(`${b.id}/${a.id}`)
+      }
+    }
+    const pane = tree.querySelector('[data-testid="conversation-tree-pane"]')?.getBoundingClientRect()
+    if (!pane) throw new Error('The tree has no viewport')
+    for (const node of nodes) {
+      if (node.y > pane.bottom || node.y + node.height < pane.top) continue
+      const lane = lanes.find((candidate) => candidate.sequence === node.sequence)
+      if (!lane || lane.top > node.y + epsilon || lane.bottom < node.y + node.height - epsilon) {
+        outsideLanes.push(node.id)
       }
     }
     for (const edge of edges) {
@@ -83,10 +112,6 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
       const first = edges[index]
       for (const second of edges.slice(index + 1)) {
         if (first.source === second.source) {
-          const a = byId.get(first.target), b = byId.get(second.target)
-          if (a && b && Math.abs(a.y + a.height / 2 - b.y - b.height / 2) > epsilon) {
-            unevenSiblings.push(`${first.target}/${second.target}`)
-          }
           continue
         }
         if (first.segments.some((segment: Segment) =>
@@ -94,12 +119,17 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
         )) crossings.push(`${first.id}/${second.id}`)
       }
     }
-    return { nodeCount: nodes.length, edgeCount: edges.length, overlaps, blocked, crossings, unevenSiblings }
+    const expectedEdgeCount = nodes.filter((node) => node.parentId && byId.has(node.parentId)).length
+    return { nodeCount: nodes.length, edgeCount: edges.length, expectedEdgeCount, overlaps, blocked, crossings,
+      unevenSequences, outsideLanes, lanes }
   })
   expect(geometry.nodeCount).toBeGreaterThan(2)
-  expect(geometry.edgeCount).toBe(geometry.nodeCount - 1)
+  expect(geometry.edgeCount).toBe(geometry.expectedEdgeCount)
   expect(geometry.overlaps).toEqual([])
   expect(geometry.blocked).toEqual([])
   expect(geometry.crossings).toEqual([])
-  expect(geometry.unevenSiblings).toEqual([])
+  expect(geometry.unevenSequences).toEqual([])
+  expect(geometry.outsideLanes).toEqual([])
+  expect(geometry.lanes.length).toBeGreaterThan(0)
+  expect(geometry.lanes.every((lane) => lane.dashed && lane.pointerTransparent)).toBe(true)
 }

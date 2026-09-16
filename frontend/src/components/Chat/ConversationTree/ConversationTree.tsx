@@ -15,6 +15,8 @@ import ConversationTreeNode, { type MessageFlowNode } from './ConversationTreeNo
 import ConversationTreeEdge from './ConversationTreeEdge'
 import MediaLightbox from './MediaLightbox'
 import MessagePiecesDialog from './MessagePiecesDialog'
+import SequenceLanes from './SequenceLanes'
+import { treeSequenceLanes } from './treeSequenceLanes'
 import {
   TREE_NODE_WIDTH,
   conversationPath,
@@ -23,10 +25,10 @@ import {
   reservePositions,
   treeNodeHeight,
   type LayoutNode,
+  type TreePosition,
 } from './treeGraph'
 import { useConversationTreeData } from './useConversationTreeData'
 import { useTreeLayout } from './useTreeLayout'
-import { treeEdgeLanes } from './treeEdgeRouting'
 import { initialTreeFocus, useTreePaneSize, visibleTreeNodes } from './useTreeViewport'
 
 const NODE_TYPES: NodeTypes = { message: ConversationTreeNode }
@@ -95,17 +97,14 @@ function ConversationTreePane({
   const orderedNodes = useMemo(() => orderedTreeNodes(index), [index])
   const nodeIds = useMemo(() => new Set(orderedNodes.map((node: TreeNode) => node.node_id)), [orderedNodes])
   const layoutNodes = useMemo(() => orderedNodes.map((node: TreeNode): LayoutNode => ({
-    id: node.node_id, parentId: node.parent_node_id, height: treeNodeHeight(node.piece_count),
+    id: node.node_id, parentId: node.parent_node_id, sequence: node.message.sequence, height: treeNodeHeight(node.piece_count),
   })), [orderedNodes])
   const anchorId = focusedId && nodeIds.has(focusedId)
     ? focusedId
     : [...currentPath].find((id: string) => nodeIds.has(id)) ?? orderedNodes[0]?.node_id ?? null
   const layout = useTreeLayout(layoutNodes, anchorId, active)
-  const positions = useMemo(() => reservePositions(layoutNodes, layout.positions), [layoutNodes, layout.positions])
-  const edgeLanes = useMemo(
-    () => treeEdgeLanes(layoutNodes.filter((node: LayoutNode) => layout.arrangedNodeIds.has(node.id)), positions),
-    [layoutNodes, layout.arrangedNodeIds, positions],
-  )
+  const positions = useMemo(() => reservePositions(layoutNodes, layout.positions, anchorId), [layoutNodes, layout.positions, anchorId])
+  const lanes = useMemo(() => treeSequenceLanes(layoutNodes, positions), [layoutNodes, positions])
   const visible = useMemo(
     () => visibleTreeNodes(orderedNodes, positions, viewport, size),
     [orderedNodes, positions, viewport, size],
@@ -181,22 +180,22 @@ function ConversationTreePane({
     },
   })), [orderedNodes, positions, snapshot.previews, snapshot.conversations, snapshot.mainConversationId, snapshot.complete,
     currentPath, activeConversationId, index, choose, select, openMedia, openPieces, retryPreviews, focus])
-  const edges = useMemo(() => orderedNodes.flatMap((node: TreeNode): Edge<{ centerY: number }>[] => {
-    const centerY = edgeLanes.get(node.node_id)
+  const edges = useMemo(() => orderedNodes.flatMap((node: TreeNode): Edge<{ points: TreePosition[] }>[] => {
+    const points = layout.edgeRoutes.get(node.node_id)
     return node.parent_node_id && nodeIds.has(node.parent_node_id)
-      && layout.arrangedNodeIds.has(node.parent_node_id) && centerY !== undefined
+      && layout.arrangedNodeIds.has(node.parent_node_id) && layout.arrangedNodeIds.has(node.node_id) && points
       ? [{
           id: `${node.parent_node_id}:${node.node_id}`,
           source: node.parent_node_id,
           target: node.node_id,
           type: 'tree',
-          data: { centerY },
+          data: { points },
           selectable: false,
           focusable: false,
           className: currentPath.has(node.node_id) ? styles.pathEdge : undefined,
         }]
       : []
-  }), [orderedNodes, nodeIds, currentPath, styles.pathEdge, layout.arrangedNodeIds, edgeLanes])
+  }), [orderedNodes, nodeIds, currentPath, styles.pathEdge, layout.arrangedNodeIds, layout.edgeRoutes])
   const emptyConversations = [...snapshot.conversations.values()].filter((endpoint: ConversationTreeEndpoint) => endpoint.node_id === null)
   const mediaNode = media ? snapshot.nodes.get(media.nodeId) : undefined
   const detailsNode = details ? snapshot.nodes.get(details.nodeId) : undefined
@@ -266,7 +265,9 @@ function ConversationTreePane({
           onInit={() => { setFlowReady(true) }}
           onMoveEnd={(_, next: Viewport) => { setViewport(next) }}
           aria-label="Read-only conversation message graph"
-        />
+        >
+          <SequenceLanes lanes={lanes} size={size} />
+        </ReactFlow>
       </div>
       {active && chooser && <ConversationChooser scope={chooser.scope} opener={chooser.opener} index={index} snapshot={snapshot} reads={reads} activeConversationId={activeConversationId} onSelect={select} onClose={() => { setChooser(null) }} />}
       {active && details && detailsNode && <MessagePiecesDialog key={details.nodeId} node={detailsNode} previews={snapshot.previews.get(detailsNode.preview_key)} opener={details.opener} onClose={() => { setDetails(null) }} onMedia={openMedia} onRetry={retryPreviews} />}

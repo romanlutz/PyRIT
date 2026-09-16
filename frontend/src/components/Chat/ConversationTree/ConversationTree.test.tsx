@@ -1,9 +1,9 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useSyncExternalStore } from 'react'
 
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import type { Viewport } from '@xyflow/react'
+import type { Edge, Viewport } from '@xyflow/react'
 
 import { attacksApi } from '@/services/api'
 import type { ConversationTreePage, ConversationTreePreviewResponse, TreeMessageReference } from '@/types'
@@ -11,6 +11,7 @@ import type { ConversationTreePage, ConversationTreePreviewResponse, TreeMessage
 import { deferred, treeNode, treePage, treePiece, treePreview } from './__fixtures__/treeFixtures'
 import ConversationTree from './ConversationTree'
 import ConversationTreeNode, { type MessageFlowNode } from './ConversationTreeNode'
+import type { TreePosition } from './treeGraph'
 
 jest.mock('@/services/api', () => ({
   attacksApi: { getConversationTree: jest.fn(), getTreePreviews: jest.fn() },
@@ -23,12 +24,23 @@ jest.mock('./useTreeViewport', () => ({
 
 interface MockFlowProps {
   nodes: MessageFlowNode[]
+  edges: Array<Edge<{ points: TreePosition[] }>>
+  children?: React.ReactNode
   onInit: () => void
   onMoveEnd: (event: null, viewport: Viewport) => void
 }
 
-const mockGraph = jest.fn()
+const mockGraph = jest.fn<void, [MockFlowProps]>()
 let mockViewport: Viewport = { x: 0, y: 0, zoom: 1 }
+const mockViewportListeners = new Set<() => void>()
+const mockSubscribeViewport = (listener: () => void): (() => void) => {
+  mockViewportListeners.add(listener)
+  return () => { mockViewportListeners.delete(listener) }
+}
+const mockReadViewport = (): Viewport => mockViewport
+function useMockViewport(): Viewport {
+  return useSyncExternalStore(mockSubscribeViewport, mockReadViewport)
+}
 const mockFlow = {
   fitView: jest.fn(async () => true),
   zoomIn: jest.fn(async () => true),
@@ -47,8 +59,17 @@ function MockReactFlow(props: MockFlowProps) {
   }, [props])
   return (
     <div aria-label="Read-only conversation message graph">
-      <button onClick={() => { mockViewport = { x: 80, y: 40, zoom: 1.25 }; props.onMoveEnd(null, mockViewport) }}>Pan graph</button>
+      <button onClick={() => {
+        mockViewport = { x: 80, y: 40, zoom: 1.25 }
+        for (const listener of mockViewportListeners) listener()
+        props.onMoveEnd(null, mockViewport)
+      }}>Pan graph</button>
+      <button onClick={() => {
+        mockViewport = { x: 40, y: 20, zoom: 1.1 }
+        for (const listener of mockViewportListeners) listener()
+      }}>Move graph viewport</button>
       {props.nodes.map((node: MessageFlowNode) => <ConversationTreeNode key={node.id} data={node.data} />)}
+      {props.children}
     </div>
   )
 }
@@ -57,6 +78,8 @@ jest.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => children,
   ReactFlow: MockReactFlow,
   useReactFlow: () => mockFlow,
+  useViewport: useMockViewport,
+  ViewportPortal: ({ children }: { children: React.ReactNode }) => children,
   Handle: () => null,
   Position: { Top: 'top', Bottom: 'bottom' },
 }))
@@ -308,5 +331,117 @@ describe('ConversationTree', () => {
     rerender(<TestWrapper><ConversationTree {...defaultProps} active={false} refreshKey={1} /></TestWrapper>)
     expect(getTree.mock.calls[0][2]?.aborted).toBe(true)
     expect(getTree).toHaveBeenCalledTimes(1)
+  })
+
+  it('should align messages by stored sequence across conversations rather than graph depth', async () => {
+    const first = treeNode('first', { message: { conversation_id: 'first', sequence: 3 } })
+    const reply = treeNode('reply', {
+      parent_node_id: 'first', message: { conversation_id: 'first', sequence: 8 }, role: 'assistant',
+    })
+    const second = treeNode('second', {
+      message: { conversation_id: 'second', sequence: 8 }, piece_count: 3, piece_types: ['text', 'image_path', 'audio_path'],
+    })
+    getTree.mockResolvedValueOnce(treePage([first, reply, second], {
+      conversations: [{ conversation_id: 'first', node_id: 'reply' }, { conversation_id: 'second', node_id: 'second' }],
+      processed_conversations: 2, total_conversations: 2,
+    }))
+    render(<TestWrapper><ConversationTree {...defaultProps} activeConversationId="first" /></TestWrapper>)
+    await waitFor(() => { expect(mockFlow.fitView).toHaveBeenCalledTimes(1) })
+    const graph = mockGraph.mock.calls[mockGraph.mock.calls.length - 1][0]
+    const replyNode = graph.nodes.find((node: MessageFlowNode) => node.id === 'reply')
+    const secondNode = graph.nodes.find((node: MessageFlowNode) => node.id === 'second')
+    if (!replyNode?.height || !secondNode?.height) throw new Error('Messages have no reserved heights')
+    expect(replyNode.position.y + replyNode.height / 2).toBe(secondNode.position.y + secondNode.height / 2)
+    expect(graph.edges).toHaveLength(1)
+    expect(graph.edges[0]).toMatchObject({ source: 'first', target: 'reply', type: 'tree', data: { points: expect.any(Array) } })
+    expect(screen.getByText('Sequence 3')).toBeInTheDocument()
+    expect(screen.getByText('Sequence 8')).toBeInTheDocument()
+    expect(screen.queryByText('Sequence 0')).not.toBeInTheDocument()
+    expect(screen.queryByText('Sequence 1')).not.toBeInTheDocument()
+  })
+
+  it('should retain separate sequence nodes while sharing their cached preview', async () => {
+    const early = treeNode('lineage-at-2', {
+      message: { conversation_id: 'first', sequence: 2 }, preview_key: 'shared-lineage-preview',
+    })
+    const later = treeNode('lineage-at-5', {
+      message: { conversation_id: 'second', sequence: 5 }, preview_key: 'shared-lineage-preview',
+    })
+    getTree.mockResolvedValueOnce(treePage([early, later], {
+      conversations: [
+        { conversation_id: 'first', node_id: early.node_id },
+        { conversation_id: 'second', node_id: later.node_id },
+      ],
+      processed_conversations: 2, total_conversations: 2,
+    }))
+    render(<TestWrapper><ConversationTree {...defaultProps} activeConversationId="first" /></TestWrapper>)
+    await waitFor(() => { expect(mockFlow.fitView).toHaveBeenCalledTimes(1) })
+    expect(await screen.findAllByText('A quiet garden')).toHaveLength(2)
+    const graph = mockGraph.mock.calls[mockGraph.mock.calls.length - 1][0]
+    expect(graph.nodes.map((node: MessageFlowNode) => ({
+      id: node.id, sequence: node.data.message.message.sequence, y: node.position.y,
+    }))).toEqual([
+      { id: early.node_id, sequence: 2, y: 0 },
+      { id: later.node_id, sequence: 5, y: 272 },
+    ])
+    expect(screen.getAllByRole('article')).toHaveLength(2)
+    expect(screen.getByText('Sequence 2')).toBeInTheDocument()
+    expect(screen.getByText('Sequence 5')).toBeInTheDocument()
+    expect(getPreviews).toHaveBeenCalledTimes(1)
+    expect(getPreviews.mock.calls[0][1]).toHaveLength(1)
+    expect(getTree).toHaveBeenCalledTimes(1)
+  })
+
+  it('should update lane decorations during movement without rerendering the data pane or refetching previews', async () => {
+    const user = userEvent.setup()
+    render(<TestWrapper><ConversationTree {...defaultProps} /></TestWrapper>)
+    await waitFor(() => { expect(mockFlow.fitView).toHaveBeenCalledTimes(1) })
+    expect(await screen.findAllByText('A quiet garden')).toHaveLength(2)
+    const requests = getPreviews.mock.calls.length
+    const renders = mockGraph.mock.calls.length
+    await user.click(screen.getByRole('button', { name: 'Move graph viewport' }))
+    expect(screen.getByTestId('tree-sequence-lane-1')).toHaveStyle({
+      left: `${-40 / 1.1}px`, width: `${1200 / 1.1}px`,
+    })
+    expect(mockGraph).toHaveBeenCalledTimes(renders)
+    expect(getPreviews).toHaveBeenCalledTimes(requests)
+    expect(getTree).toHaveBeenCalledTimes(1)
+    await user.click(screen.getByRole('button', { name: 'Pan graph' }))
+    expect(getPreviews).toHaveBeenCalledTimes(requests)
+    expect(mockFlow.fitView).toHaveBeenCalledTimes(1)
+  })
+
+  it('should never expose stale routes while a page inserts an intermediate sequence band', async () => {
+    const later = deferred<ConversationTreePage>()
+    const last = treeNode('last', {
+      parent_node_id: 'root', message: { conversation_id: 'main', sequence: 3 },
+    })
+    const intermediate = treeNode('intermediate', {
+      message: { conversation_id: 'other', sequence: 1 }, piece_count: 3,
+    })
+    getTree.mockResolvedValueOnce(treePage([root, last], { complete: false, next_cursor: 'later' }))
+      .mockReturnValueOnce(later.promise)
+    render(<TestWrapper><ConversationTree {...defaultProps} /></TestWrapper>)
+    await waitFor(() => { expect(mockFlow.fitView).toHaveBeenCalledTimes(1) })
+    const initial = mockGraph.mock.calls[mockGraph.mock.calls.length - 1][0]
+    const anchor = initial.nodes.find((node: MessageFlowNode) => node.id === 'last')?.position
+    const firstUpdate = mockGraph.mock.calls.length
+    await act(async () => { later.resolve(treePage([intermediate], { conversations: [{ conversation_id: 'other', node_id: 'intermediate' }] })) })
+    await waitFor(() => { expect(screen.getByTestId('conversation-tree')).toHaveAttribute('data-layout-pending', 'false') })
+    for (const [graph] of mockGraph.mock.calls.slice(firstUpdate)) {
+      const nodes = new Map(graph.nodes.map((node: MessageFlowNode) => [node.id, node]))
+      expect(nodes.get('last')?.position).toEqual(anchor)
+      for (const edge of graph.edges) {
+        const source = nodes.get(edge.source), target = nodes.get(edge.target)
+        if (!source?.height || !target || !edge.data) throw new Error('Incomplete rendered connection')
+        expect(edge.data.points[0]).toEqual({
+          x: source.position.x + 160, y: source.position.y + source.height,
+        })
+        expect(edge.data.points[edge.data.points.length - 1]).toEqual({
+          x: target.position.x + 160, y: target.position.y,
+        })
+      }
+    }
+    expect(mockFlow.fitView).toHaveBeenCalledTimes(1)
   })
 })

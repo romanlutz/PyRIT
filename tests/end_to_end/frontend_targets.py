@@ -12,7 +12,7 @@ from pyrit.setup.pyrit_initializer import PyRITInitializer
 
 
 class FrontendEchoTarget(PromptTarget):
-    """Return distinct local replies while exercising normal target and memory paths."""
+    """Return explicitly labeled offline echoes through the normal target and memory paths."""
 
     _DEFAULT_CONFIGURATION = TargetConfiguration(
         capabilities=TargetCapabilities(
@@ -23,22 +23,15 @@ class FrontendEchoTarget(PromptTarget):
         )
     )
 
-    def __init__(self) -> None:
-        """Initialize the deterministic reply counter."""
-        super().__init__()
-        self._reply_number = 0
-
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """Generate a local reply without bypassing the normalizer."""
         request = normalized_conversation[-1]
-        self._reply_number += 1
-        number = self._reply_number
         text = request.get_value()
         await asyncio.sleep(0.1)
         return [
             construct_response_from_request(
                 request=request.message_pieces[0],
-                response_text_pieces=[f"Local reply {number}: {text}"],
+                response_text_pieces=[f"Offline demo response: {text}"],
                 response_type="text",
             )
         ]

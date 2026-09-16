@@ -5,8 +5,13 @@ export interface TreeLayoutRequest {
   readonly nodes: LayoutNode[]
 }
 
+export interface TreeLayoutResult {
+  readonly positions: Array<[string, TreePosition]>
+  readonly edgeRoutes: Array<[string, TreePosition[]]>
+}
+
 export type TreeLayoutReply =
-  | { readonly requestId: number; readonly positions: Array<[string, TreePosition]> }
+  | (TreeLayoutResult & { readonly requestId: number })
   | { readonly requestId: number; readonly error: string }
 
 export interface TreeLayoutWorkerPort {
