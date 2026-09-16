@@ -3,9 +3,11 @@
 
 """Tests for typed optimization-iteration state in the GCG attack loop."""
 
+import random
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 attack_manager_mod = pytest.importorskip(
@@ -18,6 +20,7 @@ MultiPromptAttack = attack_manager_mod.MultiPromptAttack
 OptimizationRunState = attack_manager_mod.OptimizationRunState
 ProgressiveMultiPromptAttack = attack_manager_mod.ProgressiveMultiPromptAttack
 ProgressiveScheduleState = attack_manager_mod.ProgressiveScheduleState
+RngBundle = attack_manager_mod.RngBundle
 StopReason = attack_manager_mod.StopReason
 
 
@@ -225,6 +228,40 @@ class TestMultiPromptRunStateTracking:
 
         assert results[0] == results[1]
         assert results[0] == ("c", 1.5, 3)
+
+    def test_direct_run_creates_and_uses_complete_rng_bundle(self) -> None:
+        attack = _bare_multi_prompt_attack([("worse", 2.0)])
+        attack.workers[0].model.device = torch.device("cpu")
+        created_bundles: list[Any] = []
+        create_bundle = RngBundle.from_seed
+
+        def record_bundle(*, base_seed: int, workers: list[Any]) -> Any:
+            bundle = create_bundle(base_seed=base_seed, workers=workers)
+            created_bundles.append(bundle)
+            return bundle
+
+        with patch.object(RngBundle, "from_seed", side_effect=record_bundle) as factory:
+            control, _, _ = attack.run(
+                n_steps=1,
+                prev_loss=1.0,
+                stop_on_success=False,
+                anneal=True,
+                random_seed=123,
+            )
+
+        assert factory.call_count == 1
+        assert factory.call_args.kwargs == {"base_seed": 123, "workers": attack.workers}
+        assert len(created_bundles) == 1
+        bundle = created_bundles[0]
+        assert bundle.base_seed == 123
+        assert bundle.derived_seeds == {0: 123}
+        assert attack._torch_gens is bundle.torch_gens
+        assert control == "initial"
+
+        expected_py_rng = random.Random(123)
+        expected_py_rng.random()
+        assert bundle.py_rng.random() == expected_py_rng.random()
+        assert bundle.np_rng.random() == np.random.default_rng(123).random()
 
 
 class TestGCGCandidateSelection:

@@ -108,6 +108,52 @@ class RngBundle:
     base_seed: int
     derived_seeds: dict[int, int]
 
+    @classmethod
+    def from_seed(cls, *, base_seed: int, workers: list[ModelWorker]) -> RngBundle:
+        """
+        Create deterministic local RNGs for one GCG run.
+
+        Args:
+            base_seed (int): Seed shared by the Python and NumPy generators.
+            workers (list[ModelWorker]): Workers that need derived Torch generators.
+
+        Returns:
+            RngBundle: The initialized per-run RNG bundle.
+        """
+        derived_seeds = {i: base_seed + i for i in range(len(workers))}
+        return cls(
+            np_rng=np.random.default_rng(base_seed),
+            py_rng=random.Random(base_seed),
+            torch_gens=cls._create_torch_generators(workers=workers, derived_seeds=derived_seeds),
+            base_seed=base_seed,
+            derived_seeds=derived_seeds,
+        )
+
+    @staticmethod
+    def _create_torch_generators(
+        *, workers: list[ModelWorker], derived_seeds: dict[int, int]
+    ) -> dict[int, torch.Generator]:
+        """
+        Create worker generators on the shared sampling device.
+
+        Args:
+            workers (list[ModelWorker]): Workers that consume sampled candidates.
+            derived_seeds (dict[int, int]): Deterministic seed for each worker.
+
+        Returns:
+            dict[int, torch.Generator]: Generator keyed by worker index.
+        """
+        if not workers:
+            return {}
+
+        try:
+            sampling_device = workers[0].model.device
+            return {
+                i: torch.Generator(device=sampling_device).manual_seed(derived_seeds[i]) for i in range(len(workers))
+            }
+        except (TypeError, AttributeError):
+            return {i: torch.Generator().manual_seed(derived_seeds[i]) for i in range(len(workers))}
+
 
 class NpEncoder(json.JSONEncoder):
     """Encode NumPy scalar and array values for JSON output."""
@@ -1015,18 +1061,10 @@ class MultiPromptAttack:
             tuple[str, float, int]: The final control, loss, and step count.
         """
         rng_bundle = getattr(self, "_rng_bundle", None)
-        py_rng = rng_bundle.py_rng if rng_bundle else random.Random(random_seed)
-        if rng_bundle:
-            self._torch_gens = rng_bundle.torch_gens
-        else:
-            workers = getattr(self, "workers", [])
-            try:
-                sampling_device = workers[0].model.device
-                self._torch_gens = {
-                    i: torch.Generator(device=sampling_device).manual_seed(random_seed + i) for i in range(len(workers))
-                }
-            except (TypeError, AttributeError, IndexError):
-                self._torch_gens = {i: torch.Generator().manual_seed(random_seed + i) for i in range(len(workers))}
+        if rng_bundle is None:
+            rng_bundle = RngBundle.from_seed(base_seed=random_seed, workers=getattr(self, "workers", []))
+        py_rng = rng_bundle.py_rng
+        self._torch_gens = rng_bundle.torch_gens
 
         def acceptance_probability(e: float, e_prime: float, k: int) -> bool:
             temperature = max(1 - float(k + 1) / (n_steps + anneal_from), 1.0e-7)
@@ -1448,22 +1486,7 @@ class ProgressiveMultiPromptAttack:
 
         rng_bundle = getattr(self, "_rng_bundle", None)
         if rng_bundle is None:
-            derived_seeds = {i: random_seed + i for i in range(len(self.workers))}
-            try:
-                sampling_device = self.workers[0].model.device
-                torch_gens = {
-                    i: torch.Generator(device=sampling_device).manual_seed(derived_seeds[i])
-                    for i in range(len(self.workers))
-                }
-            except (TypeError, AttributeError):
-                torch_gens = {i: torch.Generator().manual_seed(derived_seeds[i]) for i in range(len(self.workers))}
-            rng_bundle = RngBundle(
-                np_rng=np.random.default_rng(random_seed),
-                py_rng=random.Random(random_seed),
-                torch_gens=torch_gens,
-                base_seed=random_seed,
-                derived_seeds=derived_seeds,
-            )
+            rng_bundle = RngBundle.from_seed(base_seed=random_seed, workers=self.workers)
 
         _update_attack_log_params(
             logfile=self.logfile,
@@ -1479,7 +1502,7 @@ class ProgressiveMultiPromptAttack:
                 "anneal": anneal,
                 "incr_control": incr_control,
                 "stop_on_success": stop_on_success,
-                "random_seed": random_seed,
+                "random_seed": rng_bundle.base_seed,
                 "derived_seeds": rng_bundle.derived_seeds,
             },
         )
@@ -1725,22 +1748,7 @@ class IndividualPromptAttack:
         """
         rng_bundle = getattr(self, "_rng_bundle", None)
         if rng_bundle is None:
-            derived_seeds = {i: random_seed + i for i in range(len(self.workers))}
-            try:
-                sampling_device = self.workers[0].model.device
-                torch_gens = {
-                    i: torch.Generator(device=sampling_device).manual_seed(derived_seeds[i])
-                    for i in range(len(self.workers))
-                }
-            except (TypeError, AttributeError):
-                torch_gens = {i: torch.Generator().manual_seed(derived_seeds[i]) for i in range(len(self.workers))}
-            rng_bundle = RngBundle(
-                np_rng=np.random.default_rng(random_seed),
-                py_rng=random.Random(random_seed),
-                torch_gens=torch_gens,
-                base_seed=random_seed,
-                derived_seeds=derived_seeds,
-            )
+            rng_bundle = RngBundle.from_seed(base_seed=random_seed, workers=self.workers)
 
         _update_attack_log_params(
             logfile=self.logfile,
@@ -1756,7 +1764,7 @@ class IndividualPromptAttack:
                 "anneal": anneal,
                 "incr_control": incr_control,
                 "stop_on_success": stop_on_success,
-                "random_seed": random_seed,
+                "random_seed": rng_bundle.base_seed,
                 "derived_seeds": rng_bundle.derived_seeds,
             },
         )

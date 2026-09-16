@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -44,7 +43,6 @@ from functools import partial
 from typing import Any, overload
 
 import numpy as np
-import torch
 import torch.multiprocessing as mp
 from pydantic import Field
 
@@ -271,22 +269,9 @@ class GCGGenerator(
         params = self._to_attack_params(context=context)
         context.workers, context.test_workers = await asyncio.to_thread(get_workers, params)
 
-        seed = self._algorithm.random_seed
-        derived_seeds = {i: seed + i for i in range(len(context.workers))}
-        try:
-            sampling_device = context.workers[0].model.device
-            torch_gens = {
-                i: torch.Generator(device=sampling_device).manual_seed(derived_seeds[i])
-                for i in range(len(context.workers))
-            }
-        except (TypeError, AttributeError):
-            torch_gens = {i: torch.Generator().manual_seed(derived_seeds[i]) for i in range(len(context.workers))}
-        context.rng_bundle = RngBundle(
-            np_rng=np.random.default_rng(seed),
-            py_rng=random.Random(seed),
-            torch_gens=torch_gens,
-            base_seed=seed,
-            derived_seeds=derived_seeds,
+        context.rng_bundle = RngBundle.from_seed(
+            base_seed=self._algorithm.random_seed,
+            workers=context.workers,
         )
 
         context.targets, context.test_targets = self._apply_target_augmentation(
