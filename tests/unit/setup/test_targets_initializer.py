@@ -1006,6 +1006,7 @@ class TestTargetInitializerAutoGroup:
         assert len(rr._targets) == 3
 
 
+@pytest.mark.usefixtures("patch_central_database")
 class TestGetBehavioralKey:
     """Tests for _get_behavioral_key helper function."""
 
