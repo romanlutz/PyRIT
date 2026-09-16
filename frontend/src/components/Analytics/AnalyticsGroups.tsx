@@ -7,7 +7,7 @@ import {
 
 import type { AttackAnalyticsFilter, AttackAnalyticsGroup, AttackAnalyticsReport, AttackOutcome } from '@/types'
 import {
-  analyticsDimensionLabel, analyticsOptionLabel, analyticsStatisticsLabel, analyticsValueKey,
+  analyticsDimensionLabel, analyticsOptionLabel, analyticsStatisticsLabel, analyticsSuccessCountsLabel, analyticsValueKey,
   formatAnalyticsCount, formatAnalyticsPercent,
 } from '@/utils/attackAnalytics'
 
@@ -69,7 +69,7 @@ export default function AnalyticsGroups({ report, successRate, allGroups, onDril
                     </Button>
                     <Text className={styles.number}>
                       {formatAnalyticsPercent(statistics.success_rate)}{marked ? '*' : ''}{' '}
-                      ({formatAnalyticsCount(statistics.successes)} / {formatAnalyticsCount(statistics.total_decided)} decided)
+                      ({analyticsSuccessCountsLabel(statistics)}, {formatAnalyticsCount(statistics.total_results)} total)
                     </Text>
                   </>
                 ) : (

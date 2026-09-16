@@ -176,6 +176,9 @@ are stored in the URL, so links and browser Back preserve the exploration.
 **Attack success rate (ASR)** is successes divided by successes plus failures.
 Errors and undetermined results remain visible but are excluded from that
 denominator. When there are no decided results, ASR is unavailable, not zero.
+ASR displays label both counts and the full population. For example, three
+successful results out of three decided results, with five results overall, show
+`100%`, `3 success / 3 decided`, and `5 total`.
 
 Outcome filters apply to the **entire dashboard**. An active outcome restriction
 adds an asterisk to **ASR*** and an explanatory note. Selecting only successes can

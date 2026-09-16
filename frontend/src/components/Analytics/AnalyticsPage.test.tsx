@@ -87,7 +87,8 @@ describe('AnalyticsPage', () => {
     const summary = screen.getByRole('region', { name: 'Outcome summary' })
     expect(within(summary).getByText('62.5%')).toBeInTheDocument()
     expect(within(summary).getByText('37.5%')).toBeInTheDocument()
-    expect(within(summary).getByText('4 / 6 decided')).toBeInTheDocument()
+    expect(within(summary).getByText('4 success / 6 decided')).toBeInTheDocument()
+    expect(within(summary).getByText('10 total')).toBeInTheDocument()
     expect(mockQuery).toHaveBeenCalledTimes(1)
     expect(mockQuery).toHaveBeenCalledWith(expect.objectContaining({
       filters: { dimensions: [], outcomes: [] },

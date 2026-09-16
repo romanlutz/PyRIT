@@ -3,7 +3,10 @@ import { InfoRegular } from '@fluentui/react-icons'
 
 import OutcomeBadge from '@/components/OutcomeBadge'
 import type { AttackAnalyticsStatistics, AttackOutcome } from '@/types'
-import { ANALYTICS_ASR_DEFINITION, ANALYTICS_ASR_NOTE, formatAnalyticsCount, formatAnalyticsPercent } from '@/utils/attackAnalytics'
+import {
+  ANALYTICS_ASR_DEFINITION, ANALYTICS_ASR_NOTE, analyticsSuccessCountsLabel,
+  formatAnalyticsCount, formatAnalyticsPercent,
+} from '@/utils/attackAnalytics'
 
 import { useAnalyticsStatsStyles } from './AnalyticsStats.styles'
 
@@ -55,7 +58,8 @@ export default function AnalyticsStats({ statistics, marked, onOutcome }: Analyt
         <Text size={500} weight="semibold" className={styles.number}>
           {formatAnalyticsPercent(statistics.success_rate)}{marked ? '*' : ''}
         </Text>
-        <Text size={200}>{formatAnalyticsCount(statistics.successes)} / {formatAnalyticsCount(statistics.total_decided)} decided</Text>
+        <Text size={200}>{analyticsSuccessCountsLabel(statistics)}</Text>
+        <Text size={200}>{formatAnalyticsCount(statistics.total_results)} total</Text>
       </div>
       <div className={styles.metric}>
         <Text>Decided share</Text>

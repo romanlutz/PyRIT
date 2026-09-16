@@ -30,6 +30,7 @@ describe('AnalyticsGroups', () => {
     const onDrilldown = jest.fn()
     render(<TestWrapper><AnalyticsGroups report={makeAnalyticsReport()} successRate allGroups={false} onDrilldown={onDrilldown} /></TestWrapper>)
     const bar = screen.getByRole('button', { name: /Inspect Nightly success rate: 10 results; ASR 66.7%/ })
+    expect(screen.getByText('66.7% (4 success / 6 decided, 10 total)')).toBeVisible()
     bar.focus()
     await user.keyboard(' ')
     expect(onDrilldown).toHaveBeenCalledWith([ANALYTICS_OPERATION_FILTER])

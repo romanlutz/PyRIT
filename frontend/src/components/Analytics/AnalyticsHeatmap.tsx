@@ -10,7 +10,7 @@ import type {
   AttackAnalyticsOption, AttackAnalyticsReport, AttackAnalyticsValue,
 } from '@/types'
 import {
-  analyticsDimensionLabel, analyticsOptionLabel, analyticsStatisticsLabel, analyticsValueKey,
+  analyticsDimensionLabel, analyticsOptionLabel, analyticsStatisticsLabel, analyticsSuccessCountsLabel, analyticsValueKey,
   formatAnalyticsCount, formatAnalyticsPercent,
 } from '@/utils/attackAnalytics'
 
@@ -78,7 +78,7 @@ export default function AnalyticsHeatmap({ report, metric, onDrilldown }: Analyt
                   const description = cell ? analyticsStatisticsLabel(cell.statistics, marked) : 'No cell data'
                   const value = !cell ? 'No cell data' : cell.statistics.total_results === 0 ? 'No results'
                     : metric === 'success_rate' ? `${formatAnalyticsPercent(cell.statistics.success_rate)}${marked ? '*' : ''}`
-                      : formatAnalyticsCount(cell.statistics.total_results)
+                      : `${formatAnalyticsCount(cell.statistics.total_results)} total`
                   return (
                     <TableCell className={styles.cell} key={analyticsValueKey(column.key)}>
                       <Tooltip content={`${label}: ${description}`} relationship="description">
@@ -91,7 +91,12 @@ export default function AnalyticsHeatmap({ report, metric, onDrilldown }: Analyt
                         >
                           <Text weight="semibold">{value}</Text>
                           {cell && cell.statistics.total_results > 0 && (
-                            <Text size={200}>{cell.statistics.successes} / {cell.statistics.total_decided} decided</Text>
+                            <>
+                              <Text size={200}>{analyticsSuccessCountsLabel(cell.statistics)}</Text>
+                              {metric === 'success_rate' && (
+                                <Text size={200}>{formatAnalyticsCount(cell.statistics.total_results)} total</Text>
+                              )}
+                            </>
                           )}
                         </Button>
                       </Tooltip>

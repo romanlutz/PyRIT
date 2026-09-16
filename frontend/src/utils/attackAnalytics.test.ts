@@ -2,7 +2,7 @@ import type { AttackAnalyticsFilter, AttackAnalyticsViewState } from '@/types'
 
 import {
   DEFAULT_ANALYTICS_VIEW, analyticsDimensionKey, analyticsOptionLabel,
-  analyticsQuery, analyticsValueKey, analyticsViewError, analyticsViewFromSearchParams,
+  analyticsQuery, analyticsSuccessCountsLabel, analyticsValueKey, analyticsViewError, analyticsViewFromSearchParams,
   analyticsViewToSearchParams, appendAnalyticsDrilldown, formatAnalyticsPercent,
 } from './attackAnalytics'
 
@@ -80,6 +80,11 @@ describe('attack analytics view state', () => {
     expect(formatAnalyticsPercent(null)).toBe('Unavailable')
     expect(formatAnalyticsPercent(0)).toBe('0%')
     expect(formatAnalyticsPercent(0.625)).toBe('62.5%')
+  })
+
+  it('labels the numerator as success and the denominator as decided', () => {
+    expect(analyticsSuccessCountsLabel({ successes: 3, total_decided: 3 })).toBe('3 success / 3 decided')
+    expect(analyticsSuccessCountsLabel({ successes: 0, total_decided: 0 })).toBe('0 success / 0 decided')
   })
 
   it.each([

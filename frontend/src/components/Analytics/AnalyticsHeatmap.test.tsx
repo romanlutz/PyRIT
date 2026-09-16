@@ -94,8 +94,30 @@ describe('AnalyticsHeatmap', () => {
   it('should show count mode independently of unavailable rates', () => {
     render(<TestWrapper><AnalyticsHeatmap report={REPORT} metric="total_results" onDrilldown={jest.fn()} /></TestWrapper>)
     const noDecided = screen.getByRole('button', { name: /category-A \/ B: 3 results/ })
-    expect(within(noDecided).getByText('3')).toBeInTheDocument()
-    expect(within(noDecided).getByText('0 / 0 decided')).toBeInTheDocument()
+    expect(within(noDecided).getByText('3 total')).toBeInTheDocument()
+    expect(within(noDecided).getByText('0 success / 0 decided')).toBeInTheDocument()
     expect(screen.getByText(/Count colors: 1-9, 10-99, 100-999, 1,000\+/)).toBeInTheDocument()
+  })
+
+  it('labels successes and decided results separately from the total population', () => {
+    const report = {
+      ...REPORT,
+      outcome_filter_applied: false,
+      cells: [{
+        ...REPORT.cells[0],
+        statistics: {
+          ...ANALYTICS_EMPTY_STATISTICS,
+          total_results: 5, successes: 3, total_decided: 3, undetermined: 2,
+          success_rate: 1, decided_share: 0.6,
+          outcome_shares: { success: 0.6, failure: 0, error: 0, undetermined: 0.4 },
+        },
+      }],
+    }
+    render(<TestWrapper><AnalyticsHeatmap report={report} metric="success_rate" onDrilldown={jest.fn()} /></TestWrapper>)
+    const cell = screen.getByRole('button', { name: /category-A \/ A: 5 results; ASR 100%/ })
+    expect(within(cell).getByText('100%', { exact: true })).toBeVisible()
+    expect(within(cell).getByText('3 success / 3 decided')).toBeVisible()
+    expect(within(cell).getByText('5 total')).toBeVisible()
+    expect(within(cell).queryByText('3 / 3 decided')).not.toBeInTheDocument()
   })
 })

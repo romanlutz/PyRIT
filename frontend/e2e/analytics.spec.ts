@@ -199,6 +199,47 @@ async function mockAnalytics(page: Page): Promise<AnalyticsMocks> {
 }
 
 test.describe('Saved AttackResult analytics', () => {
+  test('shows ASR, labeled success/decided counts, and the total as separate heatmap lines', async ({ page }) => {
+    await mockAnalytics(page)
+    const statistics: AttackAnalyticsStatistics = {
+      ...ANALYTICS_EMPTY_STATISTICS,
+      total_results: 5, successes: 3, total_decided: 3, undetermined: 2,
+      success_rate: 1, decided_share: 0.6,
+      outcome_shares: { success: 0.6, failure: 0, error: 0, undetermined: 0.4 },
+    }
+    await page.route('**/api/analytics/attacks/query', async (route: Route) => {
+      await route.fulfill({
+        json: makeAnalyticsReport({
+          summary: statistics,
+          group_by: HARM_FILTER.dimension,
+          compare_by: ATTACK_TYPE_FILTER.dimension,
+          groups: [],
+          groups_overlap: true,
+          rows: [{ key: HARM_FILTER.values[0], label: 'category-A' }],
+          columns: [{ key: ATTACK_TYPE_FILTER.values[0], label: 'PromptSendingAttack' }],
+          cells: [{
+            row: HARM_FILTER.values[0],
+            column: ATTACK_TYPE_FILTER.values[0],
+            statistics,
+            drilldown_filters: [HARM_FILTER, ATTACK_TYPE_FILTER],
+          }],
+          results: makeAnalyticsResults({
+            items: Array.from({ length: 5 }, (_unused: unknown, index: number) => makeAnalyticsRow({
+              attack_result_id: `result-${index + 1}`,
+              outcome: index < 3 ? 'success' : 'undetermined',
+            })),
+          }),
+        }),
+      })
+    })
+    await page.goto(`/analytics?${analyticsViewToSearchParams({ ...DEFAULT_ANALYTICS_VIEW, chart: 'heatmap' })}`)
+    const cell = page.getByRole('region', { name: 'Heatmap', exact: true })
+      .getByRole('button', { name: /5 results; ASR 100%; 3 successes \/ 3 decided/ })
+    await expect(cell.getByText('100%', { exact: true })).toBeVisible()
+    await expect(cell.getByText('3 success / 3 decided', { exact: true })).toBeVisible()
+    await expect(cell.getByText('5 total', { exact: true })).toBeVisible()
+  })
+
   for (const theme of ['light', 'dark']) {
     test(`matches the actual outcome fills in ${theme} summary badges, bars, swatches and rows`, async ({ page }) => {
       await mockAnalytics(page)

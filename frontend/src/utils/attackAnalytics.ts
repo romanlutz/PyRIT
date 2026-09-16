@@ -85,6 +85,12 @@ export function formatAnalyticsCount(value: number): string {
   return COUNT_FORMAT.format(value)
 }
 
+export function analyticsSuccessCountsLabel(
+  statistics: Pick<AttackAnalyticsStatistics, 'successes' | 'total_decided'>,
+): string {
+  return `${formatAnalyticsCount(statistics.successes)} success / ${formatAnalyticsCount(statistics.total_decided)} decided`
+}
+
 export function formatAnalyticsTime(value: string): string {
   return new Date(value).toLocaleString()
 }
