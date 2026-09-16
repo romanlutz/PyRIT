@@ -11,6 +11,8 @@ class UnicodeSubstitutionConverter(Converter):
     Encodes the prompt using any unicode starting point.
     """
 
+    MAX_UNICODE_CODE_POINT = 0x10FFFF
+
     SUPPORTED_INPUT_TYPES = ("text",)
     SUPPORTED_OUTPUT_TYPES = ("text",)
 
@@ -24,7 +26,7 @@ class UnicodeSubstitutionConverter(Converter):
         Raises:
             ValueError: If ``start_value`` is outside the Unicode code point range.
         """
-        if not 0 <= start_value <= 0x10FFFF:
+        if not 0 <= start_value <= self.MAX_UNICODE_CODE_POINT:
             raise ValueError("start_value must be a valid Unicode code point between 0 and 0x10FFFF")
         self.startValue = start_value
 
@@ -54,10 +56,23 @@ class UnicodeSubstitutionConverter(Converter):
             ConverterResult: The result containing the converted output and its type.
 
         Raises:
-            ValueError: If the input type is not supported.
+            ValueError: If the input type is not supported or the substitution
+                produces a code point outside the Unicode range.
         """
         if not self.input_supported(input_type):
             raise ValueError("Input type not supported")
 
-        ret_text = "".join(chr(self.startValue + ord(ch)) for ch in prompt)
+        converted_characters: list[str] = []
+        for character in prompt:
+            input_code_point = ord(character)
+            converted_code_point = self.startValue + input_code_point
+            if converted_code_point > self.MAX_UNICODE_CODE_POINT:
+                raise ValueError(
+                    f"Unicode substitution produced code point {converted_code_point:#x} from "
+                    f"start_value {self.startValue:#x} and input code point {input_code_point:#x}; "
+                    f"the maximum Unicode code point is {self.MAX_UNICODE_CODE_POINT:#x}."
+                )
+            converted_characters.append(chr(converted_code_point))
+
+        ret_text = "".join(converted_characters)
         return ConverterResult(output_text=ret_text, output_type="text")
