@@ -24,8 +24,8 @@ class CandidateProposalBatch:
     Attributes:
         control_candidates_by_group: List of filtered candidate string lists, one per
             compatible gradient shape group.
-        group_worker_indices: Index of the representative worker used for sampling and
-            filtering each candidate group.
+        group_worker_indices: Index of the last worker in each contiguous compatible
+            gradient shape group, used for sampling and filtering that group.
     """
 
     control_candidates_by_group: list[list[str]]
@@ -114,7 +114,6 @@ class GCGCandidateProposer:
         control_cands: list[list[str]] = []
         group_worker_indices: list[int] = []
         grad: torch.Tensor | None = None
-        active_worker_idx = 0
 
         # Collect and aggregate gradients across workers
         for j, worker in enumerate(self._workers):
@@ -123,13 +122,12 @@ class GCGCandidateProposer:
 
             if grad is None:
                 grad = torch.zeros_like(new_grad)
-                active_worker_idx = j
 
             if grad.shape != new_grad.shape:
                 # Shape mismatch: finalize the preceding group
                 with torch.no_grad():
                     sampled = self._sample_group(
-                        worker_idx=active_worker_idx,
+                        worker_idx=j - 1,
                         gradient=grad,
                         batch_size=batch_size,
                         topk=topk,
@@ -137,15 +135,14 @@ class GCGCandidateProposer:
                         allow_non_ascii=allow_non_ascii,
                     )
                     filtered = self._filter_group(
-                        worker_idx=active_worker_idx,
+                        worker_idx=j - 1,
                         control_cand=sampled,
                         filter_cand=filter_cand,
                         current_control_str=current_control_str,
                     )
                     control_cands.append(filtered)
-                    group_worker_indices.append(active_worker_idx)
+                    group_worker_indices.append(j - 1)
                 grad = new_grad
-                active_worker_idx = j
             else:
                 grad += new_grad
 
