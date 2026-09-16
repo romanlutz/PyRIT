@@ -44,6 +44,7 @@ import { useTour } from './hooks/useTour'
 import {
   attackConversationRoutePath,
   attackRoutePath,
+  conversationViewFromSearchParams,
   routerPathParamValue,
   scenarioRunProvenance,
   scenarioRunRoutePath,
@@ -199,6 +200,7 @@ function App() {
   // survive refresh. The breadcrumb ref remembers the last /history query so
   // the History nav button can restore filters after visiting another view.
   const [searchParams, setSearchParams] = useSearchParams()
+  const conversationView = conversationViewFromSearchParams(searchParams)
   const historyFilters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
   const scenarioHistoryFilters = useMemo(
     () => scenarioHistoryFiltersFromSearchParams(searchParams),
@@ -416,10 +418,10 @@ function App() {
         routeConversationId === readyAttack.mainConversationId ||
         readyAttack.relatedConversationIds.includes(routeConversationId)
       if (!isKnown) {
-        navigate(attackRoutePath(readyAttack.id, scenarioResultId), { replace: true })
+        navigate(attackRoutePath(readyAttack.id, scenarioResultId, conversationView), { replace: true })
       }
     }
-  }, [readyAttack, routeConversationId, navigate, scenarioResultId])
+  }, [readyAttack, routeConversationId, navigate, scenarioResultId, conversationView])
 
   const handleNavigate = useCallback((view: ViewName) => {
     // Re-attach the last filter query so returning to history restores filters.

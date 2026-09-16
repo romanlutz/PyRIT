@@ -3,11 +3,12 @@ import type { ReactNode } from 'react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 
 import { attacksApi } from '@/services/api'
 import { makeTarget } from '@/test-utils/targetFixtures'
 import type { AddMessageResponse, AttackSummary, BackendMessage, MessageBatchStatus } from '@/types'
+import { attackConversationRoutePath, scenarioRunProvenance } from '@/utils/routeParams'
 
 import ChatWindow from './ChatWindow'
 
@@ -91,11 +92,29 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function TestWrapper({ children }: { children: ReactNode }) {
-  return <FluentProvider theme={webLightTheme}><MemoryRouter>{children}</MemoryRouter></FluentProvider>
+function NavigationState() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  return (
+    <>
+      <output data-testid="route-location">{location.pathname}{location.search}</output>
+      <button onClick={() => { navigate(-1) }}>Browser back</button>
+      <button onClick={() => { navigate(1) }}>Browser forward</button>
+    </>
+  )
+}
+
+function TestWrapper({ children, initialEntry = '/' }: { children: ReactNode; initialEntry?: string }) {
+  return (
+    <FluentProvider theme={webLightTheme}>
+      <MemoryRouter initialEntries={[initialEntry]}><NavigationState />{children}</MemoryRouter>
+    </FluentProvider>
+  )
 }
 
 function Chat({ fresh = false }: { fresh?: boolean }) {
+  const navigate = useNavigate()
+  const location = useLocation()
   const [attack, setAttack] = useState<string | null>(fresh ? null : 'attack')
   const [main, setMain] = useState<string | null>(fresh ? null : 'source')
   const [active, setActive] = useState<string | null>(fresh ? null : 'source')
@@ -106,13 +125,18 @@ function Chat({ fresh = false }: { fresh?: boolean }) {
       conversationId={main}
       activeConversationId={active}
       targetResolutionStatus="resolved"
-      onNewAttack={() => { setAttack(null); setMain(null); setActive(null) }}
+      onNewAttack={() => { setAttack(null); setMain(null); setActive(null); navigate('/chat') }}
       onConversationCreated={(id: string, conversation: string) => {
         setAttack(id)
         setMain(conversation)
         setActive(conversation)
+        navigate(attackConversationRoutePath(id, conversation))
       }}
-      onSelectConversation={setActive}
+      onSelectConversation={(conversation: string) => {
+        if (!attack) return
+        setActive(conversation)
+        navigate(attackConversationRoutePath(attack, conversation, scenarioRunProvenance(new URLSearchParams(location.search))))
+      }}
     />
   )
 }
@@ -206,6 +230,7 @@ describe('ChatWindow multi-send integration', () => {
     await user.type(screen.getByRole('textbox'), 'Unsent draft')
     await user.click(screen.getByRole('button', { name: 'Show conversation tree' }))
     await screen.findByRole('button', { name: 'Open copied conversation' })
+    expect(screen.getByTestId('route-location')).toHaveTextContent('?view=tree')
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Return to conversation' }))
     expect(screen.getByRole('textbox')).toHaveValue('Unsent draft')
@@ -215,6 +240,43 @@ describe('ChatWindow multi-send integration', () => {
     await screen.findByText('Answer in copy')
     expect(screen.getByRole('textbox')).toHaveValue('Unsent draft')
     expect(screen.getByRole('button', { name: 'Show conversation tree' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/attacks/attack/conversations/copy')
+    expect(screen.getByTestId('route-location')).not.toHaveTextContent('view=tree')
+  })
+
+  it('opens a direct tree link without fetching the full chat transcript', async () => {
+    render(
+      <TestWrapper initialEntry="/attacks/attack/conversations/source?view=tree">
+        <Chat />
+      </TestWrapper>,
+    )
+    await screen.findByRole('button', { name: 'Open copied conversation' })
+    expect(screen.getByRole('button', { name: 'Return to conversation' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(api.getMessages).not.toHaveBeenCalled()
+  })
+
+  it('preserves query context and responds to browser back/forward view changes', async () => {
+    const user = userEvent.setup()
+    const provenance = '123e4567-e89b-12d3-a456-426614174000'
+    render(
+      <TestWrapper initialEntry={`/attacks/attack/conversations/source?scenarioResultId=${provenance}&view=tree`}>
+        <Chat />
+      </TestWrapper>,
+    )
+    await screen.findByRole('button', { name: 'Open copied conversation' })
+    await user.click(screen.getByRole('button', { name: 'Return to conversation' }))
+    await screen.findByText('Answer in source')
+    expect(screen.getByTestId('route-location')).toHaveTextContent(`?scenarioResultId=${provenance}`)
+    expect(screen.getByTestId('route-location')).not.toHaveTextContent('view=tree')
+
+    await user.click(screen.getByRole('button', { name: 'Browser back' }))
+    expect(screen.getByRole('button', { name: 'Return to conversation' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('view=tree')
+    await user.click(screen.getByRole('button', { name: 'Browser forward' }))
+    await screen.findByText('Answer in source')
+    expect(screen.getByRole('button', { name: 'Show conversation tree' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).not.toHaveTextContent('view=tree')
   })
 
   it('does not unlock a newer send when an older batch finishes', async () => {

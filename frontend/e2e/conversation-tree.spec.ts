@@ -116,6 +116,63 @@ test.describe('Progressive conversations with the real backend', () => {
   test.setTimeout(120_000)
   test.use({ actionTimeout: 15_000 })
 
+  test('opens shareable tree links and preserves mode through refresh and browser history @seeded', async ({ page, request }) => {
+    const attack = await seed(request)
+    const response = await request.post(`/api/attacks/${attack.attack_result_id}/conversations`, {
+      data: { source_conversation_id: attack.conversation_id, cutoff_index: 1 },
+    })
+    expect(response.ok(), await response.text()).toBe(true)
+    const copy: CreateConversationResponse = await response.json()
+    const provenance = '123e4567-e89b-12d3-a456-426614174000'
+    const treePath = attackConversationRoutePath(attack.attack_result_id, attack.conversation_id, provenance, 'tree')
+    const transcriptRequests: string[] = []
+    page.on('request', (requestEvent) => {
+      if (requestEvent.method() === 'GET' && new URL(requestEvent.url()).pathname.endsWith('/messages')) {
+        transcriptRequests.push(requestEvent.url())
+      }
+    })
+    await page.goto(treePath)
+    await expect(page.getByTestId('conversation-tree')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByRole('status').filter({ hasText: 'All 2 conversations loaded' })).toBeVisible()
+    expect(transcriptRequests).toEqual([])
+    await expect(page.getByRole('button', { name: 'Return to conversation' })).toBeVisible()
+
+    await page.reload()
+    await expect(page.getByTestId('conversation-tree')).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'All 2 conversations loaded' })).toBeVisible()
+    expect(transcriptRequests).toEqual([])
+    await page.getByRole('button', { name: 'Return to conversation' }).click()
+    await expect(page.getByPlaceholder('Type prompt here')).toBeVisible()
+    expect(new URL(page.url()).searchParams.has('view')).toBe(false)
+    expect(new URL(page.url()).searchParams.get('scenarioResultId')).toBe(provenance)
+
+    await page.goBack()
+    await expect(page.getByTestId('conversation-tree')).toBeVisible()
+    expect(new URL(page.url()).searchParams.get('view')).toBe('tree')
+    await page.goForward()
+    await expect(page.getByRole('button', { name: 'Show conversation tree' })).toBeVisible()
+    expect(new URL(page.url()).searchParams.has('view')).toBe(false)
+
+    await page.getByRole('button', { name: 'Show conversation tree' }).click()
+    expect(new URL(page.url()).searchParams.get('view')).toBe('tree')
+    await page.getByRole('button', { name: 'Conversations (2)' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: `Open conversation ${copy.conversation_id}` }).click()
+    await expect(page.getByRole('button', { name: 'Show conversation tree' })).toBeVisible()
+    expect(new URL(page.url()).pathname).toBe(`/attacks/${attack.attack_result_id}/conversations/${copy.conversation_id}`)
+    expect(new URL(page.url()).searchParams.has('view')).toBe(false)
+    expect(new URL(page.url()).searchParams.get('scenarioResultId')).toBe(provenance)
+    await page.goBack()
+    await expect(page.getByTestId('conversation-tree')).toBeVisible()
+    expect(new URL(page.url()).pathname).toBe(`/attacks/${attack.attack_result_id}/conversations/${attack.conversation_id}`)
+
+    await page.goto(attackConversationRoutePath(attack.attack_result_id, 'missing-conversation', provenance, 'tree'))
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`/attacks/${attack.attack_result_id}`)
+    await expect(page.getByTestId('conversation-tree')).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'All 2 conversations loaded' })).toBeVisible()
+    expect(new URL(page.url()).searchParams.get('view')).toBe('tree')
+    expect(new URL(page.url()).searchParams.get('scenarioResultId')).toBe(provenance)
+  })
+
   test('repeats on one branch, displays the tree, and keeps nested branching local @seeded', async ({ page, request }) => {
     const attack = await seed(request)
     await page.goto(attackConversationRoutePath(attack.attack_result_id, attack.conversation_id))

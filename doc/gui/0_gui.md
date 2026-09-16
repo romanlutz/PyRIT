@@ -105,6 +105,9 @@ Click the panel toggle in the ribbon to open the conversations sidebar. This pan
 #### Conversation Tree
 
 Click **Show conversation tree** in the ribbon to replace the chat pane with a top-down tree.
+The toggle updates the URL with `?view=tree`. Copy that URL to link directly to the tree;
+opening it or refreshing the page preserves tree mode and the selected conversation.
+Links without this parameter open the normal chat view, and the chat-bubble toggle removes it.
 Each node is one message, with that message's pieces kept together. Shared cloned history
 appears once; independently generated responses remain separate even when their text matches.
 Only conversations with the objective target are included, not internal adversarial conversations.

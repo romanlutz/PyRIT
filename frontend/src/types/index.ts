@@ -509,6 +509,8 @@ export interface AttackListResponse {
 
 // --- Conversations ---
 
+export type ConversationView = 'chat' | 'tree'
+
 export interface ConversationSummary {
   conversation_id: string
   message_count: number

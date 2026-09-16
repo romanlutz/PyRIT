@@ -23,7 +23,7 @@ import {
 } from '@fluentui/react-components'
 import type { SwitchOnChangeData } from '@fluentui/react-components'
 import { AddRegular, ArrowDownloadRegular, BranchForkRegular, ChatRegular, PanelRightRegular } from '@fluentui/react-icons'
-import { Link } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import MessageList from './MessageList'
 import SystemPromptBanner from './SystemPromptBanner'
 import ChatInputArea from './ChatInputArea'
@@ -56,7 +56,7 @@ import type {
   TargetInfo,
 } from '../../types'
 import { isTargetResolutionBlocking, targetInfoMatchesTarget } from '../../utils/targetIdentity'
-import { scenarioRunRoutePath } from '../../utils/routeParams'
+import { conversationViewFromSearchParams, scenarioRunRoutePath, searchParamsWithConversationView } from '@/utils/routeParams'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
 import { MessageBatchTrackingError, useMessageBatch } from '@/hooks/useMessageBatch'
@@ -155,6 +155,8 @@ export default function ChatWindow({
   scenarioResultId,
 }: ChatWindowProps) {
   const styles = useChatWindowStyles()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const isTreeView = Boolean(attackResultId) && conversationViewFromSearchParams(searchParams) === 'tree'
   const restoreFocusTargetAttributes = useRestoreFocusTarget()
   const restoreFocusSourceAttributes = useRestoreFocusSource()
   const [messages, setMessages] = useState<Message[]>([])
@@ -169,8 +171,7 @@ export default function ChatWindow({
   const effectiveConversationId = activeConversationId ?? conversationId
   const isSending = sendingConversations.has(effectiveConversationId ?? unboundConversationId ?? '__pending__')
   const [isPanelOpen, setIsPanelOpen] = useState(false)
-  const [isTreeView, setIsTreeView] = useState(false)
-  const [hasOpenedTree, setHasOpenedTree] = useState(false)
+  const [hasOpenedTree, setHasOpenedTree] = useState(isTreeView)
   const [readError, setReadError] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const isExportingRef = useRef(false)
@@ -304,8 +305,7 @@ export default function ChatWindow({
   const [prevAttackResultId, setPrevAttackResultId] = useState<string | null>(attackResultId)
   if (attackResultId !== prevAttackResultId) {
     setPrevAttackResultId(attackResultId)
-    setIsTreeView(false)
-    setHasOpenedTree(false)
+    setHasOpenedTree(isTreeView)
     setReadError(null)
     if (!attackResultId) {
       setMessages([])
@@ -314,6 +314,8 @@ export default function ChatWindow({
       setSystemPrompt('')
       setPendingObjective('')
     }
+  } else if (isTreeView && !hasOpenedTree) {
+    setHasOpenedTree(true)
   }
 
   // Clear a retained system prompt when switching to a target that can't use it,
@@ -362,7 +364,7 @@ export default function ChatWindow({
 
   // Reload messages when activeConversationId changes
   useEffect(() => {
-    if (!attackResultId || !activeConversationId) { return }
+    if (!attackResultId || !activeConversationId || isTreeView) { return }
     // Allow user-initiated switches (forceLoadRef), but skip re-loading when
     // handleSend internally updated activeConversationId during an in-flight
     // send — the optimistic messages are already displayed.
@@ -370,7 +372,7 @@ export default function ChatWindow({
     forceLoadRef.current = false
     if (!force && sendingConvIdsRef.current.has(activeConversationId)) { return }
     loadConversation(attackResultId, activeConversationId)
-  }, [activeConversationId, attackResultId, loadConversation])
+  }, [activeConversationId, attackResultId, isTreeView, loadConversation])
 
   // Synchronous loading derivation: if activeConversationId differs from the
   // conversation whose messages we've loaded, we're in a transition gap.
@@ -385,17 +387,16 @@ export default function ChatWindow({
   // Handle conversation selection from the panel
   // For a different ID the useEffect handles loading; for same ID force a refresh
   const handlePanelSelectConversation = useCallback((convId: string) => {
-    setIsTreeView(false)
     viewedConvRef.current = convId
     forceLoadRef.current = true
     onSelectConversation(convId)
     if (isNarrowScreen) {
       setIsPanelOpen(false)
     }
-    if (convId === activeConversationId && attackResultId) {
+    if (convId === activeConversationId && attackResultId && !isTreeView) {
       loadConversation(attackResultId, convId)
     }
-  }, [attackResultId, activeConversationId, isNarrowScreen, onSelectConversation, loadConversation])
+  }, [attackResultId, activeConversationId, isNarrowScreen, isTreeView, onSelectConversation, loadConversation])
 
   const handleSend = async (
     originalValue: string,
@@ -1093,8 +1094,9 @@ export default function ChatWindow({
                 aria-pressed={isTreeView}
                 data-testid="toggle-tree-btn"
                 onClick={() => {
-                  setHasOpenedTree(true)
-                  setIsTreeView((previous: boolean) => !previous)
+                  setSearchParams((current: URLSearchParams) =>
+                    searchParamsWithConversationView(current, isTreeView ? 'chat' : 'tree'),
+                  )
                 }}
               />
             </Tooltip>
@@ -1120,7 +1122,6 @@ export default function ChatWindow({
                 icon={<AddRegular />}
                 onClick={() => {
                   setIsPanelOpen(false)
-                  setIsTreeView(false)
                   setUnboundConversationId(null)
                   viewedAttackRef.current = null
                   viewedConvRef.current = null

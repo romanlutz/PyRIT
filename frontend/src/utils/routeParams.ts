@@ -1,4 +1,7 @@
+import type { ConversationView } from '@/types'
+
 const SCENARIO_RESULT_ID_QUERY_KEY = 'scenarioResultId'
+const CONVERSATION_VIEW_QUERY_KEY = 'view'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
@@ -22,14 +25,35 @@ export function scenarioRunProvenance(searchParams: URLSearchParams): string | n
   return values[0]
 }
 
-/** Builds an attack-detail route with optional bounded scenario-run provenance. */
+export function conversationViewFromSearchParams(searchParams: URLSearchParams): ConversationView {
+  const values = searchParams.getAll(CONVERSATION_VIEW_QUERY_KEY)
+  return values.length === 1 && values[0] === 'tree' ? 'tree' : 'chat'
+}
+
+/** Change only the presentation mode, preserving provenance and other query parameters. */
+export function searchParamsWithConversationView(
+  searchParams: URLSearchParams,
+  view: ConversationView,
+): URLSearchParams {
+  const next = new URLSearchParams(searchParams)
+  if (view === 'tree') {
+    next.set(CONVERSATION_VIEW_QUERY_KEY, view)
+  } else {
+    next.delete(CONVERSATION_VIEW_QUERY_KEY)
+  }
+  return next
+}
+
+/** Builds an attack-detail route with optional provenance and presentation mode. */
 export function attackRoutePath(
   attackResultId: string,
   scenarioResultId?: string | null,
+  view: ConversationView = 'chat',
 ): string {
-  return appendScenarioRunProvenance(
+  return appendAttackSearchParams(
     `/attacks/${encodeURIComponent(attackResultId)}`,
     scenarioResultId,
+    view,
   )
 }
 
@@ -38,10 +62,12 @@ export function attackConversationRoutePath(
   attackResultId: string,
   conversationId: string,
   scenarioResultId?: string | null,
+  view: ConversationView = 'chat',
 ): string {
-  return appendScenarioRunProvenance(
+  return appendAttackSearchParams(
     `/attacks/${encodeURIComponent(attackResultId)}/conversations/${encodeURIComponent(conversationId)}`,
     scenarioResultId,
+    view,
   )
 }
 
@@ -55,12 +81,15 @@ export function scenarioRunAttackRoutePath(scenarioResultId: string, attackResul
   return `${scenarioRunRoutePath(scenarioResultId)}/${encodeURIComponent(attackResultId)}`
 }
 
-function appendScenarioRunProvenance(path: string, scenarioResultId?: string | null): string {
-  if (!scenarioResultId || !UUID_PATTERN.test(scenarioResultId)) {
-    return path
+function appendAttackSearchParams(
+  path: string,
+  scenarioResultId: string | null | undefined,
+  view: ConversationView,
+): string {
+  const searchParams = new URLSearchParams()
+  if (scenarioResultId && UUID_PATTERN.test(scenarioResultId)) {
+    searchParams.set(SCENARIO_RESULT_ID_QUERY_KEY, scenarioResultId)
   }
-  const searchParams = new URLSearchParams({
-    [SCENARIO_RESULT_ID_QUERY_KEY]: scenarioResultId,
-  })
-  return `${path}?${searchParams.toString()}`
+  const query = searchParamsWithConversationView(searchParams, view).toString()
+  return query ? `${path}?${query}` : path
 }

@@ -1,10 +1,12 @@
 import {
   attackConversationRoutePath,
   attackRoutePath,
+  conversationViewFromSearchParams,
   routerPathParamValue,
   scenarioRunAttackRoutePath,
   scenarioRunProvenance,
   scenarioRunRoutePath,
+  searchParamsWithConversationView,
 } from './routeParams'
 
 const SCENARIO_RESULT_ID = '123e4567-e89b-12d3-a456-426614174000'
@@ -21,6 +23,39 @@ describe('routerPathParamValue', () => {
   it('preserves literal and malformed percent sequences', () => {
     expect(routerPathParamValue('discount%50')).toBe('discount%50')
     expect(routerPathParamValue('%zz')).toBe('%zz')
+  })
+})
+
+describe('conversation view routes', () => {
+  it('opens tree mode only for one explicit view=tree parameter', () => {
+    expect(conversationViewFromSearchParams(new URLSearchParams('view=tree'))).toBe('tree')
+    expect(conversationViewFromSearchParams(new URLSearchParams(`scenarioResultId=${SCENARIO_RESULT_ID}&view=tree`))).toBe('tree')
+  })
+
+  it.each(['', 'view=chat', 'view=unknown', 'view=tree&view=chat', 'view=tree&view=tree'])(
+    'preserves chat defaults for missing or ambiguous modes: %s',
+    (query: string) => {
+      expect(conversationViewFromSearchParams(new URLSearchParams(query))).toBe('chat')
+    },
+  )
+
+  it('changes view without dropping provenance or mutating the current query', () => {
+    const original = new URLSearchParams(`scenarioResultId=${SCENARIO_RESULT_ID}&extra=value`)
+    const tree = searchParamsWithConversationView(original, 'tree')
+    expect(tree.get('view')).toBe('tree')
+    expect(tree.get('scenarioResultId')).toBe(SCENARIO_RESULT_ID)
+    expect(tree.get('extra')).toBe('value')
+    expect(original.has('view')).toBe(false)
+    const chat = searchParamsWithConversationView(tree, 'chat')
+    expect(chat.toString()).toBe(original.toString())
+    expect(tree.get('view')).toBe('tree')
+  })
+
+  it('builds tree links for both the main and a selected conversation', () => {
+    expect(attackRoutePath('attack/1', undefined, 'tree')).toBe('/attacks/attack%2F1?view=tree')
+    expect(attackConversationRoutePath('attack/1', 'conversation/1', SCENARIO_RESULT_ID, 'tree')).toBe(
+      `/attacks/attack%2F1/conversations/conversation%2F1?scenarioResultId=${SCENARIO_RESULT_ID}&view=tree`,
+    )
   })
 })
 
