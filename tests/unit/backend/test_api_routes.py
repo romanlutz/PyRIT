@@ -26,6 +26,7 @@ from pyrit.backend.models.attacks import (
     CreateAttackResponse,
     MessagePieceView,
     MessageView,
+    TargetResponseStatus,
 )
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.converters import (
@@ -33,12 +34,13 @@ from pyrit.backend.models.converters import (
     ConverterInstance,
     ConverterInstanceListResponse,
     ConverterPreviewResponse,
-    CreateConverterResponse,
+    ConverterTypeResponse,
     PreviewStep,
 )
 from pyrit.backend.models.targets import (
     TargetCatalogResponse,
     TargetListResponse,
+    TargetTypeResponse,
 )
 from pyrit.backend.routes import version as version_routes
 from pyrit.backend.routes.scores import _get_user_identifier
@@ -411,6 +413,11 @@ class TestAttackRoutes:
                 _make_message_view(role="user", value="Hello", sequence=1),
                 _make_message_view(role="assistant", value="Hi there!", sequence=2),
             ],
+            target_response_status=TargetResponseStatus(
+                response_error="none",
+                request_turn_number=1,
+                response_turn_number=2,
+            ),
         )
 
         with patch("pyrit.backend.routes.attacks.get_attack_service") as mock_get_service:
@@ -447,6 +454,11 @@ class TestAttackRoutes:
             assert response.status_code == status.HTTP_200_OK
             data = response.json()
             assert len(data["messages"]["messages"]) == 2
+            assert data["messages"]["target_response_status"] == {
+                "response_error": "none",
+                "request_turn_number": 1,
+                "response_turn_number": 2,
+            }
             request = mock_service.add_message_async.await_args.kwargs["request"]
             assert request.request_converter_configurations[0].converter_ids == [
                 "request-1",
@@ -505,8 +517,8 @@ class TestAttackRoutes:
                     "converter_ids": ["legacy-converter"],
                 },
             )
-
             assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+            mock_get_service.return_value.add_message_async.assert_not_called()
             mock_get_service.return_value.add_message_async.assert_not_called()
 
     def test_update_attack_not_found(self, client: TestClient) -> None:
@@ -602,7 +614,13 @@ class TestAttackRoutes:
                     conversation_id="attack-1",
                     messages=[
                         _make_message_view(role="user", value="Hello", sequence=1),
+                        _make_message_view(role="assistant", value="Hi there!", sequence=2),
                     ],
+                    target_response_status=TargetResponseStatus(
+                        response_error="none",
+                        request_turn_number=1,
+                        response_turn_number=2,
+                    ),
                 )
             )
             mock_get_service.return_value = mock_service
@@ -612,7 +630,10 @@ class TestAttackRoutes:
             assert response.status_code == status.HTTP_200_OK
             data = response.json()
             assert data["conversation_id"] == "attack-1"
-            assert len(data["messages"]) == 1
+            assert len(data["messages"]) == 2
+            assert data["target_response_status"]["response_error"] == "none"
+            assert data["target_response_status"]["request_turn_number"] == 1
+            assert data["target_response_status"]["response_turn_number"] == 2
 
     def test_get_conversation_messages_not_found(self, client: TestClient) -> None:
         """Test getting messages for non-existent attack returns 404."""
@@ -1070,6 +1091,20 @@ class TestTargetRoutes:
             assert data["items"][0]["target_type"] == "OpenAIChatTarget"
             assert data["items"][0]["supported_auth_modes"] == ["api_key", "identity"]
 
+    def test_list_target_types(self, client: TestClient) -> None:
+        """Test the primary target type metadata route."""
+        with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.list_target_types_async = AsyncMock(
+                return_value=TargetTypeResponse(items=[{"target_type": "TextTarget"}])
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.get("/api/targets/types")
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["items"][0]["target_type"] == "TextTarget"
+
     def test_create_target_success(self, client: TestClient) -> None:
         """Test successful target creation."""
         with patch("pyrit.backend.routes.targets.get_target_service") as mock_get_service:
@@ -1105,6 +1140,14 @@ class TestTargetRoutes:
             )
 
             assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_create_target_rejects_unaddressable_registry_name(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/targets",
+            json={"name": "nested/name", "type": "TextTarget", "params": {}},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_create_target_internal_error(self, client: TestClient) -> None:
         """Test target creation with internal error returns 500."""
@@ -1263,15 +1306,29 @@ class TestConverterRoutes:
             data = response.json()
             assert data["items"][0]["converter_type"] == "Base64Converter"
 
+    def test_list_converter_types(self, client: TestClient) -> None:
+        """Test the primary converter type metadata route."""
+        with patch("pyrit.backend.routes.converters.get_converter_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.list_converter_types_async = AsyncMock(
+                return_value=ConverterTypeResponse(items=[{"converter_type": "Base64Converter"}])
+            )
+            mock_get_service.return_value = mock_service
+
+            response = client.get("/api/converters/types")
+
+            assert response.status_code == status.HTTP_200_OK
+            assert response.json()["items"][0]["converter_type"] == "Base64Converter"
+
     def test_create_converter_success(self, client: TestClient) -> None:
         """Test successful converter instance creation."""
         with patch("pyrit.backend.routes.converters.get_converter_service") as mock_get_service:
             mock_service = MagicMock()
             mock_service.create_converter_async = AsyncMock(
-                return_value=CreateConverterResponse(
+                return_value=ConverterInstance(
                     converter_id="conv-1",
-                    converter_type="Base64Converter",
-                    display_name="My Base64",
+                    identifier=ConverterIdentifier(class_name="Base64Converter"),
+                    is_llm_based=False,
                 )
             )
             mock_get_service.return_value = mock_service
@@ -1284,6 +1341,7 @@ class TestConverterRoutes:
             assert response.status_code == status.HTTP_201_CREATED
             data = response.json()
             assert data["converter_id"] == "conv-1"
+            assert data["identifier"]["class_name"] == "Base64Converter"
 
     def test_create_converter_invalid_type(self, client: TestClient) -> None:
         """Test converter creation with invalid type."""
@@ -1298,6 +1356,14 @@ class TestConverterRoutes:
             )
 
             assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_create_converter_rejects_unaddressable_registry_name(self, client: TestClient) -> None:
+        response = client.post(
+            "/api/converters",
+            json={"name": "nested/name", "type": "Base64Converter", "params": {}},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
     def test_create_converter_internal_error(self, client: TestClient) -> None:
         """Test converter creation with internal error returns 500."""
@@ -1342,6 +1408,27 @@ class TestConverterRoutes:
             mock_get_service.return_value = mock_service
 
             response = client.get("/api/converters/nonexistent")
+
+            assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_delete_converter_success(self, client: TestClient) -> None:
+        with patch("pyrit.backend.routes.converters.get_converter_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.delete_converter_async = AsyncMock(return_value=True)
+            mock_get_service.return_value = mock_service
+
+            response = client.delete("/api/converters/conv-1")
+
+            assert response.status_code == status.HTTP_204_NO_CONTENT
+            assert response.content == b""
+
+    def test_delete_converter_not_found(self, client: TestClient) -> None:
+        with patch("pyrit.backend.routes.converters.get_converter_service") as mock_get_service:
+            mock_service = MagicMock()
+            mock_service.delete_converter_async = AsyncMock(return_value=False)
+            mock_get_service.return_value = mock_service
+
+            response = client.delete("/api/converters/missing")
 
             assert response.status_code == status.HTTP_404_NOT_FOUND
 
