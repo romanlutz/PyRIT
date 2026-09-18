@@ -110,16 +110,16 @@ export function treeEdgePath(points: TreePosition[]): string {
   let path = `M ${route[0].x} ${route[0].y}`
   for (let index = 1; index < route.length - 1; index++) {
     const before = route[index - 1], point = route[index], after = route[index + 1]
-    const radius = Math.min(EDGE_CORNER_RADIUS,
-      (Math.abs(point.x - before.x) + Math.abs(point.y - before.y)) / 2,
-      (Math.abs(after.x - point.x) + Math.abs(after.y - point.y)) / 2)
+    const incomingLength = Math.hypot(point.x - before.x, point.y - before.y)
+    const outgoingLength = Math.hypot(after.x - point.x, after.y - point.y)
+    const radius = Math.min(EDGE_CORNER_RADIUS, incomingLength / 2, outgoingLength / 2)
     const entry = {
-      x: point.x - Math.sign(point.x - before.x) * radius,
-      y: point.y - Math.sign(point.y - before.y) * radius,
+      x: point.x - (point.x - before.x) / incomingLength * radius,
+      y: point.y - (point.y - before.y) / incomingLength * radius,
     }
     const exit = {
-      x: point.x + Math.sign(after.x - point.x) * radius,
-      y: point.y + Math.sign(after.y - point.y) * radius,
+      x: point.x + (after.x - point.x) / outgoingLength * radius,
+      y: point.y + (after.y - point.y) / outgoingLength * radius,
     }
     path += ` L ${entry.x} ${entry.y} Q ${point.x} ${point.y} ${exit.x} ${exit.y}`
   }

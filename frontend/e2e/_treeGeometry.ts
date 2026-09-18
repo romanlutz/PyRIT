@@ -37,12 +37,16 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
       const matrix = element.getScreenCTM()
       if (!matrix) throw new Error('A connection has no screen transform')
       const length = element.getTotalLength()
+      const samples: Point[] = []
       const points: Point[] = []
-      for (let distance = 0; distance < length; distance += 8) {
+      for (let distance = 0; distance < length; distance++) {
         const point = element.getPointAtLength(distance).matrixTransform(matrix)
-        points.push({ x: point.x, y: point.y })
+        const sample = { x: point.x, y: point.y }
+        samples.push(sample)
+        if (distance % 8 === 0) points.push(sample)
       }
       const end = element.getPointAtLength(length).matrixTransform(matrix)
+      samples.push({ x: end.x, y: end.y })
       points.push({ x: end.x, y: end.y })
       const corners = points.filter((point: Point, index: number) => {
         if (index === 0 || index === points.length - 1) return true
@@ -51,7 +55,7 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
           - (point.y - before.y) * (after.x - point.x)) > epsilon
       })
       return {
-        id, source, target, points,
+        id, source, target, points, samples,
         segments: corners.slice(1).map((point: Point, index: number): Segment => [corners[index], point]),
       }
     })
@@ -60,6 +64,7 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
     const crossings: string[] = []
     const unevenSequences: string[] = []
     const outsideLanes: string[] = []
+    const backtracking: string[] = []
     const cross = (a: Point, b: Point): number => a.x * b.y - a.y * b.x
     const subtract = (a: Point, b: Point): Point => ({ x: a.x - b.x, y: a.y - b.y })
     const intersects = ([a, b]: Segment, [c, d]: Segment): boolean => {
@@ -108,6 +113,23 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
       }
     }
     const byId = new Map(nodes.map((node) => [node.id, node]))
+    for (const edge of edges) {
+      const source = byId.get(edge.source), target = byId.get(edge.target)
+      const adjacent = source && target && target.sequence === source.sequence + 1
+      const start = edge.samples[0], end = edge.samples[edge.samples.length - 1]
+      const direction = Math.sign(end.x - start.x)
+      let furthestX = start.x, furthestY = start.y
+      for (const point of edge.samples) {
+        if (point.y < furthestY - epsilon || (adjacent && (
+          direction === 0 ? Math.abs(point.x - start.x) > epsilon : direction * (point.x - furthestX) < -epsilon
+        ))) {
+          backtracking.push(edge.id)
+          break
+        }
+        furthestX = direction < 0 ? Math.min(furthestX, point.x) : Math.max(furthestX, point.x)
+        furthestY = Math.max(furthestY, point.y)
+      }
+    }
     for (let index = 0; index < edges.length; index++) {
       const first = edges[index]
       for (const second of edges.slice(index + 1)) {
@@ -120,7 +142,7 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
       }
     }
     const expectedEdgeCount = nodes.filter((node) => node.parentId && byId.has(node.parentId)).length
-    return { nodeCount: nodes.length, edgeCount: edges.length, expectedEdgeCount, overlaps, blocked, crossings,
+    return { nodeCount: nodes.length, edgeCount: edges.length, expectedEdgeCount, overlaps, blocked, crossings, backtracking,
       unevenSequences, outsideLanes, lanes }
   })
   expect(geometry.nodeCount).toBeGreaterThan(2)
@@ -128,6 +150,7 @@ export async function expectClearTreeGeometry(page: Page): Promise<void> {
   expect(geometry.overlaps).toEqual([])
   expect(geometry.blocked).toEqual([])
   expect(geometry.crossings).toEqual([])
+  expect(geometry.backtracking).toEqual([])
   expect(geometry.unevenSequences).toEqual([])
   expect(geometry.outsideLanes).toEqual([])
   expect(geometry.lanes.length).toBeGreaterThan(0)

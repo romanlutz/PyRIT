@@ -33,6 +33,18 @@ describe('conversation connection routing', () => {
     expect(() => treeEdgePath([{ x: 10, y: 0 }])).toThrow('at least two distinct points')
   })
 
+  it.each([1, -1])('should round along slanted segments without exaggerating their direction (%s)', (direction: number) => {
+    expect(treeEdgePath([
+      { x: 0, y: 0 }, { x: direction * 6, y: 8 }, { x: direction * 26, y: 8 },
+    ])).toBe(`M 0 0 L ${direction * 3} 4 Q ${direction * 6} 8 ${direction * 11} 8 L ${direction * 26} 8`)
+  })
+
+  it('should keep the radius inside short routing segments', () => {
+    expect(treeEdgePath([
+      { x: 0, y: 0 }, { x: 0, y: 4 }, { x: 4, y: 4 }, { x: 4, y: 8 },
+    ])).toBe('M 0 0 L 0 2 Q 0 4 2 4 L 2 4 Q 4 4 4 6 L 4 8')
+  })
+
   it('should stagger unrelated rightward connections instead of overlapping their horizontal runs', () => {
     const routes = new Map(separateTreeRoutes([
       ['left', [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 200 }]],
