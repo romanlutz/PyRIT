@@ -13,6 +13,9 @@ jest.mock("../../services/api", () => ({
   versionApi: {
     getVersion: jest.fn(),
   },
+  labelsApi: {
+    getLabels: jest.fn().mockResolvedValue({ labels: {} }),
+  },
 }));
 
 // Mock Navigation to simplify testing
@@ -55,6 +58,8 @@ describe("MainLayout", () => {
     onNavigate: jest.fn(),
     onOpenFeedback: jest.fn(),
     canManageConfiguration: true,
+    labels: { operator: 'alice', operation: 'test_op' },
+    onLabelsChange: jest.fn(),
   };
 
   it("renders the header with title and subtitle", async () => {
