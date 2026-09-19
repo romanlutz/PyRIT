@@ -3,9 +3,13 @@ import {
   Button,
   Text,
   Tooltip,
+  mergeClasses,
 } from '@fluentui/react-components'
 import { QuestionCircleRegular } from '@fluentui/react-icons'
+
 import LabelsBar from '@/components/Labels/LabelsBar'
+import { useTheme } from '@/hooks/useTheme'
+
 import { versionApi } from '../../services/api'
 import Navigation, { type ViewName } from '../Sidebar/Navigation'
 import { UserAccountButton } from '../UserAccountButton'
@@ -35,6 +39,7 @@ export default function MainLayout({
   onStartTour,
 }: MainLayoutProps) {
   const styles = useMainLayoutStyles()
+  const { background } = useTheme()
   const [version, setVersion] = useState<string>('Loading...')
   const [commit, setCommit] = useState<string | null>(null)
   const [databaseInfo, setDatabaseInfo] = useState<string | null>(null)
@@ -105,7 +110,22 @@ export default function MainLayout({
             canManageConfiguration={canManageConfiguration}
           />
         </aside>
-        <main id="main-content" tabIndex={-1} className={styles.main}>
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className={mergeClasses(styles.main, background && styles.decorated)}
+        >
+          {background && (
+            <div
+              aria-hidden="true"
+              data-testid="workspace-background"
+              className={styles.background}
+              style={{
+                backgroundImage: `url("${background.imageUrl}")`,
+                opacity: background.opacity,
+              }}
+            />
+          )}
           <section
             className={styles.labelsSection}
             aria-label="New run labels"

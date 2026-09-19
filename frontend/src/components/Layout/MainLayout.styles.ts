@@ -111,6 +111,8 @@ export const useMainLayoutStyles = makeStyles({
     flexDirection: 'column',
   },
   main: {
+    position: 'relative',
+    isolation: 'isolate',
     flex: 1,
     minWidth: 0,
     display: 'flex',
@@ -157,6 +159,21 @@ export const useMainLayoutStyles = makeStyles({
     maxWidth: '100%',
     marginLeft: 'auto',
     ':empty': {
+      display: 'none',
+    },
+  },
+  decorated: {
+    backgroundColor: tokens.colorNeutralBackground2,
+  },
+  background: {
+    position: 'absolute',
+    inset: 0,
+    zIndex: -1,
+    pointerEvents: 'none',
+    backgroundSize: 'cover',
+    backgroundPosition: 'right bottom',
+    backgroundRepeat: 'no-repeat',
+    '@media (forced-colors: active)': {
       display: 'none',
     },
   },
