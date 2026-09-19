@@ -67,7 +67,16 @@ async def _gather_score_tasks_cancel_on_error_async(
         for task in scheduled_tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*scheduled_tasks, return_exceptions=True)
+        drain = asyncio.gather(*scheduled_tasks, return_exceptions=True)
+        outer_cancellation: asyncio.CancelledError | None = None
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError as cancellation:
+                outer_cancellation = cancellation
+        drain.result()
+        if outer_cancellation:
+            raise outer_cancellation from None
         raise
 
 

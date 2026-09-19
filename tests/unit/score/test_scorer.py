@@ -1260,6 +1260,70 @@ async def test_score_response_multiple_scorers_failure_cancels_and_drains_siblin
     assert events == ["slow_started", "failing_raised", "slow_cancelled", "slow_finalized"]
 
 
+async def test_score_response_multiple_scorers_outer_cancellation_during_drain_waits_for_cleanup():
+    response = Message(message_pieces=[MessagePiece(role="assistant", original_value="response")])
+    slow_started = asyncio.Event()
+    slow_cleanup_started = asyncio.Event()
+    allow_slow_cleanup = asyncio.Event()
+    events: list[str] = []
+    slow_task: asyncio.Task[list[Score]] | None = None
+
+    async def slow_score_async(**kwargs) -> list[Score]:
+        nonlocal slow_task
+        slow_task = asyncio.current_task()
+        events.append("slow_started")
+        slow_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("slow_cancelled")
+            slow_cleanup_started.set()
+            await allow_slow_cleanup.wait()
+            events.append("slow_cleanup_finished")
+            raise
+        finally:
+            events.append("slow_finalized")
+
+    async def failing_score_async(**kwargs) -> list[Score]:
+        await slow_started.wait()
+        events.append("failing_raised")
+        raise RuntimeError("deterministic scorer failure")
+
+    slow_scorer = MockScorer()
+    slow_scorer.score_async = slow_score_async
+    failing_scorer = MockScorer()
+    failing_scorer.score_async = failing_score_async
+
+    scoring_task = asyncio.create_task(
+        MessageScorer.score_response_multiple_scorers_async(
+            response=response,
+            scorers=[slow_scorer, failing_scorer],
+            objective="test task",
+        )
+    )
+    await slow_cleanup_started.wait()
+    scoring_task.cancel()
+    events.append("outer_cancel_requested")
+    allow_slow_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await scoring_task
+    events.append("caller_cancelled")
+
+    assert events == [
+        "slow_started",
+        "failing_raised",
+        "slow_cancelled",
+        "outer_cancel_requested",
+        "slow_cleanup_finished",
+        "slow_finalized",
+        "caller_cancelled",
+    ]
+    assert slow_task is not None
+    assert slow_task.done()
+    assert slow_task.cancelled()
+
+
 async def test_score_response_async_parent_cancellation_drains_all_scorers():
     response = Message(message_pieces=[MessagePiece(role="assistant", original_value="response")])
     all_started = asyncio.Event()
