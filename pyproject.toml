@@ -97,9 +97,15 @@ dev = [
     "types-PyYAML>=6.0.12.20250516",
     "types-requests>=2.31.0.20250515",
 ]
+inspect-example = [
+    "inspect-evals @ git+https://github.com/UKGovernmentBEIS/inspect_evals@8ddfea18ea7dabbac4d230b1fb0e7139655afb6f",
+]
 
 [project.optional-dependencies]
 # always make sure the individual ones are in sync with the all group
+inspect = [
+    "inspect-ai>=0.3.259,<0.4",
+]
 huggingface = [
     "sentencepiece>=0.2.0",
     "torch>=2.7.0",
@@ -141,6 +147,7 @@ all = [
     "azure-cognitiveservices-speech>=1.44.0",
     "flask>=3.1.3",
     "ipykernel>=6.29.5",
+    "inspect-ai>=0.3.259,<0.4",
     "jupyter>=1.1.1",
     "litellm>=1.84.0",
     "ollama>=0.5.1",

@@ -10,6 +10,8 @@ from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 
 if TYPE_CHECKING:
     from pyrit.executor.benchmark.fairness_bias import FairnessBiasBenchmark, FairnessBiasBenchmarkContext
+    from pyrit.executor.benchmark.inspect_benchmark import InspectBenchmark, InspectRunResult, InspectTaskBinding
+    from pyrit.executor.benchmark.inspect_sandbox import InspectDockerProfile, InspectSandboxTools
     from pyrit.executor.benchmark.question_answering import (
         QuestionAnsweringBenchmark,
         QuestionAnsweringBenchmarkContext,
@@ -18,6 +20,11 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "FairnessBiasBenchmarkContext": "pyrit.executor.benchmark.fairness_bias",
     "FairnessBiasBenchmark": "pyrit.executor.benchmark.fairness_bias",
+    "InspectBenchmark": "pyrit.executor.benchmark.inspect_benchmark",
+    "InspectRunResult": "pyrit.executor.benchmark.inspect_benchmark",
+    "InspectTaskBinding": "pyrit.executor.benchmark.inspect_benchmark",
+    "InspectDockerProfile": "pyrit.executor.benchmark.inspect_sandbox",
+    "InspectSandboxTools": "pyrit.executor.benchmark.inspect_sandbox",
     "QuestionAnsweringBenchmarkContext": "pyrit.executor.benchmark.question_answering",
     "QuestionAnsweringBenchmark": "pyrit.executor.benchmark.question_answering",
 }
