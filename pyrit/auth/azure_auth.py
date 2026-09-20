@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     import azure.cognitiveservices.speech as speechsdk
+    from azure.core.credentials_async import AsyncTokenCredential
 
 from pyrit.auth.auth_config import REFRESH_TOKEN_BEFORE_MSEC
 from pyrit.auth.authenticator import Authenticator
@@ -375,7 +376,9 @@ def get_azure_token_provider(scope: str) -> Callable[[], str]:
         raise
 
 
-def get_azure_async_token_provider(scope: str) -> Callable[[], Awaitable[str]]:
+def get_azure_async_token_provider(
+    scope: str, *, credential: AsyncTokenCredential | None = None
+) -> Callable[[], Awaitable[str]]:
     """
     Get an asynchronous Azure token provider using AsyncDefaultAzureCredential.
 
@@ -384,6 +387,9 @@ def get_azure_async_token_provider(scope: str) -> Callable[[], Awaitable[str]]:
 
     Args:
         scope (str): The Azure token scope (e.g., 'https://cognitiveservices.azure.com/.default').
+        credential (AsyncTokenCredential | None): Optional caller-owned credential. The caller
+            must close it after the provider's last use, preferably with an async context manager.
+            If omitted, creates an AsyncDefaultAzureCredential as before.
 
     Returns:
         Async callable that returns bearer tokens.
@@ -393,7 +399,9 @@ def get_azure_async_token_provider(scope: str) -> Callable[[], Awaitable[str]]:
         >>> token = await token_provider()  # Get current token (in async context)
     """
     try:
-        return get_async_bearer_token_provider(AsyncDefaultAzureCredential(), scope)
+        return get_async_bearer_token_provider(
+            credential if credential is not None else AsyncDefaultAzureCredential(), scope
+        )
     except Exception as e:
         logger.error(f"Failed to obtain async token provider for '{scope}': {e}")
         raise
@@ -419,7 +427,9 @@ def get_default_azure_scope(endpoint: str) -> str:
     return "https://cognitiveservices.azure.com/.default"
 
 
-def get_azure_openai_auth(endpoint: str) -> Callable[[], Awaitable[str]]:
+def get_azure_openai_auth(
+    endpoint: str, *, credential: AsyncTokenCredential | None = None
+) -> Callable[[], Awaitable[str]]:
     """
     Get an async Azure token provider for OpenAI endpoints.
 
@@ -428,6 +438,9 @@ def get_azure_openai_auth(endpoint: str) -> Callable[[], Awaitable[str]]:
 
     Args:
         endpoint (str): The Azure OpenAI endpoint URL.
+        credential (AsyncTokenCredential | None): Optional caller-owned credential, kept alive
+            until all requests finish and then closed by the caller. If omitted, preserves the
+            default credential behavior.
 
     Returns:
         Async callable that returns bearer tokens.
@@ -440,7 +453,9 @@ def get_azure_openai_auth(endpoint: str) -> Callable[[], Awaitable[str]]:
         ... )
     """
     scope = get_default_azure_scope(endpoint)
-    return get_azure_async_token_provider(scope)
+    if credential is None:
+        return get_azure_async_token_provider(scope)
+    return get_azure_async_token_provider(scope, credential=credential)
 
 
 def get_speech_config(resource_id: str | None, key: str | None, region: str) -> speechsdk.SpeechConfig:

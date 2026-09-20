@@ -1,5 +1,73 @@
 ---------------------------------------------------------
 
+Inspect evaluation prompt formatting and inclusion-scoring semantics - MIT
+https://github.com/UKGovernmentBEIS/inspect_evals
+https://github.com/UKGovernmentBEIS/inspect_ai
+
+The native CTF prototype adapts the task-4 input format from inspect-evals
+revision 8ddfea18ea7dabbac4d230b1fb0e7139655afb6f, path
+src/inspect_evals/gdm_intercode_ctf/dataset.py, and the includes() matching
+semantics from inspect-ai 0.3.259, src/inspect_ai/scorer/_match.py.
+Microsoft Corporation modified
+these portions for PyRIT. Neither Inspect package is a runtime dependency
+of the native implementation.
+
+MIT License
+
+Copyright (c) 2024 UK AI Security Institute
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------
+
+InterCode CTF data provenance - MIT
+https://github.com/princeton-nlp/intercode
+
+The native CTF operator binding downloads dataset/task-4 assets from revision
+c3e46d827cfc9d4c704ec078f7abf9f41e3191d8. Downloaded data is not bundled in
+PyRIT. Its upstream LICENSE.md is verified and retained beside run artifacts.
+The upstream dataset identifies picoCTF as the original challenge source.
+
+MIT License
+
+Copyright (c) 2023 Princeton Natural Language Processing
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------
+
 garak source portions - Apache-2.0
 https://github.com/NVIDIA/garak
 

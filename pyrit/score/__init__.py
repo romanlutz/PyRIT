@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from pyrit.score.true_false.decoding_scorer import DecodingScorer
     from pyrit.score.true_false.float_scale_threshold_scorer import FloatScaleThresholdScorer
     from pyrit.score.true_false.gandalf_scorer import GandalfScorer
+    from pyrit.score.true_false.includes_scorer import IncludesScorer
     from pyrit.score.true_false.llamaguard_parser import LLAMAGUARD_3_CATEGORY_CODES, parse_llamaguard_response
     from pyrit.score.true_false.llamaguard_policy import LlamaGuardCategory, LlamaGuardPolicy
     from pyrit.score.true_false.llamaguard_scorer import (
@@ -165,6 +166,7 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "HumanLabeledDataset": "pyrit.score.scorer_evaluation.human_labeled_dataset",
     "HumanLabeledEntry": "pyrit.score.scorer_evaluation.human_labeled_dataset",
     "InsecureCodeScorer": "pyrit.score.float_scale.insecure_code_scorer",
+    "IncludesScorer": "pyrit.score.true_false.includes_scorer",
     "JsonSchemaResponseHandler": "pyrit.score.response_handler",
     "LDAPInjectionOutputScorer": "pyrit.score.true_false.regex.ldap_injection_output_scorer",
     "LikertScaleEvalFiles": "pyrit.score.float_scale.self_ask_likert_scorer",
