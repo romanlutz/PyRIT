@@ -5,10 +5,14 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import ChatWindow from "./ChatWindow";
 import { makeTarget } from "@/test-utils/targetFixtures";
 import {
+  AttackSummary,
   BackendMessage,
+  ConversationMessagesResponse,
   ConverterInstance,
   Message,
   MessageAttachment,
+  MessageSendInput,
+  MessageSendStatus,
   PromptResponseError,
   TargetCapabilities,
   TargetInfo,
@@ -41,6 +45,9 @@ jest.mock("../../services/api", () => ({
     updateAttack: jest.fn(),
     removeHumanScore: jest.fn(),
     addMessage: jest.fn(),
+    startMessageSend: jest.fn(),
+    getMessageSend: jest.fn(),
+    getAttack: jest.fn(),
     getMessages: jest.fn(),
     getRelatedConversations: jest.fn(),
     getConversations: jest.fn(),
@@ -80,6 +87,80 @@ const actualMessageMapper = jest.requireActual<typeof import("../../utils/messag
   "../../utils/messageMapper"
 );
 const MARKDOWN_PREFERENCE_STORAGE_KEY = "pyrit.chatMarkdownMode";
+
+interface TargetResult {
+  messages: Omit<ConversationMessagesResponse, "conversation_id">
+  attack?: AttackSummary
+}
+
+const mockTargetResult = jest.fn<Promise<TargetResult>, [string, MessageSendInput]>();
+const mockReadConversation = jest.fn<
+  ReturnType<typeof attacksApi.getMessages>,
+  Parameters<typeof attacksApi.getMessages>
+>();
+
+// The API fixtures model acceptance, terminal status, transcript, and metadata separately.
+// ChatWindow and useMessageSend always run their real asynchronous lifecycle.
+function installSendApiMocks(): void {
+  const operations = new Map<string, { status: MessageSendStatus; request: MessageSendInput }>();
+  const transcripts = new Map<string, ConversationMessagesResponse>();
+  const attacks = new Map<string, AttackSummary>();
+  mockedAttacksApi.startMessageSend.mockImplementation(async (attackId: string, request: MessageSendInput) => {
+    const status: MessageSendStatus = {
+      send_id: `send-${operations.size + 1}`,
+      attack_result_id: attackId,
+      source_conversation_id: request.target_conversation_id,
+      requested_count: request.count ?? 1,
+      state: "preparing",
+      branches: [],
+      error: null,
+      failure_stage: null,
+    };
+    operations.set(status.send_id, { status, request });
+    return status;
+  });
+  mockedAttacksApi.getMessageSend.mockImplementation(async (attackId: string, sendId: string) => {
+    const operation = operations.get(sendId);
+    if (!operation) throw new Error(`Unknown send ${sendId}`);
+    const result = await mockTargetResult(attackId, operation.request);
+    const conversationId = operation.status.source_conversation_id;
+    transcripts.set(`${attackId}:${conversationId}`, { ...result.messages, conversation_id: conversationId });
+    attacks.set(attackId, result.attack ?? {
+      attack_result_id: attackId,
+      conversation_id: conversationId,
+      attack_type: "ManualAttack",
+      objective: "",
+      converters: [],
+      message_count: result.messages.messages.length,
+      related_conversation_ids: [],
+      labels: {},
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:01Z",
+    });
+    const failed = Boolean(result.messages.target_response_status?.response_error
+      && result.messages.target_response_status.response_error !== "none");
+    return {
+      ...operation.status,
+      state: failed ? "failed" : "completed",
+      failure_stage: failed ? "sending" : null,
+      branches: [{ conversation_id: conversationId, state: failed ? "failed" : "completed", error: null }],
+    };
+  });
+  mockedAttacksApi.getMessages.mockImplementation(async (attackId: string, conversationId: string) => {
+    const key = `${attackId}:${conversationId}`;
+    const transcript = transcripts.get(key);
+    if (transcript) {
+      transcripts.delete(key);
+      return transcript;
+    }
+    return mockReadConversation(attackId, conversationId);
+  });
+  mockedAttacksApi.getAttack.mockImplementation(async (attackId: string) => {
+    const attack = attacks.get(attackId);
+    if (!attack) throw new Error(`Unknown attack ${attackId}`);
+    return attack;
+  });
+}
 
 const TestWrapper: React.FC<{ children: React.ReactNode }> = ({
   children,
@@ -379,8 +460,13 @@ describe("ChatWindow Integration", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockReadConversation.mockReset();
+    mockedAttacksApi.startMessageSend.mockReset();
+    mockedAttacksApi.getMessageSend.mockReset();
     mockedAttacksApi.getMessages.mockReset();
-    mockedAttacksApi.addMessage.mockReset();
+    mockedAttacksApi.getAttack.mockReset();
+    mockTargetResult.mockReset();
+    installSendApiMocks();
     mockedMapper.backendMessageToFrontend.mockReset();
     mockedMapper.backendMessageToOriginalDraft.mockReset();
     mockedMapper.backendMessageToOriginalDraft.mockImplementation(
@@ -397,7 +483,7 @@ describe("ChatWindow Integration", () => {
     });
     // Default: getMessages never resolves so loadConversation won't trigger
     // state updates outside act(). Tests that need it override this mock.
-    mockedAttacksApi.getMessages.mockImplementation(() => new Promise(() => {}));
+    mockReadConversation.mockImplementation(() => new Promise(() => {}));
     mockedConvertersApi.listConverters.mockResolvedValue({
       items: [],
     });
@@ -431,7 +517,7 @@ describe("ChatWindow Integration", () => {
   it("should attach an updated human score to the latest response", async () => {
     const user = userEvent.setup();
     const onHumanScoreChange = jest.fn();
-    mockedAttacksApi.getMessages.mockResolvedValue(makeTextResponse("Forked response") as never);
+    mockReadConversation.mockResolvedValue(makeTextResponse("Forked response").messages as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     mockedScoresApi.createManualScore.mockResolvedValue({
       id: "manual-score-id",
@@ -696,7 +782,7 @@ describe("ChatWindow Integration", () => {
   });
 
   it("should display existing messages", async () => {
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
 
     render(
@@ -749,7 +835,7 @@ describe("ChatWindow Integration", () => {
     const user = userEvent.setup();
     const onNewAttack = jest.fn();
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
 
     render(
@@ -805,7 +891,7 @@ describe("ChatWindow Integration", () => {
         timestamp: "2026-01-01T00:00:00Z",
       },
     ];
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedAttacksApi.getConversations.mockResolvedValue({
       attack_result_id: "ar-unverifiable",
       main_conversation_id: "conv-unverifiable",
@@ -892,7 +978,7 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-1",
       created_at: "2026-01-01T00:00:00Z",
     });
-    mockedAttacksApi.addMessage.mockResolvedValue({
+    mockTargetResult.mockResolvedValue({
       ...makeTextResponse("Hello back!"),
       attack: {
         attack_result_id: "ar-conv-1",
@@ -938,7 +1024,9 @@ describe("ChatWindow Integration", () => {
         system_prompt: undefined,
       });
       expect(onConversationCreated).toHaveBeenCalledWith("ar-conv-1", "conv-1", undefined);
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith("ar-conv-1", {
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith("ar-conv-1", {
+        count: 1,
+        request_converter_mode: "shared",
         role: "user",
         pieces: [{ data_type: "text", original_value: "Hello" }],
         send: true,
@@ -952,6 +1040,9 @@ describe("ChatWindow Integration", () => {
         })
       );
     });
+    expect(mockedAttacksApi.addMessage).not.toHaveBeenCalled();
+    expect(mockedAttacksApi.getMessageSend).toHaveBeenCalledWith("ar-conv-1", "send-1", expect.any(AbortSignal));
+    expect(screen.queryByRole("region", { name: "Prompt repetition progress" })).not.toBeInTheDocument();
 
     // Messages should appear in the DOM
     await waitFor(() => {
@@ -971,7 +1062,7 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-objective",
       created_at: "2026-01-01T00:00:00Z",
     });
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Hello back!") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Hello back!") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
 
     render(
@@ -1004,7 +1095,7 @@ describe("ChatWindow Integration", () => {
   });
 
   it("should allow adding an objective after messages have been sent", async () => {
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
 
     render(
@@ -1040,7 +1131,7 @@ describe("ChatWindow Integration", () => {
         conversation_id: "conv-sys",
         created_at: "2026-01-01T00:00:00Z",
       });
-      mockedAttacksApi.addMessage.mockResolvedValue(
+      mockTargetResult.mockResolvedValue(
         makeTextResponse("Hi") as never
       );
       mockedMapper.backendMessagesToFrontend.mockReturnValue([
@@ -1061,7 +1152,7 @@ describe("ChatWindow Integration", () => {
     });
 
     it("hides the system prompt toggle once an attack exists", async () => {
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
 
       render(
@@ -1085,7 +1176,7 @@ describe("ChatWindow Integration", () => {
     });
 
     it("renders a system prompt banner when the loaded conversation has a system message", async () => {
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue([
         { role: "system", content: "You are a pirate.", timestamp: "2026-01-01T00:00:00Z" },
         { role: "user", content: "Ahoy", timestamp: "2026-01-01T00:00:01Z" },
@@ -1310,7 +1401,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Second" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Response") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Response") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1331,7 +1422,7 @@ describe("ChatWindow Integration", () => {
 
     await waitFor(() => {
       expect(mockedAttacksApi.createAttack).not.toHaveBeenCalled();
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-existing-conv",
         expect.any(Object)
       );
@@ -1370,7 +1461,7 @@ describe("ChatWindow Integration", () => {
     });
   });
 
-  it("should show error message when addMessage fails", async () => {
+  it("should retain the draft when send submission is rejected", async () => {
     const user = userEvent.setup();
 
     mockedMapper.buildMessagePieces.mockResolvedValue([
@@ -1381,8 +1472,8 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-err",
       created_at: "2026-01-01T00:00:00Z",
     });
-    mockedAttacksApi.addMessage.mockRejectedValue(
-      new Error("Request failed with status code 404")
+    mockedAttacksApi.startMessageSend.mockRejectedValue(
+      { isAxiosError: true, response: { status: 404, data: { detail: "Request failed with status code 404" } } }
     );
 
     render(
@@ -1418,7 +1509,7 @@ describe("ChatWindow Integration", () => {
       status: 500,
       data: { detail: "Failed to add message: Image URLs are only allowed for messages with role 'user'" },
     };
-    mockedAttacksApi.addMessage.mockRejectedValue(axiosError);
+    mockedAttacksApi.startMessageSend.mockRejectedValue(axiosError);
 
     render(
       <TestWrapper>
@@ -1452,7 +1543,7 @@ describe("ChatWindow Integration", () => {
       status: 500,
       data: "Internal Server Error",
     };
-    mockedAttacksApi.addMessage.mockRejectedValue(axiosError);
+    mockedAttacksApi.startMessageSend.mockRejectedValue(axiosError);
 
     render(
       <TestWrapper>
@@ -1478,7 +1569,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "test" },
     ]);
-    mockedAttacksApi.addMessage.mockRejectedValue("string error");
+    mockedAttacksApi.startMessageSend.mockRejectedValue("string error");
 
     render(
       <TestWrapper>
@@ -1508,7 +1599,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Hello" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Hi!") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Hi!") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "user",
@@ -1552,7 +1643,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Generate an image" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeImageResponse() as never);
+    mockTargetResult.mockResolvedValue(makeImageResponse() as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1600,7 +1691,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Read this aloud" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeAudioResponse() as never);
+    mockTargetResult.mockResolvedValue(makeAudioResponse() as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1649,7 +1740,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Create a video" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeVideoResponse() as never);
+    mockTargetResult.mockResolvedValue(makeVideoResponse() as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1698,7 +1789,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Describe and show" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeMultiModalResponse() as never);
+    mockTargetResult.mockResolvedValue(makeMultiModalResponse() as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1752,7 +1843,7 @@ describe("ChatWindow Integration", () => {
         mime_type: "image/png",
       },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("It's a cat.") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("It's a cat.") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "assistant",
@@ -1776,7 +1867,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-conv-attach",
         expect.objectContaining({
           pieces: [
@@ -1808,7 +1899,7 @@ describe("ChatWindow Integration", () => {
         mime_type: "audio/wav",
       },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(
+    mockTargetResult.mockResolvedValue(
       makeTextResponse("Transcribed: hello") as never
     );
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
@@ -1830,7 +1921,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-conv-aud-send",
         expect.objectContaining({
           pieces: [
@@ -1886,14 +1977,14 @@ describe("ChatWindow Integration", () => {
       };
       mockedMapper.backendMessagesToFrontend.mockImplementation(actualMessageMapper.backendMessagesToFrontend);
       mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
-      mockedAttacksApi.getMessages.mockResolvedValue(failedMessages);
-      mockedAttacksApi.addMessage.mockResolvedValue({ messages: failedMessages } as never);
+      mockReadConversation.mockResolvedValue(failedMessages);
+      mockTargetResult.mockResolvedValue({ messages: failedMessages } as never);
       mockedAttacksApi.createConversation.mockResolvedValue({
         conversation_id: "conv-error-free",
         created_at: "2026-01-01T00:00:10Z",
       });
       if (source === "live") {
-        mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] });
+        mockReadConversation.mockResolvedValueOnce({ messages: [] });
       }
 
       const rendered = render(<TestWrapper><ChatWindow {...props} /></TestWrapper>);
@@ -1915,7 +2006,7 @@ describe("ChatWindow Integration", () => {
       expect(onSelectConversation).toHaveBeenCalledWith("conv-error-free");
       expect(screen.getByText(/history from the first failed prompt onward will be left out/i)).toBeInTheDocument();
 
-      mockedAttacksApi.getMessages.mockResolvedValue({
+      mockReadConversation.mockResolvedValue({
         conversation_id: "conv-error-free",
         messages: safePrefix,
         target_response_status: prefixLength
@@ -1928,7 +2019,7 @@ describe("ChatWindow Integration", () => {
       await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
       expect(screen.getByRole("textbox")).toHaveValue("Latest failed draft");
       expect(screen.queryByRole("button", { name: /edit in clean conversation/i })).not.toBeInTheDocument();
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(source === "live" ? 1 : 0);
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(source === "live" ? 1 : 0);
     },
   );
 
@@ -1942,10 +2033,12 @@ describe("ChatWindow Integration", () => {
     const pendingHistory = new Promise<typeof secondHistory>((resolve) => {
       resolveSecondHistory = resolve;
     });
-    mockedAttacksApi.getMessages
+    mockReadConversation
       .mockResolvedValueOnce(firstHistory)
       .mockReturnValueOnce(pendingHistory);
-    mockedAttacksApi.addMessage.mockRejectedValue(new Error("Request rejected"));
+    mockedAttacksApi.startMessageSend.mockRejectedValue({
+      isAxiosError: true, response: { status: 400, data: { detail: "Request rejected" } },
+    });
     mockedMapper.backendMessagesToFrontend.mockImplementation(actualMessageMapper.backendMessagesToFrontend);
     mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
     const props = {
@@ -1967,7 +2060,7 @@ describe("ChatWindow Integration", () => {
     expect(screen.getByRole("button", { name: /export conversation/i })).toBeDisabled();
     await user.click(sendButton);
     await user.keyboard("{Enter}");
-    expect(mockedAttacksApi.addMessage).not.toHaveBeenCalled();
+    expect(mockedAttacksApi.startMessageSend).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox")).toHaveValue("Unsent draft");
 
     await act(async () => {
@@ -1977,7 +2070,7 @@ describe("ChatWindow Integration", () => {
     expect(screen.queryByText("Only conversation A history")).not.toBeInTheDocument();
     await user.click(sendButton);
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         props.attackResultId,
         expect.objectContaining({ target_conversation_id: "conv-b" }),
       );
@@ -2020,13 +2113,13 @@ describe("ChatWindow Integration", () => {
       otherHistory.messages[1].message_pieces[0].converted_value = "Other conversation history";
       let rejectSend: (reason: Error) => void = () => {};
       let resolveReload: (value: typeof firstHistory) => void = () => {};
-      mockedAttacksApi.getMessages
+      mockReadConversation
         .mockResolvedValueOnce(firstHistory)
         .mockResolvedValueOnce(otherHistory)
         .mockImplementationOnce(() => new Promise<typeof firstHistory>((resolve) => {
           resolveReload = resolve;
         }));
-      mockedAttacksApi.addMessage.mockImplementation(() => new Promise((_resolve, reject) => {
+      mockedAttacksApi.startMessageSend.mockImplementation(() => new Promise((_resolve, reject) => {
         rejectSend = reject;
       }));
       mockedAttacksApi.getConversations.mockResolvedValue({
@@ -2049,7 +2142,7 @@ describe("ChatWindow Integration", () => {
       expect(await screen.findByText("Original conversation history")).toBeInTheDocument();
       await user.type(screen.getByRole("textbox"), "Pending original request");
       await user.click(screen.getByRole("button", { name: /send message/i }));
-      await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1));
       await user.click(await screen.findByRole("button", { name: "Select conversation conv-other" }));
       rendered.rerender(
         <TestWrapper><ChatWindow {...props} activeConversationId="conv-other" /></TestWrapper>
@@ -2093,7 +2186,7 @@ describe("ChatWindow Integration", () => {
     const user = userEvent.setup();
     const blocked = makeErrorResponse("blocked", "Blocked by the target", 0);
     const failed = makeErrorResponse("processing", "Processing failed", 2);
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       messages: [...blocked.messages.messages, ...failed.messages.messages],
       target_response_status: failed.messages.target_response_status,
     });
@@ -2118,7 +2211,7 @@ describe("ChatWindow Integration", () => {
       { source_conversation_id: "conv-blocked-prefix", cutoff_index: 1 },
     );
     expect(screen.queryByText(/history from the first failed prompt onward/i)).not.toBeInTheDocument();
-    expect(mockedAttacksApi.addMessage).not.toHaveBeenCalled();
+    expect(mockedAttacksApi.startMessageSend).not.toHaveBeenCalled();
   });
 
   it("should preserve a recovered media converter before its file read completes", async () => {
@@ -2162,12 +2255,12 @@ describe("ChatWindow Integration", () => {
     };
     mockedMapper.backendMessagesToFrontend.mockImplementation(actualMessageMapper.backendMessagesToFrontend);
     mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
-    mockedAttacksApi.getMessages
+    mockReadConversation
       .mockImplementation(async (_attackId: string, conversationId: string) => (
         conversationId === props.conversationId ? failedResponse.messages : { messages: [] }
       ))
       .mockResolvedValueOnce({ messages: [] });
-    mockedAttacksApi.addMessage
+    mockTargetResult
       .mockResolvedValueOnce(failedResponse as never)
       .mockResolvedValueOnce(makeTextResponse("Recovered response") as never);
     mockedAttacksApi.createConversation.mockResolvedValue({
@@ -2211,7 +2304,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByTestId("close-converter-panel-btn"));
     await user.click(screen.getByRole("button", { name: /send message/i }));
     expect(await screen.findByRole("button", { name: /edit in clean conversation/i })).toBeEnabled();
-    expect(mockedAttacksApi.addMessage).toHaveBeenLastCalledWith(
+    expect(mockedAttacksApi.startMessageSend).toHaveBeenLastCalledWith(
       props.attackResultId,
       expect.objectContaining({
         request_converter_configurations: [{
@@ -2245,7 +2338,7 @@ describe("ChatWindow Integration", () => {
     await act(async () => {
       await deferredReads[0]();
     });
-    expect(mockedAttacksApi.addMessage).toHaveBeenLastCalledWith(
+    expect(mockedAttacksApi.startMessageSend).toHaveBeenLastCalledWith(
       props.attackResultId,
       expect.objectContaining({
         target_conversation_id: "conv-media-recovery",
@@ -2258,14 +2351,14 @@ describe("ChatWindow Integration", () => {
     );
   });
 
-  it("should preserve the draft and expose recovery for an HTTP 200 processing error", async () => {
+  it("should preserve the draft and expose recovery for a saved processing error", async () => {
     const user = userEvent.setup();
     const onSelectConversation = jest.fn();
 
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "retry this prompt" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(
+    mockTargetResult.mockResolvedValue(
       makeErrorResponse("processing", "The target could not process this message.", 2) as never
     );
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
@@ -2356,12 +2449,12 @@ describe("ChatWindow Integration", () => {
     let resolveLoad: ((value: typeof staleLoadResponse) => void) | undefined;
     let resolveSend: (value: typeof processingResponse) => void = () => {};
 
-    mockedAttacksApi.getMessages.mockImplementation(
+    mockReadConversation.mockImplementation(
       () => new Promise<typeof staleLoadResponse>((resolve) => {
         resolveLoad = resolve;
       }) as never
     );
-    mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] });
+    mockReadConversation.mockResolvedValueOnce({ messages: [] });
     mockedAttacksApi.getConversations.mockResolvedValue({
       main_conversation_id: "conv-processing-load-race",
       conversations: [{ conversation_id: "conv-processing-load-race", message_count: 0 }],
@@ -2369,7 +2462,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "keep this draft" },
     ]);
-    mockedAttacksApi.addMessage.mockImplementation(
+    mockTargetResult.mockImplementation(
       () => new Promise<typeof processingResponse>((resolve) => {
         resolveSend = resolve;
       }) as never
@@ -2413,7 +2506,7 @@ describe("ChatWindow Integration", () => {
     const input = screen.getByRole("textbox");
     await user.type(input, "keep this draft");
     await user.click(screen.getByRole("button", { name: /send/i }));
-    await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1));
     await user.click(
       await screen.findByRole("button", { name: "Select conversation conv-processing-load-race" })
     );
@@ -2450,12 +2543,12 @@ describe("ChatWindow Integration", () => {
     let rejectLoad: ((reason?: unknown) => void) | undefined;
     let resolveSend: (value: typeof processingResponse) => void = () => {};
 
-    mockedAttacksApi.getMessages.mockImplementation(
+    mockReadConversation.mockImplementation(
       () => new Promise((_resolve, reject) => {
         rejectLoad = reject;
       }) as never
     );
-    mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] });
+    mockReadConversation.mockResolvedValueOnce({ messages: [] });
     mockedAttacksApi.getConversations.mockResolvedValue({
       main_conversation_id: "conv-processing-load-failure",
       conversations: [{ conversation_id: "conv-processing-load-failure", message_count: 0 }],
@@ -2463,7 +2556,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "keep failed draft" },
     ]);
-    mockedAttacksApi.addMessage.mockImplementation(
+    mockTargetResult.mockImplementation(
       () => new Promise<typeof processingResponse>((resolve) => {
         resolveSend = resolve;
       }) as never
@@ -2488,7 +2581,7 @@ describe("ChatWindow Integration", () => {
     const input = screen.getByRole("textbox");
     await user.type(input, "keep failed draft");
     await user.click(screen.getByRole("button", { name: /send/i }));
-    await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1));
     await user.click(
       await screen.findByRole("button", { name: "Select conversation conv-processing-load-failure" })
     );
@@ -2531,7 +2624,7 @@ describe("ChatWindow Integration", () => {
         },
       ],
     } as never);
-    mockedAttacksApi.getMessages
+    mockReadConversation
       .mockImplementationOnce(
         () => new Promise<typeof olderResponse>((resolve) => {
           resolveOlderLoad = resolve;
@@ -2599,7 +2692,7 @@ describe("ChatWindow Integration", () => {
         },
       ],
     } as never);
-    mockedAttacksApi.getMessages
+    mockReadConversation
       .mockResolvedValueOnce(loadedResponse as never)
       .mockRejectedValueOnce(new Error("refresh failed"));
     mockedMapper.backendMessagesToFrontend.mockImplementation(
@@ -2640,8 +2733,8 @@ describe("ChatWindow Integration", () => {
         main_conversation_id: "conv-status-refresh",
         conversations: [{ conversation_id: "conv-status-refresh", message_count: 2 }],
       });
-      mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] } as never);
-      mockedAttacksApi.addMessage.mockResolvedValue(failedResponse as never);
+      mockReadConversation.mockResolvedValueOnce({ messages: [] } as never);
+      mockTargetResult.mockResolvedValue(failedResponse as never);
       mockedMapper.buildMessagePieces.mockResolvedValue([
         { data_type: "text", original_value: "live draft" },
       ]);
@@ -2664,7 +2757,7 @@ describe("ChatWindow Integration", () => {
       await user.click(screen.getByRole("button", { name: /send/i }));
       expect(await screen.findByRole("button", { name: /edit in clean conversation/i })).toBeEnabled();
 
-      mockedAttacksApi.getMessages.mockResolvedValue({
+      mockReadConversation.mockResolvedValue({
         conversation_id: "conv-status-refresh",
         messages: [
           ...failedResponse.messages.messages,
@@ -2685,7 +2778,7 @@ describe("ChatWindow Integration", () => {
         expect(input).toBeEnabled();
       });
       expect(input).toHaveValue("live draft");
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1);
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1);
       expect(mockedAttacksApi.createConversation).not.toHaveBeenCalled();
     }
   );
@@ -2706,8 +2799,8 @@ describe("ChatWindow Integration", () => {
         main_conversation_id: "conv-newer-failure",
         conversations: [{ conversation_id: "conv-newer-failure", message_count: 2 }],
       });
-      mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] } as never);
-      mockedAttacksApi.addMessage.mockResolvedValue(failedResponse as never);
+      mockReadConversation.mockResolvedValueOnce({ messages: [] } as never);
+      mockTargetResult.mockResolvedValue(failedResponse as never);
       mockedAttacksApi.createConversation.mockResolvedValue({
         conversation_id: "conv-newer-recovery",
         created_at: "2026-01-01T00:00:04Z",
@@ -2734,7 +2827,7 @@ describe("ChatWindow Integration", () => {
       await user.click(screen.getByRole("button", { name: /send/i }));
       expect(await screen.findByRole("button", { name: /edit in clean conversation/i })).toBeEnabled();
 
-      mockedAttacksApi.getMessages.mockResolvedValue({
+      mockReadConversation.mockResolvedValue({
         conversation_id: "conv-newer-failure",
         messages: [
           ...failedResponse.messages.messages,
@@ -2804,8 +2897,8 @@ describe("ChatWindow Integration", () => {
       main_conversation_id: props.conversationId,
       conversations: [{ conversation_id: props.conversationId, message_count: 2 }],
     });
-    mockedAttacksApi.getMessages.mockResolvedValueOnce({ messages: [] } as never);
-    mockedAttacksApi.addMessage.mockResolvedValue(failedResponse as never);
+    mockReadConversation.mockResolvedValueOnce({ messages: [] } as never);
+    mockTargetResult.mockResolvedValue(failedResponse as never);
     mockedAttacksApi.createConversation.mockResolvedValue({
       conversation_id: "conv-matching-recovery",
       created_at: "2026-01-01T00:00:04Z",
@@ -2848,7 +2941,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send message/i }));
     expect(await screen.findByRole("button", { name: /edit in clean conversation/i })).toBeEnabled();
 
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       conversation_id: props.conversationId,
       messages: [
         ...makeErrorResponse("processing", "Earlier target failure", 0).messages.messages,
@@ -2866,7 +2959,7 @@ describe("ChatWindow Integration", () => {
       expect(onSelectConversation).toHaveBeenCalledWith("conv-matching-recovery");
       expect(mockedAttacksApi.createConversation).toHaveBeenCalledWith(props.attackResultId, {});
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       conversation_id: "conv-matching-recovery",
       messages: [],
       target_response_status: null,
@@ -2880,7 +2973,7 @@ describe("ChatWindow Integration", () => {
     expect(await screen.findByTestId("converted-file-chip")).toHaveTextContent("live.pdf");
     await user.click(screen.getByRole("button", { name: /send message/i }));
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenLastCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenLastCalledWith(
         props.attackResultId,
         expect.objectContaining({
           target_conversation_id: "conv-matching-recovery",
@@ -2958,7 +3051,7 @@ describe("ChatWindow Integration", () => {
       },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       conversation_id: "conv-persisted-processing",
       messages: persistedMessages,
       target_response_status: {
@@ -3027,7 +3120,7 @@ describe("ChatWindow Integration", () => {
       expect(onSelectConversation).toHaveBeenCalledWith("conv-persisted-recovery");
     });
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] } as never);
+    mockReadConversation.mockResolvedValue({ messages: [] } as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     rendered.rerender(
       <TestWrapper>
@@ -3090,10 +3183,10 @@ describe("ChatWindow Integration", () => {
     await user.click(await screen.findByRole("button", { name: /add converted value/i }));
 
     mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("recovered") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("recovered") as never);
     await user.click(screen.getByRole("button", { name: /send message/i }));
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-persisted-processing",
         expect.objectContaining({
           target_conversation_id: "conv-persisted-recovery",
@@ -3150,7 +3243,7 @@ describe("ChatWindow Integration", () => {
       created_at: "2026-01-01T00:00:03Z",
     };
 
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       conversation_id: "conv-stale-processing",
       messages: [
         ...historicalFailure.messages.messages,
@@ -3217,7 +3310,7 @@ describe("ChatWindow Integration", () => {
         : message
     );
 
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       conversation_id: "conv-simulated-processing",
       messages: simulatedMessages,
       target_response_status: null,
@@ -3262,12 +3355,12 @@ describe("ChatWindow Integration", () => {
     const response = makeTextResponse("Reply from conversation A");
     let resolveMessage: ((value: typeof response) => void) | undefined;
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] } as never);
+    mockReadConversation.mockResolvedValue({ messages: [] } as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "conversation A draft" },
     ]);
-    mockedAttacksApi.addMessage.mockImplementation(
+    mockTargetResult.mockImplementation(
       () => new Promise<typeof response>((resolve) => {
         resolveMessage = resolve;
       }) as never
@@ -3294,7 +3387,7 @@ describe("ChatWindow Integration", () => {
     const input = screen.getByRole("textbox");
     await user.type(input, "conversation A draft");
     await user.click(screen.getByRole("button", { name: /send/i }));
-    await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1));
 
     rendered.rerender(
       <TestWrapper>
@@ -3329,7 +3422,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "failed draft" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(
+    mockTargetResult.mockResolvedValue(
       makeErrorResponse(
         "processing",
         "The target could not process this message.",
@@ -3415,7 +3508,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "bad prompt" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(
+    mockTargetResult.mockResolvedValue(
       makeErrorResponse("blocked", "Content was filtered by safety system") as never
     );
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
@@ -3463,7 +3556,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "generate this image" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(
+    mockTargetResult.mockResolvedValue(
       makeErrorResponse("processing", "The target could not process this message.") as never
     );
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
@@ -3517,7 +3610,7 @@ describe("ChatWindow Integration", () => {
       expect(onSelectConversation).toHaveBeenCalledWith("conv-single-recovery");
     });
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] } as never);
+    mockReadConversation.mockResolvedValue({ messages: [] } as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     rendered.rerender(
       <TestWrapper>
@@ -3553,7 +3646,7 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-multi-turn",
       created_at: "2026-01-01T00:00:00Z",
     });
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Reply 1") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Reply 1") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "user",
@@ -3591,7 +3684,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Turn 2" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Reply 2") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Reply 2") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       {
         role: "user",
@@ -3631,7 +3724,7 @@ describe("ChatWindow Integration", () => {
 
     await waitFor(() => {
       expect(mockedAttacksApi.createAttack).not.toHaveBeenCalled();
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-conv-multi-turn",
         expect.objectContaining({
           pieces: [{ data_type: "text", original_value: "Turn 2" }],
@@ -3652,7 +3745,7 @@ describe("ChatWindow Integration", () => {
     mockedMapper.buildMessagePieces.mockResolvedValue([
       { data_type: "text", original_value: "Hello" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("Hi!") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("Hi!") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       { role: "assistant", content: "Hi!", timestamp: "2026-01-01T00:00:01Z" },
     ]);
@@ -3668,7 +3761,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(1);
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(1);
     });
 
     // Turn 2: text + image
@@ -3677,7 +3770,7 @@ describe("ChatWindow Integration", () => {
       { data_type: "text", original_value: "What is this?" },
       { data_type: "image_path", original_value: "base64data", mime_type: "image/png" },
     ]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("A cat") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("A cat") as never);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([
       { role: "assistant", content: "A cat", timestamp: "2026-01-01T00:00:02Z" },
     ]);
@@ -3692,7 +3785,7 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => {
-      expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith(
+      expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith(
         "ar-conv-mixed-turns",
         expect.objectContaining({
           pieces: [
@@ -3737,7 +3830,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "Here is the image", timestamp: "2026-01-01T00:00:01Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(messagesWithUser);
 
     render(
@@ -3787,7 +3880,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "Hi there", timestamp: "2026-01-01T00:00:01Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(messagesWithUser);
 
     render(
@@ -3820,7 +3913,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "Audio output", timestamp: "2026-01-01T00:00:01Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(messagesWithUser);
 
     render(
@@ -3961,7 +4054,7 @@ describe("ChatWindow Integration", () => {
         { conversation_id: "conv-related", is_main: false },
       ],
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({
+    mockReadConversation.mockResolvedValue({
       messages: [],
     });
 
@@ -4011,7 +4104,7 @@ describe("ChatWindow Integration", () => {
     ];
 
     // Mock getMessages so loadConversation resolves and clears loading state
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedAttacksApi.createConversation.mockResolvedValue({
       conversation_id: "new-conv-branched",
@@ -4050,7 +4143,7 @@ describe("ChatWindow Integration", () => {
   it("should keep the mobile drawer closed until requested and restore focus after Escape", async () => {
     const user = userEvent.setup();
     mockMatchMedia(true);
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedAttacksApi.getConversations.mockResolvedValue({
       main_conversation_id: "conv-mobile",
       conversations: [
@@ -4109,7 +4202,7 @@ describe("ChatWindow Integration", () => {
     ];
 
     // Mock getMessages so loadConversation resolves and clears loading state
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedAttacksApi.createConversation.mockResolvedValue({
       conversation_id: "new-conv-copied",
@@ -4166,7 +4259,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "Here is the image", timestamp: "2026-01-01T00:00:01Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(messagesWithUser);
 
     render(
@@ -4225,7 +4318,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "This is the response text" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
 
     render(
@@ -4293,7 +4386,7 @@ describe("ChatWindow Integration", () => {
       },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedAttacksApi.createConversation.mockResolvedValue({
       conversation_id: "new-conv-copy",
@@ -4334,7 +4427,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "fallback text" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedAttacksApi.createConversation.mockRejectedValue(new Error("Failed"));
 
@@ -4375,7 +4468,7 @@ describe("ChatWindow Integration", () => {
       { role: "assistant", content: "response" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedAttacksApi.createConversation.mockResolvedValue({
       conversation_id: "branched-conv",
@@ -4424,7 +4517,7 @@ describe("ChatWindow Integration", () => {
       { role: "user", content: "hello", timestamp: "2026-01-01T00:00:00Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
 
     render(
@@ -4450,7 +4543,7 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-new-branch",
       created_at: "2026-01-01T00:00:00Z",
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(clonedMessages);
 
     const branchBtn = screen.getByTestId("branch-attack-btn-1");
@@ -4480,7 +4573,7 @@ describe("ChatWindow Integration", () => {
       ],
       main_conversation_id: "conv-main",
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     mockedAttacksApi.changeMainConversation.mockResolvedValue({});
 
@@ -4550,7 +4643,7 @@ describe("ChatWindow Integration", () => {
       { role: "user", content: "hello", timestamp: "2026-01-01T00:00:00Z" },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(existingMessages);
     mockedAttacksApi.createAttack.mockResolvedValue({
       attack_result_id: "ar-template",
@@ -4577,7 +4670,7 @@ describe("ChatWindow Integration", () => {
     });
 
     // Reconfigure mocks for the template creation
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(templateMessages);
 
     const useTemplateBtn = screen.getByTestId("use-as-template-btn");
@@ -4614,7 +4707,7 @@ describe("ChatWindow Integration", () => {
       },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(existingMessages);
 
     render(
@@ -4654,7 +4747,7 @@ describe("ChatWindow Integration", () => {
         { conversation_id: "conv-cross-panel", is_main: true, message_count: 2, created_at: "2026-01-01T00:00:00Z" },
       ],
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
 
     render(
@@ -4696,7 +4789,7 @@ describe("ChatWindow Integration", () => {
   // Network error in handleSend
   // -----------------------------------------------------------------------
 
-  it("should show network error when addMessage fails with network error", async () => {
+  it("should show uncertain status when send submission loses its response", async () => {
     const user = userEvent.setup();
 
     mockedMapper.buildMessagePieces.mockResolvedValue([
@@ -4710,7 +4803,7 @@ describe("ChatWindow Integration", () => {
     };
     networkError.isAxiosError = true;
     (networkError as Record<string, unknown>).response = undefined;
-    mockedAttacksApi.addMessage.mockRejectedValue(networkError);
+    mockedAttacksApi.startMessageSend.mockRejectedValue(networkError);
 
     render(
       <TestWrapper>
@@ -4731,7 +4824,7 @@ describe("ChatWindow Integration", () => {
     });
   });
 
-  it("should show timeout error when addMessage fails with timeout", async () => {
+  it("should show uncertain status when send submission times out", async () => {
     const user = userEvent.setup();
 
     mockedMapper.buildMessagePieces.mockResolvedValue([
@@ -4744,7 +4837,7 @@ describe("ChatWindow Integration", () => {
     };
     timeoutError.isAxiosError = true;
     (timeoutError as Record<string, unknown>).code = "ECONNABORTED";
-    mockedAttacksApi.addMessage.mockRejectedValue(timeoutError);
+    mockedAttacksApi.startMessageSend.mockRejectedValue(timeoutError);
 
     render(
       <TestWrapper>
@@ -4775,7 +4868,7 @@ describe("ChatWindow Integration", () => {
         { conversation_id: "conv-toggle-main", is_main: true, message_count: 1, created_at: "2026-01-01T00:00:00Z" },
       ],
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
 
     render(
@@ -5035,7 +5128,7 @@ describe("ChatWindow Integration", () => {
   });
 
   it("should allow converter and conversation panels to be open at the same time", async () => {
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedAttacksApi.getConversations.mockResolvedValue({
       main_conversation_id: "conv-both-panels",
       conversations: [
@@ -5107,10 +5200,10 @@ describe("ChatWindow Integration", () => {
       },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
     mockedMapper.buildMessagePieces.mockResolvedValue([]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("done") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("done") as never);
 
     render(
       <TestWrapper>
@@ -5186,7 +5279,7 @@ describe("ChatWindow Integration", () => {
       },
     ];
 
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
 
     render(
@@ -5218,7 +5311,7 @@ describe("ChatWindow Integration", () => {
   // ---------------------------------------------------------------------------
 
   it("should open converter panel when toggle button is clicked and pass props", async () => {
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
     mockedConvertersApi.listConverters.mockResolvedValue({ items: [] });
 
@@ -5341,8 +5434,8 @@ describe("ChatWindow Integration", () => {
     });
     mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
-    mockedAttacksApi.addMessage.mockImplementation(() => new Promise(() => {}));
+    mockReadConversation.mockResolvedValue({ messages: [] });
+    mockTargetResult.mockImplementation(() => new Promise(() => {}));
     render(<TestWrapper><ChatWindow
       {...defaultProps}
       attackResultId="ar-pieces"
@@ -5369,10 +5462,10 @@ describe("ChatWindow Integration", () => {
     if (removeFailed) await user.click(screen.getByTestId("remove-attachment-0"));
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledWith("ar-pieces", expect.objectContaining({
+    await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledWith("ar-pieces", expect.objectContaining({
       request_converter_configurations: [{ converter_ids: ["compress"], indexes_to_apply: [removeFailed ? 0 : 1] }],
     })));
-    const request = mockedAttacksApi.addMessage.mock.calls[0][1];
+    const request = mockedAttacksApi.startMessageSend.mock.calls[0][1];
     expect(request.pieces[removeFailed ? 0 : 1].original_value).toBe("c2Vjb25k");
     expect(request.pieces).toHaveLength(removeFailed ? 1 : 2);
   });
@@ -5388,10 +5481,10 @@ describe("ChatWindow Integration", () => {
         input_value: "hello", input_data_type: "text", output_value: "aGVsbG8=", output_data_type: "text",
       }],
     });
-    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockReadConversation.mockResolvedValue({ messages: [] });
     mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
     mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
-    mockedAttacksApi.addMessage.mockResolvedValue(makeTextResponse("response") as never);
+    mockTargetResult.mockResolvedValue(makeTextResponse("response") as never);
     render(<TestWrapper><ChatWindow
       {...defaultProps} attackResultId="ar-persist" conversationId="conv-persist" activeConversationId="conv-persist"
     /></TestWrapper>);
@@ -5409,10 +5502,10 @@ describe("ChatWindow Integration", () => {
     expect(screen.getByRole("button", { name: "Add converted value" })).toBeDisabled();
     await user.type(screen.getByTestId("chat-input"), "next");
     await user.click(screen.getByRole("button", { name: "Send message" }));
-    await waitFor(() => expect(mockedAttacksApi.addMessage).toHaveBeenCalledTimes(2));
-    expect(mockedAttacksApi.addMessage.mock.calls[0][1].request_converter_configurations)
+    await waitFor(() => expect(mockedAttacksApi.startMessageSend).toHaveBeenCalledTimes(2));
+    expect(mockedAttacksApi.startMessageSend.mock.calls[0][1].request_converter_configurations)
       .toEqual([{ converter_ids: ["base64"], indexes_to_apply: [0] }]);
-    expect(mockedAttacksApi.addMessage.mock.calls[1][1].request_converter_configurations).toBeUndefined();
+    expect(mockedAttacksApi.startMessageSend.mock.calls[1][1].request_converter_configurations).toBeUndefined();
   });
 
   it("should render converted-file chip and synthesize file attachment when a text→file converter is used", async () => {
@@ -5440,9 +5533,9 @@ describe("ChatWindow Integration", () => {
       conversation_id: "conv-pdf-flow",
       created_at: "2026-01-01T00:00:00Z",
     } as never);
-    // Keep addMessage pending so the optimistic user message (with the
+    // Keep target completion pending so the optimistic user message (with the
     // synthesized file attachment) remains in the DOM for assertion.
-    mockedAttacksApi.addMessage.mockImplementation(
+    mockTargetResult.mockImplementation(
       () => new Promise(() => {}) as never
     );
     mockedMapper.buildMessagePieces.mockResolvedValue([
@@ -5588,7 +5681,7 @@ describe("ChatWindow Integration", () => {
     async function renderWithLoadedConversation(
       props: Record<string, unknown> = {}
     ): Promise<void> {
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue(mockMessages);
       render(
         <TestWrapper>
@@ -5634,7 +5727,7 @@ describe("ChatWindow Integration", () => {
     });
 
     it("keeps export disabled when every loaded message is a loading placeholder", async () => {
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue([
         { role: "assistant", content: "", timestamp: "2026-07-22T02:30:07.000Z", isLoading: true },
       ]);
@@ -5656,7 +5749,7 @@ describe("ChatWindow Integration", () => {
     });
 
     it("keeps export disabled when the only loaded message is a system prompt", async () => {
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue([
         { role: "system", content: "You are a pirate.", timestamp: "2026-07-22T02:30:07.000Z" },
       ]);
@@ -5754,7 +5847,7 @@ describe("ChatWindow Integration", () => {
           ],
         },
       ];
-      mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+      mockReadConversation.mockResolvedValue({ messages: [] });
       mockedMapper.backendMessagesToFrontend.mockReturnValue(messagesWithMedia);
       // Hold the media read open so the export stays in flight across clicks.
       let releaseMedia: (value: string) => void = () => {};
@@ -5831,8 +5924,8 @@ describe("ChatWindow Integration", () => {
       mockedMapper.buildMessagePieces.mockResolvedValue([
         { data_type: "text", original_value: "hi" },
       ]);
-      // addMessage never resolves, so the conversation stays in the sending state.
-      mockedAttacksApi.addMessage.mockImplementation(() => new Promise(() => {}));
+      // Target completion never resolves, so the conversation stays in the sending state.
+      mockTargetResult.mockImplementation(() => new Promise(() => {}));
       await renderWithLoadedConversation();
 
       await user.type(screen.getByRole("textbox"), "hi");

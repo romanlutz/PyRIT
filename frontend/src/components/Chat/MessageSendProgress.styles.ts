@@ -2,7 +2,7 @@ import { makeStyles, tokens } from '@fluentui/react-components'
 
 import { mobileTouchTarget } from '@/styles/touchTargets'
 
-export const useMessageBatchProgressStyles = makeStyles({
+export const useMessageSendProgressStyles = makeStyles({
   root: {
     display: 'flex',
     flexDirection: 'column',

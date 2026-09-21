@@ -399,7 +399,7 @@ describe("api service", () => {
   });
 
   describe("attacksApi", () => {
-    it("submits an ordered batch with a generated submission identity", async () => {
+    it("submits ordered sends with a generated submission identity", async () => {
       const request = {
         role: "user",
         pieces: [
@@ -413,12 +413,12 @@ describe("api service", () => {
         request_converter_mode: "shared" as const,
         request_converter_configurations: [{ converter_ids: ["first", "second"] }],
       };
-      const response = { batch_id: "batch", state: "queued" };
+      const response = { send_id: "send", state: "queued" };
       (apiClient.post as jest.Mock).mockResolvedValueOnce({ data: response });
 
-      await expect(attacksApi.startMessageBatch("attack/id", request)).resolves.toEqual(response);
+      await expect(attacksApi.startMessageSend("attack/id", request)).resolves.toEqual(response);
       expect(apiClient.post).toHaveBeenCalledWith(
-        "/attacks/attack%2Fid/messages/batch",
+        "/attacks/attack%2Fid/message-sends",
         { ...request, submission_id: expect.any(String) },
       );
       expect(request).not.toHaveProperty("submission_id");
@@ -435,25 +435,41 @@ describe("api service", () => {
         request_converter_mode: "per_branch" as const,
         submission_id: "already-chosen",
       };
-      (apiClient.post as jest.Mock).mockResolvedValueOnce({ data: { batch_id: "batch" } });
+      (apiClient.post as jest.Mock).mockResolvedValueOnce({ data: { send_id: "send" } });
 
-      await attacksApi.startMessageBatch("attack", request);
+      await attacksApi.startMessageSend("attack", request);
 
-      expect(apiClient.post).toHaveBeenCalledWith("/attacks/attack/messages/batch", request);
+      expect(apiClient.post).toHaveBeenCalledWith("/attacks/attack/message-sends", request);
     });
 
-    it("reads compact batch progress with cancellation and encoded identifiers", async () => {
+    it("long-polls compact send progress with cancellation and encoded identifiers", async () => {
       const controller = new AbortController();
-      const response = { batch_id: "batch/id", state: "completed" };
+      const response = { send_id: "send/id", state: "completed" };
       (apiClient.get as jest.Mock).mockResolvedValueOnce({ data: response });
 
       await expect(
-        attacksApi.getMessageBatch("attack/id", "batch/id", controller.signal),
+        attacksApi.getMessageSend("attack/id", "send/id", controller.signal),
       ).resolves.toEqual(response);
       expect(apiClient.get).toHaveBeenCalledWith(
-        "/attacks/attack%2Fid/message-batches/batch%2Fid",
-        { signal: controller.signal },
+        "/attacks/attack%2Fid/message-sends/send%2Fid",
+        { params: { wait_ms: 1000 }, signal: controller.signal },
       );
+    });
+
+    it("allows the server defaults for a single send without retrying failed submissions", async () => {
+      const request = {
+        role: "user",
+        pieces: [{ data_type: "text", original_value: "Prompt" }],
+        send: true,
+        target_registry_name: "target",
+        target_conversation_id: "source",
+      };
+      (apiClient.post as jest.Mock).mockRejectedValueOnce(new Error("Disconnected"));
+      await expect(attacksApi.startMessageSend("attack", request)).rejects.toThrow("Disconnected");
+      expect(apiClient.post).toHaveBeenCalledTimes(1);
+      expect(apiClient.post).toHaveBeenCalledWith("/attacks/attack/message-sends", {
+        ...request, submission_id: expect.any(String),
+      });
     });
 
     it("should create an attack", async () => {

@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Manual batches exercised through real domain messages, normalizers, and SQLite."""
+"""Single and repeated sends exercised through real normalizers and SQLite."""
 
 import asyncio
 import threading
@@ -17,26 +17,28 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from pyrit.backend.models.attacks import AddMessageRequest, ConverterConfigurationRequest, MessagePieceRequest
-from pyrit.backend.models.message_batches import (
-    MessageBatchBranchState,
-    MessageBatchRequest,
-    MessageBatchState,
-    MessageBatchStatus,
+from pyrit.backend.models.message_sends import (
+    MessageSendBranchState,
+    MessageSendFailureStage,
+    MessageSendRequest,
+    MessageSendState,
+    MessageSendStatus,
     RequestConverterMode,
 )
-from pyrit.backend.routes import message_batches
+from pyrit.backend.routes import attacks, message_sends
 from pyrit.backend.services.attack_service import AttackService
 from pyrit.backend.services.converter_service import ConverterService
 from pyrit.backend.services.manual_send_scheduler import (
     ManualSendConflictError,
     ManualSendQueueFullError,
     ManualSendScheduler,
+    get_manual_send_scheduler,
 )
-from pyrit.backend.services.multi_send_service import (
-    MessageBatchNotFoundError,
-    MultiSendService,
-    get_multi_send_service,
-    shutdown_message_batches_async,
+from pyrit.backend.services.message_send_service import (
+    MessageSendNotFoundError,
+    MessageSendService,
+    get_message_send_service,
+    shutdown_message_sends_async,
 )
 from pyrit.backend.services.target_service import TargetService
 from pyrit.converter import Converter, ConverterResult
@@ -62,8 +64,8 @@ def _request(
     count: int = 5,
     mode: RequestConverterMode = RequestConverterMode.SHARED,
     converter_ids: list[str] | None = None,
-) -> MessageBatchRequest:
-    return MessageBatchRequest(
+) -> MessageSendRequest:
+    return MessageSendRequest(
         target_conversation_id=conversation_id,
         target_registry_name="target",
         pieces=[MessagePieceRequest(original_value="Next prompt")],
@@ -82,19 +84,19 @@ async def _wait_until_async(predicate: Callable[[], bool]) -> None:
             await asyncio.sleep(0.001)
 
 
-async def _wait_batch_async(*, service: MultiSendService, status: MessageBatchStatus) -> MessageBatchStatus:
+async def _wait_batch_async(*, service: MessageSendService, status: MessageSendStatus) -> MessageSendStatus:
     def is_finished() -> bool:
-        current = service.get_status(attack_result_id=status.attack_result_id, batch_id=status.batch_id)
-        return current.state in (MessageBatchState.COMPLETED, MessageBatchState.FAILED)
+        current = service.get_status(attack_result_id=status.attack_result_id, send_id=status.send_id)
+        return current.state in (MessageSendState.COMPLETED, MessageSendState.FAILED)
 
     await _wait_until_async(is_finished)
-    return service.get_status(attack_result_id=status.attack_result_id, batch_id=status.batch_id)
+    return service.get_status(attack_result_id=status.attack_result_id, send_id=status.send_id)
 
 
 @dataclass(kw_only=True)
 class _Harness:
     memory: SQLiteMemory
-    service: MultiSendService
+    service: MessageSendService
     attack_service: AttackService
     scheduler: ManualSendScheduler
     attack: AttackResult
@@ -127,17 +129,17 @@ async def harness(sqlite_instance: SQLiteMemory, patch_central_database: MagicMo
     converter_service.get_converter_objects_for_ids.return_value = []
     scheduler = ManualSendScheduler(max_concurrency=2, max_operations=12)
     attack_service = AttackService()
-    service = MultiSendService(memory=sqlite_instance, attack_service=attack_service, scheduler=scheduler)
+    service = MessageSendService(memory=sqlite_instance, scheduler=scheduler)
 
     async def send_async(*, message: Message, **kwargs: object) -> list[Message]:
         return [construct_response_from_request(request=message.get_piece(), response_text_pieces=["Reply"])]
 
     with (
         patch.object(target, "send_prompt_async", new_callable=AsyncMock, side_effect=send_async) as send,
-        patch("pyrit.backend.services.multi_send_service.get_target_service", return_value=target_service),
+        patch("pyrit.backend.services.message_send_service.get_target_service", return_value=target_service),
         patch("pyrit.backend.services.attack_service.get_target_service", return_value=target_service),
-        patch("pyrit.backend.services.attack_service.get_converter_service", return_value=converter_service),
-        patch("pyrit.backend.services.attack_service.get_manual_send_scheduler", return_value=scheduler),
+        patch("pyrit.backend.services.message_send_service.get_converter_service", return_value=converter_service),
+        patch("pyrit.backend.services.attack_service.get_message_send_service", return_value=service),
     ):
         yield _Harness(
             memory=sqlite_instance,
@@ -162,21 +164,40 @@ def _converter(*, value: str, data_type: PromptDataType = "text") -> MagicMock:
     return converter
 
 
+@pytest.fixture
+async def api_client(harness: _Harness) -> AsyncIterator[AsyncClient]:
+    app = FastAPI()
+    app.include_router(attacks.router, prefix="/api")
+    app.include_router(message_sends.router, prefix="/api")
+    with (
+        patch.object(attacks, "get_attack_service", return_value=harness.attack_service),
+        patch.object(message_sends, "get_message_send_service", return_value=harness.service),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client
+
+
 @pytest.mark.parametrize("count", [0, 11, -1, True, False, 1.5, 5.0, "5", None])
 def test_batch_count_is_a_strict_bounded_integer(count: object) -> None:
     data = _request(conversation_id="source").model_dump()
     data["count"] = count
     with pytest.raises(ValidationError):
-        MessageBatchRequest.model_validate(data)
+        MessageSendRequest.model_validate(data)
 
 
 @pytest.mark.parametrize("count", [1, 5, 10])
 def test_batch_count_boundaries_and_default_converter_mode(count: int) -> None:
     data = _request(conversation_id="source", count=count).model_dump()
     data.pop("request_converter_mode")
-    request = MessageBatchRequest.model_validate(data)
+    request = MessageSendRequest.model_validate(data)
     assert request.count == count
     assert request.request_converter_mode == RequestConverterMode.SHARED
+
+
+def test_send_defaults_to_one_conversation() -> None:
+    data = _request(conversation_id="source").model_dump()
+    data.pop("count")
+    assert MessageSendRequest.model_validate(data).count == 1
 
 
 @pytest.mark.parametrize(
@@ -198,11 +219,11 @@ def test_batch_request_rejects_invalid_input(field: str, value: object) -> None:
     data = _request(conversation_id="source").model_dump()
     data[field] = value
     with pytest.raises(ValidationError):
-        MessageBatchRequest.model_validate(data)
+        MessageSendRequest.model_validate(data)
 
 
 @pytest.mark.usefixtures("patch_central_database")
-class TestMultiSendService:
+class TestMessageSendService:
     async def test_five_sends_register_four_clones_before_dispatch_and_keep_lineage(self, harness: _Harness) -> None:
         history = [
             MessagePiece(
@@ -247,7 +268,7 @@ class TestMultiSendService:
             )
             result = await _wait_batch_async(service=harness.service, status=accepted)
             assert read_snapshot.call_count == 1
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert harness.send.await_count == 5
         assert registered_counts == [5] * 5
         assert len({branch.conversation_id for branch in result.branches}) == 5
@@ -273,7 +294,7 @@ class TestMultiSendService:
             else:
                 assert [piece.original_prompt_id for piece in messages[3].message_pieces] == original_ids
                 assert all(piece.id not in original_ids for piece in messages[3].message_pieces)
-            assert len(branch.new_message_piece_ids) == 3
+            assert "new_message_piece_ids" not in branch.model_dump()
 
     @pytest.mark.parametrize("system_only", [False, True])
     async def test_empty_and_system_only_histories(self, harness: _Harness, system_only: bool) -> None:
@@ -289,7 +310,7 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         for branch in result.branches:
             messages = await asyncio.to_thread(
                 harness.memory.get_conversation_messages, conversation_id=branch.conversation_id
@@ -312,7 +333,7 @@ class TestMultiSendService:
         attack = await asyncio.to_thread(
             harness.memory.get_attack_results, attack_result_ids=[harness.attack.attack_result_id]
         )
-        assert second.state == MessageBatchState.COMPLETED
+        assert second.state == MessageSendState.COMPLETED
         assert second.source_conversation_id == source_id
         assert len(attack[0].get_active_conversation_ids()) == 7
         assert harness.send.await_count == 8
@@ -339,7 +360,7 @@ class TestMultiSendService:
             ),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert converter.convert_tokens_async.await_count == calls
         for call in harness.send.await_args_list:
             piece = call.kwargs["message"].get_piece()
@@ -354,15 +375,15 @@ class TestMultiSendService:
         request = _request(conversation_id=harness.attack.conversation_id, count=3)
         request.pieces = [MessagePieceRequest(data_type="image_path", original_value="dGVzdA==", mime_type="image/png")]
         with patch.object(
-            harness.attack_service,
+            harness.service,
             "_persist_base64_pieces_async",
-            wraps=harness.attack_service._persist_base64_pieces_async,
+            wraps=harness.service._persist_base64_pieces_async,
         ) as persist_media:
             accepted = await harness.service.submit_async(
                 attack_result_id=harness.attack.attack_result_id, request=request
             )
             result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert persist_media.await_count == 1
         assert request.pieces[0].original_value == "dGVzdA=="
         sent_paths = [call.kwargs["message"].get_piece().original_value for call in harness.send.await_args_list]
@@ -377,7 +398,7 @@ class TestMultiSendService:
         request.pieces.append(MessagePieceRequest(original_value="Convert this"))
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert converter.convert_tokens_async.await_count == 1
         for call in harness.send.await_args_list:
             assert call.kwargs["message"].get_values() == ["Already converted", "converted"]
@@ -417,7 +438,7 @@ class TestMultiSendService:
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         result = await _wait_batch_async(service=harness.service, status=accepted)
 
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert first.convert_tokens_async.await_count == (2 if mode == RequestConverterMode.SHARED else 6)
         assert second.convert_tokens_async.await_count == first.convert_tokens_async.await_count
         for call in harness.send.await_args_list:
@@ -426,13 +447,27 @@ class TestMultiSendService:
             assert str(message.message_pieces[0].original_prompt_id) == lineage_id
 
     async def test_count_one_keeps_the_source_without_creating_copies(self, harness: _Harness) -> None:
-        accepted = await harness.service.submit_async(
-            attack_result_id=harness.attack.attack_result_id,
-            request=_request(conversation_id=harness.attack.conversation_id, count=1),
-        )
-        result = await _wait_batch_async(service=harness.service, status=accepted)
+        with (
+            patch.object(
+                harness.memory, "get_conversation_messages", wraps=harness.memory.get_conversation_messages
+            ) as history,
+            patch.object(harness.service, "_prepare_copies", wraps=harness.service._prepare_copies) as copies,
+            patch.object(
+                harness.memory,
+                "add_conversation_branches_to_attack",
+                wraps=harness.memory.add_conversation_branches_to_attack,
+            ) as register,
+        ):
+            accepted = await harness.service.submit_async(
+                attack_result_id=harness.attack.attack_result_id,
+                request=_request(conversation_id=harness.attack.conversation_id, count=1),
+            )
+            result = await _wait_batch_async(service=harness.service, status=accepted)
+        history.assert_not_called()
+        copies.assert_not_called()
+        register.assert_not_called()
 
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert [branch.conversation_id for branch in result.branches] == [harness.attack.conversation_id]
         assert harness.send.await_count == 1
         attack = await asyncio.to_thread(
@@ -453,7 +488,7 @@ class TestMultiSendService:
         request.response_converter_configurations = [ConverterConfigurationRequest(converter_ids=["response"])]
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert converter.convert_tokens_async.await_count == 3
         for branch in result.branches:
             pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
@@ -479,14 +514,14 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.FAILED
+        assert result.state == MessageSendState.FAILED
         assert calls == 3
-        assert sum(branch.state == MessageBatchBranchState.FAILED for branch in result.branches) == failed_count
+        assert sum(branch.state == MessageSendBranchState.FAILED for branch in result.branches) == failed_count
         assert "provider-private" not in result.model_dump_json()
         for branch in result.branches:
             pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
             assert len(pieces) == 2
-            assert sum(piece.has_error() for piece in pieces) == (branch.state == MessageBatchBranchState.FAILED)
+            assert sum(piece.has_error() for piece in pieces) == (branch.state == MessageSendBranchState.FAILED)
 
     async def test_per_branch_conversion_failure_is_saved_without_cancelling_siblings(self, harness: _Harness) -> None:
         converter = _converter(value="converted")
@@ -508,30 +543,34 @@ class TestMultiSendService:
         result = await _wait_batch_async(service=harness.service, status=accepted)
         assert converter.convert_tokens_async.await_count == 3
         assert harness.send.await_count == 2
-        assert [branch.state for branch in result.branches].count(MessageBatchBranchState.FAILED) == 1
-        failed = next(branch for branch in result.branches if branch.state == MessageBatchBranchState.FAILED)
+        assert [branch.state for branch in result.branches].count(MessageSendBranchState.FAILED) == 1
+        failed = next(branch for branch in result.branches if branch.state == MessageSendBranchState.FAILED)
         pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=failed.conversation_id)
         assert len(pieces) == 2
         assert pieces[0].id == pieces[0].original_prompt_id
         assert pieces[1].response_error == "processing"
 
-    async def test_shared_conversion_failure_does_not_create_clones_or_dispatch(self, harness: _Harness) -> None:
+    @pytest.mark.parametrize("count", [1, 3])
+    async def test_shared_conversion_failure_does_not_create_clones_or_dispatch(
+        self, harness: _Harness, count: int
+    ) -> None:
         converter = _converter(value="unused")
         converter.convert_tokens_async.side_effect = ValueError("cannot convert")
         harness.converter_service.get_converter_objects_for_ids.return_value = [converter]
         accepted = await harness.service.submit_async(
             attack_result_id=harness.attack.attack_result_id,
-            request=_request(conversation_id=harness.attack.conversation_id, count=3, converter_ids=["converter"]),
+            request=_request(conversation_id=harness.attack.conversation_id, count=count, converter_ids=["converter"]),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
         attack = await asyncio.to_thread(
             harness.memory.get_attack_results, attack_result_ids=[harness.attack.attack_result_id]
         )
-        assert result.state == MessageBatchState.FAILED
+        assert result.state == MessageSendState.FAILED
+        assert result.failure_stage == MessageSendFailureStage.PREPARATION
         assert harness.send.await_count == 0
         assert len(attack[0].get_active_conversation_ids()) == 1
         assert len(result.branches) == 1
-        assert result.branches[0].state == MessageBatchBranchState.FAILED
+        assert result.branches[0].state == MessageSendBranchState.FAILED
 
     async def test_invalid_converted_media_keeps_the_original_request_identity(
         self, harness: _Harness, tmp_path: Path
@@ -543,7 +582,7 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3, converter_ids=["converter"]),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.FAILED
+        assert result.state == MessageSendState.FAILED
         assert harness.send.await_count == 0
         source = await asyncio.to_thread(
             harness.memory.get_message_pieces, conversation_id=harness.attack.conversation_id
@@ -563,14 +602,14 @@ class TestMultiSendService:
         request.response_converter_configurations = [ConverterConfigurationRequest(converter_ids=["response"])]
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.FAILED
+        assert result.state == MessageSendState.FAILED
         assert harness.send.await_count == 3
         assert converter.convert_tokens_async.await_count == 3
         for branch in result.branches:
             pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
             assert [piece.role for piece in pieces] == ["user", "assistant"]
             assert pieces[-1].response_error == "processing"
-            assert len(branch.new_message_piece_ids) == 2
+            assert branch.error is not None
 
     async def test_write_only_target_is_successful(self, harness: _Harness) -> None:
         harness.send.side_effect = None
@@ -580,8 +619,10 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
-        assert all(len(branch.new_message_piece_ids) == 1 for branch in result.branches)
+        assert result.state == MessageSendState.COMPLETED
+        for branch in result.branches:
+            pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
+            assert len(pieces) == 1
 
     async def test_returned_error_message_uses_core_error_semantics_without_duplicate_errors(
         self, harness: _Harness
@@ -599,15 +640,17 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.FAILED
-        assert all(branch.state == MessageBatchBranchState.FAILED for branch in result.branches)
-        assert all(len(branch.new_message_piece_ids) == 2 for branch in result.branches)
+        assert result.state == MessageSendState.FAILED
+        assert all(branch.state == MessageSendBranchState.FAILED for branch in result.branches)
+        for branch in result.branches:
+            pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
+            assert len(pieces) == 2
 
     async def test_acceptance_is_prompt_and_progress_precedes_the_slowest_reply(self, harness: _Harness) -> None:
         release_preparation = asyncio.Event()
         preparation_started = asyncio.Event()
         release_slow_reply = asyncio.Event()
-        prepare = harness.attack_service._prepare_message_async
+        prepare = harness.service._prepare_message_async
 
         async def prepare_async(*, request: AddMessageRequest, conversation_id: str, sequence: int) -> Message:
             preparation_started.set()
@@ -620,44 +663,43 @@ class TestMultiSendService:
             return [construct_response_from_request(request=message.get_piece(), response_text_pieces=["Reply"])]
 
         harness.send.side_effect = send_async
-        with patch.object(harness.attack_service, "_prepare_message_async", side_effect=prepare_async):
+        with patch.object(harness.service, "_prepare_message_async", side_effect=prepare_async):
             request = _request(conversation_id=harness.attack.conversation_id, count=3)
             accepted = await asyncio.wait_for(
                 harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request),
                 timeout=3,
             )
             assert accepted.branches == []
-            assert accepted.state == MessageBatchState.QUEUED
+            assert accepted.state == MessageSendState.QUEUED
             await asyncio.wait_for(preparation_started.wait(), timeout=3)
             request.pieces[0].original_value = "Changed after acceptance"
             release_preparation.set()
             await _wait_until_async(
                 lambda: any(
-                    branch.state == MessageBatchBranchState.COMPLETED
+                    branch.state == MessageSendBranchState.COMPLETED
                     for branch in harness.service.get_status(
-                        attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id
+                        attack_result_id=accepted.attack_result_id, send_id=accepted.send_id
                     ).branches
                 )
             )
-            progress = harness.service.get_status(
-                attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id
-            )
+            progress = harness.service.get_status(attack_result_id=accepted.attack_result_id, send_id=accepted.send_id)
             release_slow_reply.set()
             result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert progress.state == MessageBatchState.RUNNING
+        assert progress.state == MessageSendState.RUNNING
         assert len(progress.branches) == 3
-        assert progress.branches[0].state == MessageBatchBranchState.SENDING
-        assert result.state == MessageBatchState.COMPLETED
+        assert progress.branches[0].state == MessageSendBranchState.SENDING
+        assert result.state == MessageSendState.COMPLETED
         assert all(call.kwargs["message"].get_value() == "Next prompt" for call in harness.send.await_args_list)
         assert "Next prompt" not in result.model_dump_json()
         assert set(result.model_dump()) == {
-            "batch_id",
+            "send_id",
             "attack_result_id",
             "source_conversation_id",
             "requested_count",
             "state",
             "branches",
             "error",
+            "failure_stage",
         }
 
     async def test_submission_identity_deduplicates_and_rejects_changed_payload(self, harness: _Harness) -> None:
@@ -666,10 +708,10 @@ class TestMultiSendService:
             harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request),
             harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request),
         )
-        assert first.batch_id == duplicate.batch_id
+        assert first.send_id == duplicate.send_id
         await _wait_batch_async(service=harness.service, status=first)
         same = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
-        assert same.batch_id == first.batch_id
+        assert same.send_id == first.send_id
         assert harness.send.await_count == 3
         request.pieces[0].original_value = "Different request"
         with pytest.raises(ManualSendConflictError, match="submission_id"):
@@ -700,7 +742,7 @@ class TestMultiSendService:
             ]
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         finished = await _wait_batch_async(service=harness.service, status=accepted)
-        assert finished.state == MessageBatchState.COMPLETED
+        assert finished.state == MessageSendState.COMPLETED
         reordered = request.model_copy(deep=True)
         if reordered_field == "pieces":
             reordered.pieces.reverse()
@@ -735,7 +777,8 @@ class TestMultiSendService:
             harness.converter_service.get_converter_objects_for_ids.side_effect = ValueError("Unknown converter")
         elif invalid == "piece":
             request.pieces[0].data_type = "not-a-data-type"
-        with pytest.raises(ValueError):
+        error_type = MessageSendNotFoundError if invalid == "missing_target" else ValueError
+        with pytest.raises(error_type):
             await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         attacks = await asyncio.to_thread(
             harness.memory.get_attack_results, attack_result_ids=[harness.attack.attack_result_id]
@@ -751,11 +794,9 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        restarted = MultiSendService(
-            memory=harness.memory, attack_service=harness.attack_service, scheduler=harness.scheduler
-        )
-        with pytest.raises(MessageBatchNotFoundError, match="unavailable or expired"):
-            restarted.get_status(attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id)
+        restarted = MessageSendService(memory=harness.memory, scheduler=harness.scheduler)
+        with pytest.raises(MessageSendNotFoundError, match="unavailable or expired"):
+            restarted.get_status(attack_result_id=accepted.attack_result_id, send_id=accepted.send_id)
         for branch in result.branches:
             conversation = await harness.attack_service.get_conversation_messages_async(
                 attack_result_id=accepted.attack_result_id, conversation_id=branch.conversation_id
@@ -790,7 +831,7 @@ class TestMultiSendService:
         assert len(attack[0].get_active_conversation_ids()) == 2
 
     async def test_terminal_retention_is_bounded_and_expiration_is_explicit(self, harness: _Harness) -> None:
-        with patch.object(harness.service, "MAX_TERMINAL_BATCHES", 1):
+        with patch.object(harness.service, "MAX_TERMINAL_SENDS", 1):
             first = await harness.service.submit_async(
                 attack_result_id=harness.attack.attack_result_id,
                 request=_request(conversation_id=harness.attack.conversation_id, count=1),
@@ -802,10 +843,10 @@ class TestMultiSendService:
             )
             await _wait_batch_async(service=harness.service, status=second)
         assert len(harness.service._terminal) == 1
-        with pytest.raises(MessageBatchNotFoundError):
-            harness.service.get_status(attack_result_id=first.attack_result_id, batch_id=first.batch_id)
-        with patch.object(harness.service, "TERMINAL_TTL_SECONDS", -1), pytest.raises(MessageBatchNotFoundError):
-            harness.service.get_status(attack_result_id=second.attack_result_id, batch_id=second.batch_id)
+        with pytest.raises(MessageSendNotFoundError):
+            harness.service.get_status(attack_result_id=first.attack_result_id, send_id=first.send_id)
+        with patch.object(harness.service, "TERMINAL_TTL_SECONDS", -1), pytest.raises(MessageSendNotFoundError):
+            harness.service.get_status(attack_result_id=second.attack_result_id, send_id=second.send_id)
         assert harness.service._submissions == {}
 
     async def test_shutdown_before_first_task_step_releases_admission(self, harness: _Harness) -> None:
@@ -814,8 +855,8 @@ class TestMultiSendService:
             request=_request(conversation_id=harness.attack.conversation_id, count=3),
         )
         await harness.service.shutdown_async()
-        status = harness.service.get_status(attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id)
-        assert status.state == MessageBatchState.FAILED
+        status = harness.service.get_status(attack_result_id=accepted.attack_result_id, send_id=accepted.send_id)
+        assert status.state == MessageSendState.FAILED
         assert harness.scheduler._reserved == 0
         assert not harness.scheduler._conversations
         assert harness.send.await_count == 0
@@ -835,10 +876,13 @@ class TestMultiSendService:
         )
         await asyncio.wait_for(started.wait(), timeout=3)
         await harness.service.shutdown_async()
-        status = harness.service.get_status(attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id)
-        assert status.state == MessageBatchState.FAILED
-        assert all(branch.state == MessageBatchBranchState.FAILED for branch in status.branches)
-        assert all(branch.new_message_piece_ids for branch in status.branches)
+        status = harness.service.get_status(attack_result_id=accepted.attack_result_id, send_id=accepted.send_id)
+        assert status.state == MessageSendState.FAILED
+        assert all(branch.state == MessageSendBranchState.FAILED for branch in status.branches)
+        assert status.failure_stage == MessageSendFailureStage.INTERRUPTED
+        for branch in status.branches:
+            pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
+            assert any(piece.has_error() for piece in pieces)
         assert harness.scheduler._reserved == 0
         assert harness.scheduler._active == 0
         assert not harness.scheduler._conversations
@@ -867,11 +911,14 @@ class TestMultiSendService:
             assert harness.attack.conversation_id in harness.scheduler._conversations
             release_registration.set()
             await asyncio.wait_for(shutdown, timeout=5)
-        result = harness.service.get_status(attack_result_id=accepted.attack_result_id, batch_id=accepted.batch_id)
-        assert result.state == MessageBatchState.FAILED
+        result = harness.service.get_status(attack_result_id=accepted.attack_result_id, send_id=accepted.send_id)
+        assert result.state == MessageSendState.FAILED
         assert len(result.branches) == 3
-        assert all(branch.state == MessageBatchBranchState.FAILED for branch in result.branches)
-        assert all(branch.new_message_piece_ids for branch in result.branches)
+        assert all(branch.state == MessageSendBranchState.FAILED for branch in result.branches)
+        assert result.failure_stage == MessageSendFailureStage.INTERRUPTED
+        for branch in result.branches:
+            pieces = await asyncio.to_thread(harness.memory.get_message_pieces, conversation_id=branch.conversation_id)
+            assert any(piece.has_error() for piece in pieces)
         assert harness.scheduler._reserved == 0
         assert harness.send.await_count == 0
 
@@ -882,7 +929,7 @@ class TestMultiSendService:
         )
         await asyncio.gather(
             *(
-                harness.attack_service._update_attack_after_message_async(
+                harness.service._update_attack_after_message_async(
                     attack_result_id=harness.attack.attack_result_id,
                     last_response_id=None,
                     request_converter_configurations=[ConverterConfiguration(converters=[converter])],
@@ -901,7 +948,7 @@ class TestMultiSendService:
             second.get_identifier().hash,
         }
 
-    async def test_concurrency_budget_is_shared_across_batches_and_single_send(self, harness: _Harness) -> None:
+    async def test_concurrency_budget_is_shared_across_sends_and_single_send(self, harness: _Harness) -> None:
         extra_sources = [str(uuid.uuid4()), str(uuid.uuid4())]
         await asyncio.to_thread(
             harness.memory.add_conversation_branches_to_attack,
@@ -947,17 +994,17 @@ class TestMultiSendService:
         )
         try:
             await _wait_until_async(lambda: active == 2)
-            queued = harness.service.get_status(attack_result_id=second.attack_result_id, batch_id=second.batch_id)
+            queued = harness.service.get_status(attack_result_id=second.attack_result_id, send_id=second.send_id)
         finally:
             release.set()
             single_result = await single
         first = await _wait_batch_async(service=harness.service, status=first)
         second = await _wait_batch_async(service=harness.service, status=second)
-        assert first.state == second.state == MessageBatchState.COMPLETED
+        assert first.state == second.state == MessageSendState.COMPLETED
         assert peak == 2
         assert harness.send.await_count == 7
-        assert queued.state == MessageBatchState.QUEUED or any(
-            branch.state == MessageBatchBranchState.QUEUED for branch in queued.branches
+        assert queued.state == MessageSendState.QUEUED or any(
+            branch.state == MessageSendBranchState.QUEUED for branch in queued.branches
         )
         assert len(single_result.messages.messages) == 2
         assert harness.scheduler._reserved == 0
@@ -997,7 +1044,7 @@ class TestMultiSendService:
             harness.target._max_requests_per_minute = 100
         accepted = await harness.service.submit_async(attack_result_id=harness.attack.attack_result_id, request=request)
         result = await _wait_batch_async(service=harness.service, status=accepted)
-        assert result.state == MessageBatchState.COMPLETED
+        assert result.state == MessageSendState.COMPLETED
         assert peak == 1
         assert harness.send.await_count == 3
 
@@ -1036,45 +1083,184 @@ class TestMultiSendService:
         assert harness.scheduler._reserved == 0
         assert harness.send.await_count == 0
 
-    async def test_routes_return_202_and_scoped_compact_status(self, harness: _Harness) -> None:
-        app = FastAPI()
-        app.include_router(message_batches.router, prefix="/api")
+    async def test_routes_return_202_and_scoped_compact_status(
+        self, harness: _Harness, api_client: AsyncClient
+    ) -> None:
         request = _request(conversation_id=harness.attack.conversation_id, count=3)
-        with patch.object(message_batches, "get_multi_send_service", return_value=harness.service):
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                response = await client.post(
-                    f"/api/attacks/{harness.attack.attack_result_id}/messages/batch",
-                    json=request.model_dump(mode="json"),
-                )
-                assert response.status_code == 202
-                batch_id = response.json()["batch_id"]
-                poll = await client.get(f"/api/attacks/{harness.attack.attack_result_id}/message-batches/{batch_id}")
-                assert poll.status_code == 200
-                assert "messages" not in poll.json()
-                wrong_scope = await client.get(f"/api/attacks/other/message-batches/{batch_id}")
-                missing = await client.get(f"/api/attacks/{harness.attack.attack_result_id}/message-batches/missing")
-                assert wrong_scope.status_code == 404
-                assert missing.status_code == 404
+        response = await api_client.post(
+            f"/api/attacks/{harness.attack.attack_result_id}/message-sends",
+            json=request.model_dump(mode="json"),
+        )
+        assert response.status_code == 202
+        send_id = response.json()["send_id"]
+        poll = await api_client.get(
+            f"/api/attacks/{harness.attack.attack_result_id}/message-sends/{send_id}", params={"wait_ms": 1000}
+        )
+        assert poll.status_code == 200
+        assert poll.json()["state"] == "completed"
+        assert poll.json()["failure_stage"] is None
+        assert "messages" not in poll.json()
+        assert "new_message_piece_ids" not in poll.json()["branches"][0]
+        wrong_scope = await api_client.get(f"/api/attacks/other/message-sends/{send_id}")
+        missing = await api_client.get(f"/api/attacks/{harness.attack.attack_result_id}/message-sends/missing")
+        assert wrong_scope.status_code == 404
+        assert missing.status_code == 404
 
-    async def test_route_rejects_invalid_count_and_missing_attack(self, harness: _Harness) -> None:
-        app = FastAPI()
-        app.include_router(message_batches.router, prefix="/api")
+    async def test_route_rejects_invalid_count_and_missing_attack(
+        self, harness: _Harness, api_client: AsyncClient
+    ) -> None:
         request = _request(conversation_id=harness.attack.conversation_id).model_dump(mode="json")
-        with patch.object(message_batches, "get_multi_send_service", return_value=harness.service):
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                for count in [True, 1.5, 0, 11]:
-                    response = await client.post(
-                        f"/api/attacks/{harness.attack.attack_result_id}/messages/batch",
-                        json={**request, "count": count},
-                    )
-                    assert response.status_code == 422
-                response = await client.post(f"/api/attacks/{uuid.uuid4()}/messages/batch", json=request)
-                assert response.status_code == 404
+        for count in [True, 1.5, 0, 11]:
+            response = await api_client.post(
+                f"/api/attacks/{harness.attack.attack_result_id}/message-sends",
+                json={**request, "count": count},
+            )
+            assert response.status_code == 422
+        response = await api_client.post(f"/api/attacks/{uuid.uuid4()}/message-sends", json=request)
+        assert response.status_code == 404
         assert harness.send.await_count == 0
+
+    @pytest.mark.parametrize("endpoint", ["messages", "message-sends"])
+    @pytest.mark.parametrize("busy", [True, False])
+    async def test_send_endpoints_share_admission_errors(
+        self, harness: _Harness, api_client: AsyncClient, endpoint: str, busy: bool
+    ) -> None:
+        claim = harness.scheduler.reserve(
+            conversation_id=harness.attack.conversation_id if busy else "unrelated",
+            count=1 if busy else 12,
+        )
+        try:
+            response = await api_client.post(
+                f"/api/attacks/{harness.attack.attack_result_id}/{endpoint}",
+                json=_request(conversation_id=harness.attack.conversation_id, count=1).model_dump(mode="json"),
+            )
+            assert response.status_code == (409 if busy else 429)
+            assert harness.send.await_count == 0
+        finally:
+            claim.release()
+
+    @pytest.mark.parametrize("role", ["user", "system", "assistant"])
+    async def test_legacy_store_only_keeps_arbitrary_roles_without_creating_send_operations(
+        self, harness: _Harness, api_client: AsyncClient, role: str
+    ) -> None:
+        response = await api_client.post(
+            f"/api/attacks/{harness.attack.attack_result_id}/messages",
+            json={
+                "role": role,
+                "send": False,
+                "pieces": [{"original_value": "Context only"}],
+                "target_conversation_id": harness.attack.conversation_id,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["messages"]["messages"][0]["role"] == role
+        assert harness.send.await_count == 0
+        assert harness.service._sends == {}
+
+    @pytest.mark.parametrize("provider_failure", [False, True])
+    async def test_legacy_send_waits_for_shared_execution_and_preserves_response_shape(
+        self, harness: _Harness, api_client: AsyncClient, provider_failure: bool
+    ) -> None:
+        if provider_failure:
+            harness.send.side_effect = RuntimeError("Offline provider failed")
+        request = _request(conversation_id=harness.attack.conversation_id, count=1)
+        with patch.object(harness.service, "submit_async", wraps=harness.service.submit_async) as submit:
+            response = await api_client.post(
+                f"/api/attacks/{harness.attack.attack_result_id}/messages",
+                json=request.model_dump(mode="json"),
+            )
+        assert response.status_code == 200
+        assert set(response.json()) == {"attack", "messages"}
+        assert len(response.json()["messages"]["messages"]) == 2
+        assert response.json()["messages"]["target_response_status"]["response_error"] == (
+            "processing" if provider_failure else "none"
+        )
+        assert submit.await_count == 1
+        assert submit.call_args.kwargs["request"].count == 1
+        assert harness.send.await_count == 1
+        assert harness.scheduler._reserved == 0
+
+    async def test_count_one_waiting_read_finishes_with_send_not_after_poll_interval(self, harness: _Harness) -> None:
+        accepted = await harness.service.submit_async(
+            attack_result_id=harness.attack.attack_result_id,
+            request=_request(conversation_id=harness.attack.conversation_id, count=1),
+        )
+        result = await asyncio.wait_for(
+            harness.service.get_status_async(
+                attack_result_id=accepted.attack_result_id, send_id=accepted.send_id, wait_ms=1000
+            ),
+            timeout=0.8,
+        )
+        assert result.state == MessageSendState.COMPLETED
+        assert harness.send.await_count == 1
+
+    async def test_cancelled_progress_read_does_not_cancel_accepted_send(self, harness: _Harness) -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def send_async(*, message: Message, **kwargs: object) -> list[Message]:
+            started.set()
+            await release.wait()
+            return [construct_response_from_request(request=message.get_piece(), response_text_pieces=["Reply"])]
+
+        harness.send.side_effect = send_async
+        accepted = await harness.service.submit_async(
+            attack_result_id=harness.attack.attack_result_id,
+            request=_request(conversation_id=harness.attack.conversation_id, count=1),
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        read = asyncio.create_task(
+            harness.service.get_status_async(
+                attack_result_id=accepted.attack_result_id, send_id=accepted.send_id, wait_ms=1000
+            )
+        )
+        await asyncio.sleep(0)
+        read.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+        assert harness.attack.conversation_id in harness.scheduler._conversations
+        release.set()
+        finished = await _wait_batch_async(service=harness.service, status=accepted)
+        assert finished.state == MessageSendState.COMPLETED
+        assert harness.send.await_count == 1
+
+    async def test_finalization_failure_does_not_discard_successful_conversations(self, harness: _Harness) -> None:
+        with patch.object(
+            harness.service, "_update_attack_after_message_async", side_effect=RuntimeError("Metadata failed")
+        ):
+            accepted = await harness.service.submit_async(
+                attack_result_id=harness.attack.attack_result_id,
+                request=_request(conversation_id=harness.attack.conversation_id, count=2),
+            )
+            result = await _wait_batch_async(service=harness.service, status=accepted)
+        assert result.state == MessageSendState.FAILED
+        assert result.failure_stage == MessageSendFailureStage.FINALIZATION
+        assert all(branch.state == MessageSendBranchState.COMPLETED for branch in result.branches)
+        assert harness.send.await_count == 2
+
+    @pytest.mark.parametrize("wait_ms", [-1, 1001])
+    async def test_progress_wait_is_bounded(self, harness: _Harness, api_client: AsyncClient, wait_ms: int) -> None:
+        response = await api_client.get(
+            f"/api/attacks/{harness.attack.attack_result_id}/message-sends/unknown", params={"wait_ms": wait_ms}
+        )
+        assert response.status_code == 422
 
 
 async def test_unused_service_shutdown_does_not_initialize_memory() -> None:
-    get_multi_send_service.cache_clear()
-    with patch("pyrit.backend.services.multi_send_service.CentralMemory") as memory:
-        await shutdown_message_batches_async()
+    get_message_send_service.cache_clear()
+    with patch("pyrit.backend.services.message_send_service.CentralMemory") as memory:
+        await shutdown_message_sends_async()
         memory.get_memory_instance.assert_not_called()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_shutdown_discards_event_loop_bound_singletons() -> None:
+    get_message_send_service.cache_clear()
+    scheduler = get_manual_send_scheduler()
+    get_message_send_service()
+
+    await shutdown_message_sends_async()
+
+    assert get_message_send_service.cache_info().currsize == 0
+    assert get_manual_send_scheduler.cache_info().currsize == 0
+    assert get_manual_send_scheduler() is not scheduler
+    get_manual_send_scheduler.cache_clear()

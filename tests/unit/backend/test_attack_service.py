@@ -34,6 +34,7 @@ from pyrit.backend.services.attack_service import (
     get_attack_service,
 )
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
+from pyrit.backend.services.message_send_service import MessageSendNotFoundError, MessageSendService
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
     encode_keyset_cursor,
@@ -53,7 +54,7 @@ from pyrit.models import (
     Score,
 )
 from pyrit.models.conversation_stats import ConversationStats
-from pyrit.prompt_normalizer import ConverterConfiguration
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 
 
 @pytest.fixture
@@ -73,14 +74,23 @@ def mock_memory():
 
 
 @pytest.fixture
-def attack_service(mock_memory):
-    """Create an attack service with mocked memory."""
+async def message_service(mock_memory):
+    """Use the same send owner for legacy adapters and direct helper coverage."""
     get_manual_send_scheduler.cache_clear()
+    service = MessageSendService(memory=mock_memory)
+    with patch("pyrit.backend.services.attack_service.get_message_send_service", return_value=service):
+        yield service
+    await service.shutdown_async()
+    get_manual_send_scheduler.cache_clear()
+
+
+@pytest.fixture
+def attack_service(mock_memory, message_service):
+    """Create the compatibility facade with mocked persistence."""
     with patch("pyrit.backend.services.attack_service.CentralMemory") as mock_central:
         mock_central.get_memory_instance.return_value = mock_memory
         service = AttackService()
         yield service
-    get_manual_send_scheduler.cache_clear()
 
 
 def make_attack_result(
@@ -196,9 +206,9 @@ async def _send_message_and_get_update_fields(
 
     now = datetime.now(UTC)
     with (
-        patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_converter_service,
-        patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_service,
-        patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_class,
+        patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_converter_service,
+        patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_service,
+        patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_class,
         patch.object(
             attack_service,
             "get_attack_async",
@@ -229,7 +239,10 @@ async def _send_message_and_get_update_fields(
         mock_converter_service.get_converter_objects_for_ids.return_value = converter_objects
         mock_get_converter_service.return_value = mock_converter_service
         mock_get_target_service.return_value.get_target_object.return_value = _make_matching_target_mock()
-        mock_normalizer_class.return_value.send_prompt_async = AsyncMock()
+        mock_normalizer_class.return_value.convert_values_async = AsyncMock()
+        mock_normalizer_class.return_value.send_prompt_async = AsyncMock(
+            return_value=_make_message(role="assistant", sequence=1)
+        )
 
         await attack_service.add_message_async(attack_result_id=attack_result_id, request=request)
     return mock_memory.update_attack_result_by_id.call_args.kwargs["update_fields"]
@@ -1451,15 +1464,16 @@ class TestAddMessage:
     """Tests for add_message method."""
 
     async def test_add_message_raises_for_nonexistent_attack(self, attack_service, mock_memory) -> None:
-        """Test that add_message raises ValueError for nonexistent attack."""
+        """Test that the compatibility adapter preserves missing-attack errors."""
         mock_memory.get_attack_results.return_value = []
 
         request = AddMessageRequest(
             pieces=[MessagePieceRequest(original_value="Hello")],
             target_conversation_id="test-id",
+            target_registry_name="test-target",
         )
 
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(MessageSendNotFoundError, match="not found"):
             await attack_service.add_message_async(attack_result_id="nonexistent", request=request)
 
     async def test_add_message_raises_when_send_without_registry_name(self, attack_service, mock_memory) -> None:
@@ -1510,15 +1524,17 @@ class TestAddMessage:
         mock_memory.get_conversation_messages.return_value = []
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
             mock_get_target_svc.return_value = mock_target_svc
 
-            mock_normalizer = MagicMock()
-            mock_normalizer.send_prompt_async = AsyncMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
+            mock_normalizer.send_prompt_async = AsyncMock(return_value=response_piece.to_message())
             mock_normalizer_cls.return_value = mock_normalizer
 
             request = AddMessageRequest(
@@ -1541,7 +1557,7 @@ class TestAddMessage:
         mock_memory.get_attack_results.return_value = [ar]
         mock_memory.get_message_pieces.return_value = []
 
-        with patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc:
+        with patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc:
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = None
             mock_get_target_svc.return_value = mock_target_svc
@@ -1553,7 +1569,7 @@ class TestAddMessage:
                 target_registry_name="test-target",
             )
 
-            with pytest.raises(ValueError, match="Target object .* not found"):
+            with pytest.raises(MessageSendNotFoundError, match="Target object .* not found"):
                 await attack_service.add_message_async(attack_result_id="test-id", request=request)
 
     async def test_add_message_surfaces_stored_error_piece_on_send_failure(self, attack_service, mock_memory) -> None:
@@ -1596,14 +1612,16 @@ class TestAddMessage:
             raise Exception("Error sending prompt with conversation ID: test-id")
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
             mock_get_target_svc.return_value = mock_target_svc
 
-            mock_normalizer = MagicMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
             mock_normalizer.send_prompt_async = AsyncMock(side_effect=_raise_after_store)
             mock_normalizer_cls.return_value = mock_normalizer
 
@@ -1641,14 +1659,16 @@ class TestAddMessage:
         mock_memory.get_conversation_messages.return_value = []
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
             mock_get_target_svc.return_value = mock_target_svc
 
-            mock_normalizer = MagicMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
             mock_normalizer.send_prompt_async = AsyncMock(side_effect=RuntimeError("boom"))
             mock_normalizer_cls.return_value = mock_normalizer
 
@@ -1672,9 +1692,9 @@ class TestAddMessage:
         mock_memory.get_conversation_messages.return_value = []
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_conv_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_conv_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
@@ -1696,8 +1716,10 @@ class TestAddMessage:
             mock_conv_svc.get_converter_objects_for_ids.return_value = [first_converter, second_converter]
             mock_get_conv_svc.return_value = mock_conv_svc
 
-            mock_normalizer = MagicMock()
-            mock_normalizer.send_prompt_async = AsyncMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
+            mock_normalizer.send_prompt_async = AsyncMock(return_value=_make_message(role="assistant", sequence=1))
             mock_normalizer_cls.return_value = mock_normalizer
 
             request = AddMessageRequest(
@@ -1711,7 +1733,8 @@ class TestAddMessage:
             with pytest.warns(DeprecationWarning, match="AddMessageRequest.converter_ids is deprecated"):
                 await attack_service.add_message_async(attack_result_id="test-id", request=request)
 
-            configurations = mock_normalizer.send_prompt_async.call_args.kwargs["request_converter_configurations"]
+            configurations = mock_normalizer.convert_values_async.call_args.kwargs["converter_configurations"]
+            assert mock_normalizer.send_prompt_async.call_args.kwargs["request_converter_configurations"] == []
             assert [configuration.converters for configuration in configurations] == [
                 [first_converter],
                 [second_converter],
@@ -1730,7 +1753,9 @@ class TestAddMessage:
 
         assert request.converter_ids == []
 
-    def test_empty_legacy_converter_ids_warn_and_use_structured_configuration(self, attack_service) -> None:
+    def test_empty_legacy_converter_ids_warn_and_use_structured_configuration(
+        self, message_service, attack_service
+    ) -> None:
         """Test that an empty legacy list does not override a structured configuration."""
         converter = MagicMock()
         request = AddMessageRequest(
@@ -1740,11 +1765,11 @@ class TestAddMessage:
             request_converter_configurations=[ConverterConfigurationRequest(converter_ids=["structured"])],
         )
 
-        with patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_converter_service:
+        with patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_converter_service:
             mock_get_converter_service.return_value.get_converter_objects_for_ids.return_value = [converter]
 
             with pytest.warns(DeprecationWarning, match="AddMessageRequest.converter_ids is deprecated"):
-                configurations = attack_service._resolve_request_converter_configs(request=request)
+                configurations = message_service._resolve_request_converter_configs(request=request)
 
         assert len(configurations) == 1
         assert configurations[0].converters == [converter]
@@ -1760,9 +1785,9 @@ class TestAddMessage:
         mock_memory.get_conversation_messages.return_value = []
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_conv_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_conv_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
@@ -1803,8 +1828,10 @@ class TestAddMessage:
             ]
             mock_get_conv_svc.return_value = mock_conv_svc
 
-            mock_normalizer = MagicMock()
-            mock_normalizer.send_prompt_async = AsyncMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
+            mock_normalizer.send_prompt_async = AsyncMock(return_value=_make_message(role="assistant", sequence=1))
             mock_normalizer_cls.return_value = mock_normalizer
 
             request = AddMessageRequest(
@@ -1842,7 +1869,8 @@ class TestAddMessage:
             await attack_service.add_message_async(attack_result_id="test-id", request=request)
 
             call_kwargs = mock_normalizer.send_prompt_async.call_args.kwargs
-            request_configs = call_kwargs["request_converter_configurations"]
+            request_configs = mock_normalizer.convert_values_async.call_args.kwargs["converter_configurations"]
+            assert call_kwargs["request_converter_configurations"] == []
             assert request_configs[0].converters == [first_request_converter, second_request_converter]
             assert request_configs[0].indexes_to_apply == [0]
             assert request_configs[0].prompt_data_types_to_apply == ["text"]
@@ -1877,7 +1905,11 @@ class TestAddMessage:
             request_converter_configurations=[ConverterConfigurationRequest(converter_ids=["missing"])],
         )
 
-        with patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_service:
+        with (
+            patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_service,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target,
+        ):
+            mock_get_target.return_value.get_target_object.return_value = _make_matching_target_mock()
             mock_get_service.return_value.get_converter_objects_for_ids.side_effect = ValueError(
                 "Converter instance 'missing' not found"
             )
@@ -1969,9 +2001,9 @@ class TestAddMessage:
         )
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.get_converter_service") as mock_get_conv_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.get_converter_service") as mock_get_conv_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
@@ -1981,8 +2013,10 @@ class TestAddMessage:
             mock_conv_svc.get_converter_objects_for_ids.return_value = [mock_converter]
             mock_get_conv_svc.return_value = mock_conv_svc
 
-            mock_normalizer = MagicMock()
-            mock_normalizer.send_prompt_async = AsyncMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
+            mock_normalizer.send_prompt_async = AsyncMock(return_value=_make_message(role="assistant", sequence=1))
             mock_normalizer_cls.return_value = mock_normalizer
 
             request = AddMessageRequest(
@@ -2000,18 +2034,21 @@ class TestAddMessage:
             await attack_service.add_message_async(attack_result_id="test-id", request=request)
 
             call_kwargs = mock_normalizer.send_prompt_async.call_args[1]
-            request_configurations = call_kwargs["request_converter_configurations"]
+            request_configurations = mock_normalizer.convert_values_async.call_args.kwargs["converter_configurations"]
+            assert call_kwargs["request_converter_configurations"] == []
             assert len(request_configurations) == 1
             assert request_configurations[0].indexes_to_apply == [1]
             assert len(call_kwargs["response_converter_configurations"]) == 1
             update_call = mock_memory.update_attack_result_by_id.call_args[1]
             assert "atomic_attack_identifier" in update_call["update_fields"]
 
-    def test_preconverted_piece_omits_configuration_with_no_eligible_indexes(self, attack_service) -> None:
+    def test_preconverted_piece_omits_configuration_with_no_eligible_indexes(
+        self, message_service, attack_service
+    ) -> None:
         """Test that an empty filtered selector is omitted instead of becoming unrestricted."""
         configuration = ConverterConfiguration(converters=[MagicMock()], indexes_to_apply=[0])
 
-        result = attack_service._exclude_preconverted_piece_indexes(
+        result = message_service._exclude_preconverted_piece_indexes(
             configurations=[configuration],
             preconverted_indexes={0},
             piece_count=2,
@@ -2021,11 +2058,11 @@ class TestAddMessage:
 
     @pytest.mark.parametrize("indexes", [None, []])
     def test_preconverted_piece_keeps_unrestricted_selector_on_remaining_pieces(
-        self, attack_service: AttackService, indexes: list[int] | None
+        self, message_service, attack_service: AttackService, indexes: list[int] | None
     ) -> None:
         configuration = ConverterConfiguration(converters=[], indexes_to_apply=indexes)
 
-        result = attack_service._exclude_preconverted_piece_indexes(
+        result = message_service._exclude_preconverted_piece_indexes(
             configurations=[configuration],
             preconverted_indexes={0},
             piece_count=2,
@@ -2342,7 +2379,7 @@ class TestPersistBase64Pieces:
             send=False,
             target_conversation_id="test-id",
         )
-        await AttackService._persist_base64_pieces_async(request)
+        await MessageSendService._persist_base64_pieces_async(request)
         assert request.pieces[0].original_value == "hello"
 
     async def test_image_piece_is_saved_to_file(self, attack_service) -> None:
@@ -2365,10 +2402,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/image.png"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ) as factory_mock:
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         factory_mock.assert_called_once_with(
             category="prompt-memory-entries",
@@ -2399,10 +2436,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/photo.jpg"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ):
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == "describe this"
         assert request.pieces[1].original_value == "/saved/photo.jpg"
@@ -2426,10 +2463,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/file.bin"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ) as factory_mock:
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         factory_mock.assert_called_once_with(
             category="prompt-memory-entries",
@@ -2457,10 +2494,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/image.png"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ):
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         # Should receive only the base64 payload, not the data URI prefix
         mock_serializer.save_b64_image_async.assert_awaited_once_with(data="aW1hZ2VkYXRh")
@@ -2485,10 +2522,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/image.png"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ) as factory_mock:
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         factory_mock.assert_called_once_with(
             category="prompt-memory-entries",
@@ -2517,10 +2554,10 @@ class TestPersistBase64Pieces:
         mock_serializer.value = "/saved/image.png"
 
         with patch(
-            "pyrit.backend.services.attack_service.data_serializer_factory",
+            "pyrit.backend.services.message_send_service.data_serializer_factory",
             return_value=mock_serializer,
         ) as factory_mock:
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         factory_mock.assert_called_once_with(
             category="prompt-memory-entries",
@@ -2544,7 +2581,7 @@ class TestPersistBase64Pieces:
             target_conversation_id="test-id",
         )
 
-        await AttackService._persist_base64_pieces_async(request)
+        await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == ("https://myblob.blob.core.windows.net/images/photo.png?sv=2024")
         assert request.pieces[0].converted_value == request.pieces[0].original_value
@@ -2563,8 +2600,8 @@ class TestPersistBase64Pieces:
             target_conversation_id="test-id",
         )
 
-        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as factory:
-            await AttackService._persist_base64_pieces_async(request)
+        with patch("pyrit.backend.services.message_send_service.data_serializer_factory") as factory:
+            await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == "/tmp/image.png"
         assert request.pieces[0].converted_value == "/tmp/image.png"
@@ -2581,8 +2618,8 @@ class TestPersistBase64Pieces:
             target_conversation_id="test-id",
         )
 
-        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as factory:
-            await AttackService._persist_base64_pieces_async(request)
+        with patch("pyrit.backend.services.message_send_service.data_serializer_factory") as factory:
+            await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == str(media_path)
         assert request.pieces[0].converted_value == str(media_path)
@@ -2599,7 +2636,7 @@ class TestPersistBase64Pieces:
             target_conversation_id="test-id",
         )
 
-        await AttackService._persist_base64_pieces_async(request)
+        await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == "thinking step"
 
@@ -2620,12 +2657,12 @@ class TestPersistBase64Pieces:
             target_conversation_id="test-id",
         )
 
-        with patch("pyrit.backend.services.attack_service.data_serializer_factory") as mock_factory:
+        with patch("pyrit.backend.services.message_send_service.data_serializer_factory") as mock_factory:
             mock_serializer = AsyncMock()
             mock_serializer.value = "/tmp/saved_audio.wav"
             mock_factory.return_value = mock_serializer
 
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
             mock_factory.assert_called_once()
             mock_serializer.save_b64_image_async.assert_called_once_with(data=long_b64)
@@ -2650,12 +2687,12 @@ class TestPersistBase64Pieces:
 
         with (
             patch(
-                "pyrit.backend.services.attack_service.data_serializer_factory",
+                "pyrit.backend.services.message_send_service.data_serializer_factory",
                 return_value=mock_serializer,
             ),
             pytest.raises(OSError, match="save failed"),
         ):
-            await AttackService._persist_base64_pieces_async(request)
+            await MessageSendService._persist_base64_pieces_async(request)
 
         assert request.pieces[0].original_value == "aW1hZ2VkYXRh"
         assert request.pieces[0].converted_value is None
@@ -3445,7 +3482,7 @@ class TestAddMessageGuards:
             class_module="pyrit.prompt_target",
         )
 
-        with patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc:
+        with patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc:
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = wrong_target
             mock_get_target_svc.return_value = mock_target_svc
@@ -3468,15 +3505,17 @@ class TestAddMessageGuards:
         mock_memory.get_conversation_messages.return_value = []
 
         with (
-            patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc,
-            patch("pyrit.backend.services.attack_service.PromptNormalizer") as mock_normalizer_cls,
+            patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc,
+            patch("pyrit.backend.services.message_send_service.PromptNormalizer") as mock_normalizer_cls,
         ):
             mock_target_svc = MagicMock()
             mock_target_svc.get_target_object.return_value = _make_matching_target_mock()
             mock_get_target_svc.return_value = mock_target_svc
 
-            mock_normalizer = MagicMock()
-            mock_normalizer.send_prompt_async = AsyncMock()
+            mock_normalizer = MagicMock(spec=PromptNormalizer)
+            mock_normalizer.convert_values_async = AsyncMock()
+            mock_normalizer.hash_and_persist_message_async = AsyncMock()
+            mock_normalizer.send_prompt_async = AsyncMock(return_value=_make_message(role="assistant", sequence=1))
             mock_normalizer_cls.return_value = mock_normalizer
 
             request = AddMessageRequest(
@@ -3489,7 +3528,7 @@ class TestAddMessageGuards:
             result = await attack_service.add_message_async(attack_result_id="test-id", request=request)
             assert result.attack is not None
 
-    def test_allows_matching_round_robin_target(self, attack_service) -> None:
+    def test_allows_matching_round_robin_target(self, message_service, attack_service) -> None:
         """Equivalent composite identifiers should pass target validation."""
         stored_target_id = _make_round_robin_identifier()
         request_target = MagicMock()
@@ -3506,10 +3545,10 @@ class TestAddMessageGuards:
             target_registry_name="round-robin",
         )
 
-        with patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc:
+        with patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc:
             mock_get_target_svc.return_value.get_target_object.return_value = request_target
 
-            attack_service._validate_target_match(attack_identifier=attack_identifier, request=request)
+            message_service._validate_target_match(attack_identifier=attack_identifier, request=request)
 
     @pytest.mark.parametrize(
         ("second_model_name", "weights"),
@@ -3521,6 +3560,7 @@ class TestAddMessageGuards:
     )
     def test_rejects_incompatible_round_robin_target(
         self,
+        message_service,
         attack_service,
         second_model_name: str,
         weights: tuple[int, int],
@@ -3544,11 +3584,11 @@ class TestAddMessageGuards:
             target_registry_name="round-robin",
         )
 
-        with patch("pyrit.backend.services.attack_service.get_target_service") as mock_get_target_svc:
+        with patch("pyrit.backend.services.message_send_service.get_target_service") as mock_get_target_svc:
             mock_get_target_svc.return_value.get_target_object.return_value = request_target
 
             with pytest.raises(ValueError, match="Target mismatch"):
-                attack_service._validate_target_match(attack_identifier=attack_identifier, request=request)
+                message_service._validate_target_match(attack_identifier=attack_identifier, request=request)
 
 
 def test_create_attack_request_normalizes_legacy_attribution_labels() -> None:
@@ -3571,7 +3611,7 @@ def test_create_attack_request_rejects_overlength_values() -> None:
 class TestResolveVideoRemixMetadata:
     """Tests for _resolve_video_remix_metadata."""
 
-    def test_resolves_video_id_from_original_piece(self, attack_service, mock_memory):
+    def test_resolves_video_id_from_original_piece(self, message_service, attack_service, mock_memory):
         """When a video_path piece has original_prompt_id, resolve video_id onto text piece."""
         original_piece = MagicMock()
         original_piece.prompt_metadata = {"video_id": "vid-abc-123"}
@@ -3590,12 +3630,12 @@ class TestResolveVideoRemixMetadata:
             ],
         )
 
-        attack_service._resolve_video_remix_metadata(request)
+        message_service._resolve_video_remix_metadata(request)
 
         assert request.pieces[0].prompt_metadata == {"video_id": "vid-abc-123"}
         assert request.pieces[1].prompt_metadata == {"video_id": "vid-abc-123"}
 
-    def test_no_op_without_video_pieces(self, attack_service):
+    def test_no_op_without_video_pieces(self, message_service, attack_service):
         """Should do nothing when there are no video_path pieces."""
         request = AddMessageRequest(
             role="user",
@@ -3603,11 +3643,11 @@ class TestResolveVideoRemixMetadata:
             pieces=[MessagePieceRequest(original_value="just text", data_type="text")],
         )
 
-        attack_service._resolve_video_remix_metadata(request)
+        message_service._resolve_video_remix_metadata(request)
 
         assert request.pieces[0].prompt_metadata is None
 
-    def test_no_op_when_video_id_already_set(self, attack_service, mock_memory):
+    def test_no_op_when_video_id_already_set(self, message_service, attack_service, mock_memory):
         """Should not overwrite existing video_id on text piece."""
         request = AddMessageRequest(
             role="user",
@@ -3626,12 +3666,12 @@ class TestResolveVideoRemixMetadata:
             ],
         )
 
-        attack_service._resolve_video_remix_metadata(request)
+        message_service._resolve_video_remix_metadata(request)
 
         assert request.pieces[0].prompt_metadata == {"video_id": "existing-id"}
         mock_memory.get_message_pieces.assert_not_called()
 
-    def test_no_op_without_original_prompt_id(self, attack_service, mock_memory):
+    def test_no_op_without_original_prompt_id(self, message_service, attack_service, mock_memory):
         """Should not crash when video_path piece has no original_prompt_id."""
         request = AddMessageRequest(
             role="user",
@@ -3642,12 +3682,12 @@ class TestResolveVideoRemixMetadata:
             ],
         )
 
-        attack_service._resolve_video_remix_metadata(request)
+        message_service._resolve_video_remix_metadata(request)
 
         assert request.pieces[0].prompt_metadata is None
         mock_memory.get_message_pieces.assert_not_called()
 
-    def test_no_op_when_original_piece_has_no_video_id(self, attack_service, mock_memory):
+    def test_no_op_when_original_piece_has_no_video_id(self, message_service, attack_service, mock_memory):
         """Should not set metadata when original piece has no video_id."""
         original_piece = MagicMock()
         original_piece.prompt_metadata = {"other_key": "value"}
@@ -3666,6 +3706,6 @@ class TestResolveVideoRemixMetadata:
             ],
         )
 
-        attack_service._resolve_video_remix_metadata(request)
+        message_service._resolve_video_remix_metadata(request)
 
         assert request.pieces[0].prompt_metadata is None

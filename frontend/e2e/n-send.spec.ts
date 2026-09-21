@@ -5,7 +5,7 @@ import type {
   AttackConversationsResponse,
   ConversationMessagesResponse,
   CreateAttackResponse,
-  MessageBatchStatus,
+  MessageSendStatus,
 } from '@/types'
 import { attackConversationRoutePath } from '@/utils/routeParams'
 
@@ -37,27 +37,35 @@ async function seed(request: APIRequestContext): Promise<CreateAttackResponse> {
   return attack
 }
 
-async function repeat(page: Page, count: number, prompt: string): Promise<MessageBatchStatus> {
+async function repeat(page: Page, count: number, prompt: string): Promise<MessageSendStatus> {
   await page.getByPlaceholder('Type prompt here').fill(prompt)
   await expect(page.getByRole('button', { name: 'Send message' })).toBeEnabled()
-  await page.getByRole('button', { name: 'Repetitions: 1' }).click()
-  for (let index = 1; index < count; index++) {
-    await page.getByRole('button', { name: 'Increase repetitions' }).click()
+  if (count > 1) {
+    await page.getByRole('button', { name: 'Repetitions: 1' }).click()
+    for (let index = 1; index < count; index++) {
+      await page.getByRole('button', { name: 'Increase repetitions' }).click()
+    }
+    await page.keyboard.press('Escape')
   }
-  await page.keyboard.press('Escape')
   const accepted = page.waitForResponse((response) =>
-    response.request().method() === 'POST' && response.url().endsWith('/messages/batch'),
+    response.request().method() === 'POST' && response.url().endsWith('/message-sends'),
   )
-  await page.getByRole('button', { name: `Send in ${count} conversations` }).click()
+  await page.getByRole('button', { name: count === 1 ? 'Send message' : `Send in ${count} conversations` }).click()
   const response = await accepted
   expect(response.status(), await response.text()).toBe(202)
-  const batch: MessageBatchStatus = await response.json()
-  await expect(page.getByTestId(`message-batch-${batch.batch_id}`)).toContainText(
-    `${count} of ${count} sends finished`,
-    { timeout: 30_000 },
-  )
+  expect(response.request().postDataJSON().count).toBe(count)
+  const send: MessageSendStatus = await response.json()
+  if (count > 1) {
+    await expect(page.getByTestId(`message-send-${send.send_id}`)).toContainText(
+      `${count} of ${count} sends finished`,
+      { timeout: 30_000 },
+    )
+  } else {
+    await expect(page.getByTestId('message-list').getByText(`Offline test response: ${prompt}`, { exact: true })).toBeVisible()
+    await expect(page.getByTestId(`message-send-${send.send_id}`)).toHaveCount(0)
+  }
   await expect(page.getByRole('button', { name: 'Repetitions: 1' })).toBeEnabled()
-  return batch
+  return send
 }
 
 async function conversations(
@@ -94,7 +102,7 @@ for (const viewport of [{ width: 1365, height: 900 }, { width: 412, height: 915 
       })
       await page.goto(attackConversationRoutePath(attack.attack_result_id, attack.conversation_id))
       await expect(page.getByPlaceholder('Type prompt here')).toBeEnabled({ timeout: 30_000 })
-      const firstBatch = await repeat(page, 5, 'Repeat this next prompt')
+      const firstSend = await repeat(page, 5, 'Repeat this next prompt')
       const first = await conversations(request, attack)
       expect(first.conversations).toHaveLength(5)
       expect(first.main_conversation_id).toBe(attack.conversation_id)
@@ -140,23 +148,24 @@ for (const viewport of [{ width: 1365, height: 900 }, { width: 412, height: 915 
         expect(body.messages).toHaveLength(conversation.conversation_id === copy.conversation_id ? 6 : 4)
       }
 
-      const ordinaryResponse = page.waitForResponse((response) =>
-        response.request().method() === 'POST' && response.url().endsWith('/messages'),
-      )
-      await page.getByPlaceholder('Type prompt here').fill('Just once')
-      await page.getByRole('button', { name: 'Send message' }).click()
-      expect((await ordinaryResponse).status()).toBe(200)
-      await expect(page.getByTestId('message-list').getByText('Offline test response: Just once', { exact: true })).toBeVisible()
+      const singleSend = await repeat(page, 1, 'Just once')
+      expect(singleSend.requested_count).toBe(1)
       expect((await conversations(request, attack)).conversations).toHaveLength(7)
-      expect(postPaths.filter((path: string) => path.endsWith('/messages/batch'))).toHaveLength(2)
-      expect(postPaths.filter((path: string) => path.endsWith('/messages'))).toHaveLength(1)
+      expect(postPaths.filter((path: string) => path.endsWith('/message-sends'))).toHaveLength(3)
+      expect(postPaths.filter((path: string) => path.endsWith('/messages'))).toHaveLength(0)
       const progressResponse = await request.get(
-        `/api/attacks/${attack.attack_result_id}/message-batches/${firstBatch.batch_id}`,
+        `/api/attacks/${attack.attack_result_id}/message-sends/${firstSend.send_id}`,
       )
-      const progress: MessageBatchStatus = await progressResponse.json()
+      const progress: MessageSendStatus = await progressResponse.json()
       expect(progress.state).toBe('completed')
+      expect(progress.failure_stage).toBeNull()
       expect(progress.branches).toHaveLength(5)
       expect(progress.branches.every((branch) => branch.state === 'completed')).toBe(true)
+      const singleProgressResponse = await request.get(
+        `/api/attacks/${attack.attack_result_id}/message-sends/${singleSend.send_id}`,
+      )
+      const singleProgress: MessageSendStatus = await singleProgressResponse.json()
+      expect(singleProgress.branches).toEqual([{ conversation_id: copy.conversation_id, state: 'completed', error: null }])
 
       await page.reload()
       await expect(page.getByTestId('message-list').getByText('Offline test response: Just once', { exact: true })).toBeVisible()

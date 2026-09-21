@@ -1,6 +1,6 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import type { BackendMessage } from "@/types";
-import { makeAddMessageResponse } from "./_attacks";
+import { fulfillMessageSend, makeAddMessageResponse } from "./_attacks";
 import { makeTarget } from "./_targets";
 
 // ---------------------------------------------------------------------------
@@ -96,13 +96,13 @@ function buildProcessingFailureMock(userText: string) {
 /**
  * Set up all the mocks needed for a full chat flow.
  *
- * The `addMessageHandler` parameter controls what happens on POST messages.
+ * The `sendHandler` parameter controls what happens on POST message-sends.
  * By default it returns a success response.  Tests can override it to
  * inject errors on specific calls.
  */
 async function mockAllAPIs(
   page: Page,
-  addMessageHandler?: (route: Route) => Promise<void>,
+  sendHandler?: (route: Route) => Promise<void>,
 ) {
   // Authentication config
   await page.route(/\/api\/auth\/config/, async (route) => {
@@ -164,17 +164,17 @@ async function mockAllAPIs(
     }
   });
 
-  // Messages (GET = conversation load, POST = send)
+  // Transcript reads and asynchronous send submissions.
   // Accumulate sent messages so GET returns them
   const sentMessages: BackendMessage[] = [];
-  await page.route(/\/api\/attacks\/[^/]+\/messages/, async (route) => {
+  await page.route(/\/api\/attacks\/[^/]+\/(?:messages|message-sends)(?:\?|$)/, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ messages: sentMessages }),
       });
-    } else if (route.request().method() === "POST" && addMessageHandler) {
+    } else if (route.request().method() === "POST" && sendHandler) {
       // Build success response first to accumulate messages
       let userText = "message";
       try {
@@ -188,7 +188,7 @@ async function mockAllAPIs(
       }
       const successMock = buildSuccessMessageMock(userText);
       sentMessages.push(...successMock.messages.messages);
-      await addMessageHandler(route);
+      await sendHandler(route);
     } else if (route.request().method() === "POST") {
       // Default success
       let userText = "message";
@@ -203,11 +203,7 @@ async function mockAllAPIs(
       }
       const successMock = buildSuccessMessageMock(userText);
       sentMessages.push(...successMock.messages.messages);
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(successMock),
-      });
+      await fulfillMessageSend(page, route, successMock);
     } else {
       await route.continue();
     }
@@ -264,10 +260,10 @@ async function triggerVisibilityChange(page: Page) {
 }
 
 // ---------------------------------------------------------------------------
-// Error scenario: persisted target processing failure returned with HTTP 200
+// Error scenario: a completed send with a persisted target processing failure
 // ---------------------------------------------------------------------------
 
-test.describe("Error: target processing failure returned with HTTP 200", () => {
+test.describe("Error: target processing failure in a send operation", () => {
   test("should preserve the draft and offer edit recovery", async ({ page }) => {
     let callCount = 0;
     let recoveryRequest: Record<string, unknown> | undefined;
@@ -282,11 +278,7 @@ test.describe("Error: target processing failure returned with HTTP 200", () => {
       const response = callCount === 1
         ? buildSuccessMessageMock(userText)
         : buildProcessingFailureMock(userText);
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(response),
-      });
+      await fulfillMessageSend(page, route, response);
     });
     await page.route(/\/api\/attacks\/[^/]+\/conversations/, async (route) => {
       if (route.request().method() === "GET" && recoveryCreated) {
@@ -369,7 +361,7 @@ test.describe("Error: target processing failure returned with HTTP 200", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Error: backend 500 on send message", () => {
-  test("should show error bubble and preserve input text", async ({
+  test("should show uncertain status without offering the submitted draft for automatic resend", async ({
     page,
   }) => {
     // First message succeeds, second fails with 500.
@@ -389,11 +381,7 @@ test.describe("Error: backend 500 on send message", () => {
         } catch {
           /* ignore */
         }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(buildSuccessMessageMock(userText)),
-        });
+        await fulfillMessageSend(page, route, buildSuccessMessageMock(userText));
       } else {
         // Subsequent sends fail
         await route.fulfill({
@@ -420,8 +408,9 @@ test.describe("Error: backend 500 on send message", () => {
       page.getByText(/Internal server error/i),
     ).toBeVisible({ timeout: 10000 });
 
-    // The failed text should be restored in the input for easy re-send
-    await expect(input).toHaveValue("This should fail", { timeout: 5000 });
+    await expect(page.getByText(/send status is unknown/i)).toBeVisible();
+    await expect(input).toHaveValue("", { timeout: 5000 });
+    expect(callCount).toBe(2);
   });
 
   test("should recover cleanly when the first send fails", async ({ page }) => {
@@ -444,7 +433,8 @@ test.describe("Error: backend 500 on send message", () => {
       timeout: 10000,
     });
     await expect(page.getByTestId("loading-state")).toHaveCount(0);
-    await expect(input).toHaveValue("First send fails", { timeout: 5000 });
+    await expect(page.getByText(/send status is unknown/i)).toBeVisible();
+    await expect(input).toHaveValue("", { timeout: 5000 });
   });
 });
 
@@ -468,11 +458,7 @@ test.describe("Error: network error on send message", () => {
         } catch {
           /* ignore */
         }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(buildSuccessMessageMock(userText)),
-        });
+        await fulfillMessageSend(page, route, buildSuccessMessageMock(userText));
       } else {
         await route.abort("connectionrefused");
       }

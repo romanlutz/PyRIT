@@ -26,8 +26,8 @@ import type {
   ConversationMessagesResponse,
   AddMessageRequest,
   AddMessageResponse,
-  MessageBatchInput,
-  MessageBatchStatus,
+  MessageSendInput,
+  MessageSendStatus,
   AttackConversationsResponse,
   CreateConversationRequest,
   CreateConversationResponse,
@@ -54,6 +54,7 @@ import type {
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
+const SEND_STATUS_WAIT_MS = 1_000
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -312,22 +313,22 @@ export const attacksApi = {
     return response.data
   },
 
-  startMessageBatch: async (attackResultId: string, request: MessageBatchInput): Promise<MessageBatchStatus> => {
-    const response = await apiClient.post<MessageBatchStatus>(
-      `/attacks/${encodeURIComponent(attackResultId)}/messages/batch`,
+  startMessageSend: async (attackResultId: string, request: MessageSendInput): Promise<MessageSendStatus> => {
+    const response = await apiClient.post<MessageSendStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/message-sends`,
       { ...request, submission_id: request.submission_id ?? generateClientId() },
     )
     return response.data
   },
 
-  getMessageBatch: async (
+  getMessageSend: async (
     attackResultId: string,
-    batchId: string,
+    sendId: string,
     signal?: AbortSignal,
-  ): Promise<MessageBatchStatus> => {
-    const response = await apiClient.get<MessageBatchStatus>(
-      `/attacks/${encodeURIComponent(attackResultId)}/message-batches/${encodeURIComponent(batchId)}`,
-      { signal },
+  ): Promise<MessageSendStatus> => {
+    const response = await apiClient.get<MessageSendStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/message-sends/${encodeURIComponent(sendId)}`,
+      { params: { wait_ms: SEND_STATUS_WAIT_MS }, signal },
     )
     return response.data
   },

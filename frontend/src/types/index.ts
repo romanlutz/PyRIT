@@ -589,36 +589,37 @@ export interface MultiSendOptions {
   requestConverterMode: RequestConverterMode
 }
 
-export type MessageBatchState = 'preparing' | 'queued' | 'running' | 'completed' | 'failed'
-export type MessageBatchBranchState = 'queued' | 'sending' | 'completed' | 'failed'
+export type MessageSendState = 'preparing' | 'queued' | 'running' | 'completed' | 'failed'
+export type MessageSendBranchState = 'queued' | 'sending' | 'completed' | 'failed'
+export type MessageSendFailureStage = 'preparation' | 'sending' | 'finalization' | 'interrupted'
 
-export interface MessageBatchRequest extends AddMessageRequest {
-  count: number
-  request_converter_mode: RequestConverterMode
+export interface MessageSendRequest extends AddMessageRequest {
+  count?: number
+  request_converter_mode?: RequestConverterMode
   submission_id: string
 }
 
-export type MessageBatchInput = Omit<MessageBatchRequest, 'submission_id'> & { submission_id?: string }
+export type MessageSendInput = Omit<MessageSendRequest, 'submission_id'> & { submission_id?: string }
 
-export interface MessageBatchBranch {
+export interface MessageSendBranch {
   conversation_id: string
-  state: MessageBatchBranchState
-  new_message_piece_ids: string[]
+  state: MessageSendBranchState
   error: string | null
 }
 
-export interface MessageBatchStatus {
-  batch_id: string
+export interface MessageSendStatus {
+  send_id: string
   attack_result_id: string
   source_conversation_id: string
   requested_count: number
-  state: MessageBatchState
-  branches: MessageBatchBranch[]
+  state: MessageSendState
+  branches: MessageSendBranch[]
   error: string | null
+  failure_stage: MessageSendFailureStage | null
 }
 
-export interface TrackedMessageBatch {
-  status: MessageBatchStatus
+export interface TrackedMessageSend {
+  status: MessageSendStatus
   trackingError: string | null
 }
 

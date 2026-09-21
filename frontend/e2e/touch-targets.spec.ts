@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { makeAddMessageResponse } from "./_attacks";
+import type { BackendMessage, BackendScore } from "@/types";
+import { fulfillMessageSend, makeAddMessageResponse } from "./_attacks";
 import { makeTarget } from "./_targets";
 
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
@@ -48,7 +49,7 @@ const TARGETS = [
   }),
 ];
 
-const MESSAGES = [
+const MESSAGES: BackendMessage[] = [
   {
     turn_number: 1,
     role: "user",
@@ -76,7 +77,7 @@ const MESSAGES = [
         converted_value_data_type: "text",
         original_value: "Deterministic assistant response for touch-target tests.",
         converted_value: "Deterministic assistant response for touch-target tests.",
-        scores: Array.from({ length: 9 }, (_unused: unknown, scoreIndex: number) => ({
+        scores: Array.from({ length: 9 }, (_unused: unknown, scoreIndex: number): BackendScore => ({
           id: `mobile-assistant-score-${scoreIndex}`,
           message_piece_id: "mobile-assistant-piece",
           scorer_type: `SelfAskRefusalScorer${scoreIndex}`,
@@ -293,14 +294,14 @@ async function installTouchTargetMocks(page: Page): Promise<void> {
       );
       return;
     }
+    if (apiPath === "/attacks/mobile-attack-001/message-sends" && method === "POST") {
+      await fulfillMessageSend(page, route, makeAddMessageResponse(
+        "mobile-attack-001", "mobile-conversation-001", MESSAGES,
+      ));
+      return;
+    }
     if (apiPath === "/attacks/mobile-attack-001/messages") {
-      await route.fulfill(
-        method === "POST"
-          ? jsonResponse(makeAddMessageResponse(
-              "mobile-attack-001", "mobile-conversation-001", MESSAGES,
-            ))
-          : jsonResponse({ messages: MESSAGES })
-      );
+      await route.fulfill(jsonResponse({ messages: MESSAGES }));
       return;
     }
     if (apiPath === "/attacks/mobile-attack-001/conversations") {

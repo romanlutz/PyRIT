@@ -14,8 +14,10 @@ import type {
   AddMessageResponse,
   ConversationMessagesResponse,
   CreateConversationResponse,
+  MessageSendStatus,
   TargetInstance,
 } from "@/types";
+import { waitForMessageSend } from "./_attacks";
 
 interface LocalTarget {
   registryName: string;
@@ -122,7 +124,7 @@ const test = base.extend<{ localTarget: LocalTarget; imageConverterId: string }>
 
 function isMessagePost(request: Request): boolean {
   return request.method() === "POST"
-    && /\/api\/attacks\/[^/]+\/messages$/.test(new URL(request.url()).pathname);
+    && /\/api\/attacks\/[^/]+\/message-sends$/.test(new URL(request.url()).pathname);
 }
 
 async function sendFromComposer(page: Page, text?: string): Promise<AddMessageResponse> {
@@ -136,8 +138,18 @@ async function sendFromComposer(page: Page, text?: string): Promise<AddMessageRe
     page.waitForResponse((candidate) => isMessagePost(candidate.request())),
     sendButton.click(),
   ]);
-  expect(response.status()).toBe(200);
-  return response.json();
+  expect(response.status()).toBe(202);
+  const accepted: MessageSendStatus = await response.json();
+  await waitForMessageSend(page.request, accepted);
+  const [attack, messages] = await Promise.all([
+    page.request.get(`/api/attacks/${accepted.attack_result_id}`),
+    page.request.get(`/api/attacks/${accepted.attack_result_id}/messages`, {
+      params: { conversation_id: accepted.source_conversation_id },
+    }),
+  ]);
+  expect(attack.ok()).toBe(true);
+  expect(messages.ok()).toBe(true);
+  return { attack: await attack.json(), messages: await messages.json() };
 }
 
 async function createConversation(request: APIRequestContext, attackId: string): Promise<string> {
@@ -289,7 +301,7 @@ test.describe("Chat processing recovery @seeded", () => {
     const loadGate = new Promise<void>((resolve) => { releaseLoad = resolve; });
     let loadStarted = false;
     let postCount = 0;
-    await page.route(new RegExp(`/api/attacks/${attackId}/messages`), async (route: Route) => {
+    await page.route(new RegExp(`/api/attacks/${attackId}/(?:messages|message-sends)(?:\\?|$)`), async (route: Route) => {
       if (route.request().method() === "GET"
         && new URL(route.request().url()).searchParams.get("conversation_id") === otherId) {
         loadStarted = true;
@@ -297,7 +309,7 @@ test.describe("Chat processing recovery @seeded", () => {
         await route.continue();
       } else if (isMessagePost(route.request())) {
         postCount += 1;
-        await route.abort("connectionrefused");
+        await route.fulfill({ status: 400, json: { detail: "Send rejected before acceptance" } });
       } else {
         await route.continue();
       }
@@ -313,7 +325,7 @@ test.describe("Chat processing recovery @seeded", () => {
     }
     await expect(page.getByTestId("message-list").getByText("Only conversation B history")).toBeVisible();
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    await expect(page.getByTestId("message-list").getByText(/Network error/)).toBeVisible();
+    await expect(page.getByTestId("message-list").getByText(/Send rejected before acceptance/)).toBeVisible();
     expect(postCount).toBe(1);
     await expect(page.getByTestId("chat-input")).toHaveValue("Retain this unsent draft");
     const [download] = await Promise.all([

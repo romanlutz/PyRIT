@@ -5,13 +5,15 @@ import { test, expect, type APIRequestContext, type Page, type Request } from "@
 
 import type {
   AddMessageRequest,
-  AddMessageResponse,
   BackendMessage,
+  ConversationMessagesResponse,
   ConverterPreviewRequest,
+  MessageSendStatus,
   TargetInstance,
 } from "@/types";
 
 import { makeTarget } from "./_targets";
+import { fulfillMessageSend, makeAddMessageResponse, waitForMessageSend } from "./_attacks";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -104,7 +106,7 @@ const IMAGE_OUTPUT_CONVERTERS: Record<string, string> = {
  * accumulates messages for multi-turn, and mirrors real API shapes.
  */
 async function mockBackendAPIs(page: Page) {
-  let accumulatedMessages: Record<string, unknown>[] = [];
+  let accumulatedMessages: BackendMessage[] = [];
   // Track the converter type for each registered converter instance so the
   // preview mock can decide between text and image_path output.
   const converterTypeById: Record<string, string> = Object.fromEntries(
@@ -274,8 +276,8 @@ async function mockBackendAPIs(page: Page) {
     }
   });
 
-  // Add message — MUST be registered BEFORE create-attack route
-  await page.route(/\/api\/attacks\/[^/]+\/messages/, async (route) => {
+  // Send operations and transcript reads are registered before create-attack.
+  await page.route(/\/api\/attacks\/[^/]+\/(?:messages|message-sends)(?:\?|$)/, async (route) => {
     if (route.request().method() === "POST") {
       let userText = "your message";
       let convertedText: string | null = null;
@@ -303,7 +305,7 @@ async function mockBackendAPIs(page: Page) {
       const displayText = convertedText ?? userText;
       const turnNumber = Math.floor(accumulatedMessages.length / 2) + 1;
 
-      const userMsg = {
+      const userMsg: BackendMessage = {
         turn_number: turnNumber,
         role: "user",
         created_at: new Date().toISOString(),
@@ -319,7 +321,7 @@ async function mockBackendAPIs(page: Page) {
           },
         ],
       };
-      const assistantMsg = {
+      const assistantMsg: BackendMessage = {
         turn_number: turnNumber,
         role: "assistant",
         created_at: new Date().toISOString(),
@@ -338,25 +340,9 @@ async function mockBackendAPIs(page: Page) {
 
       accumulatedMessages.push(userMsg, assistantMsg);
 
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          attack: {
-            attack_result_id: "e2e-attack-001",
-            conversation_id: MOCK_CONVERSATION_ID,
-            attack_type: "ManualAttack",
-            converters: converterIds.length > 0 ? ["Base64Converter"] : [],
-            outcome: "undetermined",
-            message_count: accumulatedMessages.length,
-            related_conversation_ids: [],
-            labels: {},
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-          messages: { messages: [...accumulatedMessages] },
-        }),
-      });
+      const result = makeAddMessageResponse("e2e-attack-001", MOCK_CONVERSATION_ID, [...accumulatedMessages]);
+      result.attack.converters = converterIds.length > 0 ? ["Base64Converter"] : [];
+      await fulfillMessageSend(page, route, result);
     } else if (route.request().method() === "GET") {
       // FIX: Handle GET so loadConversation doesn't hang in mock mode.
       // See detailed comment in chat.spec.ts mockBackendAPIs.
@@ -644,10 +630,10 @@ test.describe("Shared per-piece converter pipelines @seeded", () => {
 
     const [response] = await Promise.all([
       page.waitForResponse((candidate) => candidate.request().method() === "POST"
-        && /\/api\/attacks\/[^/]+\/messages$/.test(new URL(candidate.url()).pathname)),
+        && /\/api\/attacks\/[^/]+\/message-sends$/.test(new URL(candidate.url()).pathname)),
       page.getByRole("button", { name: "Send message", exact: true }).click(),
     ]);
-    expect(response.status()).toBe(200);
+    expect(response.status()).toBe(202);
     const sentRequest: AddMessageRequest = response.request().postDataJSON();
     expect(sentRequest.pieces).toHaveLength(1);
     expect(sentRequest.pieces[0]).toMatchObject({ data_type: "text", original_value: "hello" });
@@ -656,12 +642,13 @@ test.describe("Shared per-piece converter pipelines @seeded", () => {
       { converter_ids: [base64Id, caesarId], indexes_to_apply: [0] },
     ]);
 
-    const sent: AddMessageResponse = await response.json();
+    const sent: MessageSendStatus = await response.json();
+    expect((await waitForMessageSend(request, sent)).state).toBe("completed");
     const historyResponse = await request.get(
-      `/api/attacks/${sent.attack.attack_result_id}/messages?conversation_id=${sent.attack.conversation_id}`,
+      `/api/attacks/${sent.attack_result_id}/messages?conversation_id=${sent.source_conversation_id}`,
     );
     expect(historyResponse.ok()).toBeTruthy();
-    const history: AddMessageResponse["messages"] = await historyResponse.json();
+    const history: ConversationMessagesResponse = await historyResponse.json();
     const userMessage = history.messages.find((message: BackendMessage) => message.role === "user");
     expect(userMessage?.message_pieces).toEqual([
       expect.objectContaining({

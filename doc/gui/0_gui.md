@@ -76,6 +76,9 @@ same attack result. Repeating from a copied conversation extends only that conve
 not every existing conversation in the attack.
 
 The count resets to **n=1** after submission. Enter and Send use the same settings.
+Single sends and repeated sends use the same background execution workflow; a normal
+send is an operation with one conversation. Successful single sends keep the usual
+inline reply rather than adding a repetition banner.
 Request converters have two modes:
 
 - **Convert once, reuse for all** (default): each conversation receives the same prepared
@@ -96,6 +99,9 @@ Progress handles are temporary and local to the backend worker, but saved conver
 remain part of the attack result. If tracking is lost, use **Refresh progress** or inspect
 the saved conversations before sending again. Refreshing progress never resubmits prompts;
 a disconnected browser does not imply that the target received nothing.
+Failures distinguish preparation, sending, finalization, and interruption. A failure to
+refresh or update attack details after sending does not make the original prompt safe
+to resend.
 
 #### Attachments
 

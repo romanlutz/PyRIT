@@ -100,17 +100,29 @@ the same attack result. Shared request conversion is the default; independent co
 is optional. Response conversion runs per conversation. Progress links and the existing
 conversations sidebar open individual results, including failures.
 
-Single sends still use `POST /api/attacks/{id}/messages`. Repeated sends use
-`POST /api/attacks/{id}/messages/batch`, then poll
-`GET /api/attacks/{id}/message-batches/{batch_id}`. These endpoints use the same
-message preparation and manual-send concurrency budget. Conversation copies and attack
-membership commit atomically; no batch table or migration is needed.
+Every send, including **n=1**, submits one asynchronous operation with
+`POST /api/attacks/{id}/message-sends`, then reads
+`GET /api/attacks/{id}/message-sends/{send_id}?wait_ms=1000`. The client generates a
+submission identity once; count defaults to 1 and request conversion defaults to `shared`.
+Each status read waits for completion or up to one second. Reads never overlap for an
+operation, and there is no additional client polling timer or automatic submission retry.
+Single sends keep the inline loading experience; progress cards appear for repetitions
+or failures that need attention. The backward-compatible `/messages` POST remains
+available to API clients and append-only history consumers, but Chat does not use it to send.
+All sends share message preparation and the manual-send concurrency budget.
+Conversation copies and attack membership commit atomically; no new table or migration is needed.
 
 Submission identities and progress are worker-local, not a durable delivery ledger.
 Finished handles expire after ten minutes, with at most 128 retained by a worker.
 Multi-worker deployments must route submission and progress requests to the same worker.
-The browser never automatically resends when tracking fails. It retains preparation-failure
-drafts, preserves newer edits, and can refresh progress without submitting another send.
+The explicit `failure_stage` distinguishes preparation, sending, finalization, and
+interrupted operations; branch counts do not identify preparation failures.
+Preparation failures retain drafts. A saved processing error preserves the original
+prompt, attachments, and converter choices for clean-conversation recovery, including
+for count-one sends. Single-send drafts are not cleared until the stored target response
+is checked. Finalization failures, interrupted operations, and lost status or metadata
+reads are not safe-to-resend signals. The browser preserves newer edits and can refresh
+progress using only GET requests.
 
 ## Stack
 
@@ -165,7 +177,8 @@ E2E tests use `dev.py` to automatically start both frontend and backend servers.
 
 Seeded mode instead starts isolated servers and does not reuse a running application.
 Set `E2E_FRONTEND_PORT` and `PYRIT_E2E_BACKEND_PORT` when the default test ports are
-occupied. Direct `npx playwright` invocations can enable this mode with
+occupied; Vite's HMR connection also follows `E2E_FRONTEND_PORT`.
+Direct `npx playwright` invocations can enable this mode with
 `E2E_SEEDED_MODE=true`. Run just the offline repeat/nested-send flow with
 `npm run test:e2e:seeded -- --grep N-send`.
 

@@ -9,60 +9,67 @@ import {
 } from '@fluentui/react-components'
 import { DismissRegular } from '@fluentui/react-icons'
 
-import type { MessageBatchBranch, TrackedMessageBatch } from '@/types'
+import type { MessageSendBranch, TrackedMessageSend } from '@/types'
 
-import { useMessageBatchProgressStyles } from './MessageBatchProgress.styles'
+import { useMessageSendProgressStyles } from './MessageSendProgress.styles'
 
-interface MessageBatchProgressProps {
-  batches: TrackedMessageBatch[]
+interface MessageSendProgressProps {
+  sends: TrackedMessageSend[]
   attackResultId: string | null
   onSelectConversation: (conversationId: string) => void
-  onRetry: (batchId: string) => Promise<void>
-  onDismiss: (batchId: string) => void
+  onRetry: (sendId: string) => Promise<void>
+  onDismiss: (sendId: string) => void
 }
 
-export default function MessageBatchProgress({
-  batches,
+export default function MessageSendProgress({
+  sends,
   attackResultId,
   onSelectConversation,
   onRetry,
   onDismiss,
-}: MessageBatchProgressProps) {
-  const styles = useMessageBatchProgressStyles()
-  const visible = batches.filter((entry: TrackedMessageBatch) => entry.status.attack_result_id === attackResultId)
+}: MessageSendProgressProps) {
+  const styles = useMessageSendProgressStyles()
+  const visible = sends.filter(({ status, trackingError }: TrackedMessageSend) =>
+    status.attack_result_id === attackResultId
+    && (status.requested_count > 1 || trackingError || status.state === 'failed'
+      || status.branches.some((branch: MessageSendBranch) => branch.state === 'failed')),
+  )
   if (visible.length === 0) return null
 
   return (
     <div className={styles.root} role="region" aria-label="Prompt repetition progress">
-      {visible.map(({ status, trackingError }: TrackedMessageBatch) => {
-        const failed = status.branches.filter((branch: MessageBatchBranch) => branch.state === 'failed')
-        const completed = status.branches.filter((branch: MessageBatchBranch) =>
+      {visible.map(({ status, trackingError }: TrackedMessageSend) => {
+        const failed = status.branches.filter((branch: MessageSendBranch) => branch.state === 'failed')
+        const completed = status.branches.filter((branch: MessageSendBranch) =>
           branch.state === 'completed' || branch.state === 'failed',
         ).length
         const done = status.state === 'completed' || status.state === 'failed'
-        const failedPreparation = status.state === 'failed' && status.branches.length < status.requested_count
+        const failedPreparation = status.failure_stage === 'preparation'
+        const countLabel = status.requested_count === 1 ? 'send' : `${status.requested_count} sends`
         const intent = trackingError || failed.length || status.state === 'failed'
           ? 'warning'
           : done ? 'success' : 'info'
         return (
           <MessageBar
-            key={status.batch_id}
+            key={status.send_id}
             intent={intent}
             icon={!done && !trackingError ? <Spinner size="tiny" /> : undefined}
-            data-testid={`message-batch-${status.batch_id}`}
+            data-testid={`message-send-${status.send_id}`}
           >
             <MessageBarBody>
               <MessageBarTitle>
                 {failedPreparation
-                  ? `Could not prepare ${status.requested_count} sends`
+                  ? `Could not prepare ${countLabel}`
+                  : status.requested_count === 1 && status.state === 'failed'
+                  ? 'Send failed'
                   : status.state === 'preparing'
-                  ? `Preparing ${status.requested_count} sends`
+                  ? `Preparing ${countLabel}`
                   : `${completed} of ${status.requested_count} sends finished`}
               </MessageBarTitle>
               {trackingError || status.error || (status.state === 'queued' ? 'Waiting for target capacity.' : '')}
               {status.branches.length > 0 && (
                 <div className={styles.details}>
-                  {status.branches.map((branch: MessageBatchBranch, index: number) => (
+                  {status.branches.map((branch: MessageSendBranch, index: number) => (
                     <Tooltip
                       key={branch.conversation_id}
                       content={branch.error || `Open conversation ${branch.conversation_id}`}
@@ -91,7 +98,7 @@ export default function MessageBatchProgress({
                   className={styles.button}
                   icon={<DismissRegular />}
                   aria-label="Dismiss repetition progress"
-                  onClick={() => onDismiss(status.batch_id)}
+                  onClick={() => onDismiss(status.send_id)}
                 />
               ) : undefined}
             >
@@ -99,7 +106,7 @@ export default function MessageBatchProgress({
                 <Button
                   className={styles.button}
                   appearance="transparent"
-                  onClick={() => { void onRetry(status.batch_id) }}
+                  onClick={() => { void onRetry(status.send_id) }}
                 >
                   Refresh progress
                 </Button>
