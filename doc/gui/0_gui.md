@@ -34,7 +34,7 @@ To deploy an isolated instance for an external team, see [Deploy a New Instance]
 
 ## Views
 
-CoPyRIT has three main views, accessible from the left sidebar: **Chat**, **Attack History**, and **Target Configuration**. The **Theme** menu is available at the bottom of the sidebar.
+Use the left sidebar to navigate between Chat, History, Analytics, Scanner, Registry, and Configuration. The **Theme** menu is available at the bottom of the sidebar.
 
 ### Themes
 
@@ -172,6 +172,77 @@ Click any row to open the attack in the Chat view.
 #### Pagination
 
 Results are paginated (25 per page) with "First" and "Next" navigation buttons.
+
+History lists distinct AttackResult IDs. Different IDs are not merged merely because
+they reference the same main conversation. This matches Analytics; historical
+duplicate-data cleanup is a separate operation.
+
+### Analytics
+
+Analytics explores **saved AttackResult outcomes**. Counts, filtering, grouping,
+and rates are calculated by the SDK, not by the browser. It does not inspect
+individual scores or traverse conversations to calculate results.
+
+Filter by operation, operator, targeted harm category, attack type, request or
+response converter, persisted objective target/model, scenario run, custom labels,
+outcome, or last-updated range. A custom label requires its key before looking up
+its values. Dropdown options are fetched only when the control is opened.
+
+Values within a filter chip are alternatives (**ANY**); converters also support
+explicit **ALL** matching. Separate chips are combined with **AND**, even when
+they use the same dimension. Editing one chip does not replace the others.
+Available facet values temporarily ignore that dimension's own chips so you can
+choose alternatives; other filters still constrain those options. This applies
+only to the choices shown, not to the dashboard's saved-result cohort.
+
+Choose an outcome breakdown, an ASR comparison, or a two-dimension heatmap. Select
+a group or cell to add its filters and inspect the exact matching result rows.
+Click a result row, or focus it and press Enter or Space, to open its existing
+Chat view. Filters and chart selections
+are stored in the URL, so links and browser Back preserve the exploration.
+Changing only the heatmap's **Cell color**, or switching between outcome and
+success-rate bars, reuses the current report and pages without another request.
+Changing filters or active axes loads a new report. Page positions and unfinished
+filter edits are not stored in shared links. An invalid link shows a reset action
+instead of silently loading a broader cohort.
+
+**Attack success rate (ASR)** is successes divided by successes plus failures.
+Errors and undetermined results remain visible but are excluded from that
+denominator. When there are no decided results, ASR is unavailable, not zero.
+ASR displays label both counts and the full population. For example, three
+successful results out of three decided results, with five results overall, show
+`100%`, `3 success / 3 decided`, and `5 total`.
+
+Outcome filters apply to the **entire dashboard**. An active outcome restriction
+adds an asterisk to **ASR*** and an explanatory note. Selecting only successes can
+therefore display **100%***. This describes the selected outcomes, not an
+unfiltered measure of target safety.
+
+Outcome badges, icons, and chart markers share one palette: green for success,
+red for failure, blue for execution errors, and gray for undetermined results.
+The summary badges use the same fill colors as their corresponding bar segments.
+Labels and icons remain available when high-contrast settings replace these colors.
+
+Targeted harm categories describe what an attack intended to test, not harms
+detected by a scorer. Harm and converter groups can overlap: a result can belong
+to several groups, but counts only once in the overall total and once in each
+matching cell. Do not add overlapping group totals together. Missing metadata is
+kept separate from a known empty converter list, a literal `Unknown`, and an
+empty-string value.
+
+**Reload** preserves filters and updates the report's **Last refreshed** timestamp
+only after a successful read. There is no polling. A failed reload keeps the old
+report with a stale/error indication. Result pagination fetches only another page,
+not the charts; its separate read timestamp does not advance the report timestamp.
+Saved records can change between page requests.
+
+The page has paginated bar charts, a bounded heatmap with an optional cell-data
+view, and the individual-result table. Bar charts show the group counts directly,
+without a second aggregate table. Use **First groups** and **Next groups** to
+browse all groups, 15 at a time. Display limits never sample the underlying cohort.
+
+See [SDK attack-result analytics](../code/analytics/0_attack_results.md) for Python
+usage, endpoint contracts, resource limits, and the reproducible performance workload.
 
 ### Target Configuration
 

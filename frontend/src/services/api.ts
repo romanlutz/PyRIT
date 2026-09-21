@@ -49,6 +49,12 @@ import type {
   BackendScore,
   ManualScoreRequest,
   UpdateAttackRequest,
+  AttackAnalyticsQuery,
+  AttackAnalyticsReport,
+  AttackAnalyticsResultsQuery,
+  AttackAnalyticsResults,
+  AttackAnalyticsFacetQuery,
+  AttackAnalyticsFacets,
 } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
@@ -137,6 +143,36 @@ apiClient.interceptors.response.use(
 )
 
 export { apiClient }
+
+/** Thin reads of SDK analytics contracts; hooks own cancellation/freshness, and the SDK owns all aggregation. */
+export const analyticsApi = {
+  /** Compute a report and include its first result page in the same response. */
+  query: async (
+    query: AttackAnalyticsQuery,
+    signal?: AbortSignal,
+  ): Promise<AttackAnalyticsReport> => {
+    const response = await apiClient.post<AttackAnalyticsReport>('/analytics/attacks/query', query, { signal })
+    return response.data
+  },
+
+  /** Page matching rows without recomputing the report or advancing its timestamp. */
+  results: async (
+    query: AttackAnalyticsResultsQuery,
+    signal?: AbortSignal,
+  ): Promise<AttackAnalyticsResults> => {
+    const response = await apiClient.post<AttackAnalyticsResults>('/analytics/attacks/results', query, { signal })
+    return response.data
+  },
+
+  /** Read one dimension's alternatives; the SDK applies self-filter exclusion. */
+  facets: async (
+    query: AttackAnalyticsFacetQuery,
+    signal?: AbortSignal,
+  ): Promise<AttackAnalyticsFacets> => {
+    const response = await apiClient.post<AttackAnalyticsFacets>('/analytics/attacks/facets', query, { signal })
+    return response.data
+  },
+}
 
 export const healthApi = {
   checkHealth: async () => {

@@ -24,6 +24,7 @@ from pyrit.backend.middleware import RequestIdMiddleware, SecurityHeadersMiddlew
 from pyrit.backend.middleware.auth import EntraAuthMiddleware
 from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.routes import (
+    analytics,
     attacks,
     auth,
     configuration,
@@ -38,6 +39,7 @@ from pyrit.backend.routes import (
     targets,
     version,
 )
+from pyrit.backend.services.analytics_service import shutdown_analytics_service
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.converter_service import get_converter_service
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
@@ -126,6 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await converter_service.close_async()
             finally:
                 get_converter_service.cache_clear()
+                await asyncio.to_thread(shutdown_analytics_service)
 
 
 app = FastAPI(
@@ -167,6 +170,7 @@ app.add_middleware(
 
 
 # Include API routes
+app.include_router(analytics.router, prefix="/api", tags=["analytics"])
 app.include_router(attacks.router, prefix="/api", tags=["attacks"])
 app.include_router(configuration.router, prefix="/api", tags=["config"])
 app.include_router(targets.router, prefix="/api", tags=["targets"])

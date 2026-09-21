@@ -150,6 +150,90 @@ E2E tests use `dev.py` to automatically start both frontend and backend servers.
 The frontend proxies API requests to `http://localhost:8000` in development.
 Configure this in `vite.config.ts` if needed.
 
+## Saved-result analytics
+
+Open **Analytics** (`/analytics`) to explore saved AttackResults across operations,
+operators, persisted targets/models, targeted harms, attack types, request/response
+converters, scenario runs, custom labels, and outcomes. It starts with all saved
+results, not the current operation or active target. The optional **Last updated**
+range describes edits to stored results, not attack execution dates.
+
+Counts, outcome shares, decided share, ASR, grouping, and matching result pages
+come from the analytics API. ASR is attacker successes among decided results;
+errors and undetermined results are not defensive failures. An unavailable ASR
+is not 0%. An outcome restriction applies to the whole dashboard and adds
+**ASR\*** with an explanation, including when the rate is unavailable.
+
+Group and heatmap selections append the server's drill-down predicates. Separate
+filter chips are ANDed, even for the same converter dimension. Values within a
+chip use ANY matching, or explicit ALL matching for converters. Missing metadata
+and known-empty converter pipelines are distinct from literal values such as
+`Unknown`. Overlapping groups must not be added together.
+
+The active chart is an outcome composition, success-rate comparison, or bounded
+heatmap. Bar charts show labeled counts without a duplicate aggregate table.
+**First groups** and **Next groups** browse all groups, 15 at a time. The heatmap
+uses a semantic table with keyboard-operable cells and reports truncated axes.
+Custom-label values are fetched only after entering a key. Facets are searched
+and paged only while their control is open. The SDK ignores that dimension's own
+predicates when finding facet alternatives, but keeps the other filters. This
+does not remove any applied filter from the dashboard.
+
+Filters and chart settings are shareable in the URL and restore with browser
+Back. Result cursors, group-page offsets, and unfinished filter edits are local
+state, not part of the link. Changing heatmap color or switching between outcome
+and success-rate bars only changes presentation: it does not request data or
+reset the current pages. Changing filters or active axes requests a new report.
+
+**Reload** retains the view, resets pagination, and refreshes the report and
+opened facet. A failed reload keeps the last successful report with a stale
+warning and Retry. Result pagination uses only the results endpoint and has
+its own read time; it does not advance the report's **Last refreshed** time.
+Opening a result uses the existing attack route and its read-only guards.
+
+### Analytics implementation boundaries
+
+| Module | Responsibility |
+| --- | --- |
+| `src/utils/attackAnalytics.ts` | Validate/serialize URL state, preserve typed identities, project active settings onto the API query, and format SDK values. |
+| `src/components/Analytics/AnalyticsPage.tsx` | Coordinate validated URL edits, local group pagination, drill-down, and the report hook. |
+| `src/hooks/useAttackAnalytics.ts` | Debounce/cancel report reads, retain coherent stale reports, and manage independent cursor-based result reads. |
+| `src/hooks/useAttackAnalyticsFacet.ts` | Read only the opened dimension, debounce search, reset its offset for a new scope, and retry the same failed page. |
+| `src/components/Analytics/AnalyticsFilters.tsx` | Keep selections/date input as drafts until Apply, preserve selections across facet pages, and guard against editing a chip replaced by browser Back. |
+| `AnalyticsStats`, `AnalyticsGroups`, `AnalyticsHeatmap`, `AnalyticsResultsTable` | Render server-provided values and emit user actions; do not aggregate results or infer drill-down predicates. |
+| `src/services/api.ts` and `src/types/index.ts` | Keep the transport and shared wire contracts separate from browser state. |
+| `src/styles/outcomePalette.ts` and `OutcomeBadge` | Keep outcome identities and fills consistent across charts, History, Home, and Scanner without replacing Fluent theme tokens. |
+
+Two identities serve different purposes in the report hook. The **report scope**
+includes filters and axes but excludes group pagination, allowing the previous
+coherent report to remain visible during a group read or failed Reload. The
+**request key** includes the full server query and refresh generation. That one
+key drives fetching, loading/error state, and result-page ownership. A new
+JavaScript object with the same serialized payload is not a new request.
+The hook keeps a stable identity for consecutive equal keys; returning to an
+earlier query after another query creates a new identity rather than reviving
+that query's cancelled request or old results page.
+Each effect captures its typed payload once before debouncing; cancelled requests
+cannot publish late responses. Failed reads never invent a newer timestamp.
+
+Do not merge repeated dimension predicates or identify options by display label.
+Dimension identity includes a custom-label key or converter direction, and value
+identity includes its kind. Malformed links render a reset action and issue no
+analytics request: silently using defaults would broaden the requested cohort.
+
+Focused frontend verification (PowerShell):
+
+```powershell
+npm run type-check
+npm run lint
+npm test -- --runInBand --testPathPatterns "Analytics|attackAnalytics|OutcomeBadge|HistoryPagination|api.test"
+$env:E2E_FRONTEND_PORT = '4177'
+npm run test:e2e -- analytics.spec.ts --project=mock --workers=1
+```
+
+The analytics browser tests mock every API request and use a dedicated,
+automatically stopped Vite server. They do not start attacks or access a database.
+
 ## Adding a theme preset
 
 The catalog in `src/themes/themePresets.ts` is the source of truth for preset

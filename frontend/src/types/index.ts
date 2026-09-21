@@ -409,6 +409,195 @@ export type AttackTargetResolutionStatus =
 
 export type AttackOutcome = 'undetermined' | 'success' | 'failure' | 'error'
 
+// Saved-result analytics contracts from pyrit.models.analytics.
+export type AttackAnalyticsDimensionName =
+  | 'operation'
+  | 'operator'
+  | 'targeted_harm_category'
+  | 'attack_type'
+  | 'converter_type'
+  | 'objective_target'
+  | 'model'
+  | 'scenario'
+  | 'label'
+
+export type AttackAnalyticsConverterDirection = 'request' | 'response'
+export type AttackAnalyticsMatchMode = 'any' | 'all'
+export type AttackAnalyticsValueKind = 'value' | 'missing' | 'no_converters'
+
+/** A metadata identity; custom labels and request/response converters are distinct dimensions. */
+export type AttackAnalyticsDimension =
+  | {
+    readonly name: 'label'
+    readonly label_key: string
+    readonly converter_direction?: 'request'
+  }
+  | {
+    readonly name: 'converter_type'
+    readonly label_key?: null
+    readonly converter_direction?: AttackAnalyticsConverterDirection
+  }
+  | {
+    readonly name: Exclude<AttackAnalyticsDimensionName, 'label' | 'converter_type'>
+    readonly label_key?: null
+    readonly converter_direction?: 'request'
+  }
+
+/** Absence is typed, not a string sentinel: missing metadata, an empty pipeline, and literal values never merge. */
+export type AttackAnalyticsValue =
+  | { readonly kind: 'value'; readonly value: string }
+  | { readonly kind: 'missing' | 'no_converters'; readonly value: null }
+
+/** One predicate: values are alternatives (ANY), except explicit ALL matching for converters. */
+export interface AttackAnalyticsFilter {
+  readonly dimension: AttackAnalyticsDimension
+  readonly values: AttackAnalyticsValue[]
+  readonly match_mode: AttackAnalyticsMatchMode
+}
+
+/**
+ * The entire cohort. Dimension predicates are ANDed, including repeated dimensions;
+ * the outcome set and time bounds constrain that same cohort, not just a chart.
+ */
+export interface AttackAnalyticsFilters {
+  readonly dimensions: AttackAnalyticsFilter[]
+  readonly outcomes: AttackOutcome[]
+  readonly updated_after?: string | null
+  readonly updated_before?: string | null
+}
+
+/**
+ * SDK-computed statistics, not totals of the currently displayed groups or rows.
+ * success_rate is null with no decided results; overlapping groups are not additive.
+ */
+export interface AttackAnalyticsStatistics {
+  readonly success_rate: number | null
+  readonly total_decided: number
+  readonly successes: number
+  readonly failures: number
+  readonly undetermined: number
+  readonly errors: number
+  readonly total_results: number
+  readonly decided_share: number | null
+  readonly outcome_shares: Record<AttackOutcome, number>
+}
+
+/** Report request: display limits bound returned groups/axes/rows, never sample the underlying cohort. */
+export interface AttackAnalyticsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly group_by?: AttackAnalyticsDimension
+  readonly compare_by?: AttackAnalyticsDimension | null
+  readonly group_limit?: number
+  readonly group_offset?: number
+  readonly axis_limit?: number
+  readonly result_limit?: number
+}
+
+/** A rows-only read. Cursors are opaque and meaningful only with the filters that produced them. */
+export interface AttackAnalyticsResultsQuery {
+  readonly filters?: AttackAnalyticsFilters
+  readonly cursor?: string | null
+  readonly limit?: number
+}
+
+/** The SDK ignores this dimension's own predicates when listing alternatives; all other filters remain active. */
+export interface AttackAnalyticsFacetQuery {
+  readonly dimension: AttackAnalyticsDimension
+  readonly filters?: AttackAnalyticsFilters
+  readonly search?: string
+  readonly offset?: number
+  readonly limit?: number
+}
+
+export interface AttackAnalyticsOption {
+  readonly key: AttackAnalyticsValue
+  /** Presentation only: labels can collide and must not be used as selection identities. */
+  readonly label: string
+}
+
+export interface AttackAnalyticsGroup extends AttackAnalyticsOption {
+  readonly statistics: AttackAnalyticsStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+export interface AttackAnalyticsCell {
+  readonly row: AttackAnalyticsValue
+  readonly column: AttackAnalyticsValue
+  readonly statistics: AttackAnalyticsStatistics
+  readonly drilldown_filters: AttackAnalyticsFilter[]
+}
+
+/** Lightweight saved metadata; opening the attack uses its normal route/guards, not a hydrated analytics conversation. */
+export interface AttackAnalyticsResultRow {
+  readonly attack_result_id: string
+  readonly objective_preview: string
+  readonly outcome: AttackOutcome
+  readonly updated_at: string
+  readonly operation: string | null
+  readonly operator: string | null
+  readonly attack_type: string | null
+  readonly target_model: string | null
+  readonly target_identifier_hash: string | null
+  readonly scenario_result_id: string | null
+  readonly targeted_harm_categories: string[]
+  readonly request_converters: string[]
+  readonly response_converters: string[]
+  readonly labels: Record<string, string>
+}
+
+export interface AttackAnalyticsResults {
+  readonly items: AttackAnalyticsResultRow[]
+  readonly has_more: boolean
+  readonly next_cursor: string | null
+  /** This page's read time, independent of the aggregate report's freshness. */
+  readonly computed_at: string
+}
+
+export interface AttackAnalyticsFacets {
+  readonly items: AttackAnalyticsOption[]
+  readonly has_more: boolean
+  readonly next_offset: number | null
+  readonly computed_at: string
+}
+
+/** A coherent aggregate read plus its first results page; later results pages do not replace this report. */
+export interface AttackAnalyticsReport {
+  readonly filters: AttackAnalyticsFilters
+  readonly group_by: AttackAnalyticsDimension
+  readonly compare_by: AttackAnalyticsDimension | null
+  readonly summary: AttackAnalyticsStatistics
+  readonly outcome_filter_applied: boolean
+  readonly groups_overlap: boolean
+  /** SDK-owned availability: non-null disables chart drill-down, not the report, result paging, or outcome filters. */
+  readonly drilldown_unavailable_reason: string | null
+  readonly groups: AttackAnalyticsGroup[]
+  readonly has_more_groups: boolean
+  readonly next_group_offset: number | null
+  readonly rows: AttackAnalyticsOption[]
+  readonly columns: AttackAnalyticsOption[]
+  readonly cells: AttackAnalyticsCell[]
+  readonly axes_truncated: boolean
+  readonly results: AttackAnalyticsResults
+  readonly computed_at: string
+  readonly warnings: string[]
+}
+
+export type AttackAnalyticsChart = 'outcomes' | 'success-rate' | 'heatmap'
+export type AttackAnalyticsHeatmapMetric = 'success_rate' | 'total_results'
+
+/**
+ * Shareable browser state, not an API payload. Retain inactive chart choices, but
+ * exclude presentation-only settings when deriving a server request identity.
+ */
+export interface AttackAnalyticsViewState {
+  readonly filters: AttackAnalyticsFilters
+  readonly groupBy: AttackAnalyticsDimension
+  readonly heatmapRow: AttackAnalyticsDimension
+  readonly heatmapColumn: AttackAnalyticsDimension
+  readonly chart: AttackAnalyticsChart
+  readonly heatmapMetric: AttackAnalyticsHeatmapMetric
+}
+
 export interface AttackSummary {
   attack_result_id: string
   conversation_id: string

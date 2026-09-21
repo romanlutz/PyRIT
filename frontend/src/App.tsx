@@ -12,6 +12,7 @@ import ConverterRegistry from './components/Registry/ConverterRegistry'
 import RegistryLayout from './components/Registry/RegistryLayout'
 import Configuration from './components/Configuration/Configuration'
 import AttackHistory from './components/History/AttackHistory'
+import AnalyticsPage from './components/Analytics/AnalyticsPage'
 import HistoryPage from './components/History/HistoryPage'
 import type { HistoryTab } from './components/History/HistoryPage'
 import ScenarioHistory from './components/History/ScenarioHistory'
@@ -60,6 +61,7 @@ const VIEW_PATHS: Record<ViewName, string> = {
   home: '/',
   chat: '/chat',
   history: HISTORY_ATTACKS_PATH,
+  analytics: '/analytics',
   registry: '/registry/targets',
   scenarios: '/scanner',
   configuration: '/config',
@@ -215,12 +217,18 @@ function App() {
   )
   const lastHistorySearch = useRef('')
   const lastScenarioHistorySearch = useRef('')
+  // Opening an analytics row uses the normal attack route. Remember only the
+  // exploration URL here so sidebar return restores it without a separate loader.
+  const lastAnalyticsSearch = useRef('')
   useEffect(() => {
     if (location.pathname === HISTORY_ATTACKS_PATH) {
       lastHistorySearch.current = location.search
     }
     if (location.pathname === HISTORY_SCANNER_PATH) {
       lastScenarioHistorySearch.current = location.search
+    }
+    if (location.pathname === VIEW_PATHS.analytics) {
+      lastAnalyticsSearch.current = location.search
     }
   }, [location.pathname, location.search])
 
@@ -431,9 +439,13 @@ function App() {
   }, [readyAttack, routeConversationId, navigate, scenarioResultId])
 
   const handleNavigate = useCallback((view: ViewName) => {
-    // Re-attach the last filter query so returning to history restores filters.
+    // Re-attach each browsing view's last query after visiting an attack or another view.
     if (view === 'history') {
       navigate(VIEW_PATHS.history + lastHistorySearch.current)
+      return
+    }
+    if (view === 'analytics') {
+      navigate(VIEW_PATHS.analytics + lastAnalyticsSearch.current)
       return
     }
     navigate(VIEW_PATHS[view])
@@ -640,6 +652,7 @@ function App() {
               <Route path="/scenario-history" element={<LegacyScenarioHistoryRedirect />} />
               <Route path="/scenario-history/:scenarioResultId" element={<LegacyScenarioRunRedirect />} />
               <Route path="/config" element={<Configuration />} />
+              <Route path="/analytics" element={<AnalyticsPage onOpenAttack={handleOpenAttack} />} />
               <Route path="/history" element={<LegacyAttackHistoryRedirect />} />
               <Route
                 path={HISTORY_ATTACKS_PATH}

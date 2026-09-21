@@ -6,17 +6,15 @@ import {
   MessageBarBody,
   Spinner,
   Text,
-  tokens,
 } from '@fluentui/react-components'
 import {
   ArrowRightRegular,
-  CheckmarkCircleRegular,
-  DismissCircleRegular,
-  ErrorCircleRegular,
-  QuestionCircleRegular,
   TagMultipleRegular,
   TargetRegular,
 } from '@fluentui/react-icons'
+
+import { OutcomeIcon } from '@/components/OutcomeBadge'
+
 import LabelsBar from '../Labels/LabelsBar'
 import { attacksApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
@@ -29,13 +27,6 @@ const RECENT_ATTACKS_LIMIT = 50
 const MAX_OPERATIONS = 5
 const MAX_ATTACKS_PER_OPERATION = 3
 const NO_OPERATION_KEY = '__no_operation__'
-
-const OUTCOME_ICONS: Record<string, React.ReactElement> = {
-  success: <CheckmarkCircleRegular style={{ color: tokens.colorPaletteGreenForeground1 }} />,
-  failure: <DismissCircleRegular style={{ color: tokens.colorPaletteRedForeground1 }} />,
-  error: <ErrorCircleRegular style={{ color: tokens.colorPaletteRedForeground1 }} />,
-  undetermined: <QuestionCircleRegular style={{ color: tokens.colorNeutralForeground3 }} />,
-}
 
 interface HomeProps {
   labels: Record<string, string>
@@ -271,7 +262,7 @@ export default function Home({
                           data-testid={`home-open-attack-${attack.attack_result_id}`}
                           title={attack.last_message_preview || attack.attack_type}
                         >
-                          {OUTCOME_ICONS[attack.outcome ?? 'undetermined'] ?? OUTCOME_ICONS.undetermined}
+                          <OutcomeIcon outcome={attack.outcome} />
                           <Text size={200} className={styles.attackPreview}>
                             {attack.last_message_preview || attack.attack_type}
                           </Text>

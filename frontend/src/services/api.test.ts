@@ -24,7 +24,15 @@ import {
   attacksApi,
   labelsApi,
   scenariosApi,
+  analyticsApi,
 } from "./api";
+import {
+  ANALYTICS_OPERATION_FILTER,
+  ANALYTICS_PREDICATE_LIMIT_REASON,
+  makeAnalyticsFacets,
+  makeAnalyticsReport,
+  makeAnalyticsResults,
+} from "@/test-utils/analyticsFixtures";
 
 describe("api service", () => {
   // Interceptor functions are registered at module-load time.
@@ -44,6 +52,58 @@ describe("api service", () => {
 
       await expect(authApi.getAccess()).resolves.toEqual(response.data);
       expect(apiClient.get).toHaveBeenCalledWith("/auth/access");
+    });
+  });
+
+  describe("analyticsApi", () => {
+    it("should post the exact report contract, retain the SDK reason, and forward the request signal", async () => {
+      const signal = new AbortController().signal;
+      const query = {
+        filters: { dimensions: [ANALYTICS_OPERATION_FILTER], outcomes: [] },
+        group_by: { name: "operation" as const },
+        group_offset: 50,
+        group_limit: 50,
+        result_limit: 25,
+      };
+      const report = makeAnalyticsReport({ drilldown_unavailable_reason: ANALYTICS_PREDICATE_LIMIT_REASON });
+      jest.mocked(apiClient.post).mockResolvedValueOnce({ data: report });
+      await expect(analyticsApi.query(query, signal)).resolves.toBe(report);
+      expect(apiClient.post).toHaveBeenCalledWith("/analytics/attacks/query", query, { signal });
+    });
+
+    it("should request results separately without requesting a report", async () => {
+      const signal = new AbortController().signal;
+      const query = { filters: { dimensions: [ANALYTICS_OPERATION_FILTER], outcomes: [] }, cursor: "cursor-1", limit: 25 };
+      const results = makeAnalyticsResults();
+      jest.mocked(apiClient.post).mockResolvedValueOnce({ data: results });
+      await expect(analyticsApi.results(query, signal)).resolves.toBe(results);
+      expect(apiClient.post).toHaveBeenCalledTimes(1);
+      expect(apiClient.post).toHaveBeenCalledWith("/analytics/attacks/results", query, { signal });
+    });
+
+    it("should request one paged searchable facet with the existing client", async () => {
+      const signal = new AbortController().signal;
+      const query = {
+        dimension: { name: "label" as const, label_key: "team" },
+        search: "research",
+        offset: 50,
+        limit: 50,
+      };
+      const facets = makeAnalyticsFacets();
+      jest.mocked(apiClient.post).mockResolvedValueOnce({ data: facets });
+      await expect(analyticsApi.facets(query, signal)).resolves.toBe(facets);
+      expect(apiClient.post).toHaveBeenCalledWith("/analytics/attacks/facets", query, { signal });
+    });
+
+    it("should preserve failures for normal error handling", async () => {
+      const error = new Error("Analytics query timed out");
+      jest.mocked(apiClient.post)
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error)
+        .mockRejectedValueOnce(error);
+      await expect(analyticsApi.query({})).rejects.toBe(error);
+      await expect(analyticsApi.results({})).rejects.toBe(error);
+      await expect(analyticsApi.facets({ dimension: { name: "operation" } })).rejects.toBe(error);
     });
   });
 

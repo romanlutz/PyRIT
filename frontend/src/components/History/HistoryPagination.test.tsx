@@ -1,5 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { FluentProvider, webLightTheme } from '@fluentui/react-components'
+import userEvent from '@testing-library/user-event'
 import HistoryPagination from './HistoryPagination'
 
 jest.mock('./AttackHistory.styles', () => ({
@@ -100,5 +101,18 @@ describe('HistoryPagination', () => {
 
     expect(screen.getByText('First')).toBeInTheDocument()
     expect(screen.getByText('Next')).toBeInTheDocument()
+  })
+
+  it('should prevent both requests while analytics pagination is busy', async () => {
+    const user = userEvent.setup()
+    render(<TestWrapper><HistoryPagination {...defaultProps} page={2} disabled /></TestWrapper>)
+    const first = screen.getByRole('button', { name: 'First' })
+    const next = screen.getByRole('button', { name: 'Next' })
+    expect(first).toBeDisabled()
+    expect(next).toBeDisabled()
+    await user.click(first)
+    await user.click(next)
+    expect(defaultProps.onPrevPage).not.toHaveBeenCalled()
+    expect(defaultProps.onNextPage).not.toHaveBeenCalled()
   })
 })
