@@ -163,6 +163,7 @@ function App() {
   const routeConversationId = conversationMatch?.params.conversationId ?? null
   const currentView: ViewName = routeAttackId !== null ? 'chat' : viewFromPath(location.pathname)
   const [canManageConfiguration, setCanManageConfiguration] = useState(false)
+  const [chatToolbarContainer, setChatToolbarContainer] = useState<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -535,6 +536,7 @@ function App() {
     />
   ) : (
     <ChatWindow
+      toolbarContainer={chatToolbarContainer}
       onNewAttack={handleNewAttack}
       activeTarget={activeTarget}
       attackResultId={readyAttack ? readyAttack.id : null}
@@ -546,7 +548,6 @@ function App() {
       onHumanScoreChange={handleHumanScoreChange}
       onAttackChange={handleAttackChange}
       labels={globalLabels}
-      onLabelsChange={handleGlobalLabelsChange}
       onNavigate={handleNavigate}
       attackOperator={readyAttack ? readyAttack.operator : null}
       attackTarget={readyAttack ? readyAttack.target : null}
@@ -584,14 +585,15 @@ function App() {
             onOpenFeedback={() => setFeedbackOpen(true)}
             canManageConfiguration={canManageConfiguration}
             onStartTour={startTour}
+            labels={globalLabels}
+            onLabelsChange={handleGlobalLabelsChange}
+            toolbarRef={setChatToolbarContainer}
           >
             <Routes>
               <Route
                 path="/"
                 element={
                   <Home
-                    labels={globalLabels}
-                    onLabelsChange={handleGlobalLabelsChange}
                     activeTarget={activeTarget}
                     onNavigate={handleNavigate}
                     onOpenAttack={handleOpenAttack}
