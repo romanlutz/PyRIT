@@ -8,10 +8,11 @@ import {
   mergeClasses,
 } from '@fluentui/react-components'
 import { SendRegular, AttachRegular, DismissRegular, InfoRegular, AddRegular, CopyRegular, WarningRegular, SettingsRegular, ArrowShuffleRegular, OpenRegular, ArrowSyncRegular } from '@fluentui/react-icons'
-import type { AttackTargetResolutionStatus, ChatSendOutcome, MessageAttachment, PieceConversion, TargetInstance } from '../../types'
+import type { AttackTargetResolutionStatus, ChatSendOutcome, MessageAttachment, MultiSendOptions, PieceConversion, TargetInstance } from '../../types'
 import { isTargetResolutionBlocking } from '../../utils/targetIdentity'
 import { useChatInputAreaStyles } from './ChatInputArea.styles'
 import SystemPromptSetup from './SystemPromptSetup'
+import MultiSendSettings from './MultiSendSettings'
 import { PIECE_TYPE_TO_DATA_TYPE, withDraftIdentity } from './converterTypes'
 
 // ---------------------------------------------------------------------------
@@ -409,6 +410,7 @@ export interface ChatInputAreaHandle {
   restoreDraft: (text: string, attachments: MessageAttachment[]) => void
   focus: () => void
   getDraftRevision: () => number
+  clearSubmittedDraft: (revision: number) => void
 }
 
 interface ChatInputAreaProps {
@@ -416,6 +418,7 @@ interface ChatInputAreaProps {
     originalValue: string,
     convertedValue: string | undefined,
     attachments: MessageAttachment[],
+    options?: MultiSendOptions,
   ) => Promise<ChatSendOutcome>
   conversionRevisionKey?: string
   disabled?: boolean
@@ -458,6 +461,10 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
   const styles = useChatInputAreaStyles()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
+  const [multiSendOptions, setMultiSendOptions] = useState<MultiSendOptions>({
+    count: 1,
+    requestConverterMode: 'shared',
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const convertedRef = useRef<HTMLTextAreaElement>(null)
@@ -484,6 +491,19 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
     ? mergeClasses(styles.textInput, styles.textInputShared)
     : styles.textInput
 
+  const clearSubmittedDraft = (revision: number): void => {
+    if (draftRevisionRef.current !== revision) return
+    inputRef.current = ''
+    attachmentsRef.current = []
+    draftRevisionRef.current += 1
+    setInput('')
+    setAttachments([])
+    onClearAllConversions()
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }
+
   useImperativeHandle(ref, () => ({
     addAttachment: (att: MessageAttachment) => {
       const nextAttachments = [...attachmentsRef.current, withDraftIdentity({ ...att, draftId: undefined })]
@@ -508,6 +528,7 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
       textareaRef.current?.focus()
     },
     getDraftRevision: () => draftRevisionRef.current,
+    clearSubmittedDraft,
   }))
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -563,20 +584,13 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
       const submittedInput = inputRef.current
       const submittedAttachments = attachmentsRef.current
       const submittedRevision = draftRevisionRef.current
-      const outcome = await onSend(submittedInput, convertedValue ?? undefined, submittedAttachments)
-      if (
-        outcome.clearDraft
-        && draftRevisionRef.current === submittedRevision
-      ) {
-        inputRef.current = ''
-        attachmentsRef.current = []
-        draftRevisionRef.current += 1
-        setInput('')
-        setAttachments([])
-        onClearAllConversions()
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto'
-        }
+      const options = { ...multiSendOptions }
+      setMultiSendOptions((previous) => ({ ...previous, count: 1 }))
+      const outcome = options.count > 1
+        ? await onSend(submittedInput, convertedValue ?? undefined, submittedAttachments, options)
+        : await onSend(submittedInput, convertedValue ?? undefined, submittedAttachments)
+      if (outcome.clearDraft) {
+        clearSubmittedDraft(submittedRevision)
       }
     }
   }
@@ -784,6 +798,11 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
               />
             </div>
             <div className={styles.columnRight}>
+              <MultiSendSettings
+                options={multiSendOptions}
+                disabled={disabled || sendDisabled}
+                onChange={setMultiSendOptions}
+              />
               {activeTarget && activeTarget.capabilities?.supports_multi_turn === false && (
                 <Tooltip
                   content="This target does not track conversation history — each turn is sent independently."
@@ -794,14 +813,17 @@ const ChatInputArea = forwardRef<ChatInputAreaHandle, ChatInputAreaProps>(functi
                   </span>
                 </Tooltip>
               )}
-              <Tooltip content="Send message" relationship="label">
+              <Tooltip
+                content={multiSendOptions.count === 1 ? 'Send message' : `Send in ${multiSendOptions.count} conversations`}
+                relationship="label"
+              >
                 <Button
                   className={styles.sendButton}
                   appearance="primary"
                   icon={<SendRegular />}
                   onClick={() => { void handleSend() }}
                   disabled={disabled || sendDisabled || (!input && attachments.length === 0) || hasUnsupportedModalities}
-                  aria-label="Send message"
+                  aria-label={multiSendOptions.count === 1 ? 'Send message' : `Send in ${multiSendOptions.count} conversations`}
                   data-testid="send-message-btn"
                 />
               </Tooltip>

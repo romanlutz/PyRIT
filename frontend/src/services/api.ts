@@ -26,6 +26,8 @@ import type {
   ConversationMessagesResponse,
   AddMessageRequest,
   AddMessageResponse,
+  MessageBatchInput,
+  MessageBatchStatus,
   AttackConversationsResponse,
   CreateConversationRequest,
   CreateConversationResponse,
@@ -112,6 +114,7 @@ apiClient.interceptors.request.use(async (config) => {
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
+    if (error?.code === 'ERR_CANCELED') return Promise.reject(error)
     const originalRequest = error?.config
     if (error?.response?.status === 401 && originalRequest && !originalRequest._retried) {
       originalRequest._retried = true
@@ -305,6 +308,26 @@ export const attacksApi = {
     const response = await apiClient.post(
       `/attacks/${encodeURIComponent(attackResultId)}/messages`,
       request
+    )
+    return response.data
+  },
+
+  startMessageBatch: async (attackResultId: string, request: MessageBatchInput): Promise<MessageBatchStatus> => {
+    const response = await apiClient.post<MessageBatchStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/messages/batch`,
+      { ...request, submission_id: request.submission_id ?? generateClientId() },
+    )
+    return response.data
+  },
+
+  getMessageBatch: async (
+    attackResultId: string,
+    batchId: string,
+    signal?: AbortSignal,
+  ): Promise<MessageBatchStatus> => {
+    const response = await apiClient.get<MessageBatchStatus>(
+      `/attacks/${encodeURIComponent(attackResultId)}/message-batches/${encodeURIComponent(batchId)}`,
+      { signal },
     )
     return response.data
   },

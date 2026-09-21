@@ -92,6 +92,26 @@ Send uses the applied pieces' exact message indexes and runs their configured
 converters on the backend. A nondeterministic converter can produce a different
 value at Send than the value shown in the converter panel.
 
+## Repeating a prompt
+
+The **n=1** control beside Send selects 1-10 repetitions and resets after submission.
+Counts above 1 retain the selected conversation and create copies of its history under
+the same attack result. Shared request conversion is the default; independent conversion
+is optional. Response conversion runs per conversation. Progress links and the existing
+conversations sidebar open individual results, including failures.
+
+Single sends still use `POST /api/attacks/{id}/messages`. Repeated sends use
+`POST /api/attacks/{id}/messages/batch`, then poll
+`GET /api/attacks/{id}/message-batches/{batch_id}`. These endpoints use the same
+message preparation and manual-send concurrency budget. Conversation copies and attack
+membership commit atomically; no batch table or migration is needed.
+
+Submission identities and progress are worker-local, not a durable delivery ledger.
+Finished handles expire after ten minutes, with at most 128 retained by a worker.
+Multi-worker deployments must route submission and progress requests to the same worker.
+The browser never automatically resends when tracking fails. It retains preparation-failure
+drafts, preserves newer edits, and can refresh progress without submitting another send.
+
 ## Stack
 
 - **React 18** - UI framework
@@ -124,13 +144,13 @@ layout engine; use Playwright for assertions about element dimensions or positio
 
 E2E flow tests run in two modes controlled by Playwright projects and an environment variable:
 
-- **Seeded** (`--project seeded`, default for CI): Messages are stored directly in the database with `send: false` using dummy credentials. No real API keys needed. Tests cover the full UI flow (display, branching, conversation switching, promoting) without calling any external service.
+- **Seeded** (`npm run test:e2e:seeded`, also run in CI): A dedicated backend uses `tests/end_to_end/frontend_test_config.yaml` with in-memory storage and an offline echo target. Most fixtures use `send: false`; n-send tests exercise the real normalizer with local replies. No real API keys or external services are needed. The separate configuration leaves credentialed scenario tests unchanged.
 
 - **Live** (`--project live`, requires `E2E_LIVE_MODE=true`): Messages are sent to real OpenAI endpoints with `send: true`. Each target variant requires endpoint and model environment variables plus either an API key or an Azure endpoint accessible through the current Entra identity. Variants without a usable configuration are automatically skipped. Tests verify that real target responses render correctly.
 
 ```bash
 # Seeded integration (no credentials needed)
-npx playwright test --project seeded
+npm run test:e2e:seeded
 
 # Live integration (uses API keys when present, otherwise Entra authentication)
 E2E_LIVE_MODE=true npx playwright test --project live
@@ -142,6 +162,12 @@ E2E_LIVE_MODE=true npx playwright test
 The mock and seeded projects run in the **GitHub Actions** pull-request workflow. The live project is intended for a protected pipeline with an Entra identity or API keys.
 
 E2E tests use `dev.py` to automatically start both frontend and backend servers. If servers are already running, they will be reused.
+
+Seeded mode instead starts isolated servers and does not reuse a running application.
+Set `E2E_FRONTEND_PORT` and `PYRIT_E2E_BACKEND_PORT` when the default test ports are
+occupied. Direct `npx playwright` invocations can enable this mode with
+`E2E_SEEDED_MODE=true`. Run just the offline repeat/nested-send flow with
+`npm run test:e2e:seeded -- --grep N-send`.
 
 > **Note**: `test:e2e:ui` and `test:e2e:headed` require a graphical display and won't work in headless environments like devcontainers. Use `npm run test:e2e` for CI/headless testing.
 

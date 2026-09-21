@@ -12,6 +12,8 @@ import {
   MenuPopover,
   MenuTrigger,
   mergeClasses,
+  MessageBar,
+  MessageBarBody,
   Spinner,
   Switch,
   Text,
@@ -26,11 +28,13 @@ import MessageList from './MessageList'
 import SystemPromptBanner from './SystemPromptBanner'
 import ChatInputArea from './ChatInputArea'
 import ConversationPanel from './ConversationPanel'
+import MessageBatchProgress from './MessageBatchProgress'
 import ConverterPanel from './ConverterPanel'
 import TargetBadge from './TargetBadge'
 import ObjectiveHeader from './ObjectiveHeader'
 import type { PieceConversion } from './converterTypes'
 import { useChatConverters } from '@/hooks/useChatConverters'
+import { MessageBatchTrackingError, useMessageBatch } from '@/hooks/useMessageBatch'
 import {
   basenameFromValue,
   buildMediaUrl,
@@ -64,6 +68,8 @@ import type {
   CreateConversationRequest,
   Message,
   MessageAttachment,
+  MessageBatchStatus,
+  MultiSendOptions,
   TargetInstance,
   TargetInfo,
 } from '../../types'
@@ -95,6 +101,8 @@ interface ConversationLoadRequest {
   conversationId: string
   requestId: number
 }
+
+type SubmittedSendDraft = Pick<RecoverableSendDraft, 'originalValue' | 'attachments' | 'conversions'>
 
 function getRecoveryDescription(draft: RecoverableSendDraft): string {
   const historyNotice = draft.historyCutoffIndex < draft.failedRequestTurnNumber - 1
@@ -279,8 +287,11 @@ export default function ChatWindow({
   const nextConversationLoadRequestIdRef = useRef(0)
   const latestConversationLoadRequestIdsRef = useRef<Map<string, number>>(new Map())
   const activeConversationLoadRequestRef = useRef<ConversationLoadRequest | null>(null)
-  const isSending = activeConversationId ? sendingConversations.has(activeConversationId) : Boolean(sendingConversations.size)
+  const [unboundConversationId, setUnboundConversationId] = useState<string | null>(null)
+  const effectiveConversationId = activeConversationId ?? conversationId
+  const isSending = sendingConversations.has(effectiveConversationId ?? unboundConversationId ?? '__pending__')
   const [isPanelOpen, setIsPanelOpen] = useState(false)
+  const [readError, setReadError] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
   const isExportingRef = useRef(false)
   const [isNarrowScreen, setIsNarrowScreen] = useState(matchesNarrowScreen)
@@ -296,6 +307,14 @@ export default function ChatWindow({
   const [isRecoveringProcessingError, setIsRecoveringProcessingError] = useState(false)
   const [panelRefreshKey, setPanelRefreshKey] = useState(0)
   const inputBoxRef = useRef<ChatInputAreaHandle>(null)
+  const { batches, executeBatch, retryTracking, dismissBatch } = useMessageBatch()
+  const componentMountedRef = useRef(true)
+
+  useEffect(() => {
+    componentMountedRef.current = true
+    return () => { componentMountedRef.current = false }
+  }, [])
+
   const recoveryInFlightRef = useRef(false)
   const viewedConversationId = activeConversationId ?? conversationId
   const recoverableSend = viewedConversationId
@@ -367,11 +386,14 @@ export default function ChatWindow({
   // Always-current ref of the conversation being viewed so async callbacks can
   // check whether the user navigated away while a request was in-flight.
   const viewedConvRef = useRef(activeConversationId ?? conversationId)
+  const viewedAttackRef = useRef(attackResultId)
   useLayoutEffect(() => {
     viewedConvRef.current = activeConversationId ?? conversationId
-  }, [activeConversationId, conversationId])
+    viewedAttackRef.current = attackResultId
+  }, [activeConversationId, conversationId, attackResultId])
   // Synchronous ref tracking which conversations have an in-flight send.
   const sendingConvIdsRef = useRef<Set<string>>(new Set())
+  const sendTokensRef = useRef(new Map<string, symbol>())
   // Pending user messages per conversation that may not be stored server-side yet.
   // Used to restore the user's input when switching back to an in-flight conversation.
   const pendingUserMessagesRef = useRef<Map<string, Message[]>>(new Map())
@@ -403,10 +425,12 @@ export default function ChatWindow({
   const [prevAttackResultId, setPrevAttackResultId] = useState<string | null>(attackResultId)
   if (attackResultId !== prevAttackResultId) {
     setPrevAttackResultId(attackResultId)
+    setReadError(null)
     if (!attackResultId) {
       setRecoverableSends({})
       setMessages([])
       setLoadedConversationId(null)
+      setUnboundConversationId(null)
       setSystemPrompt('')
       setPendingObjective('')
     }
@@ -424,7 +448,7 @@ export default function ChatWindow({
   }
 
   // Load messages for a given conversation
-  const loadConversation = useCallback(async (arId: string, convId: string) => {
+  const loadConversation = useCallback(async (arId: string, convId: string, liveDraft?: SubmittedSendDraft) => {
     nextConversationLoadRequestIdRef.current += 1
     const requestId = nextConversationLoadRequestIdRef.current
     latestConversationLoadRequestIdsRef.current.set(convId, requestId)
@@ -437,9 +461,13 @@ export default function ChatWindow({
     try {
       const response = await attacksApi.getMessages(arId, convId)
       // Discard superseded loads and responses invalidated by a send.
-      if (!isCurrentLoad() || viewedConvRef.current !== convId) { return }
+      if (!componentMountedRef.current || !isCurrentLoad() || viewedConvRef.current !== convId) { return }
       const frontendMessages = backendMessagesToFrontend(response.messages)
-      const persistedRecovery = getPersistedProcessingRecovery(convId, response)
+      setReadError(null)
+      const storedRecovery = getPersistedProcessingRecovery(convId, response)
+      const persistedRecovery: RecoverableSendDraft | undefined = storedRecovery && liveDraft
+        ? { ...storedRecovery, ...liveDraft, source: 'live', missingConverterSelections: false }
+        : storedRecovery
       setRecoverableSends((currentRecoveries) => {
         const currentRecovery = currentRecoveries[convId]
         if (persistedRecovery) {
@@ -480,8 +508,9 @@ export default function ChatWindow({
       }
       setMessages(frontendMessages)
       markConversationLoaded(convId)
-    } catch {
-      if (!isCurrentLoad() || viewedConvRef.current !== convId) { return }
+    } catch (error: unknown) {
+      if (!componentMountedRef.current || !isCurrentLoad() || viewedConvRef.current !== convId) { return }
+      setReadError(`Could not load this conversation: ${toApiError(error).detail}`)
       // Initial-load failures must not show another conversation's transcript.
       // Refresh failures keep the already-loaded transcript and recovery aligned.
       if (loadedConversationIdRef.current !== convId) {
@@ -492,7 +521,7 @@ export default function ChatWindow({
       if (latestConversationLoadRequestIdsRef.current.get(convId) === requestId) {
         latestConversationLoadRequestIdsRef.current.delete(convId)
       }
-      if (activeConversationLoadRequestRef.current?.requestId === requestId) {
+      if (componentMountedRef.current && activeConversationLoadRequestRef.current?.requestId === requestId) {
         activeConversationLoadRequestRef.current = null
         setIsLoadingMessages(false)
       }
@@ -524,6 +553,7 @@ export default function ChatWindow({
   // Handle conversation selection from the panel
   // For a different ID the useEffect handles loading; for same ID force a refresh
   const handlePanelSelectConversation = useCallback((convId: string) => {
+    viewedConvRef.current = convId
     forceLoadRef.current = true
     onSelectConversation(convId)
     if (isNarrowScreen) {
@@ -538,7 +568,9 @@ export default function ChatWindow({
     originalValue: string,
     convertedValue: string | undefined,
     attachments: MessageAttachment[],
+    options?: MultiSendOptions,
   ): Promise<ChatSendOutcome> => {
+    const sendCount = options?.count ?? 1
     if (
       !activeTarget
       || isLoadingAttack
@@ -555,6 +587,7 @@ export default function ChatWindow({
     }
 
     invalidateConversationLoads(initialSendConvId)
+    setReadError(null)
     setRecoverableSends((currentRecoveries) => {
       if (!currentRecoveries[initialSendConvId]) {
         return currentRecoveries
@@ -572,15 +605,40 @@ export default function ChatWindow({
 
     // Track which conversation this send belongs to (may be updated after attack creation)
     let sendConvId = initialSendConvId
+    let sendAttackId = attackResultId
+    let batchSubmitted = false
+    let preparationFailed = false
+    let prepared = false
+    const submittedDraftRevision = inputBoxRef.current?.getDraftRevision()
+    const sendToken = Symbol('send')
+    const trackedConversations = new Set([sendConvId])
+    const finishedConversations = new Set<string>()
+    sendTokensRef.current.set(sendConvId, sendToken)
+    const releaseConversation = (id: string): void => {
+      if (sendTokensRef.current.get(id) !== sendToken) return
+      sendTokensRef.current.delete(id)
+      sendingConvIdsRef.current.delete(id)
+      pendingUserMessagesRef.current.delete(id)
+      if (componentMountedRef.current) {
+        invalidateConversationLoads(id)
+        setSendingConversations((previous: Set<string>) => {
+          const next = new Set(previous)
+          next.delete(id)
+          return next
+        })
+      }
+    }
     // Mark synchronously so the useEffect guard sees it immediately
     sendingConvIdsRef.current.add(sendConvId)
 
     // When a text→text converter is active, show the converted text as the bubble's
     // primary content. When a text→file converter is active, keep the typed text
     // as content and synthesize a file attachment so the bubble shows both.
-    const displayContent = isTextTextConversion && convertedValue != null ? convertedValue : originalValue
+    const displayContent = sendCount === 1 && isTextTextConversion && convertedValue != null
+      ? convertedValue
+      : originalValue
     const optimisticAttachments: MessageAttachment[] = [...attachments]
-    if (isTextFileConversion && textConversion) {
+    if (sendCount === 1 && isTextFileConversion && textConversion) {
       const url = buildMediaUrl(textConversion.convertedValue)
       const kind = dataTypeToAttachmentKind(textConversion.convertedDataType)
       optimisticAttachments.push({
@@ -597,7 +655,7 @@ export default function ChatWindow({
       content: displayContent,
       timestamp: new Date().toISOString(),
       attachments: optimisticAttachments.length > 0 ? optimisticAttachments : undefined,
-      originalContent: isTextTextConversion ? originalValue : undefined,
+      originalContent: sendCount === 1 && isTextTextConversion ? originalValue : undefined,
     }
     setMessages(prev => [...prev, userMessage])
 
@@ -644,29 +702,38 @@ export default function ChatWindow({
         }
         const createResponse = await attacksApi.createAttack(createRequest)
         currentAttackResultId = createResponse.attack_result_id
+        sendAttackId = currentAttackResultId
         currentConversationId = createResponse.conversation_id
         currentActiveConversationId = currentConversationId
         // Mark new ID in synchronous ref *before* triggering the state
         // update that changes activeConversationId (and fires the useEffect)
         sendingConvIdsRef.current.delete('__pending__')
         sendingConvIdsRef.current.add(currentConversationId!)
+        sendTokensRef.current.delete('__pending__')
+        sendTokensRef.current.set(currentConversationId, sendToken)
+        trackedConversations.delete('__pending__')
+        trackedConversations.add(currentConversationId)
         // Move pending messages to the real conversation ID
         const pendingMsgs = pendingUserMessagesRef.current.get('__pending__')
         if (pendingMsgs) {
           pendingUserMessagesRef.current.delete('__pending__')
           pendingUserMessagesRef.current.set(currentConversationId!, pendingMsgs)
         }
-        onConversationCreated(currentAttackResultId, currentConversationId, pendingObjective || undefined)
-        // Update the viewed-conversation ref so the success/error guards
-        // below recognise this as the active conversation.
-        viewedConvRef.current = currentConversationId!
+        if (componentMountedRef.current && viewedAttackRef.current === attackResultId) {
+          viewedConvRef.current = currentConversationId
+          viewedAttackRef.current = currentAttackResultId
+          setUnboundConversationId(currentConversationId)
+          onConversationCreated(currentAttackResultId, currentConversationId, pendingObjective || undefined)
+        }
         // Update sending tracker to use real ID instead of __pending__
-        setSendingConversations(prev => {
-          const next = new Set(prev)
-          next.delete('__pending__')
-          next.add(currentConversationId!)
-          return next
-        })
+        if (componentMountedRef.current) {
+          setSendingConversations(prev => {
+            const next = new Set(prev)
+            next.delete('__pending__')
+            next.add(currentConversationId!)
+            return next
+          })
+        }
         sendConvId = currentConversationId!
       }
 
@@ -687,8 +754,77 @@ export default function ChatWindow({
           ? requestConverterConfigurations
           : undefined,
       }
+      if (sendCount > 1) {
+        batchSubmitted = true
+        const status = await executeBatch(currentAttackResultId, {
+          ...addMessageRequest,
+          count: sendCount,
+          request_converter_mode: options?.requestConverterMode ?? 'shared',
+        }, async (progress: MessageBatchStatus): Promise<void> => {
+          if (!componentMountedRef.current) return
+          if (!prepared && progress.branches.length === progress.requested_count) {
+            prepared = true
+            pendingUserMessagesRef.current.delete(sendConvId)
+            if (viewedAttackRef.current === progress.attack_result_id && submittedDraftRevision !== undefined) {
+              inputBoxRef.current?.clearSubmittedDraft(submittedDraftRevision)
+            }
+          }
+          let changed = false
+          for (const branch of progress.branches) {
+            const id = branch.conversation_id
+            if (branch.state === 'queued' || branch.state === 'sending') {
+              if (!trackedConversations.has(id) && !sendTokensRef.current.has(id)) {
+                trackedConversations.add(id)
+                sendTokensRef.current.set(id, sendToken)
+                sendingConvIdsRef.current.add(id)
+                setSendingConversations((previous: Set<string>) => new Set(previous).add(id))
+                changed = true
+              }
+            } else if (!finishedConversations.has(id)) {
+              finishedConversations.add(id)
+              releaseConversation(id)
+              changed = true
+              if (
+                viewedAttackRef.current === progress.attack_result_id
+                && viewedConvRef.current === id
+                && !sendingConvIdsRef.current.has(id)
+              ) {
+                await loadConversation(progress.attack_result_id, id, { originalValue, attachments, conversions })
+              }
+            }
+          }
+          if (changed && componentMountedRef.current && viewedAttackRef.current === progress.attack_result_id) {
+            setPanelRefreshKey((key: number) => key + 1)
+          }
+        })
+        if (status.state === 'failed' && status.branches.length < status.requested_count) {
+          preparationFailed = true
+          if (status.branches.length === 0) {
+            throw new Error(status.error || 'Could not prepare these sends. No prompts were sent to the objective target.')
+          }
+          return { status: 'retryable_failure', clearDraft: viewedConvRef.current !== effectiveConvId }
+        }
+        if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+          try {
+            const attack = await attacksApi.getAttack(currentAttackResultId)
+            if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+              onAttackChange?.(attack)
+            }
+          } catch (error: unknown) {
+            if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+              setReadError(`Sends finished, but attack details could not be refreshed: ${toApiError(error).detail}`)
+            }
+          }
+        }
+        return {
+          status: status.state === 'failed' ? 'non_retryable_failure' : 'sent',
+          clearDraft: true,
+        }
+      }
       const response = await attacksApi.addMessage(currentAttackResultId, addMessageRequest)
-      onAttackChange?.(response.attack)
+      if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId) {
+        onAttackChange?.(response.attack)
+      }
 
       const targetResponseStatus = response.messages.target_response_status
       const status: ChatSendOutcome['status'] = targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR
@@ -698,7 +834,7 @@ export default function ChatWindow({
           : 'sent'
       const backendMessages = backendMessagesToFrontend(response.messages.messages)
 
-      if (targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR) {
+      if (componentMountedRef.current && targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR) {
         const errorMessageIndex = response.messages.messages.findIndex(
           (message) => (
             message.role === 'assistant'
@@ -731,7 +867,7 @@ export default function ChatWindow({
       // Only update displayed messages if the user is still viewing this conversation.
       // If they switched away the response is persisted server-side and will appear
       // when they navigate back.
-      if (viewedConvRef.current === effectiveConvId) {
+      if (componentMountedRef.current && viewedAttackRef.current === currentAttackResultId && viewedConvRef.current === effectiveConvId) {
         // Replace the entire message list with authoritative server data.
         // This correctly handles the case where the user switched away and
         // back during the request — the full conversation is restored.
@@ -743,12 +879,23 @@ export default function ChatWindow({
         clearDraft: status !== 'retryable_failure' || viewedConvRef.current !== effectiveConvId,
       }
     } catch (err) {
+      if (!componentMountedRef.current) return { status: 'non_retryable_failure', clearDraft: false }
+      const apiError = toApiError(err)
+      const uncertainBatch = batchSubmitted && !preparationFailed && (
+        err instanceof MessageBatchTrackingError
+        || apiError.status === null
+        || apiError.status >= 500
+      )
       const viewedConversationId = viewedConvRef.current
       const isViewingFailedConversation = viewedConversationId === sendConvId
         || (viewedConversationId == null && sendConvId === '__pending__')
 
       // Only show error in UI if user is still on this conversation
-      if (isViewingFailedConversation) {
+      if (
+        isViewingFailedConversation
+        && viewedAttackRef.current === sendAttackId
+        && sendTokensRef.current.get(sendConvId) === sendToken
+      ) {
         const hasMatchingTranscript = loadedConversationIdRef.current === sendConvId
         // Mark the viewed conversation as loaded so first-send failures do not
         // get stuck behind the "Loading conversation..." placeholder.
@@ -758,9 +905,12 @@ export default function ChatWindow({
           markConversationLoaded(sendConvId)
         }
 
-        const apiError = toApiError(err)
         let description: string
-        if (apiError.isNetworkError) {
+        if (uncertainBatch) {
+          description = err instanceof MessageBatchTrackingError
+            ? err.message
+            : 'The send status is unknown. Some prompts may already have been sent. Refresh saved conversations before trying again.'
+        } else if (apiError.isNetworkError) {
           description = 'Network error — check that the backend is running and reachable.'
         } else if (apiError.isTimeout) {
           description = 'Request timed out. The server may be busy — please try again.'
@@ -788,19 +938,15 @@ export default function ChatWindow({
 
       }
       return {
-        status: 'retryable_failure',
-        clearDraft: viewedConversationId != null && viewedConversationId !== sendConvId,
+        status: uncertainBatch ? 'non_retryable_failure' : 'retryable_failure',
+        clearDraft: uncertainBatch || (viewedConversationId != null && viewedConversationId !== sendConvId),
       }
     } finally {
-      invalidateConversationLoads(sendConvId)
-      sendingConvIdsRef.current.delete(sendConvId)
-      pendingUserMessagesRef.current.delete(sendConvId)
-      setSendingConversations(prev => {
-        const next = new Set(prev)
-        next.delete(sendConvId)
-        return next
-      })
-      setPanelRefreshKey(k => k + 1)
+      for (const id of trackedConversations) releaseConversation(id)
+      releaseConversation(sendConvId)
+      if (componentMountedRef.current && viewedAttackRef.current === sendAttackId) {
+        setPanelRefreshKey((key: number) => key + 1)
+      }
     }
   }
 
@@ -1279,7 +1425,13 @@ export default function ChatWindow({
               <Button
                 appearance="primary"
                 icon={<AddRegular />}
-                onClick={() => { setIsPanelOpen(false); onNewAttack() }}
+                onClick={() => {
+                  setIsPanelOpen(false)
+                  setUnboundConversationId(null)
+                  viewedAttackRef.current = null
+                  viewedConvRef.current = null
+                  onNewAttack()
+                }}
                 disabled={!attackResultId}
                 data-testid="new-attack-btn"
                 aria-label="New Attack"
@@ -1317,6 +1469,18 @@ export default function ChatWindow({
           }
           onAdd={handleAddObjective}
         />
+        <MessageBatchProgress
+          batches={batches}
+          attackResultId={attackResultId}
+          onSelectConversation={handlePanelSelectConversation}
+          onRetry={retryTracking}
+          onDismiss={dismissBatch}
+        />
+        {readError && (
+          <MessageBar intent="warning">
+            <MessageBarBody>{readError}</MessageBarBody>
+          </MessageBar>
+        )}
         {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
         <MessageList
           messages={messages}

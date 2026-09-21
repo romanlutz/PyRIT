@@ -67,6 +67,36 @@ The Chat view is the primary workspace for running interactive attacks against c
 
 Type a message and press Enter (or click Send) to send it to the active target. The response appears below. Shift+Enter inserts a newline without sending.
 
+#### Repeating the Next Prompt
+
+Click **n=1** beside Send to choose between 1 and 10 repetitions. With a count greater
+than 1, CoPyRIT keeps the selected conversation and copies its history into additional
+conversations, then sends the next prompt once in each. All conversations belong to the
+same attack result. Repeating from a copied conversation extends only that conversation,
+not every existing conversation in the attack.
+
+The count resets to **n=1** after submission. Enter and Send use the same settings.
+Request converters have two modes:
+
+- **Convert once, reuse for all** (default): each conversation receives the same prepared
+  prompt and attachments.
+- **Convert independently for each**: request converters run separately for each conversation.
+
+Already-converted message pieces remain unchanged. Response converters process each reply
+independently. Manual sends share bounded target capacity; work using rate limits or
+converters is serialized. A failed send does not discard successful siblings or resend them.
+
+The compact progress banner shows each conversation's status and lets you open it.
+The ordinary conversations sidebar also lists the copies. You can switch conversations
+while sends continue, and continue a finished conversation before its siblings finish.
+Preparation failures preserve your draft. If an error was saved, use **Edit in clean
+conversation** to continue without including that error in the target's history.
+
+Progress handles are temporary and local to the backend worker, but saved conversations
+remain part of the attack result. If tracking is lost, use **Refresh progress** or inspect
+the saved conversations before sending again. Refreshing progress never resubmits prompts;
+a disconnected browser does not imply that the target received nothing.
+
 #### Attachments
 
 Click the attachment button to add images, audio, video, or documents to your message. Supported types include `image/*`, `audio/*`, `video/*`, `.pdf`, `.doc`, `.docx`, and `.txt`. Attachments are displayed as chips below the input with type icons and file sizes.

@@ -582,6 +582,46 @@ export interface AddMessageRequest {
   target_conversation_id: string
 }
 
+export type RequestConverterMode = 'shared' | 'per_branch'
+
+export interface MultiSendOptions {
+  count: number
+  requestConverterMode: RequestConverterMode
+}
+
+export type MessageBatchState = 'preparing' | 'queued' | 'running' | 'completed' | 'failed'
+export type MessageBatchBranchState = 'queued' | 'sending' | 'completed' | 'failed'
+
+export interface MessageBatchRequest extends AddMessageRequest {
+  count: number
+  request_converter_mode: RequestConverterMode
+  submission_id: string
+}
+
+export type MessageBatchInput = Omit<MessageBatchRequest, 'submission_id'> & { submission_id?: string }
+
+export interface MessageBatchBranch {
+  conversation_id: string
+  state: MessageBatchBranchState
+  new_message_piece_ids: string[]
+  error: string | null
+}
+
+export interface MessageBatchStatus {
+  batch_id: string
+  attack_result_id: string
+  source_conversation_id: string
+  requested_count: number
+  state: MessageBatchState
+  branches: MessageBatchBranch[]
+  error: string | null
+}
+
+export interface TrackedMessageBatch {
+  status: MessageBatchStatus
+  trackingError: string | null
+}
+
 export interface LabelOptionsResponse {
   source: string
   operators?: string[]
