@@ -75,7 +75,7 @@ function viewFromPath(pathname: string): ViewName {
   if (pathname === '/history' || pathname.startsWith('/history/') || pathname.startsWith('/scanner-history/')) {
     return 'history'
   }
-  if (pathname.startsWith('/registry')) {
+  if (pathname === '/targets' || pathname.startsWith('/registry')) {
     return 'registry'
   }
   if (
@@ -623,6 +623,7 @@ function App() {
                 />
                 <Route path="converters" element={<ConverterRegistry />} />
               </Route>
+              <Route path="/targets" element={<Navigate to="/registry/targets" replace />} />
               <Route path="/scanner" element={<ScenarioCatalog />} />
               <Route
                 path="/scanner/:scenarioName"
