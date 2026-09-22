@@ -3589,6 +3589,82 @@ class MemoryInterface(abc.ABC):
         for dataset in datasets:
             await self.add_seeds_to_memory_async(seeds=dataset.seeds, added_by=added_by)
 
+@dataclass(frozen=True, slots=True)
+class SeedDatasetSummary:
+    """Database-side summary of seeds belonging to one dataset."""
+
+    dataset_name: str | None
+    logical_examples: int
+    seed_pieces: int
+    objectives: int
+    modalities: tuple[str, ...]
+    harm_categories: tuple[str, ...]
+    has_unlabeled_harm_categories: bool
+
+
+    def get_seed_dataset_summaries(self) -> Sequence[SeedDatasetSummary]:
+        """
+        Return aggregate metadata for datasets already loaded in memory.
+
+        The queries intentionally project only dataset metadata and counts. Seed values and
+        media are never hydrated, so callers can build dataset cards without materializing
+        every prompt or fetching providers.
+
+        Returns:
+            Sequence[SeedDatasetSummary]: One summary for each stored dataset, including
+            a single deterministic entry for seeds without a dataset name.
+        """
+        try:
+            logical_example_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+            aggregate_rows = self._execute_query(
+                select(
+                    SeedEntry.dataset_name,
+                    func.count().label("seed_pieces"),
+                    func.count(func.distinct(logical_example_id)).label("logical_examples"),
+                    func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
+                ).group_by(SeedEntry.dataset_name)
+            )
+            modality_rows = self._execute_query(
+                select(SeedEntry.dataset_name, SeedEntry.data_type).distinct()
+            )
+            harm_rows = self._execute_query(
+                select(SeedEntry.dataset_name, SeedEntry.harm_categories)
+            )
+
+            modalities_by_dataset: dict[str | None, set[str]] = {}
+            for row in modality_rows:
+                modalities_by_dataset.setdefault(row.dataset_name, set()).add(str(row.data_type))
+
+            harm_categories_by_dataset: dict[str | None, set[str]] = {}
+            unlabeled_by_dataset: set[str | None] = set()
+            for row in harm_rows:
+                categories = row.harm_categories
+                if not categories:
+                    unlabeled_by_dataset.add(row.dataset_name)
+                    continue
+                harm_categories_by_dataset.setdefault(row.dataset_name, set()).update(
+                    str(category) for category in categories
+                )
+
+            summaries: list[SeedDatasetSummary] = []
+            for row in aggregate_rows:
+                dataset_name = row.dataset_name
+                summaries.append(
+                    SeedDatasetSummary(
+                        dataset_name=dataset_name,
+                        logical_examples=int(row.logical_examples or 0),
+                        seed_pieces=int(row.seed_pieces or 0),
+                        objectives=int(row.objectives or 0),
+                        modalities=tuple(sorted(modalities_by_dataset.get(dataset_name, set()))),
+                        harm_categories=tuple(sorted(harm_categories_by_dataset.get(dataset_name, set()))),
+                        has_unlabeled_harm_categories=dataset_name in unlabeled_by_dataset,
+                    )
+                )
+            return summaries
+        except Exception as e:
+            logger.exception(f"Failed to retrieve dataset summaries with error {e}")
+            raise
+
     def get_seed_dataset_names(self) -> Sequence[str]:
         """
         Return a list of all seed dataset names in the memory storage.
