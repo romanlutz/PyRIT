@@ -2,6 +2,8 @@
 # Licensed under the MIT license.
 
 import abc
+import asyncio
+import copy
 import logging
 from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, final
@@ -209,6 +211,52 @@ class PromptTarget(Identifiable):
         Returns:
             list[Message]: Response messages from the target.
         """
+
+    @property
+    def supports_conversation_continuation(self) -> bool:
+        """Whether this target can generate from retained history without a new message."""
+        return False
+
+    @final
+    async def continue_conversation_async(self, *, conversation_id: str) -> list[Message]:
+        """
+        Generate from an existing conversation without appending a request.
+
+        Only target-facing normalization is applied. Previously accepted content is not
+        passed through prompt converters again, and this method does not persist messages.
+
+        Returns:
+            list[Message]: Only the new provider response messages.
+
+        Raises:
+            NotImplementedError: If the target does not support genuine continuation.
+            ValueError: If the conversation is absent or incompatible with the target.
+        """
+        if not self.supports_conversation_continuation:
+            raise NotImplementedError(f"{type(self).__name__} does not support conversation continuation.")
+        if not conversation_id or not self.capabilities.supports_multi_turn:
+            raise ValueError("Continuation requires an existing multi-turn conversation.")
+        retained = await asyncio.to_thread(self._memory.get_conversation_messages, conversation_id=conversation_id)
+        history = filter_non_replayable_messages(messages=copy.deepcopy(list(retained)))
+        if not history:
+            raise ValueError("Continuation requires nonempty retained conversation history.")
+        normalized = await self.configuration.normalize_async(messages=history)
+        if not normalized:
+            raise ValueError("Target normalization removed all retained conversation history.")
+        for message in normalized:
+            for piece in message.message_pieces:
+                piece.conversation_id = conversation_id
+        self._validate_request(normalized_conversation=normalized)
+        return await self._continue_conversation_to_target_async(normalized_conversation=normalized)
+
+    async def _continue_conversation_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        """
+        Reject continuation unless a subclass implements the provider operation.
+
+        Raises:
+            NotImplementedError: Always, for targets without a provider continuation implementation.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no provider continuation implementation.")
 
     def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
         """

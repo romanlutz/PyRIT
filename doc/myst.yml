@@ -111,6 +111,8 @@ project:
             - file: code/executor/7_promptgen.ipynb
             - file: code/executor/8_modality_feedback.ipynb
             - file: code/executor/9_inspect.md
+            - file: code/executor/10_native_inspect.md
+            - file: code/executor/11_native_inspect_v2.md
             - file: code/executor/gcg/0_gcg.ipynb
               children:
                 - file: code/executor/gcg/1_gcg_azure_ml.ipynb

@@ -15,6 +15,8 @@ from pyrit.prompt_target import OpenAIResponseTarget
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.score import InspectEvalScorer, SubStringScorer
 from pyrit.executor.benchmark import InspectBenchmark, InspectTaskBinding
+from pyrit.executor.benchmark import InspectNativeTaskBridge, InspectTaskEnvironment
+from pyrit.score import SubmissionReportScorer
 assert "inspect_ai.log" not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False, timeout=30)
