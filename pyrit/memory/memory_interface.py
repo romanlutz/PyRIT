@@ -333,6 +333,19 @@ class _AttackResultQuery:
             object.__setattr__(self, "labels", MappingProxyType(labels) if labels else None)
 
 
+@dataclass(frozen=True, slots=True)
+class SeedDatasetSummary:
+    """Database-side summary of seeds belonging to one dataset."""
+
+    dataset_name: str | None
+    logical_examples: int
+    seed_pieces: int
+    objectives: int
+    modalities: tuple[str, ...]
+    harm_categories: tuple[str, ...]
+    has_unlabeled_harm_categories: bool
+
+
 class MemoryInterface(abc.ABC):
     """
     Abstract interface for conversation memory storage systems.
@@ -3588,19 +3601,6 @@ class MemoryInterface(abc.ABC):
         """
         for dataset in datasets:
             await self.add_seeds_to_memory_async(seeds=dataset.seeds, added_by=added_by)
-
-@dataclass(frozen=True, slots=True)
-class SeedDatasetSummary:
-    """Database-side summary of seeds belonging to one dataset."""
-
-    dataset_name: str | None
-    logical_examples: int
-    seed_pieces: int
-    objectives: int
-    modalities: tuple[str, ...]
-    harm_categories: tuple[str, ...]
-    has_unlabeled_harm_categories: bool
-
 
     def get_seed_dataset_summaries(self) -> Sequence[SeedDatasetSummary]:
         """
