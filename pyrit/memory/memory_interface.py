@@ -3616,20 +3616,22 @@ class SeedDatasetSummary:
         """
         try:
             logical_example_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
-            aggregate_rows = self._execute_query(
+            aggregate_statement = (
                 select(
                     SeedEntry.dataset_name,
                     func.count().label("seed_pieces"),
                     func.count(func.distinct(logical_example_id)).label("logical_examples"),
                     func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
-                ).group_by(SeedEntry.dataset_name)
+                )
+                .group_by(SeedEntry.dataset_name)
             )
-            modality_rows = self._execute_query(
-                select(SeedEntry.dataset_name, SeedEntry.data_type).distinct()
-            )
-            harm_rows = self._execute_query(
-                select(SeedEntry.dataset_name, SeedEntry.harm_categories)
-            )
+            modality_statement = select(SeedEntry.dataset_name, SeedEntry.data_type).distinct()
+            harm_statement = select(SeedEntry.dataset_name, SeedEntry.harm_categories)
+
+            with closing(self.get_session()) as session:
+                aggregate_rows = session.execute(aggregate_statement).all()
+                modality_rows = session.execute(modality_statement).all()
+                harm_rows = session.execute(harm_statement).all()
 
             modalities_by_dataset: dict[str | None, set[str]] = {}
             for row in modality_rows:
@@ -3646,21 +3648,18 @@ class SeedDatasetSummary:
                     str(category) for category in categories
                 )
 
-            summaries: list[SeedDatasetSummary] = []
-            for row in aggregate_rows:
-                dataset_name = row.dataset_name
-                summaries.append(
-                    SeedDatasetSummary(
-                        dataset_name=dataset_name,
-                        logical_examples=int(row.logical_examples or 0),
-                        seed_pieces=int(row.seed_pieces or 0),
-                        objectives=int(row.objectives or 0),
-                        modalities=tuple(sorted(modalities_by_dataset.get(dataset_name, set()))),
-                        harm_categories=tuple(sorted(harm_categories_by_dataset.get(dataset_name, set()))),
-                        has_unlabeled_harm_categories=dataset_name in unlabeled_by_dataset,
-                    )
+            return [
+                SeedDatasetSummary(
+                    dataset_name=row.dataset_name,
+                    logical_examples=int(row.logical_examples or 0),
+                    seed_pieces=int(row.seed_pieces or 0),
+                    objectives=int(row.objectives or 0),
+                    modalities=tuple(sorted(modalities_by_dataset.get(row.dataset_name, set()))),
+                    harm_categories=tuple(sorted(harm_categories_by_dataset.get(row.dataset_name, set()))),
+                    has_unlabeled_harm_categories=row.dataset_name in unlabeled_by_dataset,
                 )
-            return summaries
+                for row in aggregate_rows
+            ]
         except Exception as e:
             logger.exception(f"Failed to retrieve dataset summaries with error {e}")
             raise
