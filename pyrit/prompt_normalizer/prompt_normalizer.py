@@ -215,6 +215,30 @@ class PromptNormalizer:
         # Return the last response for backward compatibility
         return responses[-1]
 
+    async def continue_conversation_async(self, *, target: PromptTarget, conversation_id: str) -> Message:
+        """
+        Continue retained history and persist only authentic new provider output.
+
+        No request is created, and neither request nor response converters are rerun.
+        Transport errors propagate without a fabricated response or request row.
+
+        Returns:
+            Message: The last actual provider response.
+
+        Raises:
+            EmptyResponseException: If continuation produced no actual response messages.
+        """
+        responses = await target.continue_conversation_async(conversation_id=conversation_id)
+        if not responses:
+            raise EmptyResponseException(message="Conversation continuation returned no actual response messages.")
+        for response in responses:
+            response.validate()
+            for piece in response.message_pieces:
+                piece.conversation_id = conversation_id
+            await self._calc_hash_async(request=response)
+            await asyncio.to_thread(self.memory.add_message_to_memory, request=response)
+        return responses[-1]
+
     async def send_prompt_batch_to_target_async(
         self,
         *,

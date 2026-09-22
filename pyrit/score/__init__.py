@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         render_likert_system_prompt,
     )
     from pyrit.score.float_scale.self_ask_scale_scorer import SelfAskScaleScorer, render_scale_system_prompt
+    from pyrit.score.float_scale.submission_report_scorer import SubmissionReportScorer
     from pyrit.score.float_scale.system_prompt_extraction_scorer import SystemPromptExtractionScorer
     from pyrit.score.float_scale.video_float_scale_scorer import VideoFloatScaleScorer
     from pyrit.score.message_scorable_resolver import MessageScorableResolver
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
     from pyrit.score.true_false.wildguard_scorer import WildGuardScorer, render_wildguard_prompt
 
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
+    "SubmissionReportScorer": "pyrit.score.float_scale.submission_report_scorer",
     "AnthraxKeywordScorer": "pyrit.score.true_false.regex.anthrax_keyword_scorer",
     "AudioFloatScaleScorer": "pyrit.score.float_scale.audio_float_scale_scorer",
     "AudioTrueFalseScorer": "pyrit.score.true_false.audio_true_false_scorer",

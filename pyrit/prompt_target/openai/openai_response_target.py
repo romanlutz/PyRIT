@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 
 # Tool function registry (agentic extension)
-ToolExecutor = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+ToolExecutor = Callable[[dict[str, Any]], Awaitable[str | dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -113,6 +113,7 @@ class OpenAIResponseTarget(OpenAITarget):
         self,
         *,
         custom_functions: dict[str, ToolExecutor] | None = None,
+        auto_execute_tools: bool = True,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
@@ -128,6 +129,10 @@ class OpenAIResponseTarget(OpenAITarget):
 
         Args:
             custom_functions: Mapping of user-defined function names (e.g., "my_func").
+                Callbacks return an exact string or a JSON-serializable dictionary.
+            auto_execute_tools (bool): Whether to execute registered functions and continue the
+                model/tool loop. Defaults to True. If False, return one provider response unchanged
+                and leave tool execution and subsequent sends to the caller.
             model_name (str, Optional): The name of the model (or deployment name in Azure).
                 If no value is provided, the OPENAI_RESPONSES_MODEL environment variable will be used.
             endpoint (str, Optional): The target URL for the OpenAI service.
@@ -189,6 +194,7 @@ class OpenAIResponseTarget(OpenAITarget):
 
         # Per-instance tool/func registries:
         self._custom_functions: dict[str, ToolExecutor] = custom_functions or {}
+        self._auto_execute_tools = auto_execute_tools
         self._fail_on_missing_function: bool = fail_on_missing_function
 
         # Extract the grammar 'tool' if one is present
@@ -205,6 +211,22 @@ class OpenAIResponseTarget(OpenAITarget):
                     logger.debug("Detected grammar tool: %s", tool_name)
                     self._grammar_name = tool_name
 
+    @property
+    def auto_execute_tools(self) -> bool:
+        """Whether this target owns the automatic model/tool loop."""
+        return self._auto_execute_tools
+
+    @property
+    def supports_conversation_continuation(self) -> bool:
+        """Whether retained Responses history can be sent without another input turn."""
+        return True
+
+    async def _continue_conversation_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
+        responses: list[Message] = await self._send_prompt_to_target_async(
+            normalized_conversation=normalized_conversation
+        )
+        return responses
+
     def _build_identifier(self) -> ComponentIdentifier:
         """
         Build the identifier with OpenAI response-specific parameters.
@@ -220,6 +242,7 @@ class OpenAIResponseTarget(OpenAITarget):
                 "reasoning_effort": self._reasoning_effort,
                 "reasoning_summary": self._reasoning_summary,
                 "extra_body_parameters": self._extra_body_parameters,
+                **({"auto_execute_tools": False} if not self._auto_execute_tools else {}),
             },
         )
 
@@ -563,6 +586,9 @@ class OpenAIResponseTarget(OpenAITarget):
             working_conversation.append(result)
             responses_to_return.append(result)
 
+            if not self._auto_execute_tools:
+                break
+
             # Extract tool call if present
             tool_call_section = self._find_last_pending_tool_call(result)
 
@@ -799,7 +825,7 @@ class OpenAIResponseTarget(OpenAITarget):
                     return cast("dict[str, Any]", section)
         return None
 
-    async def _execute_call_section_async(self, tool_call_section: dict[str, Any]) -> dict[str, Any]:
+    async def _execute_call_section_async(self, tool_call_section: dict[str, Any]) -> str | dict[str, Any]:
         """
         Execute a function_call from the custom_functions registry.
 
@@ -807,7 +833,7 @@ class OpenAIResponseTarget(OpenAITarget):
             tool_call_section: The function_call section dict.
 
         Returns:
-            A dict payload (will be serialized and sent as function_call_output).
+            An exact string or dictionary payload (serialized as function_call_output).
             If fail_on_missing_function=False and a function is missing or no function is not called, returns:
             {"error": "function_not_found", "missing_function": "<name>", "available_functions": [...]}
 
@@ -854,7 +880,9 @@ class OpenAIResponseTarget(OpenAITarget):
 
         return await fn(args)
 
-    def _make_tool_piece(self, output: dict[str, Any], call_id: str, *, reference_piece: MessagePiece) -> MessagePiece:
+    def _make_tool_piece(
+        self, output: str | dict[str, Any], call_id: str, *, reference_piece: MessagePiece
+    ) -> MessagePiece:
         """
         Create a function_call_output MessagePiece.
 
