@@ -120,7 +120,6 @@ async def test_get_seeds_with_value_filter(sqlite_instance: MemoryInterface):
     assert result[0].value == "prompt1"
 
 
-
 async def test_get_seed_dataset_summaries(sqlite_instance: MemoryInterface):
     """Test aggregate dataset summaries without hydrating seed values."""
     group_id = uuid4()
@@ -168,6 +167,87 @@ async def test_get_seed_dataset_summaries(sqlite_instance: MemoryInterface):
     unnamed = summaries[None]
     assert unnamed.logical_examples == 1
     assert unnamed.seed_pieces == 1
+
+
+async def test_get_seed_dataset_summaries_follows_a_case_insensitive_collation(
+    sqlite_instance: MemoryInterface,
+):
+    """Summary grouping honors the column collation, so differently cased names fold together.
+
+    Rebuilds the real column with COLLATE NOCASE exactly like the seed dedupe tests so the
+    summary's GROUP BY and metadata joins apply case-insensitive equality in SQL. A
+    Python-side raw-name merge would read these three spellings as separate datasets and
+    report each variant's counts and metadata independently.
+    """
+    table = SeedEntry.__table__
+    original_type = table.c.dataset_name.type
+    table.drop(sqlite_instance.engine)
+    table.c.dataset_name.type = String(collation="NOCASE")
+    try:
+        table.create(sqlite_instance.engine)
+
+        await sqlite_instance.add_seeds_to_memory_async(
+            seeds=[
+                SeedPrompt(value="prompt one", dataset_name="Dataset", data_type="text", harm_categories=["hate"]),
+                SeedPrompt(
+                    value="https://example.com/two",
+                    dataset_name="dataset",
+                    data_type="url",
+                    harm_categories=["violence"],
+                ),
+                SeedPrompt(value="prompt three", dataset_name="DATASET", data_type="reasoning"),
+            ],
+            added_by="tester",
+        )
+
+        summaries = sqlite_instance.get_seed_dataset_summaries()
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary.seed_pieces == 3
+        assert summary.objectives == 0
+        assert summary.modalities == ("reasoning", "text", "url")
+        assert summary.harm_categories == ("hate", "violence")
+        assert summary.has_unlabeled_harm_categories is True
+    finally:
+        table.c.dataset_name.type = original_type
+
+
+async def test_get_seed_dataset_summaries_follows_a_trailing_blank_insensitive_collation(
+    sqlite_instance: MemoryInterface,
+):
+    """T-SQL ignores trailing blanks too, so folding case alone would not have been enough."""
+    table = SeedEntry.__table__
+    original_type = table.c.dataset_name.type
+    table.drop(sqlite_instance.engine)
+    table.c.dataset_name.type = String(collation="RTRIM")
+    try:
+        table.create(sqlite_instance.engine)
+
+        await sqlite_instance.add_seeds_to_memory_async(
+            seeds=[
+                SeedPrompt(value="prompt one", dataset_name="alpha", data_type="text", harm_categories=["hate"]),
+                SeedPrompt(
+                    value="https://example.com/two",
+                    dataset_name="alpha   ",
+                    data_type="url",
+                    harm_categories=["violence"],
+                ),
+                SeedPrompt(value="prompt three", dataset_name="alpha ", data_type="reasoning"),
+            ],
+            added_by="tester",
+        )
+
+        summaries = sqlite_instance.get_seed_dataset_summaries()
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary.seed_pieces == 3
+        assert summary.objectives == 0
+        assert summary.modalities == ("reasoning", "text", "url")
+        assert summary.harm_categories == ("hate", "violence")
+        assert summary.has_unlabeled_harm_categories is True
+    finally:
+        table.c.dataset_name.type = original_type
+
 
 async def test_get_seeds_with_dataset_name_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
