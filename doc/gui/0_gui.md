@@ -179,6 +179,12 @@ Click any row to open the attack in the Chat view.
 
 Results are paginated (25 per page) with "First" and "Next" navigation buttons.
 
+### Scenario Run Results
+
+In active runs and saved scenario results, **Atomic attack groups** defaults to expanded for up to 20 group summaries and collapsed for more than 20, with group and execution counts always visible. Select **Expand** to show all group summaries or **Collapse** to hide the list. Individual groups start collapsed; expand one to inspect its executions and open attack details or conversation links.
+
+Until you expand or collapse the section, its default follows the current group count as progress loads. Once you choose, the section keeps your choice during progress updates for the same run, even if the count crosses 20. Opening a different run resets to that run's count-based default.
+
 ### Target Configuration
 
 The Configuration view manages the targets available for attacks.
