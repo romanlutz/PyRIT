@@ -120,6 +120,55 @@ async def test_get_seeds_with_value_filter(sqlite_instance: MemoryInterface):
     assert result[0].value == "prompt1"
 
 
+
+async def test_get_seed_dataset_summaries(sqlite_instance: MemoryInterface):
+    """Test aggregate dataset summaries without hydrating seed values."""
+    group_id = uuid4()
+    seeds = [
+        SeedPrompt(
+            value="prompt one",
+            dataset_name="dataset1",
+            data_type="text",
+            harm_categories=["violence"],
+            prompt_group_id=group_id,
+        ),
+        SeedPrompt(
+            value="prompt two",
+            dataset_name="dataset1",
+            data_type="text",
+            harm_categories=["hate"],
+            prompt_group_id=group_id,
+        ),
+        SeedObjective(
+            value="objective",
+            dataset_name="dataset1",
+            data_type="text",
+            prompt_group_id=group_id,
+        ),
+        SeedPrompt(value="dataset2 prompt", dataset_name="dataset2", data_type="text"),
+        SeedPrompt(value="unnamed prompt", data_type="text"),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="test")
+
+    summaries = {summary.dataset_name: summary for summary in sqlite_instance.get_seed_dataset_summaries()}
+
+    dataset1 = summaries["dataset1"]
+    assert dataset1.logical_examples == 1
+    assert dataset1.seed_pieces == 3
+    assert dataset1.objectives == 1
+    assert dataset1.modalities == ("text",)
+    assert dataset1.harm_categories == ("hate", "violence")
+    assert dataset1.has_unlabeled_harm_categories is True
+
+    dataset2 = summaries["dataset2"]
+    assert dataset2.logical_examples == 1
+    assert dataset2.seed_pieces == 1
+    assert dataset2.objectives == 0
+
+    unnamed = summaries[None]
+    assert unnamed.logical_examples == 1
+    assert unnamed.seed_pieces == 1
+
 async def test_get_seeds_with_dataset_name_filter(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="prompt1", dataset_name="dataset1", data_type="text"),
