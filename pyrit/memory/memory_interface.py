@@ -3610,13 +3610,9 @@ class MemoryInterface(abc.ABC):
         media are never hydrated, so callers can build dataset cards without materializing
         every prompt or fetching providers.
 
-        Grouping happens in the database: rows are combined with ``GROUP BY`` and the
-        modality and harm-category metadata is joined back onto the seed dataset name
-        column. Equality is therefore decided by the column's collation (case-insensitive
-        and trailing-blank-insensitive on Azure SQL) rather than by matching raw names in
-        Python. Each group is emitted under a single spelling chosen by ``GROUP BY``, so the
-        Python side keys on that one database-decided name and never compares two incoming
-        spellings to each other.
+        Grouping happens in the database so dataset-name equality follows the column
+        collation. Metadata is projected distinctly per dataset before Python combines it,
+        avoiding a modality-by-harm-category row multiplication.
 
         Returns:
             Sequence[SeedDatasetSummary]: One summary for each stored dataset, including
@@ -3636,7 +3632,6 @@ class MemoryInterface(abc.ABC):
                     func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
                 )
                 .group_by(dataset_group)
-                .subquery()
             )
             metadata_statement = (
                 select(
@@ -3644,42 +3639,51 @@ class MemoryInterface(abc.ABC):
                     SeedEntry.data_type,
                     SeedEntry.harm_categories,
                 )
-                .subquery()
-            )
-            combined_statement = (
-                select(
-                    aggregate_statement.c.dataset_name,
-                    aggregate_statement.c.seed_pieces,
-                    aggregate_statement.c.logical_examples,
-                    aggregate_statement.c.objectives,
-                    metadata_statement.c.data_type,
-                    metadata_statement.c.harm_categories,
-                )
-                .select_from(aggregate_statement)
-                .outerjoin(
-                    metadata_statement,
-                    aggregate_statement.c.dataset_name.is_not_distinct_from(metadata_statement.c.dataset_name),
-                )
+                .distinct()
             )
 
             with closing(self.get_session()) as session:
-                rows = session.execute(combined_statement).all()
+                aggregate_rows = session.execute(aggregate_statement).all()
+                metadata_rows = session.execute(metadata_statement).all()
 
-            summaries: list[SeedDatasetSummary] = []
-            for dataset_name in dataset_order:
-                counts = counts_by_dataset[dataset_name]
-                summaries.append(
-                    SeedDatasetSummary(
-                        dataset_name=dataset_name,
-                        logical_examples=counts[1],
-                        seed_pieces=counts[0],
-                        objectives=counts[2],
-                        modalities=tuple(sorted(modalities_by_dataset[dataset_name])),
-                        harm_categories=tuple(sorted(harm_categories_by_dataset[dataset_name])),
-                        has_unlabeled_harm_categories=dataset_name in unlabeled_by_dataset,
-                    )
+            summaries_by_dataset: dict[str | None, dict[str, Any]] = {}
+            dataset_order: list[str | None] = []
+            for row in aggregate_rows:
+                dataset_name = row.dataset_name
+                summaries_by_dataset[dataset_name] = {
+                    "seed_pieces": int(row.seed_pieces or 0),
+                    "logical_examples": int(row.logical_examples or 0),
+                    "objectives": int(row.objectives or 0),
+                    "modalities": set(),
+                    "harm_categories": set(),
+                    "has_unlabeled_harm_categories": False,
+                }
+                dataset_order.append(dataset_name)
+
+            for row in metadata_rows:
+                summary = summaries_by_dataset.get(row.dataset_name)
+                if summary is None:
+                    continue
+                if row.data_type:
+                    summary["modalities"].add(row.data_type)
+                categories = row.harm_categories or []
+                if categories:
+                    summary["harm_categories"].update(categories)
+                else:
+                    summary["has_unlabeled_harm_categories"] = True
+
+            return [
+                SeedDatasetSummary(
+                    dataset_name=dataset_name,
+                    logical_examples=summaries_by_dataset[dataset_name]["logical_examples"],
+                    seed_pieces=summaries_by_dataset[dataset_name]["seed_pieces"],
+                    objectives=summaries_by_dataset[dataset_name]["objectives"],
+                    modalities=tuple(sorted(summaries_by_dataset[dataset_name]["modalities"])),
+                    harm_categories=tuple(sorted(summaries_by_dataset[dataset_name]["harm_categories"])),
+                    has_unlabeled_harm_categories=summaries_by_dataset[dataset_name]["has_unlabeled_harm_categories"],
                 )
-            return summaries
+                for dataset_name in dataset_order
+            ]
         except Exception as e:
             logger.exception(f"Failed to retrieve dataset summaries with error {e}")
             raise
