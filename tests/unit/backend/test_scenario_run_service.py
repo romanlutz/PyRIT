@@ -1479,6 +1479,40 @@ class TestScenarioRunServiceGetRun:
         assert fetched.techniques_used == (["Attack"] if expected_planned_total else ["legacy attack"])
         assert ("using legacy run detail fields" in caplog.text) is expected_warning
 
+    def test_get_run_detail_techniques_used_prefers_technique_name_over_display_group(self, mock_memory) -> None:
+        """A goal-based display_group must not stand in for the technique identity."""
+        plan = ScenarioRunPlan(
+            scenario_registry_name="garak.prompt_inject",
+            atomic_groups=[
+                ScenarioRunPlanAtomicGroup(
+                    id="group-1",
+                    atomic_attack_name="ignore_print__goal_0",
+                    display_group="AUDIT_SAFE_MARKER",
+                    technique_name="ignore_print",
+                    technique_eval_hash="eval",
+                    seed_group_ids=["seed-1"],
+                )
+            ],
+            seed_groups=[
+                ScenarioRunPlanSeedGroup(
+                    id="seed-1",
+                    objective_sha256=to_sha256("objective"),
+                    objective="objective",
+                )
+            ],
+        ).model_dump(mode="json")
+        db_result = make_scenario_result(
+            scenario_name="garak.prompt_inject",
+            attack_results={},
+            metadata={SCENARIO_RUN_PLAN_METADATA_KEY: plan},
+        )
+        mock_memory.get_scenario_results.return_value = [db_result]
+
+        fetched = ScenarioRunService().get_run(scenario_result_id=str(db_result.id))
+
+        assert fetched is not None
+        assert fetched.techniques_used == ["ignore_print"]
+
     @pytest.mark.parametrize("run_state", list(ScenarioRunState))
     def test_get_run_only_falls_back_to_persisted_error_for_failed_state(
         self, *, mock_memory: MagicMock, run_state: ScenarioRunState
@@ -1751,6 +1785,28 @@ class TestScenarioRunServiceListRuns:
         assert summary.completed_attacks == 2
         assert summary.successful_attacks == 2
         mock_memory.get_scenario_history_aggregates.assert_not_called()
+
+    def test_list_runs_techniques_used_prefers_technique_name_over_display_group(self, mock_memory) -> None:
+        """A goal-based display_group must not stand in for the technique identity."""
+        record = _make_history_record(result_id="sr-goal-display-group", run_state=ScenarioRunState.COMPLETED)
+        group = ScenarioRunPlanAtomicGroup(
+            id="group-1",
+            atomic_attack_name="ignore_print__goal_0",
+            display_group="AUDIT_SAFE_MARKER",
+            technique_name="ignore_print",
+            technique_eval_hash="eval",
+            seed_group_ids=["seed-1"],
+        ).model_dump(mode="json")
+        record = replace(
+            record,
+            plan_atomic_groups=[group],
+            plan_seed_id_map=[{"id": "seed-1", "objective_sha256": "hash-1"}],
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {}, False)
+
+        summary = ScenarioRunService().list_runs().items[0]
+
+        assert summary.techniques_used == ["ignore_print"]
 
     def test_history_falls_back_for_duplicate_objective_hashes_within_one_group(self, mock_memory) -> None:
         record = _make_history_record(result_id="sr-ambiguous-objective", run_state=ScenarioRunState.COMPLETED)
@@ -3186,6 +3242,42 @@ def test_get_progress_exposes_persisted_started_at(mock_memory) -> None:
 
     assert progress is not None
     assert progress.run.started_at == started_at
+
+
+def test_get_progress_techniques_used_prefers_technique_name_over_display_group(mock_memory) -> None:
+    """A goal-based display_group must not stand in for the technique identity."""
+    header = make_scenario_result(
+        scenario_name="garak.prompt_inject",
+        attack_results={},
+        metadata={
+            SCENARIO_RUN_PLAN_METADATA_KEY: ScenarioRunPlan(
+                scenario_registry_name="garak.prompt_inject",
+                atomic_groups=[
+                    ScenarioRunPlanAtomicGroup(
+                        id="group-1",
+                        atomic_attack_name="ignore_print__goal_0",
+                        display_group="AUDIT_SAFE_MARKER",
+                        technique_name="ignore_print",
+                        technique_eval_hash="eval",
+                        seed_group_ids=[],
+                    )
+                ],
+                seed_groups=[],
+            ).model_dump(mode="json"),
+        },
+    )
+    mock_memory.get_scenario_result_header.return_value = header
+    mock_memory.get_scenario_attack_result_deltas.return_value = ([], False)
+
+    progress = ScenarioRunService().get_run_progress_from_storage(
+        scenario_result_id=str(header.id),
+        since=None,
+        limit=25,
+        active_group_ids=[],
+    )
+
+    assert progress is not None
+    assert progress.run.techniques_used == ["ignore_print"]
 
 
 @pytest.mark.parametrize("started_at", ["not-a-timestamp", "2026-08-08T12:30:00"])
