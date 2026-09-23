@@ -3658,7 +3658,7 @@ class MemoryInterface(abc.ABC):
 
             unnamed_aggregate = (
                 select(
-                    func.max(SeedEntry.dataset_name).label("dataset_name"),
+                    literal(None, type_=SeedEntry.dataset_name.type).label("dataset_name"),
                     func.count().label("seed_pieces"),
                     func.count(func.distinct(logical_example_id)).label("logical_examples"),
                     func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
