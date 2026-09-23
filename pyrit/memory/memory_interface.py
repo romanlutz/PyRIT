@@ -3624,66 +3624,46 @@ class MemoryInterface(abc.ABC):
         """
         try:
             logical_example_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+            dataset_group = case(
+                (or_(SeedEntry.dataset_name.is_(None), SeedEntry.dataset_name == ""), None),
+                else_=SeedEntry.dataset_name,
+            )
             aggregate_statement = (
                 select(
-                    SeedEntry.dataset_name.label("dataset_name"),
+                    dataset_group.label("dataset_name"),
                     func.count().label("seed_pieces"),
                     func.count(func.distinct(logical_example_id)).label("logical_examples"),
                     func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
                 )
-                .group_by(SeedEntry.dataset_name)
+                .group_by(dataset_group)
                 .subquery()
             )
-            modality_statement = (
-                select(SeedEntry.dataset_name.label("dataset_name"), SeedEntry.data_type).distinct().subquery()
+            metadata_statement = (
+                select(
+                    dataset_group.label("dataset_name"),
+                    SeedEntry.data_type,
+                    SeedEntry.harm_categories,
+                )
+                .subquery()
             )
-            harm_statement = select(SeedEntry.dataset_name.label("dataset_name"), SeedEntry.harm_categories).subquery()
             combined_statement = (
                 select(
                     aggregate_statement.c.dataset_name,
                     aggregate_statement.c.seed_pieces,
                     aggregate_statement.c.logical_examples,
                     aggregate_statement.c.objectives,
-                    modality_statement.c.data_type,
-                    harm_statement.c.harm_categories,
+                    metadata_statement.c.data_type,
+                    metadata_statement.c.harm_categories,
                 )
                 .select_from(aggregate_statement)
                 .outerjoin(
-                    modality_statement,
-                    aggregate_statement.c.dataset_name.is_not_distinct_from(modality_statement.c.dataset_name),
-                )
-                .outerjoin(
-                    harm_statement,
-                    aggregate_statement.c.dataset_name.is_not_distinct_from(harm_statement.c.dataset_name),
+                    metadata_statement,
+                    aggregate_statement.c.dataset_name.is_not_distinct_from(metadata_statement.c.dataset_name),
                 )
             )
 
             with closing(self.get_session()) as session:
                 rows = session.execute(combined_statement).all()
-
-            modalities_by_dataset: dict[str | None, set[str]] = {}
-            harm_categories_by_dataset: dict[str | None, set[str]] = {}
-            unlabeled_by_dataset: set[str | None] = set()
-            counts_by_dataset: dict[str | None, tuple[int, int, int]] = {}
-            dataset_order: list[str | None] = []
-            for row in rows:
-                dataset_name = row.dataset_name
-                if dataset_name not in counts_by_dataset:
-                    counts_by_dataset[dataset_name] = (
-                        int(row.seed_pieces or 0),
-                        int(row.logical_examples or 0),
-                        int(row.objectives or 0),
-                    )
-                    dataset_order.append(dataset_name)
-                    modalities_by_dataset.setdefault(dataset_name, set())
-                    harm_categories_by_dataset.setdefault(dataset_name, set())
-                if row.data_type is not None:
-                    modalities_by_dataset[dataset_name].add(str(row.data_type))
-                categories = row.harm_categories
-                if not categories:
-                    unlabeled_by_dataset.add(dataset_name)
-                else:
-                    harm_categories_by_dataset[dataset_name].update(str(category) for category in categories)
 
             summaries: list[SeedDatasetSummary] = []
             for dataset_name in dataset_order:
