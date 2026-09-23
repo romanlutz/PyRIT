@@ -180,7 +180,34 @@ class TestListDatasets:
         assert unnamed.harm_categories == ["hate"]
         assert unnamed.has_unlabeled_harm_categories is True
 
-    async def test_list_datasets_keeps_unnamed_population_for_whitespace_collation(\n        self, dataset_service, mock_memory\n    ):\n        """A whitespace-only name normalized by the memory query remains the unnamed selection."""\n        mock_memory.get_seed_dataset_summaries.return_value = [\n            SeedDatasetSummary(\n                dataset_name=None,\n                logical_examples=1,\n                seed_pieces=2,\n                objectives=1,\n                modalities=("text",),\n                harm_categories=(),\n                has_unlabeled_harm_categories=True,\n            )\n        ]\n        with patch(\n            "pyrit.backend.services.dataset_service.SeedDatasetProvider.get_all_dataset_names_async",\n            new_callable=AsyncMock,\n            return_value=[],\n        ):\n            result = await dataset_service.list_datasets_async()\n\n        assert len(result.items) == 1\n        unnamed = result.items[0]\n        assert unnamed.name == "(unnamed)"\n        assert unnamed.selection_key == "dataset:unnamed"\n        assert unnamed.seed_pieces == 2\n        assert unnamed.objectives == 1\n\n    async def test_list_datasets_loaded_only_matches_the_empty_memory_contract(self, dataset_service):
+    async def test_list_datasets_keeps_unnamed_population_for_whitespace_collation(self, dataset_service, mock_memory):
+        """A whitespace-only name normalized by the memory query remains the unnamed selection."""
+        mock_memory.get_seed_dataset_summaries.return_value = [
+            SeedDatasetSummary(
+                dataset_name=None,
+                logical_examples=1,
+                seed_pieces=2,
+                objectives=1,
+                modalities=("text",),
+                harm_categories=(),
+                has_unlabeled_harm_categories=True,
+            )
+        ]
+        with patch(
+            "pyrit.backend.services.dataset_service.SeedDatasetProvider.get_all_dataset_names_async",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await dataset_service.list_datasets_async()
+
+        assert len(result.items) == 1
+        unnamed = result.items[0]
+        assert unnamed.name == "(unnamed)"
+        assert unnamed.selection_key == "dataset:unnamed"
+        assert unnamed.seed_pieces == 2
+        assert unnamed.objectives == 1
+
+    async def test_list_datasets_loaded_only_matches_the_empty_memory_contract(self, dataset_service):
         """#2746: an empty memory is a valid empty response, even with providers registered."""
         with patch(
             "pyrit.backend.services.dataset_service.SeedDatasetProvider.get_all_dataset_names_async",
