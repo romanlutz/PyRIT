@@ -169,7 +169,28 @@ async def test_get_seed_dataset_summaries(sqlite_instance: MemoryInterface):
     assert unnamed.seed_pieces == 1
 
 
-async def test_get_seed_dataset_summaries_merges_none_and_empty_dataset_groups(\n    sqlite_instance: MemoryInterface,\n):\n    """Linked seeds with None and empty dataset names count as one unnamed logical example."""\n    group = SeedGroup(\n        seeds=[\n            SeedObjective(value="objective", dataset_name=None, data_type="text"),\n            SeedPrompt(value="prompt", dataset_name="", data_type="text"),\n        ]\n    )\n    await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[group], added_by="tester")\n\n    summaries = sqlite_instance.get_seed_dataset_summaries()\n\n    assert len(summaries) == 1\n    assert summaries[0].dataset_name is None\n    assert summaries[0].logical_examples == 1\n    assert summaries[0].seed_pieces == 2\n    assert summaries[0].objectives == 1\n\n\nasync def test_get_seed_dataset_summaries_follows_a_case_insensitive_collation(
+async def test_get_seed_dataset_summaries_merges_none_and_empty_dataset_groups(
+    sqlite_instance: MemoryInterface,
+):
+    """Linked seeds with None and empty dataset names count as one unnamed logical example."""
+    group = SeedGroup(
+        seeds=[
+            SeedObjective(value="objective", dataset_name=None, data_type="text"),
+            SeedPrompt(value="prompt", dataset_name="", data_type="text"),
+        ]
+    )
+    await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=[group], added_by="tester")
+
+    summaries = sqlite_instance.get_seed_dataset_summaries()
+
+    assert len(summaries) == 1
+    assert summaries[0].dataset_name is None
+    assert summaries[0].logical_examples == 1
+    assert summaries[0].seed_pieces == 2
+    assert summaries[0].objectives == 1
+
+
+async def test_get_seed_dataset_summaries_follows_a_case_insensitive_collation(
     sqlite_instance: MemoryInterface,
 ):
     """Summary grouping honors the column collation, so differently cased names fold together.
