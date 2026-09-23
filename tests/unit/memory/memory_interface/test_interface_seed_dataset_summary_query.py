@@ -15,8 +15,8 @@ async def test_get_seed_dataset_summaries_avoids_metadata_row_multiplication(
     await sqlite_instance.add_seeds_to_memory_async(
         seeds=[
             SeedPrompt(value="prompt one", dataset_name="dataset", data_type="text", harm_categories=["harm"]),
-            SeedPrompt(value="prompt two", dataset_name="dataset", data_type="image_path", harm_categories=["harm"]),
-            SeedPrompt(value="prompt three", dataset_name="dataset", data_type="url", harm_categories=["harm"]),
+            SeedPrompt(value="prompt two", dataset_name="dataset", data_type="reasoning", harm_categories=["harm"]),
+            SeedPrompt(value="https://example.com/three", dataset_name="dataset", data_type="url", harm_categories=["harm"]),
         ],
         added_by="tester",
     )
@@ -49,5 +49,5 @@ async def test_get_seed_dataset_summaries_avoids_metadata_row_multiplication(
     assert len(captured_rows) == 3
     assert len(summaries) == 1
     assert summaries[0].seed_pieces == 3
-    assert summaries[0].modalities == ("image_path", "text", "url")
+    assert summaries[0].modalities == ("reasoning", "text", "url")
     assert summaries[0].harm_categories == ("harm",)
