@@ -27,6 +27,9 @@ from pyrit.backend.services.scenario_service import (
 from pyrit.models import (
     Parameter,
     ScenarioDatasetSizeCap,
+    ScenarioDatasetSizeLimit,
+    ScenarioDatasetSizeLimitDefaultScope,
+    ScenarioDatasetSizeLimitOverrideScope,
     ScenarioDatasetSummary,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
@@ -95,6 +98,7 @@ def _make_scenario_metadata(
         ),
     ),
     default_datasets: tuple[str, ...] = ("test_dataset",),
+    dataset_size_limit: ScenarioDatasetSizeLimit | None = None,
     baseline_policy: str = "enabled",
     include_baseline_by_default: bool = True,
 ) -> ScenarioMetadata:
@@ -113,6 +117,7 @@ def _make_scenario_metadata(
         aggregate_technique_expansions=aggregate_technique_expansions,
         technique_summaries=technique_summaries,
         default_datasets=default_datasets,
+        dataset_size_limit=dataset_size_limit or ScenarioDatasetSizeLimit(),
         baseline_policy=baseline_policy,
         include_baseline_by_default=include_baseline_by_default,
     )
@@ -140,7 +145,13 @@ class TestScenarioServiceListScenarios:
 
     async def test_list_scenarios_returns_scenarios_from_registry(self) -> None:
         """Test that list returns scenarios from registry."""
-        metadata = _make_scenario_metadata()
+        metadata = _make_scenario_metadata(
+            dataset_size_limit=ScenarioDatasetSizeLimit(
+                default_scope=ScenarioDatasetSizeLimitDefaultScope.PerDataset,
+                default_count=25,
+                override_scope=ScenarioDatasetSizeLimitOverrideScope.PerDataset,
+            )
+        )
 
         with patch.object(ScenarioService, "__init__", lambda self: None):
             service = ScenarioService()
@@ -162,6 +173,9 @@ class TestScenarioServiceListScenarios:
             assert result.items[0].technique_summaries[0].description == "Frames the objective as role play."
             assert result.items[0].technique_summaries[0].tags == ["default", "single_turn"]
             assert result.items[0].default_datasets == ["test_dataset"]
+            assert result.items[0].dataset_size_limit.default_scope is ScenarioDatasetSizeLimitDefaultScope.PerDataset
+            assert result.items[0].dataset_size_limit.default_count == 25
+            assert result.items[0].dataset_size_limit.override_scope is ScenarioDatasetSizeLimitOverrideScope.PerDataset
             assert result.items[0].baseline_policy == "enabled"
             assert result.items[0].include_baseline_by_default is True
 

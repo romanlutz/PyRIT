@@ -59,6 +59,25 @@ def _validate_dataset_filter_mapping(
     return value
 
 
+def _validate_dataset_name_selection(value: list[str] | None) -> list[str] | None:
+    """
+    Validate an explicit ordered dataset selection.
+
+    Returns:
+        list[str] | None: The validated selection.
+
+    Raises:
+        ValueError: If an explicit selection is empty or contains duplicate names.
+    """
+    if value is None:
+        return None
+    if not value:
+        raise ValueError("dataset_names must contain at least one dataset when provided")
+    if len(set(value)) != len(value):
+        raise ValueError("dataset_names cannot contain duplicates")
+    return value
+
+
 class ScenarioRunSizeEstimateStatus(str, Enum):
     """Confidence level for a scenario run-size estimate."""
 
@@ -73,6 +92,30 @@ class ScenarioRunSizeEstimateCondition(str, Enum):
     TargetCapabilities = "target_capabilities"
     LaunchConfiguration = "launch_configuration"
     PriorExecutionResults = "prior_execution_results"
+
+
+class ScenarioDatasetPopulationStatus(str, Enum):
+    """Whether a dataset's full logical population is known."""
+
+    Known = "known"
+    Unknown = "unknown"
+
+
+class ScenarioDatasetSizeLimitDefaultScope(str, Enum):
+    """How a scenario's default dataset-size limit is applied."""
+
+    None_ = "none"
+    PerDataset = "per_dataset"
+    Combined = "combined"
+    Heterogeneous = "heterogeneous"
+
+
+class ScenarioDatasetSizeLimitOverrideScope(str, Enum):
+    """How a scenario interprets an explicit dataset-size override."""
+
+    PerDataset = "per_dataset"
+    Combined = "combined"
+    Unsupported = "unsupported"
 
 
 class ScenarioRunSizeFactor(BaseModel):
@@ -118,6 +161,34 @@ class ScenarioDatasetSizeCap(BaseModel):
     count: int = Field(..., ge=1)
     configured_on: Literal["dataset", "configuration", "compound"] = "dataset"
     dataset_name: str | None = None
+    dataset_names: list[str] = Field(
+        default_factory=list,
+        description="Ordered datasets sharing this cap; one entry for a per-dataset cap.",
+    )
+
+    @model_validator(mode="after")
+    def validate_dataset_names(self) -> "ScenarioDatasetSizeCap":
+        """
+        Normalize the legacy singular dataset name into ordered provenance.
+
+        Returns:
+            ScenarioDatasetSizeCap: The validated cap.
+
+        Raises:
+            ValueError: If contributor names are duplicated or contradict the singular name.
+        """
+        if len(set(self.dataset_names)) != len(self.dataset_names):
+            raise ValueError("dataset_names cannot contain duplicates")
+        if self.dataset_name is not None:
+            if self.dataset_names and self.dataset_name not in self.dataset_names:
+                raise ValueError("dataset_name must be included in dataset_names")
+            if not self.dataset_names:
+                self.dataset_names = [self.dataset_name]
+        if self.configured_on == "dataset" and len(self.dataset_names) == 1 and self.dataset_name is None:
+            self.dataset_name = self.dataset_names[0]
+        if self.configured_on == "dataset" and len(self.dataset_names) > 1:
+            raise ValueError("A per-dataset cap must identify at most one dataset")
+        return self
 
 
 class ScenarioDatasetSummary(BaseModel):
@@ -125,14 +196,114 @@ class ScenarioDatasetSummary(BaseModel):
 
     name: str = Field(..., min_length=1)
     kind: Literal["dataset", "synthesized"] = "dataset"
-    logical_seed_group_count: int = Field(
-        ...,
+    population_status: ScenarioDatasetPopulationStatus = ScenarioDatasetPopulationStatus.Known
+    logical_seed_group_count: int | None = Field(
+        default=None,
         ge=0,
         validation_alias=AliasChoices("logical_seed_group_count", "seed_group_count"),
+        description="Full logical seed-group population, or null when it has not been materialized.",
     )
-    selected_seed_group_count: int = Field(..., ge=0)
+    selected_seed_group_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="Selected logical seed groups, or null when the population is unknown.",
+    )
+    effective_cap: int | None = Field(
+        default=None,
+        ge=1,
+        description="Independent cap effective for this dataset; shared caps are reported at estimate level.",
+    )
     configured_caps: list[ScenarioDatasetSizeCap] = Field(default_factory=list)
     selection_note: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_population_status(cls, data: Any) -> Any:
+        """
+        Preserve existing known-summary construction while allowing explicit unknowns.
+
+        Returns:
+            Any: The normalized summary input.
+        """
+        if not isinstance(data, dict) or "population_status" in data:
+            return data
+        normalized = dict(data)
+        full_count = normalized.get("logical_seed_group_count", normalized.get("seed_group_count"))
+        normalized["population_status"] = (
+            ScenarioDatasetPopulationStatus.Known if full_count is not None else ScenarioDatasetPopulationStatus.Unknown
+        )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_population(self) -> "ScenarioDatasetSummary":
+        """
+        Keep known and unknown population states internally consistent.
+
+        Returns:
+            ScenarioDatasetSummary: The validated summary.
+
+        Raises:
+            ValueError: If population state, counts, or the effective cap conflict.
+        """
+        if self.population_status is ScenarioDatasetPopulationStatus.Known:
+            if self.logical_seed_group_count is None or self.selected_seed_group_count is None:
+                raise ValueError("Known dataset populations require full and selected seed-group counts")
+        elif self.logical_seed_group_count is not None:
+            raise ValueError("Unknown dataset populations cannot include a full seed-group count")
+
+        if any(cap.dataset_names and self.name not in cap.dataset_names for cap in self.configured_caps):
+            raise ValueError("configured_caps must include the summarized dataset in their provenance")
+        if (
+            self.logical_seed_group_count is not None
+            and self.selected_seed_group_count is not None
+            and self.selected_seed_group_count > self.logical_seed_group_count
+        ):
+            raise ValueError("selected_seed_group_count cannot exceed logical_seed_group_count")
+        independent_caps = [
+            cap.count
+            for cap in self.configured_caps
+            if cap.configured_on == "dataset" and (not cap.dataset_names or self.name in cap.dataset_names)
+        ]
+        if independent_caps:
+            configured_effective_cap = min(independent_caps)
+            if self.effective_cap is None:
+                self.effective_cap = configured_effective_cap
+            elif self.effective_cap != configured_effective_cap:
+                raise ValueError("effective_cap must match the most restrictive per-dataset configured cap")
+        if (
+            self.effective_cap is not None
+            and self.selected_seed_group_count is not None
+            and self.selected_seed_group_count > self.effective_cap
+        ):
+            raise ValueError("selected_seed_group_count cannot exceed effective_cap")
+        return self
+
+
+class ScenarioDatasetSizeLimit(BaseModel):
+    """Structured default and override semantics for a scenario's dataset-size limit."""
+
+    default_scope: ScenarioDatasetSizeLimitDefaultScope = ScenarioDatasetSizeLimitDefaultScope.None_
+    default_count: int | None = Field(default=None, ge=1)
+    override_scope: ScenarioDatasetSizeLimitOverrideScope = ScenarioDatasetSizeLimitOverrideScope.PerDataset
+
+    @model_validator(mode="after")
+    def validate_default_count(self) -> "ScenarioDatasetSizeLimit":
+        """
+        Require a count exactly when the default has one representable scope.
+
+        Returns:
+            ScenarioDatasetSizeLimit: The validated limit metadata.
+
+        Raises:
+            ValueError: If the count does not match the declared default scope.
+        """
+        has_representable_default = self.default_scope in {
+            ScenarioDatasetSizeLimitDefaultScope.PerDataset,
+            ScenarioDatasetSizeLimitDefaultScope.Combined,
+        }
+        if has_representable_default != (self.default_count is not None):
+            raise ValueError("default_count must be set exactly for per_dataset or combined defaults")
+        return self
 
 
 class ScenarioTechniqueSummary(BaseModel):
@@ -162,6 +333,10 @@ class ScenarioRunSizeEstimate(BaseModel):
     condition: ScenarioRunSizeEstimateCondition | None = None
     components: list[ScenarioRunSizeComponent] = Field(default_factory=list)
     datasets: list[ScenarioDatasetSummary] = Field(default_factory=list)
+    dataset_cap_provenance: list[ScenarioDatasetSizeCap] = Field(
+        default_factory=list,
+        description="Ordered unique cap provenance; shared configuration and compound caps appear once.",
+    )
     effective_parameters: dict[str, bool | int | float | str | list[str]] = Field(
         default_factory=dict,
         description="Scenario parameter values used by this estimate, including implicit runtime defaults.",
@@ -225,6 +400,7 @@ class ScenarioRunSizeEstimate(BaseModel):
         Raises:
             ValueError: If the estimate contains contradictory values.
         """
+        self._populate_dataset_cap_provenance()
         component_total = sum(component.count for component in self.components)
         if self.status is not ScenarioRunSizeEstimateStatus.Conditional and self.condition is not None:
             raise ValueError(f"{self.status.value.capitalize()} run-size estimates cannot include condition")
@@ -272,6 +448,45 @@ class ScenarioRunSizeEstimate(BaseModel):
                 )
         return self
 
+    def _populate_dataset_cap_provenance(self) -> None:
+        """Derive canonical cap provenance from compatibility dataset summaries when omitted."""
+        if self.dataset_cap_provenance:
+            return
+
+        caps_by_key: dict[tuple[str, int, str, str | None, tuple[str, ...]], ScenarioDatasetSizeCap] = {}
+        for dataset in self.datasets:
+            for configured_cap in dataset.configured_caps:
+                dataset_name = configured_cap.dataset_name if configured_cap.configured_on == "dataset" else None
+                declared_names = (
+                    tuple(configured_cap.dataset_names) if configured_cap.configured_on != "dataset" else ()
+                )
+                key = (
+                    configured_cap.label,
+                    configured_cap.count,
+                    configured_cap.configured_on,
+                    dataset_name,
+                    declared_names,
+                )
+                existing = caps_by_key.get(key)
+                if existing is None:
+                    names = configured_cap.dataset_names or [dataset.name]
+                    caps_by_key[key] = configured_cap.model_copy(
+                        update={
+                            "dataset_name": dataset_name,
+                            "dataset_names": list(names),
+                        }
+                    )
+                    continue
+                for name in configured_cap.dataset_names or [dataset.name]:
+                    if name not in existing.dataset_names:
+                        existing.dataset_names.append(name)
+
+        scope_order = {"dataset": 0, "configuration": 1, "compound": 2}
+        self.dataset_cap_provenance = sorted(
+            caps_by_key.values(),
+            key=lambda cap: scope_order[cap.configured_on],
+        )
+
     @classmethod
     def unavailable(cls, *, note: str = "Default-run size estimate is unavailable.") -> "ScenarioRunSizeEstimate":
         """
@@ -318,6 +533,10 @@ class RegisteredScenario(BaseModel):
         description="Descriptions and tags for the available concrete techniques",
     )
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    dataset_size_limit: ScenarioDatasetSizeLimit = Field(
+        default_factory=ScenarioDatasetSizeLimit,
+        description="Structured scenario-default and explicit-override dataset-size limit semantics",
+    )
     baseline_policy: Literal["enabled", "disabled", "forbidden"] = Field(
         "enabled", description="Whether baseline execution is enabled, disabled, or forbidden"
     )
@@ -344,7 +563,11 @@ class ScenarioRunSizeEstimateRequest(BaseModel):
     dataset_names: list[str] | None = Field(
         None, description="Dataset names to estimate (uses scenario default if omitted)"
     )
-    max_dataset_size: int | None = Field(None, ge=1, description="Maximum selected logical seed groups")
+    max_dataset_size: int | None = Field(
+        None,
+        ge=1,
+        description="Dataset cap interpreted according to the scenario catalog's dataset_size_limit.override_scope",
+    )
     dataset_filters: dict[str, list[str]] | None = Field(
         None,
         description="Dataset seed filters keyed by field. Accepted keys: harm_categories, data_types.",
@@ -357,6 +580,17 @@ class ScenarioRunSizeEstimateRequest(BaseModel):
         None,
         description="Scenario-declared parameters such as Jailbreak template and attempt counts",
     )
+
+    @field_validator("dataset_names")
+    @classmethod
+    def _validate_dataset_names(cls, value: list[str] | None) -> list[str] | None:
+        """
+        Validate explicit estimate dataset selections.
+
+        Returns:
+            list[str] | None: Validated names.
+        """
+        return _validate_dataset_name_selection(value)
 
     @field_validator("dataset_filters")
     @classmethod
@@ -380,7 +614,11 @@ class RunScenarioRequest(BaseModel):
     )
     techniques: list[str] | None = Field(None, description="Technique names to use (uses scenario default if omitted)")
     dataset_names: list[str] | None = Field(None, description="Dataset names to use (uses scenario default if omitted)")
-    max_dataset_size: int | None = Field(None, ge=1, description="Maximum items per dataset")
+    max_dataset_size: int | None = Field(
+        None,
+        ge=1,
+        description="Dataset cap interpreted according to the scenario catalog's dataset_size_limit.override_scope",
+    )
     dataset_filters: dict[str, list[str]] | None = Field(
         None,
         description=(
@@ -409,6 +647,17 @@ class RunScenarioRequest(BaseModel):
         description="Optional ID of an existing ScenarioResult to resume. "
         "If provided, the scenario will resume from prior progress instead of starting fresh.",
     )
+
+    @field_validator("dataset_names")
+    @classmethod
+    def _validate_dataset_names(cls, value: list[str] | None) -> list[str] | None:
+        """
+        Validate explicit launch dataset selections.
+
+        Returns:
+            list[str] | None: Validated names.
+        """
+        return _validate_dataset_name_selection(value)
 
     @field_validator("dataset_filters")
     @classmethod

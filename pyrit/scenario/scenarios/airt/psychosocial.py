@@ -7,7 +7,7 @@ import asyncio
 import logging
 import pathlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from pyrit.common import apply_defaults
 from pyrit.common.path import DATASETS_PATH
@@ -32,6 +32,7 @@ from pyrit.executor.attack import (
     CrescendoAttack,
 )
 from pyrit.models import (
+    ScenarioDatasetSizeLimitOverrideScope,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
     SeedPrompt,
@@ -364,6 +365,9 @@ class Psychosocial(Scenario):
     """
 
     VERSION: int = 3
+    DATASET_SIZE_LIMIT_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSizeLimitOverrideScope | None] = (
+        ScenarioDatasetSizeLimitOverrideScope.PerDataset
+    )
 
     @classmethod
     def additional_parameters(cls) -> list[Parameter]:
@@ -491,9 +495,22 @@ class Psychosocial(Scenario):
 
         Returns:
             dict[str, list[AttackSeedGroup]]: Seed groups keyed by originating dataset name.
+
+        Raises:
+            ValueError: If a compound override mixes per-dataset caps or adds a combined cap.
         """
         dataset_names = [harm.dataset_name for harm in self._selected_sub_harms()]
-        per_subharm_cap = self._dataset_config.max_dataset_size
+        if isinstance(self._dataset_config, CompoundDatasetAttackConfiguration):
+            configured_caps = self._dataset_config.size_cap_provenance()
+            if any(cap.configured_on != "dataset" for cap in configured_caps):
+                raise ValueError("Psychosocial does not support a combined dataset cap.")
+            capped_names = [name for cap in configured_caps for name in cap.dataset_names]
+            child_caps = {cap.count for cap in configured_caps}
+            if configured_caps and (len(child_caps) > 1 or capped_names != self._dataset_config.dataset_names):
+                raise ValueError("Psychosocial requires one consistent per-dataset cap.")
+            per_subharm_cap = next(iter(child_caps), None)
+        else:
+            per_subharm_cap = self._dataset_config.max_dataset_size
         filters = self._dataset_config.filters
         if per_subharm_cap is None:
             self._dataset_config = DatasetAttackConfiguration(dataset_names=dataset_names, filters=filters)
@@ -501,10 +518,6 @@ class Psychosocial(Scenario):
             rebuilt = CompoundDatasetAttackConfiguration.per_dataset(
                 dataset_names=dataset_names, max_dataset_size=per_subharm_cap, filters=filters
             )
-            # Parent cap = per-sub-harm cap x sub-harm count: each child already caps at the
-            # per-sub-harm budget so the parent never trims the union, yet it stays non-None so the
-            # base still pins the sampled objective subset into the scenario metadata for resume.
-            rebuilt.max_dataset_size = per_subharm_cap * len(dataset_names)
             self._dataset_config = rebuilt
         return await super()._resolve_seed_groups_by_dataset_async(apply_sampling=apply_sampling)
 

@@ -46,7 +46,11 @@ if TYPE_CHECKING:
         AttackStats,
     )
     from pyrit.models.catalog import (
+        ScenarioDatasetPopulationStatus,
         ScenarioDatasetSizeCap,
+        ScenarioDatasetSizeLimit,
+        ScenarioDatasetSizeLimitDefaultScope,
+        ScenarioDatasetSizeLimitOverrideScope,
         ScenarioDatasetSummary,
         ScenarioDefaultRunSizeEstimate,
         ScenarioRunListItem,
@@ -348,7 +352,11 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ScorerEvaluationIdentifier": "pyrit.models.identifiers",
     "ScorerIdentifier": "pyrit.models.identifiers",
     "ScenarioIdentifier": "pyrit.models.identifiers",
+    "ScenarioDatasetPopulationStatus": "pyrit.models.catalog",
     "ScenarioDatasetSizeCap": "pyrit.models.catalog",
+    "ScenarioDatasetSizeLimit": "pyrit.models.catalog",
+    "ScenarioDatasetSizeLimitDefaultScope": "pyrit.models.catalog",
+    "ScenarioDatasetSizeLimitOverrideScope": "pyrit.models.catalog",
     "ScenarioDatasetSummary": "pyrit.models.catalog",
     "ScenarioDefaultRunSizeEstimate": "pyrit.models.catalog",
     "ScenarioRunListItem": "pyrit.models.catalog",

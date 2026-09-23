@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.models import AttackSeedGroup, SeedGroup, SeedObjective, SeedPrompt
+from pyrit.models import AttackSeedGroup, ScenarioDatasetPopulationStatus, SeedGroup, SeedObjective, SeedPrompt
 from pyrit.scenario.core.dataset_configuration import (
     INLINE_DATASET_NAME,
     CompoundDatasetAttackConfiguration,
@@ -131,6 +131,10 @@ class TestDatasetConfigurationInit:
     def test_init_with_max_dataset_size_negative_raises(self) -> None:
         with pytest.raises(ValueError, match="positive integer"):
             DatasetConfiguration(dataset_names=["d1"], max_dataset_size=-1)
+
+    def test_init_with_duplicate_dataset_names_raises(self) -> None:
+        with pytest.raises(ValueError, match="cannot contain duplicates"):
+            DatasetConfiguration(dataset_names=["d1", "d1"])
 
     def test_init_copies_seed_groups_to_prevent_mutation(self, sample_seed_groups: list[SeedGroup]) -> None:
         config = DatasetConfiguration(seed_groups=sample_seed_groups)
@@ -261,6 +265,17 @@ class TestGetAttackGroupsByDatasetAsync:
         config = DatasetAttackConfiguration(dataset_names=["d1", "d2"], max_dataset_size=2)
         result = await config.get_attack_groups_by_dataset_async()
         assert sum(len(groups) for groups in result.values()) == 2
+
+    async def test_estimate_resolution_reads_full_and_selected_groups_once(self, mock_memory: MagicMock) -> None:
+        """Known-population estimates sample a single resolved snapshot."""
+        mock_memory.get_seeds.return_value = make_objectives("a", "b", "c")
+        config = DatasetAttackConfiguration(dataset_names=["d1"], max_dataset_size=1)
+
+        full, selected = await config.resolve_attack_groups_for_estimate_async()
+
+        assert len(full["d1"]) == 3
+        assert len(selected["d1"]) == 1
+        mock_memory.get_seeds.assert_called_once_with(dataset_name="d1")
 
     async def test_loud_raise_when_a_dataset_is_empty(self, mock_memory: MagicMock) -> None:
         mock_memory.get_seeds.side_effect = [make_objectives("a"), []]
@@ -507,6 +522,67 @@ class TestCompoundDatasetAttackConfiguration:
         assert [child.dataset_names for child in config._configurations] == [["d1"], ["d2"]]
         assert all(child.max_dataset_size == 4 for child in config._configurations)
 
+    def test_with_dataset_names_preserves_per_dataset_shape(self) -> None:
+        config = CompoundDatasetAttackConfiguration.per_dataset(
+            dataset_names=["d1", "d2"],
+            max_dataset_size=4,
+            filters={"harm_categories": ["original"]},
+        )
+
+        overridden = config.with_dataset_names(
+            dataset_names=["selected"],
+            filters={"data_types": ["text"]},
+        )
+
+        assert overridden.dataset_names == ["selected"]
+        assert overridden._configurations[0].max_dataset_size == 4
+        assert overridden._configurations[0].filters == {
+            "harm_categories": ["original"],
+            "data_types": ["text"],
+        }
+        assert config.dataset_names == ["d1", "d2"]
+
+    def test_with_dataset_names_rejects_shaped_children(self) -> None:
+        class _ShapedDatasetConfiguration(DatasetAttackConfiguration):
+            pass
+
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[_ShapedDatasetConfiguration(dataset_names=["d1"])],
+        )
+
+        with pytest.raises(TypeError, match="homogeneous single-dataset"):
+            config.with_dataset_names(dataset_names=["selected"])
+
+    def test_with_dataset_names_rejects_heterogeneous_children(self) -> None:
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[
+                DatasetAttackConfiguration(dataset_names=["d1"], max_dataset_size=2),
+                DatasetAttackConfiguration(dataset_names=["d2"], max_dataset_size=3),
+            ],
+        )
+
+        with pytest.raises(TypeError, match="shared caps"):
+            config.with_dataset_names(dataset_names=["selected"])
+
+    def test_update_child_max_dataset_size_preserves_child_types(self) -> None:
+        class _ShapedDatasetConfiguration(DatasetAttackConfiguration):
+            pass
+
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[
+                _ShapedDatasetConfiguration(dataset_names=["d1"], max_dataset_size=4),
+                _ShapedDatasetConfiguration(dataset_names=["d2"], max_dataset_size=4),
+            ],
+        )
+
+        config.update_child_max_dataset_size(max_dataset_size=2)
+
+        assert [type(child) for child in config._configurations] == [
+            _ShapedDatasetConfiguration,
+            _ShapedDatasetConfiguration,
+        ]
+        assert [child.max_dataset_size for child in config._configurations] == [2, 2]
+
     def test_size_caps_report_child_and_combined_limits(self) -> None:
         """Planning metadata explains independent child caps and the final compound cap."""
         config = CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["d1", "d2"], max_dataset_size=4)
@@ -516,6 +592,54 @@ class TestCompoundDatasetAttackConfiguration:
             "d1": [("per-dataset cap", 4, "dataset"), ("combined compound cap", 6, "compound")],
             "d2": [("per-dataset cap", 4, "dataset"), ("combined compound cap", 6, "compound")],
         }
+
+    def test_cap_provenance_counts_combined_cap_once(self) -> None:
+        config = CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["d1", "d2"], max_dataset_size=4)
+        config.max_dataset_size = 6
+
+        provenance = config.size_cap_provenance()
+
+        assert [(cap.count, cap.configured_on, cap.dataset_names) for cap in provenance] == [
+            (4, "dataset", ["d1"]),
+            (4, "dataset", ["d2"]),
+            (6, "compound", ["d1", "d2"]),
+        ]
+
+    def test_unknown_population_summaries_preserve_caps_without_zero_counts(self) -> None:
+        config = CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["d1", "d2"], max_dataset_size=4)
+        config.max_dataset_size = 6
+
+        summaries = config.build_population_summaries()
+
+        assert [summary.name for summary in summaries] == ["d1", "d2"]
+        assert all(summary.population_status is ScenarioDatasetPopulationStatus.Unknown for summary in summaries)
+        assert all(summary.logical_seed_group_count is None for summary in summaries)
+        assert all(summary.selected_seed_group_count is None for summary in summaries)
+        assert [summary.effective_cap for summary in summaries] == [4, 4]
+        assert [len(summary.configured_caps) for summary in summaries] == [2, 2]
+
+    def test_known_population_summaries_represent_unselected_dataset_as_zero(self) -> None:
+        config = DatasetAttackConfiguration(dataset_names=["d1", "d2"], max_dataset_size=1)
+
+        summaries = config.build_population_summaries(
+            full_counts_by_dataset={"d1": 2, "d2": 2},
+            selected_counts_by_dataset={"d1": 1},
+        )
+
+        assert [summary.population_status for summary in summaries] == [
+            ScenarioDatasetPopulationStatus.Known,
+            ScenarioDatasetPopulationStatus.Known,
+        ]
+        assert [summary.selected_seed_group_count for summary in summaries] == [1, 0]
+
+    def test_per_dataset_override_rejects_multi_population_child(self) -> None:
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[DatasetAttackConfiguration(dataset_names=["d1", "d2"])],
+        )
+
+        assert config.supports_per_dataset_size_override is False
+        with pytest.raises(ValueError, match="one distinct dataset population"):
+            config.update_child_max_dataset_size(max_dataset_size=2)
 
     def test_dataset_names_aggregates_and_dedups(self) -> None:
         config = CompoundDatasetAttackConfiguration(
@@ -567,6 +691,19 @@ class TestCompoundDatasetAttackConfiguration:
         )
         groups = await config.get_attack_seed_groups_async()
         assert len(groups) == 2
+
+    async def test_estimate_resolution_reads_each_child_once(self, mock_memory: MagicMock) -> None:
+        mock_memory.get_seeds.side_effect = [make_objectives("a", "b"), make_objectives("c", "d")]
+        config = CompoundDatasetAttackConfiguration.per_dataset(
+            dataset_names=["d1", "d2"],
+            max_dataset_size=1,
+        )
+
+        full, selected = await config.resolve_attack_groups_for_estimate_async()
+
+        assert {name: len(groups) for name, groups in full.items()} == {"d1": 2, "d2": 2}
+        assert {name: len(groups) for name, groups in selected.items()} == {"d1": 1, "d2": 1}
+        assert mock_memory.get_seeds.call_count == 2
 
     async def test_inline_children_combine(self) -> None:
         config = CompoundDatasetAttackConfiguration(

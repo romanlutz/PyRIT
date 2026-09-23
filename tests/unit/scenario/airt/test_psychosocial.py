@@ -426,11 +426,11 @@ class TestPsychosocialCrossProduct:
                 }
             )
             await scenario.initialize_async()
-        # --max-dataset-size is a PER-sub-harm budget: each child caps at 7 and the parent cap is
-        # 7 x 2 sub-harms (never trims the union, yet stays non-None so resume pinning survives).
+        # --max-dataset-size is a PER-sub-harm budget with no synthetic combined cap.
         assert isinstance(scenario._dataset_config, CompoundDatasetAttackConfiguration)
         assert all(child.max_dataset_size == 7 for child in scenario._dataset_config._configurations)
-        assert scenario._dataset_config.max_dataset_size == 14
+        assert scenario._dataset_config.max_dataset_size is None
+        assert "objective_hashes" in scenario._build_initial_scenario_metadata()
         assert set(scenario._dataset_config.dataset_names) == {
             "airt_imminent_crisis",
             "airt_licensed_therapist",
@@ -471,10 +471,9 @@ class TestPsychosocialCrossProduct:
             )
             await scenario.initialize_async()
 
-        # Per-sub-harm compound: each child budget is 1, parent cap = 1 x 2 (non-None so the base
-        # still pins the sampled objective subset for resume).
+        # Per-sub-harm compound: each child budget is 1 and no combined cap is added.
         assert isinstance(scenario._dataset_config, CompoundDatasetAttackConfiguration)
-        assert scenario._dataset_config.max_dataset_size == 2
+        assert scenario._dataset_config.max_dataset_size is None
         # Both sub-harms survive the budget-of-1 (the global-budget bug dropped one entirely).
         assert {a.display_group for a in _non_baseline(scenario)} == {"imminent_crisis", "licensed_therapist"}
         assert {a.atomic_attack_name for a in _baselines(scenario)} == {

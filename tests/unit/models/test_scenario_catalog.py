@@ -7,7 +7,11 @@ import pytest
 from pydantic import ValidationError
 
 from pyrit.models import (
+    ScenarioDatasetPopulationStatus,
     ScenarioDatasetSizeCap,
+    ScenarioDatasetSizeLimit,
+    ScenarioDatasetSizeLimitDefaultScope,
+    ScenarioDatasetSizeLimitOverrideScope,
     ScenarioDatasetSummary,
     ScenarioDefaultRunSizeEstimate,
     ScenarioRunSizeComponent,
@@ -17,6 +21,7 @@ from pyrit.models import (
     ScenarioRunSizeEstimateStatus,
     ScenarioRunSizeFactor,
 )
+from pyrit.models.catalog.scenario import RunScenarioRequest
 
 
 def test_run_size_estimate_compatibility_alias_is_canonical_model() -> None:
@@ -81,6 +86,7 @@ def test_run_size_estimate_preserves_legacy_total_and_serializes_additively() ->
             },
         ],
         "datasets": [],
+        "dataset_cap_provenance": [],
         "effective_parameters": {
             "include_baseline": True,
             "techniques": ["one", "two"],
@@ -346,11 +352,222 @@ def test_estimate_preserves_ordered_datasets_structurally() -> None:
             "count": 4,
             "configured_on": "dataset",
             "dataset_name": "harmbench",
+            "dataset_names": ["harmbench"],
         }
     ]
+    assert payload["datasets"][0]["population_status"] == "known"
+    assert payload["datasets"][0]["effective_cap"] == 4
+    assert payload["dataset_cap_provenance"] == [
+        {
+            "label": "per-dataset cap",
+            "count": 4,
+            "configured_on": "dataset",
+            "dataset_name": "harmbench",
+            "dataset_names": ["harmbench"],
+        }
+    ]
+
+
+def test_unknown_dataset_population_serializes_null_counts_and_effective_cap() -> None:
+    """An unmaterialized dataset remains explicitly unknown rather than looking empty."""
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name="harmbench",
+                population_status=ScenarioDatasetPopulationStatus.Unknown,
+                logical_seed_group_count=None,
+                selected_seed_group_count=None,
+                effective_cap=4,
+                configured_caps=[
+                    ScenarioDatasetSizeCap(
+                        label="per-dataset cap",
+                        count=4,
+                        configured_on="dataset",
+                        dataset_name="harmbench",
+                    )
+                ],
+            )
+        ]
+    )
+
+    payload = estimate.model_dump(mode="json")
+    assert payload["datasets"][0]["population_status"] == "unknown"
+    assert payload["datasets"][0]["logical_seed_group_count"] is None
+    assert payload["datasets"][0]["selected_seed_group_count"] is None
+    assert payload["datasets"][0]["effective_cap"] == 4
+
+
+def test_dataset_cap_rejects_multiple_dataset_attribution() -> None:
+    """A per-dataset cap cannot be ambiguously attributed to multiple datasets."""
+    with pytest.raises(ValidationError, match="at most one dataset"):
+        ScenarioDatasetSizeCap(
+            label="per-dataset cap",
+            count=4,
+            configured_on="dataset",
+            dataset_names=["first", "second"],
+        )
+
+
+def test_dataset_summary_rejects_inconsistent_effective_cap() -> None:
+    """The effective cap must match the independently attributable configured caps."""
+    with pytest.raises(ValidationError, match="effective_cap"):
+        ScenarioDatasetSummary(
+            name="first",
+            logical_seed_group_count=4,
+            selected_seed_group_count=2,
+            effective_cap=3,
+            configured_caps=[
+                ScenarioDatasetSizeCap(
+                    label="per-dataset cap",
+                    count=2,
+                    configured_on="dataset",
+                    dataset_name="first",
+                )
+            ],
+        )
+
+
+def test_dataset_summary_rejects_unrelated_cap_provenance() -> None:
+    """Nested cap provenance must include the population it annotates."""
+    with pytest.raises(ValidationError, match="summarized dataset"):
+        ScenarioDatasetSummary(
+            name="first",
+            logical_seed_group_count=4,
+            selected_seed_group_count=2,
+            configured_caps=[
+                ScenarioDatasetSizeCap(
+                    label="per-dataset cap",
+                    count=2,
+                    configured_on="dataset",
+                    dataset_name="second",
+                )
+            ],
+        )
+
+
+def test_combined_cap_provenance_is_serialized_once_in_dataset_order() -> None:
+    """A shared configuration cap is one ordered provenance record, not one per dataset."""
+    first_cap = ScenarioDatasetSizeCap(
+        label="per-dataset cap",
+        count=3,
+        configured_on="dataset",
+        dataset_name="first",
+    )
+    second_cap = ScenarioDatasetSizeCap(
+        label="per-dataset cap",
+        count=4,
+        configured_on="dataset",
+        dataset_name="second",
+    )
+    shared_cap = ScenarioDatasetSizeCap(
+        label="combined configuration cap",
+        count=5,
+        configured_on="configuration",
+        dataset_names=["first", "second"],
+    )
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name="first",
+                logical_seed_group_count=3,
+                selected_seed_group_count=2,
+                configured_caps=[first_cap, shared_cap],
+            ),
+            ScenarioDatasetSummary(
+                name="second",
+                logical_seed_group_count=4,
+                selected_seed_group_count=3,
+                configured_caps=[second_cap, shared_cap],
+            ),
+        ]
+    )
+
+    payload = estimate.model_dump(mode="json")
+    assert [(cap.configured_on, cap.dataset_names) for cap in estimate.dataset_cap_provenance] == [
+        ("dataset", ["first"]),
+        ("dataset", ["second"]),
+        ("configuration", ["first", "second"]),
+    ]
+    assert [cap["count"] for cap in payload["dataset_cap_provenance"]] == [3, 4, 5]
+
+
+def test_distinct_shared_caps_with_equal_values_remain_separate() -> None:
+    """Equal cap values on disjoint populations do not collapse into one provenance record."""
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name="first",
+                logical_seed_group_count=3,
+                selected_seed_group_count=2,
+                configured_caps=[
+                    ScenarioDatasetSizeCap(
+                        label="combined configuration cap",
+                        count=2,
+                        configured_on="configuration",
+                        dataset_names=["first"],
+                    )
+                ],
+            ),
+            ScenarioDatasetSummary(
+                name="second",
+                logical_seed_group_count=3,
+                selected_seed_group_count=2,
+                configured_caps=[
+                    ScenarioDatasetSizeCap(
+                        label="combined configuration cap",
+                        count=2,
+                        configured_on="configuration",
+                        dataset_names=["second"],
+                    )
+                ],
+            ),
+        ]
+    )
+
+    assert [cap.dataset_names for cap in estimate.dataset_cap_provenance] == [["first"], ["second"]]
+
+
+@pytest.mark.parametrize(
+    ("default_scope", "default_count"),
+    [
+        (ScenarioDatasetSizeLimitDefaultScope.None_, 4),
+        (ScenarioDatasetSizeLimitDefaultScope.Heterogeneous, 4),
+        (ScenarioDatasetSizeLimitDefaultScope.PerDataset, None),
+        (ScenarioDatasetSizeLimitDefaultScope.Combined, None),
+    ],
+)
+def test_dataset_size_limit_rejects_inconsistent_default_count(
+    default_scope: ScenarioDatasetSizeLimitDefaultScope,
+    default_count: int | None,
+) -> None:
+    """Only uniform capped defaults carry one client-facing default count."""
+    with pytest.raises(ValidationError, match="default_count"):
+        ScenarioDatasetSizeLimit(
+            default_scope=default_scope,
+            default_count=default_count,
+            override_scope=ScenarioDatasetSizeLimitOverrideScope.PerDataset,
+        )
 
 
 def test_estimate_request_reuses_dataset_filter_validation() -> None:
     """Configured estimates reject the same unsupported dataset filters as launches."""
     with pytest.raises(ValidationError, match="Unknown dataset filter 'unknown'"):
         ScenarioRunSizeEstimateRequest(dataset_filters={"unknown": ["value"]})
+
+
+@pytest.mark.parametrize("dataset_names", [[], ["duplicate", "duplicate"]])
+def test_estimate_request_rejects_ambiguous_dataset_names(dataset_names: list[str]) -> None:
+    """Explicit dataset selections must be non-empty and unique."""
+    with pytest.raises(ValidationError, match="dataset_names"):
+        ScenarioRunSizeEstimateRequest(dataset_names=dataset_names)
+
+
+@pytest.mark.parametrize("dataset_names", [[], ["duplicate", "duplicate"]])
+def test_launch_request_rejects_ambiguous_dataset_names(dataset_names: list[str]) -> None:
+    """Launch validates the same explicit dataset selection shape as preview."""
+    with pytest.raises(ValidationError, match="dataset_names"):
+        RunScenarioRequest(
+            scenario_name="example",
+            target_name="target",
+            dataset_names=dataset_names,
+        )
