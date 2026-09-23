@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NotRequired, TypedDict
 
 from pydantic import ValidationError
 from sqlalchemy import event
@@ -70,6 +70,18 @@ class RawAnalyticsGroup:
     column: RawAnalyticsOption | None = None
 
 
+class RawAnalyticsProfile(TypedDict):
+    """One pre-counted, bounded metadata tuple for the optional SQLite fast path."""
+
+    source0: str | None
+    outcome: str
+    weight: int
+    oversized: bool
+    source1: NotRequired[str | None]
+    display0: NotRequired[str | None]
+    display1: NotRequired[str | None]
+
+
 @dataclass
 class RawAnalyticsReport:
     """
@@ -90,7 +102,7 @@ class RawAnalyticsReport:
     axes_truncated: bool
     results: AttackAnalyticsResults
     warnings: list[str]
-    profiles: list[dict[str, Any]] | None = None
+    profiles: list[RawAnalyticsProfile] | None = None
 
 
 @dataclass
@@ -139,6 +151,7 @@ class AttackAnalyticsReader:
             RawAnalyticsReport: Raw counts and bounded projections, or profiles that
                 still need SDK aggregation. Query failures propagate; they are not empty reports.
         """
+        query = AttackAnalyticsQuery.model_validate(query.model_dump())
         with self._session(control=control, consistent=True) as (session, dialect, warnings):
             compiler = AttackAnalyticsQueryCompiler(dialect=dialect, filters=query.filters)
             counts = dict(session.execute(compiler.totals()).tuples().all())
@@ -197,6 +210,7 @@ class AttackAnalyticsReader:
         Returns:
             AttackAnalyticsResults: A page with its own freshness timestamp.
         """
+        query = AttackAnalyticsResultsQuery.model_validate(query.model_dump())
         with self._session(control=control) as (session, dialect, _):
             result = self._results(session=session, dialect=dialect, query=query)
             control.check()
@@ -217,6 +231,7 @@ class AttackAnalyticsReader:
         Returns:
             RawAnalyticsFacets: The bounded facet page.
         """
+        query = AttackAnalyticsFacetQuery.model_validate(query.model_dump())
         filters = query.filters.model_copy(
             update={
                 "dimensions": [
@@ -236,7 +251,7 @@ class AttackAnalyticsReader:
 
     def _read_compact_profiles(
         self, *, session: Session, compiler: AttackAnalyticsQueryCompiler, query: AttackAnalyticsQuery
-    ) -> list[dict[str, Any]] | None:
+    ) -> list[RawAnalyticsProfile] | None:
         """
         Accept only a complete, size-bounded profile projection for SDK aggregation.
 
@@ -247,7 +262,7 @@ class AttackAnalyticsReader:
         must run the general SQL query, not use a partially accepted list.
 
         Returns:
-            list[dict[str, Any]] | None: All profiles, including [] for an empty cohort,
+            list[RawAnalyticsProfile] | None: All profiles, including [] for an empty cohort,
                 or None for an ineligible backend/dimension or any exceeded limit.
         """
         statement = compiler.compact_profiles(
@@ -263,17 +278,61 @@ class AttackAnalyticsReader:
         text_length = sum(len(value) for record in records for value in record.values() if isinstance(value, str))
         if text_length > self.MAX_COMPACT_TOTAL_LENGTH:
             return None
-        return [dict(record) for record in records]
+        return [self._raw_profile(record) for record in records]
+
+    @classmethod
+    def _raw_profile(cls, record: RowMapping) -> RawAnalyticsProfile:
+        """
+        Validate the bounded SQL projection without decoding its metadata arrays.
+
+        Returns:
+            RawAnalyticsProfile: Typed raw sources and their saved-outcome weight.
+
+        Raises:
+            AnalyticsDataException: If the database returns a malformed profile.
+        """
+        outcome, weight, oversized = record["outcome"], record["weight"], record["oversized"]
+        if not isinstance(outcome, str) or type(weight) is not int or weight < 0 or type(oversized) is not bool:
+            raise AnalyticsDataException("Stored categorical profiles contain invalid counts.")
+        profile: RawAnalyticsProfile = {
+            "source0": cls._raw_profile_text(record["source0"]),
+            "outcome": outcome,
+            "weight": weight,
+            "oversized": oversized,
+        }
+        if "source1" in record:
+            profile["source1"] = cls._raw_profile_text(record["source1"])
+        if "display0" in record:
+            profile["display0"] = cls._raw_profile_text(record["display0"])
+        if "display1" in record:
+            profile["display1"] = cls._raw_profile_text(record["display1"])
+        return profile
+
+    @staticmethod
+    def _raw_profile_text(value: Any) -> str | None:
+        """
+        Reject non-text profile sources before passing them to the SDK.
+
+        Returns:
+            str | None: A raw metadata string or absent value.
+
+        Raises:
+            AnalyticsDataException: If a stored source is not text or NULL.
+        """
+        if value is not None and not isinstance(value, str):
+            raise AnalyticsDataException("A compact metadata profile is not a string.")
+        return value
 
     @contextmanager
     def _session(self, *, control: QueryControl, consistent: bool = False) -> Iterator[tuple[Session, str, list[str]]]:
         """
         Own a session and its cancellation hooks until all database work has finished.
 
-        SQLite's progress handler interrupts long statements cooperatively. A
-        before-execute listener also checks the budget between statements; ODBC
-        receives the remaining whole-second query timeout there. Cancellation
-        never returns a pooled connection while its statement is still running.
+        SQLite's progress handler interrupts long statements cooperatively; its
+        busy timeout is bounded per statement so lock waits share the deadline.
+        ODBC receives the remaining whole-second timeout before each cursor is
+        created. Cancellation never returns a pooled connection while its
+        statement is still running.
 
         Consistent reports explicitly start SQLite's read transaction (including
         with legacy sqlite3 transaction control) or request SQL Server SNAPSHOT.
@@ -308,21 +367,38 @@ class AttackAnalyticsReader:
                 raise AnalyticsDataException("The analytics database connection is closed.")
             warnings: list[str] = []
             old_timeout: int | None = None
+            old_busy_timeout: int | None = None
 
-            def before_execute(
-                conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+            def before_statement(
+                conn: Any, clauseelement: Any, multiparams: Any, params: Any, execution_options: Any
             ) -> None:
-                """Recheck the shared budget at each statement boundary, not just session acquisition."""
+                """Apply ODBC's per-cursor timeout before SQLAlchemy creates the cursor."""
                 control.check()
                 if dialect == "mssql":
                     driver.timeout = max(1, math.ceil(control.remaining))
 
-            event.listen(connection, "before_cursor_execute", before_execute)
+            def before_cursor_execute(
+                conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+            ) -> None:
+                """Recheck the budget and bound SQLite waits at the statement boundary."""
+                control.check()
+                if old_busy_timeout is not None:
+                    # Direct DBAPI execution avoids recursively firing this listener.
+                    driver.execute(
+                        f"PRAGMA busy_timeout = {min(old_busy_timeout, max(1, math.ceil(control.remaining * 1000)))}"
+                    )
+
+            event.listen(connection, "before_execute", before_statement)
+            event.listen(connection, "before_cursor_execute", before_cursor_execute)
             try:
                 control.check()
                 if dialect == "sqlite":
                     if not isinstance(driver, sqlite3.Connection):
                         raise NotImplementedError("SQLite analytics requires a sqlite3 connection")
+                    old_busy_timeout = driver.execute("PRAGMA busy_timeout").fetchone()[0]
+                    driver.execute(
+                        f"PRAGMA busy_timeout = {min(old_busy_timeout, max(1, math.ceil(control.remaining * 1000)))}"
+                    )
                     driver.set_progress_handler(lambda: int(control.expired), self.SQLITE_PROGRESS_STEPS)
                     if consistent:
                         mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar_one()
@@ -345,10 +421,13 @@ class AttackAnalyticsReader:
                     raise AnalyticsTimeoutException from error
                 raise
             finally:
-                event.remove(connection, "before_cursor_execute", before_execute)
+                event.remove(connection, "before_execute", before_statement)
+                event.remove(connection, "before_cursor_execute", before_cursor_execute)
                 if not connection.invalidated and not connection.closed:
                     if isinstance(driver, sqlite3.Connection):
                         driver.set_progress_handler(None, 0)
+                        if old_busy_timeout is not None:
+                            driver.execute(f"PRAGMA busy_timeout = {old_busy_timeout}")
                     if old_timeout is not None:
                         driver.timeout = old_timeout
 
@@ -503,7 +582,10 @@ class AttackAnalyticsReader:
             raise AnalyticsDataException("Stored converter metadata is not a list.")
         names: set[str] = set()
         for value in values:
-            name = value.get("class_name") if isinstance(value, dict) else value
+            if isinstance(value, dict):
+                name = value["class_name"] if "class_name" in value else value.get("__type__")
+            else:
+                name = value
             if name is None:
                 continue
             if not isinstance(name, str):

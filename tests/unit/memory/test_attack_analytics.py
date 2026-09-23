@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -15,14 +16,16 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import UnicodeText, column, create_engine, event, literal, literal_column, select, text, update
 from sqlalchemy.dialects import mssql, sqlite
 from sqlalchemy.exc import CompileError, OperationalError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql import Select, visitors
 from sqlalchemy.sql.functions import Function
 
 from pyrit.exceptions.analytics_exception import AnalyticsDataException, AnalyticsTimeoutException
+from pyrit.memory import SQLiteMemory
 from pyrit.memory.analytics_sql import JsonArrayEmpty, JsonIsArray, JsonScalar, ResolvedAttackIdentifierHash
 from pyrit.memory.attack_analytics import AttackAnalyticsReader
 from pyrit.memory.attack_analytics_query import AttackAnalyticsQueryCompiler
@@ -36,6 +39,7 @@ from pyrit.models import (
     AttackAnalyticsFilters,
     AttackAnalyticsQuery,
     AttackAnalyticsResultsQuery,
+    AttackAnalyticsValue,
     AttackIdentifier,
     AttackOutcome,
     AttackResult,
@@ -48,8 +52,6 @@ if TYPE_CHECKING:
 
     from sqlalchemy.engine import Dialect
     from sqlalchemy.sql import ClauseElement
-
-    from pyrit.memory import SQLiteMemory
 
 
 def make_result(
@@ -325,6 +327,109 @@ def test_changed_filters_reject_stale_result_cursor(sqlite_instance: SQLiteMemor
         )
 
 
+def test_report_snapshots_mutable_filters_and_axes(sqlite_instance: SQLiteMemory) -> None:
+    sqlite_instance.add_attack_results_to_memory(
+        attack_results=[
+            make_result(index=1, operation="selected"),
+            make_result(index=2, outcome=AttackOutcome.FAILURE, operation="excluded"),
+        ]
+    )
+    query = AttackAnalyticsQuery(
+        filters=AttackAnalyticsFilters(
+            outcomes=[AttackOutcome.SUCCESS],
+            dimensions=[
+                AttackAnalyticsFilter(
+                    dimension=AttackAnalyticsDimension(name="operation"),
+                    values=[AttackAnalyticsValue(value="selected")],
+                )
+            ],
+        )
+    )
+    mutated = False
+
+    def change_request_after_totals(
+        conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, executemany: bool
+    ) -> None:
+        nonlocal mutated
+        if not mutated and "count(" in statement.lower():
+            mutated = True
+            query.filters.outcomes[:] = [AttackOutcome.FAILURE]
+            query.filters.dimensions[0].values[0].value = "excluded"
+            query.group_by = AttackAnalyticsDimension(name="model")
+            query.result_limit = 100
+
+    event.listen(sqlite_instance.engine, "after_cursor_execute", change_request_after_totals)
+    try:
+        report = AttackAnalyticsReader(memory=sqlite_instance).report(query=query, control=control())
+    finally:
+        event.remove(sqlite_instance.engine, "after_cursor_execute", change_request_after_totals)
+    assert mutated
+    assert report.counts == {"success": 1}
+    assert [(group.option.key.value, group.counts) for group in report.groups] == [("selected", {"success": 1})]
+    assert [row.attack_result_id for row in report.results.items] == [str(uuid.UUID(int=1))]
+
+
+def test_results_request_snapshots_filters_and_page_limit_before_session_acquisition(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    sqlite_instance.add_attack_results_to_memory(
+        attack_results=[
+            make_result(index=1),
+            make_result(index=2),
+            make_result(index=3, outcome=AttackOutcome.FAILURE),
+        ]
+    )
+    query = AttackAnalyticsResultsQuery(filters=AttackAnalyticsFilters(outcomes=[AttackOutcome.SUCCESS]), limit=1)
+    get_session = sqlite_instance.get_session
+
+    def change_request_on_acquire(*, timeout: float | None) -> Session:
+        query.filters.outcomes[:] = [AttackOutcome.FAILURE]
+        query.limit = 2
+        return get_session(timeout=timeout)
+
+    with patch.object(sqlite_instance, "get_session", side_effect=change_request_on_acquire):
+        page = AttackAnalyticsReader(memory=sqlite_instance).results(query=query, control=control())
+    assert [row.attack_result_id for row in page.items] == [str(uuid.UUID(int=2))]
+    assert page.has_more
+
+
+def test_facet_request_snapshots_filters_dimension_and_limit_before_session_acquisition(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    sqlite_instance.add_attack_results_to_memory(
+        attack_results=[
+            make_result(index=1, operation="a"),
+            make_result(index=2, operation="b"),
+            make_result(index=3, outcome=AttackOutcome.FAILURE, operation="z"),
+        ]
+    )
+    query = AttackAnalyticsFacetQuery(
+        filters=AttackAnalyticsFilters(outcomes=[AttackOutcome.SUCCESS]),
+        dimension=AttackAnalyticsDimension(name="operation"),
+        limit=1,
+    )
+    get_session = sqlite_instance.get_session
+
+    def change_request_on_acquire(*, timeout: float | None) -> Session:
+        query.filters.outcomes[:] = [AttackOutcome.FAILURE]
+        query.dimension = AttackAnalyticsDimension(name="model")
+        query.limit = 2
+        return get_session(timeout=timeout)
+
+    with patch.object(sqlite_instance, "get_session", side_effect=change_request_on_acquire):
+        facet = AttackAnalyticsReader(memory=sqlite_instance).facets(query=query, control=control())
+    assert [item.key.value for item in facet.items] == ["a"]
+    assert facet.has_more
+
+
+def test_reader_revalidates_mutated_requests_before_database_access(sqlite_instance: SQLiteMemory) -> None:
+    query = AttackAnalyticsQuery()
+    query.group_limit = 0
+    with patch.object(sqlite_instance, "get_session", side_effect=AssertionError("Must not acquire")):
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            AttackAnalyticsReader(memory=sqlite_instance).report(query=query, control=control())
+
+
 def test_expired_control_prevents_database_access(sqlite_instance: SQLiteMemory) -> None:
     with patch.object(sqlite_instance, "get_session", side_effect=AssertionError("Must not acquire")):
         with pytest.raises(AnalyticsTimeoutException):
@@ -333,19 +438,118 @@ def test_expired_control_prevents_database_access(sqlite_instance: SQLiteMemory)
             )
 
 
-def test_sqlite_execution_deadline_cleans_up_the_connection(sqlite_instance: SQLiteMemory) -> None:
+@pytest.mark.parametrize("trigger", ["deadline", "cancel"])
+def test_sqlite_execution_deadline_or_cancellation_cleans_up_the_connection(
+    *, sqlite_instance: SQLiteMemory, trigger: str
+) -> None:
     reader = AttackAnalyticsReader(memory=sqlite_instance)
+    query_control = QueryControl(deadline=time.monotonic() + 10)
+
+    def stop_during_query() -> int:
+        if trigger == "deadline":
+            query_control.deadline = 0
+        else:
+            query_control.cancel()
+        return 1
+
+    with sqlite_instance.engine.connect() as connection:
+        driver = connection.connection.driver_connection
+        assert isinstance(driver, sqlite3.Connection)
+        driver.create_function("stop_during_query", 0, stop_during_query)
     heavy = text(
         "WITH RECURSIVE work(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM work WHERE x < 10000) "
-        "SELECT 'success', COUNT(*) FROM work a CROSS JOIN work b"
+        "SELECT 'success', SUM(stop_during_query()) FROM work"
     )
-    with patch.object(AttackAnalyticsQueryCompiler, "totals", return_value=heavy):
-        with pytest.raises(AnalyticsTimeoutException):
-            reader.report(
-                query=AttackAnalyticsQuery(),
-                control=QueryControl(deadline=time.monotonic() + 1),
-            )
+    try:
+        with (
+            patch.object(AttackAnalyticsQueryCompiler, "totals", return_value=heavy),
+            patch.object(reader, "SQLITE_PROGRESS_STEPS", 1),
+        ):
+            with pytest.raises(AnalyticsTimeoutException):
+                reader.report(query=AttackAnalyticsQuery(), control=query_control)
+    finally:
+        driver.create_function("stop_during_query", 0, None)
+    assert query_control.expired
+    assert query_control.cancel_event.is_set() == (trigger == "cancel")
     assert reader.report(query=AttackAnalyticsQuery(), control=control()).counts == {}
+
+
+@pytest.mark.parametrize("method", ["report", "results", "facets"])
+def test_sqlite_deadline_bounds_file_database_lock_wait_and_restores_timeout(
+    *, sqlite_instance: SQLiteMemory, tmp_path: Path, method: str
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'analytics-lock.sqlite'}", connect_args={"timeout": 2})
+    try:
+        Base.metadata.create_all(engine)
+        with (
+            patch.object(sqlite_instance, "engine", engine),
+            patch.object(sqlite_instance, "SessionFactory", sessionmaker(bind=engine)),
+            patch.object(sqlite_instance, "_connection_lock", None),
+            engine.connect() as writer,
+        ):
+            writer.exec_driver_sql("BEGIN EXCLUSIVE")
+            try:
+                started = time.monotonic()
+                reader = AttackAnalyticsReader(memory=sqlite_instance)
+                budget = QueryControl(deadline=started + 0.08)
+                with pytest.raises(AnalyticsTimeoutException):
+                    if method == "report":
+                        reader.report(query=AttackAnalyticsQuery(), control=budget)
+                    elif method == "results":
+                        reader.results(query=AttackAnalyticsResultsQuery(), control=budget)
+                    else:
+                        reader.facets(
+                            query=AttackAnalyticsFacetQuery(dimension=AttackAnalyticsDimension(name="operation")),
+                            control=budget,
+                        )
+                assert time.monotonic() - started < 1
+                with engine.connect() as reader_connection:
+                    assert reader_connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 2000
+            finally:
+                writer.rollback()
+            assert (
+                AttackAnalyticsReader(memory=sqlite_instance)
+                .report(query=AttackAnalyticsQuery(), control=control())
+                .counts
+                == {}
+            )
+    finally:
+        engine.dispose()
+
+
+def test_odbc_timeout_is_applied_before_each_cursor_is_created() -> None:
+    class RecordingConnection(sqlite3.Connection):
+        timeout = 0
+        cursor_timeouts: list[int] = []
+
+        def cursor(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+            self.cursor_timeouts.append(self.timeout)
+            cursor = super().cursor(*args, **kwargs)
+            assert isinstance(cursor, sqlite3.Cursor)
+            return cursor
+
+    driver = sqlite3.connect(":memory:", factory=RecordingConnection)
+    engine = create_engine("sqlite://", creator=lambda: driver)
+    memory = SQLiteMemory.__new__(SQLiteMemory)
+    memory.engine = engine
+    memory.SessionFactory = sessionmaker(bind=engine)
+    memory._connection_lock = None
+    try:
+        with engine.connect():
+            pass
+        budget = QueryControl(deadline=time.monotonic() + 30)
+        with patch.object(engine.dialect, "name", "mssql"):
+            with AttackAnalyticsReader(memory=memory)._session(control=budget) as (session, dialect, _):
+                assert dialect == "mssql"
+                assert session.execute(text("SELECT 42")).scalar_one() == 42
+                budget.deadline = time.monotonic() + 1.5
+                assert session.execute(text("SELECT 43")).scalar_one() == 43
+        assert driver.cursor_timeouts[-2] >= 10
+        assert 1 <= driver.cursor_timeouts[-1] <= 2
+        assert driver.timeout == 0
+    finally:
+        engine.dispose()
+        driver.close()
 
 
 def test_invalidated_sqlite_connection_preserves_the_original_error(sqlite_instance: SQLiteMemory) -> None:
@@ -506,6 +710,32 @@ def test_empty_profiles_are_success_not_a_fallback_signal(sqlite_instance: SQLit
     assert report.groups == []
 
 
+def test_compact_profiles_keep_typed_raw_sources_and_reject_invalid_values(sqlite_instance: SQLiteMemory) -> None:
+    sqlite_instance.add_attack_results_to_memory(attack_results=[make_result(categories=["privacy"])])
+    reader = AttackAnalyticsReader(memory=sqlite_instance)
+    report = reader.report(
+        query=AttackAnalyticsQuery(group_by=AttackAnalyticsDimension(name="targeted_harm_category")),
+        control=control(),
+        use_compact_profiles=True,
+    )
+    assert report.profiles == [{"source0": '["privacy"]', "outcome": "success", "weight": 1, "oversized": False}]
+    with closing(sqlite_instance.get_session()) as session:
+        invalid = (
+            session.execute(
+                select(
+                    literal(123).label("source0"),
+                    literal("success").label("outcome"),
+                    literal(1).label("weight"),
+                    literal(False).label("oversized"),
+                )
+            )
+            .mappings()
+            .one()
+        )
+    with pytest.raises(AnalyticsDataException, match="not a string"):
+        reader._raw_profile(invalid)
+
+
 @pytest.mark.parametrize(
     ("raw", "is_array", "is_empty"),
     [
@@ -532,6 +762,17 @@ def test_json_array_checks_distinguish_shape_from_missing_members(
 def test_result_converter_projection_rejects_invalid_metadata(raw: Any) -> None:
     with pytest.raises(AnalyticsDataException):
         AttackAnalyticsReader._converter_names(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('["Alpha", {"__type__": "LegacyConverter"}]', ["Alpha", "LegacyConverter"]),
+        ('[{"__type__": "Legacy", "class_name": "Canonical"}]', ["Canonical"]),
+    ],
+)
+def test_result_converter_projection_accepts_supported_legacy_names(raw: str, expected: list[str]) -> None:
+    assert AttackAnalyticsReader._converter_names(raw) == expected
 
 
 def test_query_cancellation_is_request_local() -> None:

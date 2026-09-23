@@ -40,6 +40,18 @@ class JsonScalar(FunctionElement[str]):
     inherit_cache = True
 
 
+class JsonClassNamePresent(FunctionElement[bool]):
+    """
+    Whether an identifier object explicitly has ``class_name``, even when null.
+
+    The second argument is the path to the containing object. A missing key may
+    use the legacy ``__type__`` fallback; a present null key may not.
+    """
+
+    type = Boolean()
+    inherit_cache = True
+
+
 class ResolvedAttackIdentifierHash(FunctionElement[str]):
     """
     The indexed identifier reference, falling back to the hash saved inside legacy JSON.
@@ -170,6 +182,18 @@ def _sqlite_json_property(element: FunctionElement[str], compiler: Any, **kwargs
     return f"json_extract({', '.join(_arguments(element, compiler, **kwargs))})"
 
 
+@compiles(JsonClassNamePresent, "sqlite")
+def _sqlite_class_name_present(element: JsonClassNamePresent, compiler: Any, **kwargs: Any) -> str:
+    """
+    Distinguish an absent key from a JSON null without expanding the object.
+
+    Returns:
+        str: A scalar 0/1 expression, including for a missing parent object.
+    """
+    document, object_path = _arguments(element, compiler, **kwargs)
+    return f"CASE WHEN json_type({document}, {object_path} || '.class_name') IS NOT NULL THEN 1 ELSE 0 END"
+
+
 @compiles(JsonScalar, "mssql")
 def _mssql_json_scalar(element: JsonScalar, compiler: Any, **kwargs: Any) -> str:
     """
@@ -199,6 +223,28 @@ def _mssql_json_scalar(element: JsonScalar, compiler: Any, **kwargs: Any) -> str
         "(SELECT [value] FROM "
         f"OPENJSON(CONCAT(CAST(N'[' AS nvarchar(max)), JSON_QUERY({document_sql}), N']')) "
         f"WITH ([value] nvarchar(max) {path_sql}))"
+    )
+
+
+@compiles(JsonClassNamePresent, "mssql")
+def _mssql_class_name_present(element: JsonClassNamePresent, compiler: Any, **kwargs: Any) -> str:
+    """
+    Inspect OPENJSON's keys so an explicitly null canonical name blocks legacy fallback.
+
+    Returns:
+        str: A scalar 0/1 expression; path literalization is safe at execution time.
+
+    Raises:
+        CompileError: If the containing-object path is not a bound string.
+    """
+    document, object_path = element.clauses
+    if not isinstance(object_path, BindParameter) or not isinstance(object_path.value, str):
+        raise CompileError("SQL Server identifier object paths must be a bound string.")
+    document_sql = compiler.process(document, **kwargs)
+    path_sql = compiler.process(object_path, **{**kwargs, "literal_execute": True})
+    return (
+        f"CASE WHEN EXISTS (SELECT 1 FROM OPENJSON({document_sql}, {path_sql}) "
+        "WHERE [key] = N'class_name') THEN 1 ELSE 0 END"
     )
 
 

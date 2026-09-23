@@ -45,6 +45,7 @@ from pyrit.memory.analytics_sql import (
     JsonArrayEmpty,
     JsonArrayItems,
     JsonArrayJoin,
+    JsonClassNamePresent,
     JsonContainer,
     JsonIsArray,
     JsonObjectAggregate,
@@ -168,7 +169,9 @@ class AttackAnalyticsQueryCompiler:
         self.technique = AttackTechniqueIdentifierEntry.__table__.alias("analytics_technique")
         self.attack = AttackIdentifierEntry.__table__.alias("analytics_attack")
         self.target = TargetIdentifierEntry.__table__.alias("analytics_target")
-        self._converter_arrays: dict[AttackAnalyticsConverterDirection, ColumnElement[Any]] = {}
+        self._converter_arrays: dict[
+            AttackAnalyticsConverterDirection, tuple[ColumnElement[Any], ColumnElement[Any]]
+        ] = {}
 
     def totals(self) -> Select[Any]:
         """
@@ -216,8 +219,28 @@ class AttackAnalyticsQueryCompiler:
             return None
         compiler = self._group_compiler(dimensions)
         profiles = compiler._profiles([compiler._source(dimension) for dimension in dimensions])
+        canonical_sources = {
+            f"source{index}": self._profile_converter_array(
+                profile=profiles, raw=profiles.c[f"source{index}"], name=f"profile_converter{index}"
+            )
+            for index, dimension in enumerate(dimensions)
+            if dimension.name is AttackAnalyticsDimensionName.CONVERTER_TYPE
+        }
+        canonical = (
+            select(*[canonical_sources.get(key, value).label(key) for key, value in profiles.c.items()]).cte(
+                "canonical_analytics_profiles"
+            )
+            if canonical_sources
+            else profiles
+        )
         oversized = or_(
-            *[func.length(profiles.c[f"source{index}"]) > max_value_length for index in range(len(dimensions))]
+            *[
+                and_(
+                    canonical.c[f"source{index}"].isnot(None),
+                    func.length(canonical.c[f"source{index}"]) > max_value_length,
+                )
+                for index in range(len(dimensions))
+            ]
         )
         return select(
             *[
@@ -226,10 +249,51 @@ class AttackAnalyticsQueryCompiler:
                     if key.startswith(("source", "display"))
                     else value
                 )
-                for key, value in profiles.c.items()
+                for key, value in canonical.c.items()
             ],
             oversized.label("oversized"),
         ).limit(limit)
+
+    def _profile_converter_array(self, *, profile: CTE, raw: ColumnElement[Any], name: str) -> ColumnElement[Any]:
+        """
+        Emit converter names, not legacy objects, from a pre-counted SQLite profile.
+
+        Leave NULL, JSON null, [], and malformed member types distinct. Only
+        profiled converter arrays need this transformation; result pages and SQL
+        memberships already understand both identifier-object layouts.
+
+        Returns:
+            ColumnElement[Any]: A canonical JSON string array when the source is usable,
+                or its original value so unsupported metadata remains observable.
+        """
+        items = JsonArrayItems(raw).table_valued(column("key"), column("value"), column("type"))
+        items = items.alias(f"{name}_items")
+        document = case((items.c.type == "object", items.c.value), else_="{}")
+        member = case(
+            (items.c.type == "object", self._identifier_property(document=document, path="class_name")),
+            else_=items.c.value,
+        )
+        name_type = case(
+            (
+                JsonClassNamePresent(document, "$") == true(),
+                func.json_type(document, "$.class_name"),
+            ),
+            else_=func.json_type(document, "$.__type__"),
+        )
+        unsupported = (
+            select(1)
+            .select_from(items)
+            .where(
+                or_(
+                    ~items.c.type.in_(("text", "object", "null")),
+                    and_(items.c.type == "object", name_type.isnot(None), ~name_type.in_(("text", "null"))),
+                )
+            )
+            .correlate(profile)
+            .exists()
+        )
+        names = select(JsonArrayAggregate(member)).select_from(items).correlate(profile).scalar_subquery()
+        return case((and_(JsonIsArray(raw) == true(), ~unsupported), names), else_=raw)
 
     def groups(self, query: AttackAnalyticsQuery) -> Select[Any]:
         """
@@ -483,8 +547,8 @@ class AttackAnalyticsQueryCompiler:
         attack = self._source(AttackAnalyticsDimension(name=AttackAnalyticsDimensionName.ATTACK_TYPE))
         target = self._source(AttackAnalyticsDimension(name=AttackAnalyticsDimensionName.OBJECTIVE_TARGET))
         model = self._source(AttackAnalyticsDimension(name=AttackAnalyticsDimensionName.MODEL))
-        request = self._converter_source(AttackAnalyticsConverterDirection.REQUEST)
-        response = self._converter_source(AttackAnalyticsConverterDirection.RESPONSE)
+        request = self._converter_source(direction=AttackAnalyticsConverterDirection.REQUEST)
+        response = self._converter_source(direction=AttackAnalyticsConverterDirection.RESPONSE)
         conditions = self._conditions()
         if after is not None:
             timestamp = after.timestamp.astimezone(UTC).replace(tzinfo=None)
@@ -529,10 +593,10 @@ class AttackAnalyticsQueryCompiler:
         """
         key = dimension.model_dump_json()
         if key not in self._sources:
-            self._sources[key] = self._create_source(dimension)
+            self._sources[key] = self._create_source(dimension=dimension)
         return self._sources[key]
 
-    def _create_source(self, dimension: AttackAnalyticsDimension) -> _Source:
+    def _create_source(self, *, dimension: AttackAnalyticsDimension, embedded: bool = True) -> _Source:
         """
         Map a validated dimension to its stored key, display text, and membership rules.
 
@@ -540,6 +604,10 @@ class AttackAnalyticsQueryCompiler:
         spelling. Attack types, harm categories, and converter types fold case.
         Scenario keys use the persisted UUID, not a possibly non-unique scenario
         name; target keys likewise use the hash rather than the model label.
+
+        Args:
+            dimension (AttackAnalyticsDimension): Metadata axis to resolve.
+            embedded (bool): Include fallbacks from the saved result's identifier JSON.
 
         Returns:
             _Source: A scalar or JSON-array projection. Looking it up may extend
@@ -567,25 +635,25 @@ class AttackAnalyticsQueryCompiler:
             return _Source(value=value, label=func.coalesce(scenario.c.scenario_name, value))
         self._ensure_identifiers()
         if name is AttackAnalyticsDimensionName.CONVERTER_TYPE:
-            return self._converter_source(dimension.converter_direction)
+            return self._converter_source(direction=dimension.converter_direction, embedded=embedded)
         if name is AttackAnalyticsDimensionName.ATTACK_TYPE:
-            value = func.coalesce(self.attack.c.class_name, self._attack_property("class_name"))
+            value = func.coalesce(self.attack.c.class_name, self._attack_property(path="class_name", embedded=embedded))
             return _Source(value=value, label=value, insensitive=True)
         if name is AttackAnalyticsDimensionName.OBJECTIVE_TARGET:
-            value = func.coalesce(self.target.c.hash, self._target_property("hash"))
+            value = func.coalesce(self.target.c.hash, self._target_property(path="hash", embedded=embedded))
             label = func.coalesce(
                 self.target.c.model_name,
-                self._target_property("params.model_name"),
+                self._target_property(path="params.model_name", embedded=embedded),
                 self.target.c.class_name,
-                self._target_property("class_name"),
+                self._target_property(path="class_name", embedded=embedded),
                 value,
             )
             return _Source(value=value, label=label)
         value = func.coalesce(
             self.target.c.model_name,
             self.target.c.underlying_model_name,
-            self._target_property("params.model_name"),
-            self._target_property("params.underlying_model_name"),
+            self._target_property(path="params.model_name", embedded=embedded),
+            self._target_property(path="params.underlying_model_name", embedded=embedded),
         )
         return _Source(value=value, label=value)
 
@@ -607,25 +675,53 @@ class AttackAnalyticsQueryCompiler:
         )
         self._identifiers_ready = True
 
-    def _attack_property(self, path: str) -> ColumnElement[Any]:
+    @staticmethod
+    def _identifier_property(*, document: ColumnElement[Any], path: str) -> ColumnElement[Any]:
+        """
+        Read a property, accepting ``__type__`` only when ``class_name`` is absent.
+
+        Returns:
+            ColumnElement[Any]: The canonical value, including JSON null, or the legacy type.
+        """
+        canonical = JsonScalar(document, f"$.{path}")
+        if path.rsplit(".", 1)[-1] != "class_name":
+            return canonical
+        parent = path.rpartition(".")[0]
+        object_path = f"$.{parent}" if parent else "$"
+        return case(
+            (JsonClassNamePresent(document, object_path) == true(), canonical),
+            else_=JsonScalar(document, f"$.{path[: -len('class_name')]}__type__"),
+        )
+
+    def _attack_property(self, *, path: str, embedded: bool = True) -> ColumnElement[Any]:
         """
         Resolve an attack scalar across normalized and historical identifier layouts.
 
         Args:
             path (str): Internal property path relative to the attack identifier.
+            embedded (bool): Include both historical saved-result layouts.
 
         Returns:
             ColumnElement[Any]: The first non-NULL value from normalized identifier JSON,
                 the technique-wrapped legacy layout, or the older direct attack child.
                 A real blank string is not replaced by a fallback.
         """
-        return func.coalesce(
-            JsonScalar(self.attack.c.identifier_json, f"$.{path}"),
-            JsonScalar(self.root.c.atomic_attack_identifier, f"$.children.attack_technique.children.attack.{path}"),
-            JsonScalar(self.root.c.atomic_attack_identifier, f"$.children.attack.{path}"),
-        )
+        properties = [self._identifier_property(document=self.attack.c.identifier_json, path=path)]
+        if embedded:
+            properties.extend(
+                [
+                    self._identifier_property(
+                        document=self.root.c.atomic_attack_identifier,
+                        path=f"children.attack_technique.children.attack.{path}",
+                    ),
+                    self._identifier_property(
+                        document=self.root.c.atomic_attack_identifier, path=f"children.attack.{path}"
+                    ),
+                ]
+            )
+        return func.coalesce(*properties) if embedded else properties[0]
 
-    def _target_property(self, path: str) -> ColumnElement[Any]:
+    def _target_property(self, *, path: str, embedded: bool = True) -> ColumnElement[Any]:
         """
         Read promoted target properties and their older ``params`` representation.
 
@@ -634,26 +730,34 @@ class AttackAnalyticsQueryCompiler:
                 the embedded objective-target child in either historical attack layout.
         """
         canonical_path = path.removeprefix("params.")
-        return func.coalesce(
-            JsonScalar(self.target.c.identifier_json, f"$.{canonical_path}"),
-            JsonScalar(self.target.c.identifier_json, f"$.{path}"),
-            self._attack_property(f"children.objective_target.{canonical_path}"),
-            self._attack_property(f"children.objective_target.{path}"),
-        )
+        properties = [
+            self._identifier_property(document=self.target.c.identifier_json, path=canonical_path),
+            self._identifier_property(document=self.target.c.identifier_json, path=path),
+        ]
+        if embedded:
+            properties.extend(
+                [
+                    self._attack_property(path=f"children.objective_target.{canonical_path}"),
+                    self._attack_property(path=f"children.objective_target.{path}"),
+                ]
+            )
+        return func.coalesce(*properties)
 
-    def _converter_source(self, direction: AttackAnalyticsConverterDirection) -> _Source:
+    def _converter_source(self, *, direction: AttackAnalyticsConverterDirection, embedded: bool = True) -> _Source:
         """
         Collapse converter edges to one JSON array per attack before joining results.
 
         Joining edges directly would multiply saved-result counts. Deduplicate
         names here, then fold case and deduplicate memberships after expansion.
-        A missing converter projection remains a NULL member, not an omitted edge.
-        When there are no edges, fall back to identifier JSON: a recorded [] means
-        no converters, whereas absent identifier metadata means missing.
+        A retained converter list takes precedence: migration backfills can have
+        fewer edges than recorded members when a child has no usable hash.
+        Edges remain a fallback for identifiers without a retained converter list.
+        A recorded [] means no converters, unlike absent identifier metadata.
 
         Args:
             direction (AttackAnalyticsConverterDirection): Request or response pipeline;
                 each has independent edges, aliases, and fallback properties.
+            embedded (bool): Include the saved result's converter list.
 
         Returns:
             _Source: An array of normalized names or legacy converter objects. These
@@ -668,17 +772,33 @@ class AttackAnalyticsQueryCompiler:
             )
             edge = table.alias(f"analytics_{direction.value}_edge")
             converter = ConverterIdentifierEntry.__table__.alias(f"analytics_{direction.value}_converter")
-            converter_name: ColumnElement[Any] = func.coalesce(
+            canonical_name: ColumnElement[Any] = func.coalesce(
                 converter.c.class_name, JsonScalar(converter.c.identifier_json, "$.class_name")
+            )
+            if self.dialect == "mssql":
+                canonical_name = self._collate(canonical_name)
+            identified = (
+                select(
+                    edge.c.attack_identifier_hash,
+                    canonical_name.label("class_name"),
+                    JsonScalar(converter.c.identifier_json, "$.__type__").label("legacy_class_name"),
+                    JsonClassNamePresent(converter.c.identifier_json, "$").label("canonical_present"),
+                )
+                .select_from(edge.outerjoin(converter, converter.c.hash == edge.c.converter_identifier_hash))
+                .cte(f"{self.root.name}_{direction.value}_converter_identified")
+            )
+            converter_name = case(
+                (identified.c.class_name.isnot(None), identified.c.class_name),
+                (identified.c.canonical_present == true(), cast(null(), UnicodeText())),
+                else_=identified.c.legacy_class_name,
             )
             if self.dialect == "mssql":
                 converter_name = self._collate(converter_name)
             names = (
                 select(
-                    edge.c.attack_identifier_hash,
+                    identified.c.attack_identifier_hash,
                     converter_name.label("class_name"),
                 )
-                .select_from(edge.outerjoin(converter, converter.c.hash == edge.c.converter_identifier_hash))
                 .distinct()
                 .cte(f"{self.root.name}_{direction.value}_converter_names")
             )
@@ -692,16 +812,20 @@ class AttackAnalyticsQueryCompiler:
             )
             self._from = self._from.outerjoin(arrays, arrays.c.attack_identifier_hash == self.attack.c.hash)
             path = f"children.{direction.value}_converters"
-            self._converter_arrays[direction] = func.coalesce(
-                arrays.c.names,
-                JsonContainer(self.attack.c.identifier_json, f"$.{path}"),
-                JsonContainer(
-                    self.root.c.atomic_attack_identifier,
-                    f"$.children.attack_technique.children.attack.{path}",
+            retained = JsonContainer(self.attack.c.identifier_json, f"$.{path}")
+            self._converter_arrays[direction] = (
+                func.coalesce(
+                    retained,
+                    JsonContainer(
+                        self.root.c.atomic_attack_identifier,
+                        f"$.children.attack_technique.children.attack.{path}",
+                    ),
+                    JsonContainer(self.root.c.atomic_attack_identifier, f"$.children.attack.{path}"),
+                    arrays.c.names,
                 ),
-                JsonContainer(self.root.c.atomic_attack_identifier, f"$.children.attack.{path}"),
+                func.coalesce(retained, arrays.c.names),
             )
-        value = self._converter_arrays[direction]
+        value = self._converter_arrays[direction][0 if embedded else 1]
         return _Source(value=value, label=value, array=True, converters=True, insensitive=True)
 
     def _conditions(self) -> list[ColumnElement[bool]]:
@@ -851,6 +975,45 @@ class AttackAnalyticsQueryCompiler:
             projected.c.get(value.key, value) if value.key is not None else value for value in values
         ]
 
+    def _same_metadata(self, *, original: ColumnElement[Any], compacted: ColumnElement[Any]) -> ColumnElement[bool]:
+        """
+        Compare nullable metadata without discarding rows on SQL UNKNOWN.
+
+        Returns:
+            ColumnElement[bool]: True only when the raw key or label survives compaction.
+        """
+        return or_(
+            and_(original.is_(None), compacted.is_(None)),
+            and_(
+                original.isnot(None),
+                compacted.isnot(None),
+                self._collate(original) == self._collate(compacted),
+            ),
+        )
+
+    def _complete_identifier_source(self, *, dimension: AttackAnalyticsDimension) -> ColumnElement[bool]:
+        """
+        Check that removing a result's embedded identifier preserves this axis.
+
+        Returns:
+            ColumnElement[bool]: A completeness predicate for the requested axis.
+        """
+        if dimension.name is AttackAnalyticsDimensionName.CONVERTER_TYPE:
+            self._ensure_identifiers()
+            path = f"children.{dimension.converter_direction.value}_converters"
+            retained = JsonContainer(self.attack.c.identifier_json, f"$.{path}")
+            wrapped = JsonContainer(
+                self.root.c.atomic_attack_identifier, f"$.children.attack_technique.children.attack.{path}"
+            )
+            direct = JsonContainer(self.root.c.atomic_attack_identifier, f"$.children.attack.{path}")
+            return or_(retained.isnot(None), and_(wrapped.is_(None), direct.is_(None)))
+        original = self._create_source(dimension=dimension)
+        compacted = self._create_source(dimension=dimension, embedded=False)
+        checks = [self._same_metadata(original=original.value, compacted=compacted.value)]
+        if original.value is not original.label:
+            checks.append(self._same_metadata(original=original.label, compacted=compacted.label))
+        return and_(*checks)
+
     def _group_compiler(self, dimensions: list[AttackAnalyticsDimension]) -> AttackAnalyticsQueryCompiler:
         """
         Compact filtered result rows before resolving repeated identifier metadata.
@@ -863,14 +1026,15 @@ class AttackAnalyticsQueryCompiler:
 
         Three disjoint UNION ALL branches preserve both speed and legacy metadata:
 
-        * Complete normalized identifier chains use indexed result columns and
-          project NULL instead of copying each result's identifier JSON.
+        * Identifier chains whose requested metadata is unchanged without
+          embedded JSON use indexed result columns and project NULL.
         * Missing hashes retain their embedded identifier JSON.
         * Non-NULL hashes whose normalized chain is incomplete also retain JSON.
 
-        "Complete" means the normalized attack JSON is available, plus target JSON
-        when a target/model axis needs it. Promoted scalar columns may still be
-        NULL: their canonical JSON fallbacks remain available after compaction.
+        "Complete" means every requested identifier key and display label survives
+        removal of embedded JSON. Converter lists must be retained on the attack
+        row or absent from the result; edges alone can omit hashless legacy members.
+        Promoted columns and retained JSON can each supply normalized metadata.
         Legacy facts also group by their retained document, so unrelated missing
         or unresolved identifiers cannot collapse into one metadata value.
         Text retains binary collation; native scenario UUIDs do not take collation.
@@ -904,7 +1068,6 @@ class AttackAnalyticsQueryCompiler:
                 AttackIdentifierEntry,
                 AttackIdentifierEntry.hash == AttackTechniqueIdentifierEntry.attack_identifier_hash,
             )
-            .where(AttackIdentifierEntry.identifier_json.isnot(None))
         )
         if any(
             dimension.name
@@ -917,7 +1080,7 @@ class AttackAnalyticsQueryCompiler:
             valid_atomic = valid_atomic.join(
                 TargetIdentifierEntry,
                 TargetIdentifierEntry.hash == AttackIdentifierEntry.objective_target_hash,
-            ).where(TargetIdentifierEntry.identifier_json.isnot(None))
+            )
         values: dict[str, ColumnElement[Any]] = {
             "atomic_attack_identifier_hash": base._atomic_hash,
             "outcome": base.root.c.outcome,
@@ -943,7 +1106,14 @@ class AttackAnalyticsQueryCompiler:
                 name: value if isinstance(value.type, CustomUUID) else self._collate(value)
                 for name, value in values.items()
             }
-        complete = base._atomic_hash.in_(valid_atomic)
+        complete = and_(
+            base._atomic_hash.in_(valid_atomic),
+            *[
+                base._complete_identifier_source(dimension=dimension)
+                for dimension in dimensions
+                if dimension.name in self._IDENTIFIER_DIMENSIONS
+            ],
+        )
         modern_origin, modern_values = self._grouping_projection(
             origin=base._from,
             values=[expression.label(name) for name, expression in values.items()],
@@ -1106,8 +1276,9 @@ class AttackAnalyticsQueryCompiler:
         """
         Classify an expanded member while preserving its parent array's absence state.
 
-        Converter arrays accept canonical names and legacy objects with class_name;
-        harm arrays accept strings. JSON null members represent missing metadata.
+        Converter arrays accept canonical names and legacy objects with
+        ``class_name`` or ``__type__``; harm arrays accept strings. JSON null
+        members represent missing metadata.
         Empty harm arrays are missing, while an empty converter array is explicitly
         no-converters. Wrong array shapes or outer member types receive an invalid
         kind that the reader rejects. Legacy object properties are expected to
@@ -1131,7 +1302,7 @@ class AttackAnalyticsQueryCompiler:
         if source.converters:
             document = case((items.c.type == object_type, items.c.value), else_="{}")
             label = case(
-                (items.c.type == object_type, JsonScalar(document, "$.class_name")),
+                (items.c.type == object_type, self._identifier_property(document=document, path="class_name")),
                 else_=label,
             )
         valid_types = [string_type, object_type] if source.converters else [string_type]

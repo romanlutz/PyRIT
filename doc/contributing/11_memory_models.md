@@ -119,20 +119,38 @@ empty converter pipelines, and real empty strings retain different typed keys.
 Request and response converter membership remains separate. Repeated members
 contribute once per result to a group or cell; different groups may overlap.
 Canonical identifier tables and supported legacy JSON layouts remain queryable.
+Where a converter pipeline is retained in identifier JSON, that recorded list
+takes precedence over normalized edges: the published identifier backfill can
+omit edges for individual hashless converters without removing those converters
+from the saved list. Edges supply names only when no retained list exists.
+Legacy `__type__` names are read when the canonical `class_name` key is absent.
+Indexed fact compaction omits a result's embedded identifier only when doing so
+preserves the requested metadata keys and display labels; incomplete normalized
+documents continue to use the embedded fallback.
 SQL Server uses full-width `OPENJSON` scalar projections before grouping, preserving
 the shared 4096-character metadata contract.
 
 A raw report and its first result page share a short consistent read transaction.
 Later pages and facets use fresh reads. Cursors are bound to the current filters
-and result-ID selection; updated bounds use a half-open UTC interval.
+and result-ID selection; updated bounds use a half-open UTC interval. Each request
+is copied and revalidated before acquiring a session, so changes to the caller's
+query during execution cannot mix different filters or axes in one report.
 `QueryControl` supplies a monotonic deadline and request-local cancellation signal.
-SQLite shared-connection acquisition accepts an optional timeout, while SQL Server
-connection acquisition remains governed by its pool. SQL Server reports require
-SNAPSHOT support; analytics never changes server isolation settings or enables
-SQLite WAL automatically. Query errors propagate rather than returning empty reports.
+SQLite shared-connection acquisition accepts an optional timeout. Its per-connection
+busy timeout is also bounded by the remaining budget before each statement and
+restored afterward, so lock waits cannot use the full default busy timeout after
+the analytics deadline. SQL Server connection acquisition remains governed by
+its pool; ODBC query timeouts are set before statement cursors are created and
+restored when the session closes. SQL Server reports require SNAPSHOT support;
+analytics never changes server isolation settings or enables SQLite WAL
+automatically. Query errors propagate rather than returning empty reports.
 
-The optional SQLite compact-profile probe returns raw weighted profiles for a
-caller to aggregate, not statistics. Its row and per-value limits bound returned
+The optional SQLite compact-profile probe returns typed raw `RawAnalyticsProfile`
+dictionaries with `source0` and optional `source1`/display fields, stored
+`outcome`, and result-ID `weight` for a caller to aggregate, not statistics.
+For converter axes, the bounded probe emits canonical name arrays so supported
+legacy converter objects have the same memberships as SQL grouping.
+Its row and per-value limits bound returned
 metadata, not SQL scans or intermediate work. The combined-text cap is checked
 after fetching the bounded probe, so it is not a peak-memory or network-byte
 guarantee. Any overflow uses complete SQL aggregation, never partial counts.
