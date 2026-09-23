@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyrit.models import (
+    ScenarioDatasetSelection,
+    ScenarioDatasetSelectionOverrideScope,
     ScenarioDatasetSizeLimitDefaultScope,
     ScenarioDatasetSizeLimitOverrideScope,
 )
@@ -18,9 +20,16 @@ from pyrit.scenario.core import (
     DatasetAttackConfiguration,
     DatasetConfiguration,
     DatasetConstraintError,
+    Scenario,
     ScenarioTechnique,
 )
 from pyrit.scenario.scenarios.airt.psychosocial import Psychosocial
+from pyrit.scenario.scenarios.garak.api_key import ApiKey
+from pyrit.scenario.scenarios.garak.encoding import Encoding
+from pyrit.scenario.scenarios.garak.figstep import FigStep
+from pyrit.scenario.scenarios.garak.package_hallucination import PackageHallucination
+from pyrit.scenario.scenarios.garak.prompt_inject import PromptInject
+from pyrit.scenario.scenarios.garak.system_prompt_extraction import SystemPromptExtraction
 from pyrit.scenario.scenarios.garak.web_injection import WebInjection
 
 
@@ -78,6 +87,10 @@ class _MetadataScenario:
         """Return the conventional single-dataset override scope."""
         return ScenarioDatasetSizeLimitOverrideScope.PerDataset
 
+    def get_dataset_selection(self) -> ScenarioDatasetSelection:
+        """Return unrestricted dataset-name selection."""
+        return ScenarioDatasetSelection()
+
 
 class _MarkdownMetadataScenario(_MetadataScenario):
     """
@@ -120,6 +133,8 @@ def test_build_metadata_expands_ordered_default_techniques() -> None:
         "default": ("one", "two"),
     }
     assert metadata.default_datasets == ("sample",)
+    assert metadata.dataset_selection.override_scope is ScenarioDatasetSelectionOverrideScope.Any
+    assert metadata.dataset_selection.allowed_names is None
     assert metadata.dataset_size_limit.default_scope is ScenarioDatasetSizeLimitDefaultScope.None_
     assert metadata.dataset_size_limit.override_scope is ScenarioDatasetSizeLimitOverrideScope.PerDataset
 
@@ -188,6 +203,46 @@ def test_specialized_scenarios_declare_nonstandard_dataset_override_semantics() 
     """Specialized dataset shaping remains explicit in catalog metadata."""
     assert Psychosocial.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.PerDataset
     assert WebInjection.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.Unsupported
+
+
+@pytest.mark.parametrize(
+    ("scenario_class", "scope"),
+    [
+        (Psychosocial, ScenarioDatasetSelectionOverrideScope.Unsupported),
+        (Encoding, ScenarioDatasetSelectionOverrideScope.Fixed),
+        (FigStep, ScenarioDatasetSelectionOverrideScope.OneOf),
+        (ApiKey, ScenarioDatasetSelectionOverrideScope.FixedSet),
+        (PromptInject, ScenarioDatasetSelectionOverrideScope.FixedSet),
+        (WebInjection, ScenarioDatasetSelectionOverrideScope.FixedSet),
+        (SystemPromptExtraction, ScenarioDatasetSelectionOverrideScope.FixedSet),
+        (PackageHallucination, ScenarioDatasetSelectionOverrideScope.Unsupported),
+    ],
+)
+def test_specialized_dataset_selection_is_declared(
+    scenario_class: type[Scenario], scope: ScenarioDatasetSelectionOverrideScope
+) -> None:
+    assert scenario_class.DATASET_SELECTION_OVERRIDE_SCOPE is scope
+
+
+@pytest.mark.usefixtures("patch_central_database")
+def test_encoding_catalog_exposes_fixed_default_selection() -> None:
+    metadata = ScenarioRegistry()._build_metadata("garak.encoding", Encoding)
+
+    assert metadata.default_datasets == ("garak_slur_terms_en", "garak_web_html_js")
+    assert metadata.dataset_selection.model_dump(mode="json") == {
+        "override_scope": "fixed",
+        "allowed_names": ["garak_slur_terms_en", "garak_web_html_js"],
+    }
+
+
+def test_figstep_catalog_lists_both_single_dataset_options() -> None:
+    """One-of metadata exposes valid alternatives rather than only the default."""
+    scenario = object.__new__(FigStep)
+    scenario._default_dataset_config = DatasetAttackConfiguration(dataset_names=["figstep"])
+    selection = scenario.get_dataset_selection()
+
+    assert selection.override_scope is ScenarioDatasetSelectionOverrideScope.OneOf
+    assert selection.allowed_names == ["figstep", "figstep_pro"]
 
 
 def test_build_metadata_preserves_structured_markdown_separately() -> None:

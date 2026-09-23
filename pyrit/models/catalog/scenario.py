@@ -39,6 +39,7 @@ from pyrit.models.retry_event import RetryEvent
 #   - data_types -> OR + exact: a seed matches ANY value, compared for exact equality. So
 #     ``data_types=text,image_path`` is a union.
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
+_DatasetCapKey = tuple[str, int, str, str | None, tuple[str, ...]]
 
 
 def _validate_dataset_filter_mapping(
@@ -115,6 +116,16 @@ class ScenarioDatasetSizeLimitOverrideScope(str, Enum):
 
     PerDataset = "per_dataset"
     Combined = "combined"
+    Unsupported = "unsupported"
+
+
+class ScenarioDatasetSelectionOverrideScope(str, Enum):
+    """Which explicit dataset-name selections a scenario accepts."""
+
+    Any = "any"
+    Fixed = "fixed"
+    FixedSet = "fixed_set"
+    OneOf = "one_of"
     Unsupported = "unsupported"
 
 
@@ -306,6 +317,40 @@ class ScenarioDatasetSizeLimit(BaseModel):
         return self
 
 
+class ScenarioDatasetSelection(BaseModel):
+    """Dataset-name override shape, independent of the dataset-size cap scope."""
+
+    override_scope: ScenarioDatasetSelectionOverrideScope = ScenarioDatasetSelectionOverrideScope.Any
+    allowed_names: list[str] | None = Field(
+        default=None,
+        description=(
+            "Exact required names for fixed scopes, or alternatives for one_of; null means unrestricted or unsupported."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_allowed_names(self) -> "ScenarioDatasetSelection":
+        """
+        Require explicit allowed names exactly when the scope needs them.
+
+        Returns:
+            ScenarioDatasetSelection: The validated selection contract.
+
+        Raises:
+            ValueError: If allowed names are missing, duplicated, or incompatible with the scope.
+        """
+        has_named_scope = self.override_scope in {
+            ScenarioDatasetSelectionOverrideScope.Fixed,
+            ScenarioDatasetSelectionOverrideScope.FixedSet,
+            ScenarioDatasetSelectionOverrideScope.OneOf,
+        }
+        if has_named_scope != (self.allowed_names is not None):
+            raise ValueError("allowed_names must be set exactly for fixed, fixed_set, or one_of selections")
+        if self.allowed_names is not None:
+            _validate_dataset_name_selection(self.allowed_names)
+        return self
+
+
 class ScenarioTechniqueSummary(BaseModel):
     """One concrete attack technique available to a scenario."""
 
@@ -449,12 +494,19 @@ class ScenarioRunSizeEstimate(BaseModel):
         return self
 
     def _populate_dataset_cap_provenance(self) -> None:
-        """Derive canonical cap provenance from compatibility dataset summaries when omitted."""
+        """
+        Derive cap provenance in an order consistent with each dataset's application order.
+
+        Raises:
+            ValueError: If dataset summaries describe conflicting cap application orders.
+        """
         if self.dataset_cap_provenance:
             return
 
-        caps_by_key: dict[tuple[str, int, str, str | None, tuple[str, ...]], ScenarioDatasetSizeCap] = {}
+        caps_by_key: dict[_DatasetCapKey, ScenarioDatasetSizeCap] = {}
+        predecessors: dict[_DatasetCapKey, set[_DatasetCapKey]] = {}
         for dataset in self.datasets:
+            previous_key: _DatasetCapKey | None = None
             for configured_cap in dataset.configured_caps:
                 dataset_name = configured_cap.dataset_name if configured_cap.configured_on == "dataset" else None
                 declared_names = (
@@ -467,6 +519,10 @@ class ScenarioRunSizeEstimate(BaseModel):
                     dataset_name,
                     declared_names,
                 )
+                predecessors.setdefault(key, set())
+                if previous_key is not None and previous_key != key:
+                    predecessors[key].add(previous_key)
+                previous_key = key
                 existing = caps_by_key.get(key)
                 if existing is None:
                     names = configured_cap.dataset_names or [dataset.name]
@@ -481,11 +537,15 @@ class ScenarioRunSizeEstimate(BaseModel):
                     if name not in existing.dataset_names:
                         existing.dataset_names.append(name)
 
-        scope_order = {"dataset": 0, "configuration": 1, "compound": 2}
-        self.dataset_cap_provenance = sorted(
-            caps_by_key.values(),
-            key=lambda cap: scope_order[cap.configured_on],
-        )
+        remaining = list(caps_by_key)
+        placed: set[_DatasetCapKey] = set()
+        while remaining:
+            ready = next((key for key in remaining if predecessors[key] <= placed), None)
+            if ready is None:
+                raise ValueError("Dataset summaries have conflicting cap application order")
+            self.dataset_cap_provenance.append(caps_by_key[ready])
+            placed.add(ready)
+            remaining.remove(ready)
 
     @classmethod
     def unavailable(cls, *, note: str = "Default-run size estimate is unavailable.") -> "ScenarioRunSizeEstimate":
@@ -533,6 +593,10 @@ class RegisteredScenario(BaseModel):
         description="Descriptions and tags for the available concrete techniques",
     )
     default_datasets: list[str] = Field(..., description="Default dataset names used by the scenario")
+    dataset_selection: ScenarioDatasetSelection = Field(
+        default_factory=ScenarioDatasetSelection,
+        description="Which explicit dataset-name selections are valid for this scenario",
+    )
     dataset_size_limit: ScenarioDatasetSizeLimit = Field(
         default_factory=ScenarioDatasetSizeLimit,
         description="Structured scenario-default and explicit-override dataset-size limit semantics",

@@ -263,6 +263,7 @@ class TestApiKey:
         assert estimate.maximum_attack_count == expected
         assert len(estimate.dataset_cap_provenance) == 1
         assert estimate.dataset_cap_provenance[0].count == expected
+        assert estimate.dataset_cap_provenance[0].dataset_name is None
         assert estimate.dataset_cap_provenance[0].dataset_names == ["get_key", "complete_key"]
         assert all(summary.effective_cap is None for summary in estimate.datasets)
         assert all(len(summary.configured_caps) == 1 for summary in estimate.datasets)
@@ -284,7 +285,7 @@ class TestApiKey:
             assert cap.label == "combined configuration cap"
             assert cap.count == expected
             assert cap.configured_on == "configuration"
-            assert cap.dataset_name is None
+            assert cap.dataset_name == dataset.name
             assert cap.dataset_names == ["get_key", "complete_key"]
 
     @pytest.mark.parametrize("size", [None, 3])

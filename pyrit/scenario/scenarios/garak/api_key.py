@@ -16,6 +16,7 @@ from pyrit.common import apply_defaults, forward_init_parameters
 from pyrit.executor.attack import AttackConverterConfig, AttackScoringConfig, PromptSendingAttack
 from pyrit.models import (
     AttackSeedGroup,
+    ScenarioDatasetSelectionOverrideScope,
     ScenarioDatasetSizeCap,
     ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
@@ -198,6 +199,9 @@ class ApiKey(Scenario):
 
     VERSION: int = 1
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Forbidden
+    DATASET_SELECTION_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSelectionOverrideScope] = (
+        ScenarioDatasetSelectionOverrideScope.FixedSet
+    )
 
     @classmethod
     def required_datasets(cls) -> list[str]:

@@ -47,6 +47,8 @@ if TYPE_CHECKING:
     )
     from pyrit.models.catalog import (
         ScenarioDatasetPopulationStatus,
+        ScenarioDatasetSelection,
+        ScenarioDatasetSelectionOverrideScope,
         ScenarioDatasetSizeCap,
         ScenarioDatasetSizeLimit,
         ScenarioDatasetSizeLimitDefaultScope,
@@ -353,6 +355,8 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ScorerIdentifier": "pyrit.models.identifiers",
     "ScenarioIdentifier": "pyrit.models.identifiers",
     "ScenarioDatasetPopulationStatus": "pyrit.models.catalog",
+    "ScenarioDatasetSelection": "pyrit.models.catalog",
+    "ScenarioDatasetSelectionOverrideScope": "pyrit.models.catalog",
     "ScenarioDatasetSizeCap": "pyrit.models.catalog",
     "ScenarioDatasetSizeLimit": "pyrit.models.catalog",
     "ScenarioDatasetSizeLimitDefaultScope": "pyrit.models.catalog",

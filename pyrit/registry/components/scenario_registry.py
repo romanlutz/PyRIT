@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pyrit.models import (
+    ScenarioDatasetSelection,
     ScenarioDatasetSizeLimit,
     ScenarioDatasetSizeLimitDefaultScope,
     ScenarioDatasetSizeLimitOverrideScope,
@@ -72,6 +73,9 @@ class ScenarioMetadata(RegistryMetadata):
 
     # Default dataset names used by this scenario.
     default_datasets: tuple[str, ...] = field(kw_only=True)
+
+    # Dataset-name override semantics, including any allowed names.
+    dataset_selection: ScenarioDatasetSelection = field(kw_only=True, default_factory=ScenarioDatasetSelection)
 
     # Structured default and override semantics for the dataset-size control.
     dataset_size_limit: ScenarioDatasetSizeLimit = field(kw_only=True, default_factory=ScenarioDatasetSizeLimit)
@@ -224,6 +228,7 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
             aggregate_techniques=aggregate_techniques,
             aggregate_technique_expansions=aggregate_technique_expansions,
             default_datasets=default_datasets,
+            dataset_selection=instance.get_dataset_selection(),
             dataset_size_limit=dataset_size_limit,
             supported_parameters=supported_parameters,
             baseline_policy=instance.BASELINE_ATTACK_POLICY.value,

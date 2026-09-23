@@ -17,6 +17,7 @@ from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
 from pyrit.memory import CentralMemory
 from pyrit.models import (
     AttackSeedGroup,
+    ScenarioDatasetSelectionOverrideScope,
     ScenarioDatasetSizeLimitOverrideScope,
     ScenarioDatasetSummary,
     ScenarioRunSizeComponent,
@@ -101,6 +102,9 @@ class WebInjection(Scenario):
 
     VERSION: int = 1
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Enabled
+    DATASET_SELECTION_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSelectionOverrideScope] = (
+        ScenarioDatasetSelectionOverrideScope.FixedSet
+    )
     DATASET_SIZE_LIMIT_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSizeLimitOverrideScope | None] = (
         ScenarioDatasetSizeLimitOverrideScope.Unsupported
     )

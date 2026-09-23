@@ -492,7 +492,9 @@ class DatasetConfiguration:
         for name in names:
             full_count = full_counts_by_dataset.get(name, 0) if full_counts_by_dataset is not None else None
             selected_count = selected_counts_by_dataset.get(name, 0) if selected_counts_by_dataset is not None else None
-            applicable_caps = [cap.model_copy(deep=True) for cap in caps if name in cap.dataset_names]
+            applicable_caps = [
+                cap.model_copy(deep=True, update={"dataset_name": name}) for cap in caps if name in cap.dataset_names
+            ]
             independent_caps = [cap.count for cap in applicable_caps if cap.configured_on == "dataset"]
             selection_note = None
             if full_count is not None and selected_count is not None and selected_count != full_count:
@@ -988,7 +990,7 @@ class CompoundDatasetAttackConfiguration(DatasetAttackConfiguration):
         """
         if not dataset_names:
             raise ValueError("per_dataset requires at least one dataset name.")
-        return cls(
+        config = cls(
             configurations=[
                 DatasetAttackConfiguration(
                     dataset_names=[name],
@@ -1000,6 +1002,9 @@ class CompoundDatasetAttackConfiguration(DatasetAttackConfiguration):
                 for name in dataset_names
             ]
         )
+        if filters:
+            config.update_filters(filters=filters)
+        return config
 
     def with_dataset_names(
         self,
@@ -1245,7 +1250,7 @@ class CompoundDatasetAttackConfiguration(DatasetAttackConfiguration):
                 full_merged.setdefault(name, []).extend(groups)
             for name, groups in selected_groups.items():
                 selected_merged.setdefault(name, []).extend(groups)
-        self.validate(self._resolved_from_groups([group for groups in full_merged.values() for group in groups]))
+        self.validate(self._resolved_from_groups([group for groups in selected_merged.values() for group in groups]))
         selected = {name: groups for name, groups in self._sample_groups_by_dataset(selected_merged).items() if groups}
         return full_merged, selected
 

@@ -30,6 +30,8 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     AttackSeedGroup,
+    ScenarioDatasetSelection,
+    ScenarioDatasetSelectionOverrideScope,
     ScenarioDatasetSizeLimitOverrideScope,
     ScenarioDatasetSummary,
     ScenarioEvaluationIdentifier,
@@ -140,6 +142,12 @@ class Scenario(ABC):
     #: How a generic dataset-size run override is interpreted. ``None`` derives the
     #: standard behavior from the default configuration.
     DATASET_SIZE_LIMIT_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSizeLimitOverrideScope | None] = None
+
+    #: Which explicit dataset-name requests this scenario can interpret.
+    DATASET_SELECTION_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSelectionOverrideScope] = (
+        ScenarioDatasetSelectionOverrideScope.Any
+    )
+    DATASET_SELECTION_ALLOWED_NAMES: ClassVar[tuple[str, ...] | None] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """
@@ -282,6 +290,25 @@ class Scenario(ABC):
         if len(self._default_dataset_config.dataset_names) <= 1:
             return ScenarioDatasetSizeLimitOverrideScope.PerDataset
         return ScenarioDatasetSizeLimitOverrideScope.Combined
+
+    def get_dataset_selection(self) -> ScenarioDatasetSelection:
+        """
+        Describe valid explicit dataset-name requests for this scenario.
+
+        Returns:
+            ScenarioDatasetSelection: The client-facing selection contract.
+        """
+        scope = self.DATASET_SELECTION_OVERRIDE_SCOPE
+        if scope in {
+            ScenarioDatasetSelectionOverrideScope.Fixed,
+            ScenarioDatasetSelectionOverrideScope.FixedSet,
+        }:
+            allowed_names = self._default_dataset_config.dataset_names
+        elif scope is ScenarioDatasetSelectionOverrideScope.OneOf:
+            allowed_names = list(self.DATASET_SELECTION_ALLOWED_NAMES or [])
+        else:
+            allowed_names = None
+        return ScenarioDatasetSelection(override_scope=scope, allowed_names=allowed_names)
 
     @property
     def name(self) -> str:

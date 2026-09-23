@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pyrit.common import apply_defaults
 from pyrit.executor.attack import AttackScoringConfig, PromptSendingAttack
 from pyrit.memory import CentralMemory
-from pyrit.models import AttackSeedGroup, SeedObjective, SeedPrompt
+from pyrit.models import AttackSeedGroup, ScenarioDatasetSelectionOverrideScope, SeedObjective, SeedPrompt
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
@@ -87,6 +87,9 @@ class SystemPromptExtraction(Scenario):
     """
 
     VERSION: int = 1
+    DATASET_SELECTION_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSelectionOverrideScope] = (
+        ScenarioDatasetSelectionOverrideScope.FixedSet
+    )
 
     # Template-dominated like the Doctor/Jailbreak scenarios: the bare system prompt with no
     # extraction request is a weak comparison point, so baseline is off by default.

@@ -7,7 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pyrit.models import AttackSeedGroup, ScenarioDatasetPopulationStatus, SeedGroup, SeedObjective, SeedPrompt
+from pyrit.models import (
+    AttackSeedGroup,
+    ScenarioDatasetPopulationStatus,
+    ScenarioRunSizeEstimate,
+    SeedGroup,
+    SeedObjective,
+    SeedPrompt,
+)
 from pyrit.scenario.core.dataset_configuration import (
     INLINE_DATASET_NAME,
     CompoundDatasetAttackConfiguration,
@@ -605,6 +612,27 @@ class TestCompoundDatasetAttackConfiguration:
             (6, "compound", ["d1", "d2"]),
         ]
 
+    def test_mixed_child_and_parent_caps_keep_application_order_in_estimate(self) -> None:
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[
+                DatasetAttackConfiguration(dataset_names=["d1", "d2"], max_dataset_size=2),
+                DatasetAttackConfiguration(dataset_names=["d3"], max_dataset_size=1),
+            ],
+            max_dataset_size=2,
+        )
+        summaries = config.build_population_summaries(
+            full_counts_by_dataset={"d1": 3, "d2": 3, "d3": 3},
+            selected_counts_by_dataset={"d1": 1, "d3": 1},
+        )
+        estimate = ScenarioRunSizeEstimate(datasets=summaries)
+
+        assert estimate.dataset_cap_provenance == config.size_cap_provenance()
+        assert [cap["configured_on"] for cap in estimate.model_dump(mode="json")["dataset_cap_provenance"]] == [
+            "configuration",
+            "dataset",
+            "compound",
+        ]
+
     def test_unknown_population_summaries_preserve_caps_without_zero_counts(self) -> None:
         config = CompoundDatasetAttackConfiguration.per_dataset(dataset_names=["d1", "d2"], max_dataset_size=4)
         config.max_dataset_size = 6
@@ -631,6 +659,11 @@ class TestCompoundDatasetAttackConfiguration:
             ScenarioDatasetPopulationStatus.Known,
         ]
         assert [summary.selected_seed_group_count for summary in summaries] == [1, 0]
+        assert [summary.configured_caps[0].dataset_name for summary in summaries] == ["d1", "d2"]
+        estimate = ScenarioRunSizeEstimate(datasets=summaries)
+        assert len(estimate.dataset_cap_provenance) == 1
+        assert estimate.dataset_cap_provenance[0].dataset_name is None
+        assert estimate.dataset_cap_provenance[0].dataset_names == ["d1", "d2"]
 
     def test_per_dataset_override_rejects_multi_population_child(self) -> None:
         config = CompoundDatasetAttackConfiguration(
@@ -705,6 +738,23 @@ class TestCompoundDatasetAttackConfiguration:
         assert {name: len(groups) for name, groups in selected.items()} == {"d1": 1, "d2": 1}
         assert mock_memory.get_seeds.call_count == 2
 
+    async def test_estimate_validates_the_same_selected_children_as_launch(self, mock_memory: MagicMock) -> None:
+        mock_memory.get_seeds.side_effect = lambda *, dataset_name: make_objectives(
+            f"{dataset_name}-a", f"{dataset_name}-b"
+        )
+        config = CompoundDatasetAttackConfiguration(
+            configurations=[
+                DatasetAttackConfiguration(dataset_names=["d1"], max_dataset_size=1),
+                DatasetAttackConfiguration(dataset_names=["d2"], max_dataset_size=1),
+            ],
+            validators=[require_min_size(3)],
+        )
+
+        with pytest.raises(DatasetConstraintError, match="has 2 item"):
+            await config.get_attack_groups_by_dataset_async()
+        with pytest.raises(DatasetConstraintError, match="has 2 item"):
+            await config.resolve_attack_groups_for_estimate_async()
+
     async def test_inline_children_combine(self) -> None:
         config = CompoundDatasetAttackConfiguration(
             configurations=[
@@ -753,6 +803,7 @@ class TestDatasetConfigurationFilters:
         config = CompoundDatasetAttackConfiguration.per_dataset(
             dataset_names=["d1"], filters={"harm_categories": ["cyber"]}
         )
+        assert config.filters == {"harm_categories": ["cyber"]}
         await config.get_attack_seed_groups_async()
         mock_memory.get_seeds.assert_called_with(dataset_name="d1", harm_categories=["cyber"])
 

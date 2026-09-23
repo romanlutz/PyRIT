@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pyrit.models import ScenarioDatasetSizeLimitOverrideScope
+from pyrit.models import (
+    ScenarioDatasetSelection,
+    ScenarioDatasetSelectionOverrideScope,
+    ScenarioDatasetSizeLimitOverrideScope,
+)
 from pyrit.registry import ConverterRegistry, ScenarioRegistry, TargetRegistry
 from pyrit.scenario.core.dataset_configuration import (
     CompoundDatasetAttackConfiguration,
@@ -121,6 +125,13 @@ class ScenarioConfigurationResolver:
                 f"scenario class is not instantiable without arguments ({exc})."
             ) from exc
 
+        if dataset_names is not None:
+            cls._validate_dataset_selection(
+                scenario_name=scenario_name,
+                selection=introspection_instance.get_dataset_selection(),
+                dataset_names=dataset_names,
+            )
+
         if techniques:
             technique_enums, technique_converters = cls.resolve_techniques_and_converters(
                 tokens=techniques,
@@ -144,6 +155,32 @@ class ScenarioConfigurationResolver:
             )
 
         return resolved
+
+    @staticmethod
+    def _validate_dataset_selection(
+        *,
+        scenario_name: str,
+        selection: ScenarioDatasetSelection,
+        dataset_names: list[str],
+    ) -> None:
+        """Reject explicit dataset-name shapes the scenario cannot interpret."""
+        scope = selection.override_scope
+        if scope is ScenarioDatasetSelectionOverrideScope.Unsupported:
+            raise ValueError(f"Scenario '{scenario_name}' does not support dataset_names overrides.")
+        if scope is ScenarioDatasetSelectionOverrideScope.Any:
+            return
+
+        allowed = selection.allowed_names
+        if allowed is None:
+            raise ValueError(f"Scenario '{scenario_name}' has no allowed dataset names configured.")
+        if scope is ScenarioDatasetSelectionOverrideScope.Fixed and dataset_names != allowed:
+            raise ValueError(f"Scenario '{scenario_name}' requires dataset_names={allowed} in that order.")
+        if scope is ScenarioDatasetSelectionOverrideScope.FixedSet and set(dataset_names) != set(allowed):
+            raise ValueError(f"Scenario '{scenario_name}' requires exactly these datasets: {allowed}.")
+        if scope is ScenarioDatasetSelectionOverrideScope.OneOf and (
+            len(dataset_names) != 1 or dataset_names[0] not in allowed
+        ):
+            raise ValueError(f"Scenario '{scenario_name}' requires exactly one dataset from {allowed}.")
 
     @classmethod
     def _resolve_dataset_configuration(
@@ -211,7 +248,10 @@ class ScenarioConfigurationResolver:
                 )
                 for name in config.dataset_names
             ]
-            return CompoundDatasetAttackConfiguration(configurations=children)
+            compound = CompoundDatasetAttackConfiguration(configurations=children)
+            if config.filters:
+                compound.update_filters(filters=config.filters)
+            return compound
         return config
 
     @staticmethod

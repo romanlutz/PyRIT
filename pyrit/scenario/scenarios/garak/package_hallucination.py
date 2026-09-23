@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pyrit.common import apply_defaults
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.single_turn.prompt_sending import PromptSendingAttack
-from pyrit.models import AttackSeedGroup, SeedObjective, SeedPrompt
+from pyrit.models import AttackSeedGroup, ScenarioDatasetSelectionOverrideScope, SeedObjective, SeedPrompt
 from pyrit.scenario.core.atomic_attack import AtomicAttack
 from pyrit.scenario.core.attack_technique import AttackTechnique
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration, DatasetConfiguration
@@ -145,6 +145,9 @@ class PackageHallucination(Scenario):
     """
 
     VERSION: int = 3
+    DATASET_SELECTION_OVERRIDE_SCOPE: ClassVar[ScenarioDatasetSelectionOverrideScope] = (
+        ScenarioDatasetSelectionOverrideScope.Unsupported
+    )
 
     # The plain code request is not an adversarial baseline to compare against, so no baseline.
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Forbidden

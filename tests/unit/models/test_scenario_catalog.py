@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from pyrit.models import (
     ScenarioDatasetPopulationStatus,
+    ScenarioDatasetSelection,
+    ScenarioDatasetSelectionOverrideScope,
     ScenarioDatasetSizeCap,
     ScenarioDatasetSizeLimit,
     ScenarioDatasetSizeLimitDefaultScope,
@@ -491,6 +493,84 @@ def test_combined_cap_provenance_is_serialized_once_in_dataset_order() -> None:
     assert [cap["count"] for cap in payload["dataset_cap_provenance"]] == [3, 4, 5]
 
 
+def test_mixed_scope_cap_provenance_keeps_application_order() -> None:
+    """A compound cap follows every child cap even when a later child uses another scope."""
+    shared = ScenarioDatasetSizeCap(
+        label="shared first child",
+        count=2,
+        configured_on="configuration",
+        dataset_names=["first", "second"],
+    )
+    per_dataset = ScenarioDatasetSizeCap(
+        label="third child",
+        count=1,
+        configured_on="dataset",
+        dataset_name="third",
+    )
+    combined = ScenarioDatasetSizeCap(
+        label="combined parent",
+        count=3,
+        configured_on="compound",
+        dataset_names=["first", "second", "third"],
+    )
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name="first",
+                logical_seed_group_count=3,
+                selected_seed_group_count=1,
+                configured_caps=[shared, combined],
+            ),
+            ScenarioDatasetSummary(
+                name="second",
+                logical_seed_group_count=3,
+                selected_seed_group_count=1,
+                configured_caps=[shared, combined],
+            ),
+            ScenarioDatasetSummary(
+                name="third",
+                logical_seed_group_count=3,
+                selected_seed_group_count=1,
+                configured_caps=[per_dataset, combined],
+            ),
+        ]
+    )
+
+    assert [cap.label for cap in estimate.dataset_cap_provenance] == [
+        "shared first child",
+        "third child",
+        "combined parent",
+    ]
+    assert [cap["label"] for cap in estimate.model_dump(mode="json")["dataset_cap_provenance"]] == [
+        "shared first child",
+        "third child",
+        "combined parent",
+    ]
+
+
+def test_conflicting_cap_application_orders_raise() -> None:
+    """Two datasets cannot describe the same caps in contradictory orders."""
+    first = ScenarioDatasetSizeCap(label="first", count=2, configured_on="configuration", dataset_names=["a", "b"])
+    second = ScenarioDatasetSizeCap(label="second", count=2, configured_on="configuration", dataset_names=["a", "b"])
+    with pytest.raises(ValidationError, match="conflicting cap application order"):
+        ScenarioRunSizeEstimate(
+            datasets=[
+                ScenarioDatasetSummary(
+                    name="a",
+                    logical_seed_group_count=2,
+                    selected_seed_group_count=1,
+                    configured_caps=[first, second],
+                ),
+                ScenarioDatasetSummary(
+                    name="b",
+                    logical_seed_group_count=2,
+                    selected_seed_group_count=1,
+                    configured_caps=[second, first],
+                ),
+            ]
+        )
+
+
 def test_distinct_shared_caps_with_equal_values_remain_separate() -> None:
     """Equal cap values on disjoint populations do not collapse into one provenance record."""
     estimate = ScenarioRunSizeEstimate(
@@ -547,6 +627,35 @@ def test_dataset_size_limit_rejects_inconsistent_default_count(
             default_count=default_count,
             override_scope=ScenarioDatasetSizeLimitOverrideScope.PerDataset,
         )
+
+
+@pytest.mark.parametrize(
+    ("scope", "allowed_names"),
+    [
+        (ScenarioDatasetSelectionOverrideScope.Fixed, None),
+        (ScenarioDatasetSelectionOverrideScope.OneOf, []),
+        (ScenarioDatasetSelectionOverrideScope.Any, ["a"]),
+        (ScenarioDatasetSelectionOverrideScope.Unsupported, ["a"]),
+        (ScenarioDatasetSelectionOverrideScope.FixedSet, ["a", "a"]),
+    ],
+)
+def test_dataset_selection_rejects_inconsistent_metadata(
+    scope: ScenarioDatasetSelectionOverrideScope,
+    allowed_names: list[str] | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        ScenarioDatasetSelection(override_scope=scope, allowed_names=allowed_names)
+
+
+def test_dataset_selection_serializes_allowed_names_in_order() -> None:
+    selection = ScenarioDatasetSelection(
+        override_scope=ScenarioDatasetSelectionOverrideScope.OneOf,
+        allowed_names=["figstep", "figstep_pro"],
+    )
+    assert selection.model_dump(mode="json") == {
+        "override_scope": "one_of",
+        "allowed_names": ["figstep", "figstep_pro"],
+    }
 
 
 def test_estimate_request_reuses_dataset_filter_validation() -> None:
