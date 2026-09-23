@@ -3640,30 +3640,42 @@ class MemoryInterface(abc.ABC):
                     SeedEntry.harm_categories,
                 )
                 .distinct()
+                .subquery()
+            )
+            combined_statement = (
+                select(
+                    aggregate_statement.c.dataset_name,
+                    aggregate_statement.c.seed_pieces,
+                    aggregate_statement.c.logical_examples,
+                    aggregate_statement.c.objectives,
+                    metadata_statement.c.data_type,
+                    metadata_statement.c.harm_categories,
+                )
+                .select_from(aggregate_statement)
+                .outerjoin(
+                    metadata_statement,
+                    aggregate_statement.c.dataset_name.is_not_distinct_from(metadata_statement.c.dataset_name),
+                )
             )
 
             with closing(self.get_session()) as session:
-                aggregate_rows = session.execute(aggregate_statement).all()
-                metadata_rows = session.execute(metadata_statement).all()
+                rows = session.execute(combined_statement).all()
 
             summaries_by_dataset: dict[str | None, dict[str, Any]] = {}
             dataset_order: list[str | None] = []
-            for row in aggregate_rows:
+            for row in rows:
                 dataset_name = row.dataset_name
-                summaries_by_dataset[dataset_name] = {
-                    "seed_pieces": int(row.seed_pieces or 0),
-                    "logical_examples": int(row.logical_examples or 0),
-                    "objectives": int(row.objectives or 0),
-                    "modalities": set(),
-                    "harm_categories": set(),
-                    "has_unlabeled_harm_categories": False,
-                }
-                dataset_order.append(dataset_name)
-
-            for row in metadata_rows:
-                summary = summaries_by_dataset.get(row.dataset_name)
-                if summary is None:
-                    continue
+                if dataset_name not in summaries_by_dataset:
+                    summaries_by_dataset[dataset_name] = {
+                        "seed_pieces": int(row.seed_pieces or 0),
+                        "logical_examples": int(row.logical_examples or 0),
+                        "objectives": int(row.objectives or 0),
+                        "modalities": set(),
+                        "harm_categories": set(),
+                        "has_unlabeled_harm_categories": False,
+                    }
+                    dataset_order.append(dataset_name)
+                summary = summaries_by_dataset[dataset_name]
                 if row.data_type:
                     summary["modalities"].add(row.data_type)
                 categories = row.harm_categories or []
