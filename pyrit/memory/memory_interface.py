@@ -3610,9 +3610,9 @@ class MemoryInterface(abc.ABC):
         media are never hydrated, so callers can build dataset cards without materializing
         every prompt or fetching providers.
 
-        Grouping happens in the database so dataset-name equality follows the column
-        collation. Metadata is projected distinctly per dataset before Python combines it,
-        avoiding a modality-by-harm-category row multiplication.
+        Named dataset grouping and metadata matching stay on the original collated
+        dataset_name column. NULL and empty names are aggregated separately into the
+        unnamed population so their shared logical groups are counted exactly once.
 
         Returns:
             Sequence[SeedDatasetSummary]: One summary for each stored dataset, including
@@ -3620,43 +3620,70 @@ class MemoryInterface(abc.ABC):
         """
         try:
             logical_example_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
-            dataset_group = case(
-                (or_(SeedEntry.dataset_name.is_(None), SeedEntry.dataset_name == ""), None),
-                else_=SeedEntry.dataset_name,
-            )
-            aggregate_statement = (
+            named_condition = and_(SeedEntry.dataset_name.is_not(None), SeedEntry.dataset_name != "")
+            unnamed_condition = or_(SeedEntry.dataset_name.is_(None), SeedEntry.dataset_name == "")
+
+            named_aggregate = (
                 select(
-                    dataset_group.label("dataset_name"),
+                    SeedEntry.dataset_name.label("dataset_name"),
                     func.count().label("seed_pieces"),
                     func.count(func.distinct(logical_example_id)).label("logical_examples"),
                     func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
                 )
-                .group_by(dataset_group)
+                .where(named_condition)
+                .group_by(SeedEntry.dataset_name)
+                .subquery()
             )
-            metadata_statement = (
+            named_metadata = (
                 select(
-                    dataset_group.label("dataset_name"),
+                    SeedEntry.dataset_name.label("dataset_name"),
                     SeedEntry.data_type,
                     SeedEntry.harm_categories,
                 )
+                .where(named_condition)
                 .distinct()
                 .subquery()
             )
-            combined_statement = (
-                select(
-                    aggregate_statement.c.dataset_name,
-                    aggregate_statement.c.seed_pieces,
-                    aggregate_statement.c.logical_examples,
-                    aggregate_statement.c.objectives,
-                    metadata_statement.c.data_type,
-                    metadata_statement.c.harm_categories,
-                )
-                .select_from(aggregate_statement)
-                .outerjoin(
-                    metadata_statement,
-                    aggregate_statement.c.dataset_name.is_not_distinct_from(metadata_statement.c.dataset_name),
-                )
+            named_statement = select(
+                named_aggregate.c.dataset_name,
+                named_aggregate.c.seed_pieces,
+                named_aggregate.c.logical_examples,
+                named_aggregate.c.objectives,
+                named_metadata.c.data_type,
+                named_metadata.c.harm_categories,
+            ).join(
+                named_metadata,
+                named_aggregate.c.dataset_name == named_metadata.c.dataset_name,
             )
+
+            unnamed_aggregate = (
+                select(
+                    func.max(SeedEntry.dataset_name).label("dataset_name"),
+                    func.count().label("seed_pieces"),
+                    func.count(func.distinct(logical_example_id)).label("logical_examples"),
+                    func.sum(case((SeedEntry.seed_type == "objective", 1), else_=0)).label("objectives"),
+                )
+                .where(unnamed_condition)
+                .subquery()
+            )
+            unnamed_metadata = (
+                select(SeedEntry.data_type, SeedEntry.harm_categories)
+                .where(unnamed_condition)
+                .distinct()
+                .subquery()
+            )
+            unnamed_statement = select(
+                unnamed_aggregate.c.dataset_name,
+                unnamed_aggregate.c.seed_pieces,
+                unnamed_aggregate.c.logical_examples,
+                unnamed_aggregate.c.objectives,
+                unnamed_metadata.c.data_type,
+                unnamed_metadata.c.harm_categories,
+            ).select_from(
+                unnamed_aggregate.join(unnamed_metadata, literal(True))
+            )
+
+            combined_statement = named_statement.union_all(unnamed_statement)
 
             with closing(self.get_session()) as session:
                 rows = session.execute(combined_statement).all()
