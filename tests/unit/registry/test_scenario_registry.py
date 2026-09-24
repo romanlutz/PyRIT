@@ -67,6 +67,7 @@ class _MetadataScenario:
     """Minimal scenario-shaped metadata source."""
 
     BASELINE_ATTACK_POLICY = BaselineAttackPolicy.Enabled
+    uses_default_adversarial_target = False
 
     @classmethod
     def supported_parameters(cls):
@@ -117,6 +118,7 @@ def test_build_metadata_expands_ordered_default_techniques() -> None:
     metadata = ScenarioRegistry()._build_metadata("sample", _MetadataScenario)
 
     assert metadata.default_technique == "default"
+    assert metadata.uses_default_adversarial_target is False
     assert metadata.default_techniques == ("one", "two")
     assert metadata.technique_summaries[0].model_dump() == {
         "name": "one",
@@ -243,6 +245,16 @@ def test_figstep_catalog_lists_both_single_dataset_options() -> None:
 
     assert selection.override_scope is ScenarioDatasetSelectionOverrideScope.OneOf
     assert selection.allowed_names == ["figstep", "figstep_pro"]
+
+
+def test_build_metadata_reports_scenario_owned_adversarial_usage() -> None:
+    """The catalog keeps a scenario's declared use of the shared target."""
+
+    class AdversarialScenario(_MetadataScenario):
+        uses_default_adversarial_target = True
+
+    metadata = ScenarioRegistry()._build_metadata("adversarial", AdversarialScenario)
+    assert metadata.uses_default_adversarial_target is True
 
 
 def test_build_metadata_preserves_structured_markdown_separately() -> None:
