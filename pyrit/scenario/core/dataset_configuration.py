@@ -466,6 +466,18 @@ class DatasetConfiguration:
                 caps.setdefault(name, []).append((cap.label, cap.count, cap.configured_on))
         return caps
 
+    def _has_single_population_source(self, *, name: str) -> bool:
+        """
+        Identify populations whose cap applies to one source.
+
+        Args:
+            name (str): The population name.
+
+        Returns:
+            bool: True for a single-source configuration.
+        """
+        return True
+
     def build_population_summaries(
         self,
         *,
@@ -511,7 +523,11 @@ class DatasetConfiguration:
                     ),
                     logical_seed_group_count=full_count,
                     selected_seed_group_count=selected_count,
-                    effective_cap=min(independent_caps) if independent_caps else None,
+                    effective_cap=(
+                        independent_caps[0]
+                        if len(independent_caps) == 1 and self._has_single_population_source(name=name)
+                        else None
+                    ),
                     configured_caps=applicable_caps,
                     selection_note=selection_note,
                 )
@@ -1116,6 +1132,28 @@ class CompoundDatasetAttackConfiguration(DatasetAttackConfiguration):
                 return False
             population_names.extend(names)
         return len(set(population_names)) == len(population_names)
+
+    def _has_single_population_source(self, *, name: str) -> bool:
+        """
+        Check whether exactly one child contributes the named population.
+
+        Args:
+            name (str): The population name.
+
+        Returns:
+            bool: Whether one child supplies the complete population.
+        """
+        matches = 0
+        for child in self._configurations:
+            names = child.dataset_names or (
+                [INLINE_DATASET_NAME] if child.source_kind is DatasetSourceKind.INLINE else []
+            )
+            if name not in names:
+                continue
+            matches += 1
+            if matches > 1 or not child._has_single_population_source(name=name):
+                return False
+        return matches == 1
 
     def size_cap_provenance(self) -> list[ScenarioDatasetSizeCap]:
         """

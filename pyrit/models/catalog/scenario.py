@@ -39,7 +39,8 @@ from pyrit.models.retry_event import RetryEvent
 #   - data_types -> OR + exact: a seed matches ANY value, compared for exact equality. So
 #     ``data_types=text,image_path`` is a union.
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
-_DatasetCapKey = tuple[str, int, str, str | None, tuple[str, ...]]
+_DatasetCapIdentity = tuple[str, int, str, str | None, tuple[str, ...]]
+_DatasetCapKey = tuple[_DatasetCapIdentity, int]
 
 
 def _validate_dataset_filter_mapping(
@@ -222,7 +223,10 @@ class ScenarioDatasetSummary(BaseModel):
     effective_cap: int | None = Field(
         default=None,
         ge=1,
-        description="Independent cap effective for this dataset; shared caps are reported at estimate level.",
+        description=(
+            "Independent cap for this dataset; null when several children contribute to one population. "
+            "Shared caps are reported at estimate level."
+        ),
     )
     configured_caps: list[ScenarioDatasetSizeCap] = Field(default_factory=list)
     selection_note: str | None = None
@@ -275,12 +279,14 @@ class ScenarioDatasetSummary(BaseModel):
             for cap in self.configured_caps
             if cap.configured_on == "dataset" and (not cap.dataset_names or self.name in cap.dataset_names)
         ]
-        if independent_caps:
-            configured_effective_cap = min(independent_caps)
-            if self.effective_cap is None:
+        if len(independent_caps) > 1 and self.effective_cap is not None:
+            raise ValueError("effective_cap cannot represent multiple child caps on one population")
+        if len(independent_caps) == 1:
+            configured_effective_cap = independent_caps[0]
+            if self.effective_cap is None and "effective_cap" not in self.model_fields_set:
                 self.effective_cap = configured_effective_cap
-            elif self.effective_cap != configured_effective_cap:
-                raise ValueError("effective_cap must match the most restrictive per-dataset configured cap")
+            elif self.effective_cap is not None and self.effective_cap != configured_effective_cap:
+                raise ValueError("effective_cap must match the per-dataset configured cap")
         if (
             self.effective_cap is not None
             and self.selected_seed_group_count is not None
@@ -507,18 +513,24 @@ class ScenarioRunSizeEstimate(BaseModel):
         predecessors: dict[_DatasetCapKey, set[_DatasetCapKey]] = {}
         for dataset in self.datasets:
             previous_key: _DatasetCapKey | None = None
+            cap_occurrences: dict[_DatasetCapIdentity, int] = {}
             for configured_cap in dataset.configured_caps:
-                dataset_name = configured_cap.dataset_name if configured_cap.configured_on == "dataset" else None
+                dataset_name = (
+                    configured_cap.dataset_name or dataset.name if configured_cap.configured_on == "dataset" else None
+                )
                 declared_names = (
                     tuple(configured_cap.dataset_names) if configured_cap.configured_on != "dataset" else ()
                 )
-                key = (
+                identity: _DatasetCapIdentity = (
                     configured_cap.label,
                     configured_cap.count,
                     configured_cap.configured_on,
                     dataset_name,
                     declared_names,
                 )
+                occurrence = cap_occurrences.get(identity, 0)
+                cap_occurrences[identity] = occurrence + 1
+                key = (identity, occurrence)
                 predecessors.setdefault(key, set())
                 if previous_key is not None and previous_key != key:
                     predecessors[key].add(previous_key)

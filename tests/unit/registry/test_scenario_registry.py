@@ -205,6 +205,21 @@ def test_specialized_scenarios_declare_nonstandard_dataset_override_semantics() 
     """Specialized dataset shaping remains explicit in catalog metadata."""
     assert Psychosocial.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.PerDataset
     assert WebInjection.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.Unsupported
+    assert PackageHallucination.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.Unsupported
+    assert SystemPromptExtraction.DATASET_SIZE_LIMIT_OVERRIDE_SCOPE is ScenarioDatasetSizeLimitOverrideScope.Unsupported
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    ("name", "scenario_class"),
+    [
+        ("garak.package_hallucination", PackageHallucination),
+        ("garak.system_prompt_extraction", SystemPromptExtraction),
+    ],
+)
+def test_synthesized_scenario_catalog_disables_ignored_dataset_cap(name: str, scenario_class: type[Scenario]) -> None:
+    metadata = ScenarioRegistry()._build_metadata(name, scenario_class)
+    assert metadata.dataset_size_limit.override_scope is ScenarioDatasetSizeLimitOverrideScope.Unsupported
 
 
 @pytest.mark.parametrize(

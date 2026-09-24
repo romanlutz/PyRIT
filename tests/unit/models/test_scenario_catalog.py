@@ -439,6 +439,64 @@ def test_dataset_summary_rejects_inconsistent_effective_cap() -> None:
         )
 
 
+def test_repeated_child_caps_do_not_impose_one_effective_cap() -> None:
+    """Two separately sampled children can contribute more groups than either child's cap."""
+    caps = [
+        ScenarioDatasetSizeCap(label="per-dataset cap", count=2, configured_on="dataset", dataset_name="inline")
+        for _ in range(2)
+    ]
+    summary = ScenarioDatasetSummary(
+        name="inline",
+        logical_seed_group_count=6,
+        selected_seed_group_count=4,
+        configured_caps=caps,
+    )
+    assert summary.effective_cap is None
+
+    estimate = ScenarioRunSizeEstimate(datasets=[summary])
+    assert estimate.dataset_cap_provenance == caps
+    assert len(estimate.model_dump(mode="json")["dataset_cap_provenance"]) == 2
+
+    one_capped_child = ScenarioDatasetSummary(
+        name="inline",
+        logical_seed_group_count=6,
+        selected_seed_group_count=5,
+        effective_cap=None,
+        configured_caps=[caps[0]],
+    )
+    assert one_capped_child.effective_cap is None
+
+    with pytest.raises(ValidationError, match="multiple child caps"):
+        ScenarioDatasetSummary(
+            name="inline",
+            logical_seed_group_count=6,
+            selected_seed_group_count=4,
+            effective_cap=2,
+            configured_caps=caps,
+        )
+
+
+def test_legacy_per_dataset_caps_without_names_remain_attributable() -> None:
+    """Legacy caps that omit dataset_name are still distinct for distinct populations."""
+    cap = ScenarioDatasetSizeCap(label="per-dataset cap", count=2)
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name=name,
+                logical_seed_group_count=3,
+                selected_seed_group_count=2,
+                configured_caps=[cap],
+            )
+            for name in ("first", "second")
+        ]
+    )
+
+    assert [(item.dataset_name, item.dataset_names) for item in estimate.dataset_cap_provenance] == [
+        ("first", ["first"]),
+        ("second", ["second"]),
+    ]
+
+
 def test_dataset_summary_rejects_unrelated_cap_provenance() -> None:
     """Nested cap provenance must include the population it annotates."""
     with pytest.raises(ValidationError, match="summarized dataset"):
@@ -615,6 +673,29 @@ def test_distinct_shared_caps_with_equal_values_remain_separate() -> None:
     )
 
     assert [cap.dataset_names for cap in estimate.dataset_cap_provenance] == [["first"], ["second"]]
+
+
+def test_repeated_shared_caps_deduplicate_only_across_dataset_summaries() -> None:
+    """Equal shared caps applied twice stay distinct while their per-dataset copies collapse."""
+    shared = ScenarioDatasetSizeCap(
+        label="combined configuration cap",
+        count=2,
+        configured_on="configuration",
+        dataset_names=["first", "second"],
+    )
+    estimate = ScenarioRunSizeEstimate(
+        datasets=[
+            ScenarioDatasetSummary(
+                name=name,
+                logical_seed_group_count=3,
+                selected_seed_group_count=1,
+                configured_caps=[shared, shared],
+            )
+            for name in ("first", "second")
+        ]
+    )
+
+    assert estimate.dataset_cap_provenance == [shared, shared]
 
 
 @pytest.mark.parametrize(

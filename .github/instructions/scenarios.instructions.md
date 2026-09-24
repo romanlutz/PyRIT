@@ -152,6 +152,10 @@ Options:
   cap with `CompoundDatasetAttackConfiguration.per_dataset`
 - Override `_load_seed_groups_for_dataset()` for custom loading
 
+When several compound children contribute to the same named population, their caps still
+apply to each child independently. The population summary reports all child caps, but
+has no single `effective_cap` for their combined selection.
+
 ## Technique Enum
 
 Technique members should represent **attack techniques** — the *how* of an attack (e.g., prompt sending, role play, TAP).  Datasets control *what* is tested (e.g., harm categories, compliance topics).  Avoid mixing dataset/category selection into the technique enum; use `DatasetConfiguration` and `--dataset-names` for that axis.

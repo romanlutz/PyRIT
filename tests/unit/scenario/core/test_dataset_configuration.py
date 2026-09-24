@@ -755,6 +755,57 @@ class TestCompoundDatasetAttackConfiguration:
         with pytest.raises(DatasetConstraintError, match="has 2 item"):
             await config.resolve_attack_groups_for_estimate_async()
 
+    @pytest.mark.parametrize(
+        ("inline", "combined_cap", "second_child_cap"),
+        [(True, None, 2), (False, 3, 2), (False, None, None)],
+    )
+    async def test_repeated_population_caps_preserve_launch_estimate_parity(
+        self, mock_memory: MagicMock, inline: bool, combined_cap: int | None, second_child_cap: int | None
+    ) -> None:
+        if not inline:
+
+            def _get_seeds(*, dataset_name: str, harm_categories: list[str]) -> list[SeedObjective]:
+                assert dataset_name == "shared"
+                return make_objectives(*(f"{harm_categories[0]}-{index}" for index in range(3)))
+
+            mock_memory.get_seeds.side_effect = _get_seeds
+
+        children = [
+            DatasetAttackConfiguration(
+                seeds=make_objectives(*(f"{child}-{index}" for index in range(3))) if inline else None,
+                dataset_names=None if inline else ["shared"],
+                filters=None if inline else {"harm_categories": [str(child)]},
+                max_dataset_size=2 if child == 0 else second_child_cap,
+                auto_fetch=False,
+            )
+            for child in range(2)
+        ]
+        config = CompoundDatasetAttackConfiguration(configurations=children, max_dataset_size=combined_cap)
+        launched = await config.get_attack_groups_by_dataset_async()
+        full, selected = await config.resolve_attack_groups_for_estimate_async()
+        name = INLINE_DATASET_NAME if inline else "shared"
+        selected_count = combined_cap if combined_cap is not None else 2 + (second_child_cap or 3)
+
+        assert len(launched[name]) == len(selected[name]) == selected_count
+        summaries = config.build_population_summaries(
+            full_counts_by_dataset={name: len(groups) for name, groups in full.items()},
+            selected_counts_by_dataset={name: len(groups) for name, groups in selected.items()},
+        )
+        assert len(summaries) == 1
+        assert summaries[0].logical_seed_group_count == 6
+        assert summaries[0].selected_seed_group_count == selected_count
+        assert summaries[0].effective_cap is None
+        estimate = ScenarioRunSizeEstimate(datasets=summaries)
+        assert estimate.dataset_cap_provenance == config.size_cap_provenance()
+        assert len(estimate.model_dump(mode="json")["dataset_cap_provenance"]) == (
+            3 if combined_cap is not None else (2 if second_child_cap is not None else 1)
+        )
+        if not inline:
+            assert {tuple(call.kwargs["harm_categories"]) for call in mock_memory.get_seeds.call_args_list} == {
+                ("0",),
+                ("1",),
+            }
+
     async def test_inline_children_combine(self) -> None:
         config = CompoundDatasetAttackConfiguration(
             configurations=[

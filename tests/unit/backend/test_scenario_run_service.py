@@ -68,6 +68,8 @@ from pyrit.scenario.core import (
     get_default_adversarial_target,
 )
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+from pyrit.scenario.scenarios.garak.package_hallucination import PackageHallucination
+from pyrit.scenario.scenarios.garak.system_prompt_extraction import SystemPromptExtraction
 from pyrit.score.scorer_evaluation.scorer_metrics import ObjectiveScorerMetrics
 from unit.mocks import MockPromptTarget, make_scenario_result
 
@@ -2828,6 +2830,19 @@ class TestScenarioRunServiceFailedAttackReporting:
 
 class TestResolveDatasetConfiguration:
     """Tests for the shared launch and estimate dataset contract."""
+
+    @pytest.mark.usefixtures("patch_central_database")
+    @pytest.mark.parametrize(
+        "scenario_class",
+        [PackageHallucination, SystemPromptExtraction],
+    )
+    def test_synthesized_scenarios_reject_unused_dataset_caps(self, scenario_class: type[Scenario]) -> None:
+        with pytest.raises(ValueError, match="does not support max_dataset_size"):
+            _resolver_mod.ScenarioConfigurationResolver.resolve_configuration(
+                scenario_name=scenario_class.__name__,
+                scenario_class=scenario_class,
+                max_dataset_size=2,
+            )
 
     def test_launch_and_estimate_inputs_resolve_identical_dataset_configuration(self) -> None:
         class _DatasetResolutionScenario:
