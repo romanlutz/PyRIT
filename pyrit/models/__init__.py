@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     )
     from pyrit.models.score import (
         Acquisition,
+        AnswerMatches,
         Condition,
         ContentEntryScorable,
         ContentScorable,
@@ -204,6 +205,7 @@ if TYPE_CHECKING:
         NextMessageSystemPromptPaths,
         Seed,
         SeedDataset,
+        SeedDatasetSummary,
         SeedGroup,
         SeedObjective,
         SeedPrompt,
@@ -232,8 +234,10 @@ if TYPE_CHECKING:
         register_common_json_schema,
         unregister_common_json_schema,
     )
+    from pyrit.models.target.request_trace_context import RequestTraceContext
 
 _LAZY_EXPORTS: dict[str, str] = {
+    "RequestTraceContext": "pyrit.models.target.request_trace_context",
     "AttackAnalyticsCell": "pyrit.models.analytics",
     "AttackAnalyticsConverterDirection": "pyrit.models.analytics",
     "AttackAnalyticsDimension": "pyrit.models.analytics",
@@ -256,6 +260,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AttackResultSelection": "pyrit.models.analytics",
     "AttackStats": "pyrit.models.analytics",
     "Acquisition": "pyrit.models.score",
+    "AnswerMatches": "pyrit.models.score",
     "ALLOWED_CHAT_MESSAGE_ROLES": "pyrit.models.messages.chat_message",
     "AtomicAttackEvaluationIdentifier": "pyrit.models.identifiers",
     "AtomicAttackIdentifier": "pyrit.models.identifiers",
@@ -404,6 +409,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "SeedObjective": "pyrit.models.seeds",
     "SeedPrompt": "pyrit.models.seeds",
     "SeedDataset": "pyrit.models.seeds",
+    "SeedDatasetSummary": "pyrit.models.seeds",
     "SeedGroup": "pyrit.models.seeds",
     "SeedIdentifier": "pyrit.models.identifiers",
     "SeedSimulatedConversation": "pyrit.models.seeds",
