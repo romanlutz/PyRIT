@@ -655,6 +655,7 @@ class TestScenarioServiceListScenarios:
         )
         two_started = asyncio.Event()
         third_waiting = asyncio.Event()
+        third_acquired = asyncio.Event()
         release = asyncio.Event()
         active = 0
         maximum_active = 0
@@ -688,9 +689,13 @@ class TestScenarioServiceListScenarios:
         async def acquire_async() -> bool:
             nonlocal acquire_count
             acquire_count += 1
-            if acquire_count == 3:
+            attempt = acquire_count
+            if attempt == 3:
                 third_waiting.set()
-            return await original_acquire()
+            acquired = await original_acquire()
+            if attempt == 3:
+                third_acquired.set()
+            return acquired
 
         with (
             patch("pyrit.backend.services.scenario_service._DEFAULT_ESTIMATE_TIMEOUT_SECONDS", 30),
@@ -710,6 +715,7 @@ class TestScenarioServiceListScenarios:
                     raise AssertionError(f"Catalog finished before two estimates started and the third queued: {notes}")
                 assert readiness in done, "Two catalog estimates did not start and queue a third within 10 seconds"
 
+                assert not third_acquired.is_set()
                 assert service._run_default_estimate_async.await_count == 2
                 release.set()
                 result = await asyncio.wait_for(catalog_task, timeout=10)
@@ -1176,6 +1182,7 @@ class TestScenarioServiceListScenarios:
         )
         two_started = asyncio.Event()
         third_waiting = asyncio.Event()
+        third_acquired = asyncio.Event()
         release = asyncio.Event()
         active = 0
         maximum_active = 0
@@ -1207,9 +1214,13 @@ class TestScenarioServiceListScenarios:
         async def acquire_async() -> bool:
             nonlocal acquire_count
             acquire_count += 1
-            if acquire_count == 3:
+            attempt = acquire_count
+            if attempt == 3:
                 third_waiting.set()
-            return await original_acquire()
+            acquired = await original_acquire()
+            if attempt == 3:
+                third_acquired.set()
+            return acquired
 
         with patch.object(service._configured_estimate_semaphore, "acquire", side_effect=acquire_async):
             tasks = [
@@ -1235,6 +1246,7 @@ class TestScenarioServiceListScenarios:
                     raise AssertionError("Configured estimate finished before two estimates started.")
                 assert readiness in done, "Two configured estimates did not start and queue a third within 10 seconds"
 
+                assert not third_acquired.is_set()
                 assert service._estimate_configured_run_size_async.await_count == 2
                 release.set()
                 assert await asyncio.wait_for(asyncio.gather(*tasks), timeout=10) == [estimate, estimate, estimate]
