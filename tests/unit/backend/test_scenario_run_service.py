@@ -55,7 +55,7 @@ from pyrit.models import (
     SeedObjective,
     config_hash,
 )
-from pyrit.models.catalog.scenario import RunScenarioRequest
+from pyrit.models.catalog.scenario import RunScenarioRequest, ScenarioTechniqueSummary
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.scenario import Scenario
 from pyrit.scenario.core import (
@@ -65,7 +65,7 @@ from pyrit.scenario.core import (
 )
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score.scorer_evaluation.scorer_metrics import ObjectiveScorerMetrics
-from unit.mocks import MockPromptTarget, make_scenario_result
+from unit.mocks import MockPromptTarget, get_mock_target_identifier, make_scenario_result
 
 if TYPE_CHECKING:
     from pyrit.prompt_target import PromptTarget
@@ -1994,6 +1994,52 @@ class TestScenarioRunServiceListRuns:
 
         assert summary.techniques_used == ["ignore_print"]
 
+    @pytest.mark.parametrize(
+        ("scenario_registry_name", "atomic_attack_name", "technique_name", "known_names", "expected_name"),
+        [
+            (None, "ignore_print__goal_0", None, ["ignore_print"], "AUDIT_SAFE_MARKER"),
+            ("removed.scenario", "ignore_print__goal_0", None, [], "AUDIT_SAFE_MARKER"),
+            ("garak.prompt_inject", "custom_attack", None, ["ignore_print"], "AUDIT_SAFE_MARKER"),
+            ("garak.prompt_inject", "ignore_print__goal_0", "saved_technique", ["ignore_print"], "saved_technique"),
+        ],
+        ids=["no-registry-name", "removed-scenario", "unknown-technique", "persisted-technique"],
+    )
+    def test_list_runs_preserves_technique_fallbacks(
+        self,
+        *,
+        mock_memory: MagicMock,
+        scenario_registry_name: str | None,
+        atomic_attack_name: str,
+        technique_name: str | None,
+        known_names: list[str],
+        expected_name: str,
+    ) -> None:
+        record = _make_history_record(result_id="sr-technique-fallback", run_state=ScenarioRunState.COMPLETED)
+        group = ScenarioRunPlanAtomicGroup(
+            id="group-1",
+            atomic_attack_name=atomic_attack_name,
+            display_group="AUDIT_SAFE_MARKER",
+            technique_name=technique_name,
+            technique_eval_hash="eval",
+            seed_group_ids=["seed-1"],
+        ).model_dump(mode="json", exclude_none=True)
+        record = replace(
+            record,
+            scenario_registry_name=scenario_registry_name,
+            plan_atomic_groups=[group],
+            plan_seed_id_map=[{"id": "seed-1", "objective_sha256": "hash-1"}],
+        )
+        mock_memory.get_scenario_run_history_page.return_value = ([record], {}, False)
+        service = ScenarioRunService()
+        summaries = {name: ScenarioTechniqueSummary(name=name) for name in known_names}
+
+        with patch.object(service, "_get_scenario_technique_summaries", return_value=summaries) as lookup:
+            summary = service.list_runs().items[0]
+
+        assert summary.techniques_used == [expected_name]
+        if scenario_registry_name is None or technique_name is not None:
+            lookup.assert_not_called()
+
     def test_history_falls_back_for_duplicate_objective_hashes_within_one_group(self, mock_memory) -> None:
         record = _make_history_record(result_id="sr-ambiguous-objective", run_state=ScenarioRunState.COMPLETED)
         group = ScenarioRunPlanAtomicGroup(
@@ -2060,6 +2106,69 @@ class TestScenarioRunServiceListRuns:
         result = ScenarioRunService().list_runs()
 
         assert result.items[0].total_attacks is None
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("omit_technique_name", [True, False], ids=["omitted", "null"])
+def test_legacy_plan_techniques_agree_across_projections(
+    *, sqlite_instance: SQLiteMemory, omit_technique_name: bool
+) -> None:
+    techniques = ["ignore_print", "ignore_print_upper"]
+    goals = ["AUDIT_SAFE_MARKER", "SECOND_SAFE_MARKER"]
+    plan = ScenarioRunPlan(
+        scenario_registry_name="garak.prompt_inject",
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id=f"{technique}-{index}",
+                atomic_attack_name=f"{technique}__goal_{index}",
+                display_group=goal,
+                technique_eval_hash=f"eval-{technique}-{index}",
+                seed_group_ids=[f"seed-{index}"],
+            )
+            for technique in techniques
+            for index, goal in enumerate(goals)
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(id=f"seed-{index}", objective_sha256=to_sha256(goal), objective=goal)
+            for index, goal in enumerate(goals)
+        ],
+    )
+    raw_plan = plan.model_dump(mode="json", exclude_none=omit_technique_name)
+    scenario_result = make_scenario_result(
+        scenario_name="garak.prompt_inject",
+        techniques=techniques,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+        scenario_run_state=ScenarioRunState.COMPLETED,
+        metadata={SCENARIO_RUN_PLAN_METADATA_KEY: raw_plan},
+    )
+    sqlite_instance.add_scenario_results_to_memory(scenario_results=[scenario_result])
+    run_id = str(scenario_result.id)
+    service = ScenarioRunService()
+    summaries = {
+        name: ScenarioTechniqueSummary(name=name, description=f"{name} description", tags=["default"])
+        for name in techniques
+    }
+
+    with patch.object(service, "_get_scenario_technique_summaries", return_value=summaries):
+        history = service.list_runs().items[0]
+        detail = service.get_run(scenario_result_id=run_id)
+        progress = service.get_run_progress_from_storage(
+            scenario_result_id=run_id, since=None, limit=25, active_group_ids=[]
+        )
+
+    assert detail is not None
+    assert progress is not None
+    assert history.techniques_used == detail.techniques_used == progress.run.techniques_used == techniques
+    assert history.total_attacks == detail.total_attacks == progress.summary.overall.planned == 4
+    assert [group.display_group for group in progress.summary.display_groups] == goals
+    assert progress.plan is not None
+    assert [group.technique_name for group in progress.plan.atomic_groups] == [
+        technique for technique in techniques for _ in goals
+    ]
+    assert all(group.description and group.tags == ["default"] for group in progress.plan.atomic_groups)
+    stored = sqlite_instance.get_scenario_results(scenario_result_ids=[run_id])[0]
+    assert stored.metadata[SCENARIO_RUN_PLAN_METADATA_KEY] == raw_plan
 
 
 class TestScenarioRunServiceCancelRun:
