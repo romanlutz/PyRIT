@@ -654,9 +654,11 @@ class TestScenarioServiceListScenarios:
             components=[ScenarioRunSizeComponent(label="Default sweep", count=1)],
         )
         two_started = asyncio.Event()
+        third_waiting = asyncio.Event()
         release = asyncio.Event()
         active = 0
         maximum_active = 0
+        acquire_count = 0
 
         async def estimate_async(
             *,
@@ -681,14 +683,49 @@ class TestScenarioServiceListScenarios:
         service._registry.get_all_registered_class_metadata.return_value = metadata
         service._estimate_semaphore = asyncio.Semaphore(2)
         service._run_default_estimate_async = AsyncMock(side_effect=estimate_async)
+        original_acquire = service._estimate_semaphore.acquire
 
-        catalog_task = asyncio.create_task(service.list_scenarios_async())
-        await asyncio.wait_for(two_started.wait(), timeout=2)
-        await asyncio.sleep(0)
+        async def acquire_async() -> bool:
+            nonlocal acquire_count
+            acquire_count += 1
+            if acquire_count == 3:
+                third_waiting.set()
+            return await original_acquire()
 
-        assert service._run_default_estimate_async.await_count == 2
-        release.set()
-        result = await catalog_task
+        with (
+            patch("pyrit.backend.services.scenario_service._DEFAULT_ESTIMATE_TIMEOUT_SECONDS", 30),
+            patch.object(service._estimate_semaphore, "acquire", side_effect=acquire_async),
+        ):
+            catalog_task = asyncio.create_task(service.list_scenarios_async())
+            readiness = asyncio.gather(two_started.wait(), third_waiting.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {readiness, catalog_task},
+                    timeout=10,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if catalog_task in done:
+                    result = await catalog_task
+                    notes = [item.default_run_size.note for item in result.items]
+                    raise AssertionError(f"Catalog finished before two estimates started and the third queued: {notes}")
+                assert readiness in done, "Two catalog estimates did not start and queue a third within 10 seconds"
+
+                assert service._run_default_estimate_async.await_count == 2
+                release.set()
+                result = await asyncio.wait_for(catalog_task, timeout=10)
+            finally:
+                release.set()
+                readiness.cancel()
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        readiness,
+                        catalog_task,
+                        *service._estimate_tasks.values(),
+                        *service._timed_out_estimate_workers,
+                        return_exceptions=True,
+                    ),
+                    timeout=10,
+                )
 
         assert maximum_active == 2
         assert service._run_default_estimate_async.await_count == 3
@@ -1138,9 +1175,11 @@ class TestScenarioServiceListScenarios:
             components=[ScenarioRunSizeComponent(label="Configured sweep", count=1)],
         )
         two_started = asyncio.Event()
+        third_waiting = asyncio.Event()
         release = asyncio.Event()
         active = 0
         maximum_active = 0
+        acquire_count = 0
 
         async def estimate_async(
             *,
@@ -1163,22 +1202,54 @@ class TestScenarioServiceListScenarios:
         service._registry.get_registered_class_metadata.return_value = metadata
         service._configured_estimate_semaphore = asyncio.Semaphore(2)
         service._estimate_configured_run_size_async = AsyncMock(side_effect=estimate_async)
+        original_acquire = service._configured_estimate_semaphore.acquire
 
-        tasks = [
-            asyncio.create_task(
-                service.estimate_scenario_run_size_async(
-                    scenario_name=metadata.registry_name,
-                    request=ScenarioRunSizeEstimateRequest(scenario_params={"request_index": index}),
+        async def acquire_async() -> bool:
+            nonlocal acquire_count
+            acquire_count += 1
+            if acquire_count == 3:
+                third_waiting.set()
+            return await original_acquire()
+
+        with patch.object(service._configured_estimate_semaphore, "acquire", side_effect=acquire_async):
+            tasks = [
+                asyncio.create_task(
+                    service.estimate_scenario_run_size_async(
+                        scenario_name=metadata.registry_name,
+                        request=ScenarioRunSizeEstimateRequest(scenario_params={"request_index": index}),
+                    )
                 )
-            )
-            for index in range(3)
-        ]
-        await asyncio.wait_for(two_started.wait(), timeout=1)
-        await asyncio.sleep(0)
+                for index in range(3)
+            ]
+            readiness = asyncio.gather(two_started.wait(), third_waiting.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {readiness, *tasks},
+                    timeout=10,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                early_tasks = [task for task in tasks if task in done]
+                if early_tasks:
+                    for task in early_tasks:
+                        await task
+                    raise AssertionError("Configured estimate finished before two estimates started.")
+                assert readiness in done, "Two configured estimates did not start and queue a third within 10 seconds"
 
-        assert service._estimate_configured_run_size_async.await_count == 2
-        release.set()
-        assert await asyncio.gather(*tasks) == [estimate, estimate, estimate]
+                assert service._estimate_configured_run_size_async.await_count == 2
+                release.set()
+                assert await asyncio.wait_for(asyncio.gather(*tasks), timeout=10) == [estimate, estimate, estimate]
+            finally:
+                release.set()
+                readiness.cancel()
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        readiness,
+                        *tasks,
+                        *service._configured_estimate_tasks.values(),
+                        return_exceptions=True,
+                    ),
+                    timeout=10,
+                )
         assert maximum_active == 2
 
     async def test_metadata_catalog_remains_responsive_during_estimate(self) -> None:
