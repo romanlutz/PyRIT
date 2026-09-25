@@ -148,8 +148,9 @@ E2E_LIVE_MODE=true npx playwright test
 The mock and seeded projects run in the **GitHub Actions** pull-request workflow. The live project is intended for a protected pipeline with an Entra identity or API keys.
 
 CI runs two isolated mock shards alongside one serial seeded job, with one
-worker per job. Mock shards start only Vite; the seeded job starts its own Python
-backend. The required **Frontend E2E Tests** check merges their reports and fails
+worker per job. Each job starts its own Vite server and Python backend because
+mock specs still depend on backend auth bootstrap and some API calls. The jobs
+never share backend state. The required **Frontend E2E Tests** check merges their reports and fails
 if any shard fails, is cancelled, or is missing a report. Skipped and flaky tests
 also fail CI.
 
@@ -160,13 +161,7 @@ attempt. Per-shard blob reports are replaced on reruns so **Re-run failed jobs**
 can reuse the reports from successful shards.
 
 Local E2E tests use `dev.py` to automatically start both frontend and backend
-servers. If servers are already running, they will be reused. Setting
-`E2E_FRONTEND_PORT` instead starts a dedicated Vite server without a backend,
-which is useful for running an isolated mock shard:
-
-```bash
-E2E_FRONTEND_PORT=13010 npx playwright test --project=mock --shard=1/2 --workers=1
-```
+servers. If servers are already running, they will be reused.
 
 > **Note**: `test:e2e:ui` and `test:e2e:headed` require a graphical display and won't work in headless environments like devcontainers. Use `npm run test:e2e` for CI/headless testing.
 
