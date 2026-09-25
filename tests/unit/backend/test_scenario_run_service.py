@@ -924,6 +924,9 @@ class TestScenarioRunServiceStartRun:
         records: dict[str, MagicMock] = {}
         release_events: dict[str, asyncio.Event] = {}
         started_events: dict[str, asyncio.Event] = {}
+        handoff_read_failed = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        retry_timeout = 10
         started: list[str] = []
         active_count = 0
         max_active_count = 0
@@ -961,6 +964,7 @@ class TestScenarioRunServiceStartRun:
                 return list(records.values())
             if fail_once["handoff_read"] and scenario_result_ids == ["run-2"]:
                 fail_once["handoff_read"] = False
+                loop.call_soon_threadsafe(handoff_read_failed.set)
                 raise RuntimeError("temporary storage failure")
             return [records[run_id] for run_id in scenario_result_ids if run_id in records]
 
@@ -987,42 +991,54 @@ class TestScenarioRunServiceStartRun:
         mock_memory.try_update_scenario_run_state.side_effect = _update_state
         mock_memory.update_scenario_run_state_and_metadata_fields.side_effect = _update_state
 
-        responses = await asyncio.gather(*(service.start_run_async(request=_make_request()) for _ in range(4)))
+        try:
+            responses = await asyncio.gather(*(service.start_run_async(request=_make_request()) for _ in range(4)))
 
-        assert [response.scenario_result_id for response in responses] == ["run-1", "run-2", "run-3", "run-4"]
-        snapshot = service.get_queue_snapshot()
-        assert snapshot.active and snapshot.active.scenario_result_id == "run-1"
-        assert [(entry.scenario_result_id, entry.position) for entry in snapshot.queued] == [
-            ("run-2", 1),
-            ("run-3", 2),
-            ("run-4", 3),
-        ]
+            assert [response.scenario_result_id for response in responses] == ["run-1", "run-2", "run-3", "run-4"]
+            snapshot = service.get_queue_snapshot()
+            assert snapshot.active and snapshot.active.scenario_result_id == "run-1"
+            assert [(entry.scenario_result_id, entry.position) for entry in snapshot.queued] == [
+                ("run-2", 1),
+                ("run-3", 2),
+                ("run-4", 3),
+            ]
 
-        fail_once["handoff_read"] = True
-        release_events["run-1"].set()
-        await asyncio.wait_for(started_events["run-2"].wait(), timeout=1)
-        fail_once["queued_cancel"] = True
-        with pytest.raises(RuntimeError, match="temporary cancellation persistence failure"):
-            await service.cancel_run_async(scenario_result_id="run-3")
-        assert [entry.scenario_result_id for entry in service.get_queue_snapshot().queued] == ["run-3", "run-4"]
-        cancelled = await service.cancel_run_async(scenario_result_id="run-3")
-        assert cancelled and cancelled.status == ScenarioRunState.CANCELLED
-        assert [(entry.scenario_result_id, entry.position) for entry in service.get_queue_snapshot().queued] == [
-            ("run-4", 1)
-        ]
+            fail_once["handoff_read"] = True
+            release_events["run-1"].set()
+            await asyncio.wait_for(handoff_read_failed.wait(), timeout=retry_timeout)
+            await asyncio.wait_for(started_events["run-2"].wait(), timeout=retry_timeout)
+            snapshot = service.get_queue_snapshot()
+            assert snapshot.active and snapshot.active.scenario_result_id == "run-2"
+            fail_once["queued_cancel"] = True
+            with pytest.raises(RuntimeError, match="temporary cancellation persistence failure"):
+                await service.cancel_run_async(scenario_result_id="run-3")
+            assert [entry.scenario_result_id for entry in service.get_queue_snapshot().queued] == ["run-3", "run-4"]
+            cancelled = await service.cancel_run_async(scenario_result_id="run-3")
+            assert cancelled and cancelled.status == ScenarioRunState.CANCELLED
+            assert [(entry.scenario_result_id, entry.position) for entry in service.get_queue_snapshot().queued] == [
+                ("run-4", 1)
+            ]
 
-        fail_once["active_cancel"] = True
-        with pytest.raises(RuntimeError, match="temporary active cancellation persistence failure"):
-            await service.cancel_run_async(scenario_result_id="run-2")
-        await asyncio.wait_for(started_events["run-4"].wait(), timeout=1)
-        assert records["run-2"].scenario_run_state == ScenarioRunState.CANCELLED
-        release_events["run-4"].set()
-        await asyncio.wait_for(service._active_tasks["run-4"].task, timeout=1)
+            fail_once["active_cancel"] = True
+            with pytest.raises(RuntimeError, match="temporary active cancellation persistence failure"):
+                await service.cancel_run_async(scenario_result_id="run-2")
+            await asyncio.wait_for(started_events["run-4"].wait(), timeout=retry_timeout)
+            assert records["run-2"].scenario_run_state == ScenarioRunState.CANCELLED
+            release_events["run-4"].set()
+            last_task = service._active_tasks["run-4"].task
+            assert last_task is not None
+            await asyncio.wait_for(asyncio.shield(last_task), timeout=retry_timeout)
 
-        assert started == ["run-1", "run-2", "run-4"]
-        assert max_active_count == 1
-        assert service.get_queue_snapshot().active is None
-        assert service.get_queue_snapshot().queued == []
+            assert started == ["run-1", "run-2", "run-4"]
+            assert max_active_count == 1
+            assert service.get_queue_snapshot().active is None
+            assert service.get_queue_snapshot().queued == []
+        finally:
+            for key in fail_once:
+                fail_once[key] = False
+            for release in release_events.values():
+                release.set()
+            await service.shutdown_async()
 
     async def test_start_run_runs_initializers(self, mock_all_registries) -> None:
         """Test that initializers are run during start_run_async."""
