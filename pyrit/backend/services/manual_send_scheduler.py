@@ -45,6 +45,11 @@ class ManualSendScheduler:
         self._condition = asyncio.Condition()
         self._queue: deque[object] = deque()
         self._active = 0
+        self._closing = False
+
+    def stop_admission(self) -> None:
+        """Reject new operations while existing owners finish cancellation cleanup."""
+        self._closing = True
 
     @contextmanager
     def reserve(self, *, conversation_id: str) -> Iterator[None]:
@@ -58,6 +63,8 @@ class ManualSendScheduler:
             ManualSendConflictError: If a manual operation already owns the conversation.
             ManualSendQueueFullError: If accepting the operation would exceed the budget.
         """
+        if self._closing:
+            raise ManualSendQueueFullError("Manual message operations are shutting down")
         if conversation_id in self._conversations:
             raise ManualSendConflictError("A manual message operation is already in progress for this conversation")
         if len(self._conversations) >= self._max_operations:
