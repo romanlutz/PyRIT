@@ -183,5 +183,7 @@ jobs:
     condition: always()
     inputs:
       testResultsFormat: 'JUnit'
-      testResultsFiles: 'junit/test-results*.xml'
+      testResultsFiles: |
+        junit/test-results*.xml
+        junit/partner-test-results.xml
       mergeTestResults: true
