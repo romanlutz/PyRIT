@@ -208,6 +208,7 @@ def test_builds_stay_local_and_only_identical_devcontainers_share_cache(workflow
             assert steps[stage]["with"]["push"] == "false"
             assert steps[stage]["with"]["load"] == "true"
         production = steps["production"]["with"]
+        assert production["builder"] == "default"
         assert production["context"] == "."
         assert production["file"] == "docker/Dockerfile"
         assert f"PYRIT_SOURCE={source}" in production["build-args"]

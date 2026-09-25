@@ -14,8 +14,10 @@ Images stay in that runner's Docker daemon instead of being compressed, uploaded
 downloaded, and loaded between jobs. The PyPI checks run on `main` and manual
 dispatches only, using a separate runner with the same co-located build/test
 sequence. The two sequences share the existing GHA cache only for their identical
-devcontainer build inputs. Production still uses the Docker driver so it can
-consume the locally loaded base image. Neither sequence publishes images.
+devcontainer build inputs. Production explicitly selects the daemon's `default`
+builder (Docker driver) so it can consume the locally loaded base image rather
+than looking for it in the cached builder's separate image store. Neither
+sequence publishes images.
 
 The existing `Build Devcontainer`, `Build Production (local)`, `Test Import (local)`,
 `Test GUI (local)`, and `Test Jupyter (local)` check names are retained as result
