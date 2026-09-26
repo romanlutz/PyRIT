@@ -49,6 +49,7 @@ def test_submission_returns_accepted_handle(
         "send_id": "send",
         "attack_result_id": "attack",
         "conversation_id": "conversation",
+        "request_turn_number": None,
         "state": "queued",
         "error": None,
         "failure_stage": None,

@@ -44,6 +44,7 @@ import { generateClientId } from '@/utils/clientId'
 import ObjectiveHeader from './ObjectiveHeader'
 import type { PieceConversion } from './converterTypes'
 import { useChatConverters } from '@/hooks/useChatConverters'
+import { useRuntime } from '@/hooks/useRuntime'
 import { useUserPreferences } from '@/hooks/useUserPreferences'
 import TargetSelect from '@/components/Config/TargetSelect'
 import {
@@ -104,6 +105,7 @@ interface RecoverableSendDraft {
   conversions: Record<string, PieceConversion>
   source: 'live' | 'persisted'
   missingConverterSelections: boolean
+  converterGeneration?: string
 }
 
 interface ConversationLoadRequest {
@@ -121,9 +123,11 @@ interface PendingSend {
   readonly priorUserPieceIds: Set<string>
   readonly initialMessages: Message[]
   readonly navigationRevision: number
+  readonly converterGeneration: string
   attackResultId: string | null
   conversationId: string
   needsRefresh: boolean
+  responseReadId?: number
   progress?: MessageSendStatus
 }
 
@@ -335,6 +339,7 @@ export default function ChatWindow({
   const isExportingRef = useRef(false)
   const [isNarrowScreen, setIsNarrowScreen] = useState(matchesNarrowScreen)
   const [isConverterPanelOpen, setIsConverterPanelOpen] = useState(false)
+  const runtime = useRuntime()
   // Conversation-wide preference for rendering message text as Markdown.
   const { preferences, updatePreferences } = useUserPreferences()
   const globalMarkdown = preferences.chatMarkdown
@@ -349,9 +354,14 @@ export default function ChatWindow({
   const inputBoxRef = useRef<ChatInputAreaHandle>(null)
   const recoveryInFlightRef = useRef(false)
   const viewedConversationId = activeConversationId ?? conversationId
-  const recoverableSend = viewedConversationId
+  const savedRecovery = viewedConversationId
     ? recoverableSends[viewedConversationId]
     : undefined
+  const recoverableSend = useMemo<RecoverableSendDraft | undefined>(() => (
+    savedRecovery?.converterGeneration !== undefined && savedRecovery.converterGeneration !== runtime.generation
+      ? { ...savedRecovery, conversions: {}, source: 'persisted', missingConverterSelections: true }
+      : savedRecovery
+  ), [savedRecovery, runtime.generation])
   const [sendIssues, setSendIssues] = useState<Record<string, SendIssue>>({})
   const sendIssueConversationId = attackResultId ? viewedConversationId : loadedConversationId ?? viewedConversationId
   const sendIssue = sendIssues[sendIssueConversationId ?? '__pending__']
@@ -546,13 +556,15 @@ export default function ChatWindow({
         const operation = pendingSendsRef.current.get(convId)
         const pending = pendingUserMessagesRef.current.get(convId) ?? []
         const requestStored = operation && [...savedUserIds].some((id) => !operation.priorUserPieceIds.has(id))
-        if (!requestStored) { frontendMessages.push(...pending) }
-        frontendMessages.push({
-          role: 'assistant',
-          content: '...',
-          timestamp: new Date().toISOString(),
-          isLoading: true,
-        })
+        if (!operation?.progress || !isSendFinished(operation.progress)) {
+          if (!requestStored) { frontendMessages.push(...pending) }
+          frontendMessages.push({
+            role: 'assistant',
+            content: '...',
+            timestamp: new Date().toISOString(),
+            isLoading: true,
+          })
+        }
       }
       setMessages(frontendMessages)
       markConversationLoaded(convId)
@@ -637,7 +649,13 @@ export default function ChatWindow({
   }
   const finishTracking = (operation: PendingSend): void => {
     if (!isCurrentSend(operation) || !sendingConvIdsRef.current.has(operation.conversationId)) { return }
-    invalidateConversationLoads(operation.conversationId)
+    if (operation.responseReadId === undefined
+      || latestConversationLoadRequestIdsRef.current.get(operation.conversationId) === operation.responseReadId) {
+      invalidateConversationLoads(operation.conversationId)
+    }
+    if (isViewingSend(operation)) {
+      setMessages((previous) => previous.filter((message) => !message.isLoading))
+    }
     sendingConvIdsRef.current.delete(operation.conversationId)
     pendingUserMessagesRef.current.delete(operation.conversationId)
     setSendingConversations((previous) => {
@@ -663,12 +681,17 @@ export default function ChatWindow({
     markConversationLoaded(operation.conversationId)
   }
 
-  const applySendResponse = (operation: PendingSend, response: AddMessageResponse): ChatSendOutcome => {
+  const applySendResponse = (
+    operation: PendingSend, response: AddMessageResponse, isLatestRead: boolean,
+  ): ChatSendOutcome => {
     const effectiveConvId = operation.conversationId
     const targetResponseStatus = response.messages.target_response_status
-    const processingFailure = operation.progress
+    const recovery = operation.progress
       && !['interrupted', 'finalization'].includes(operation.progress.failure_stage ?? '')
-      && targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR
+      ? getPersistedProcessingRecovery(effectiveConvId, response.messages)
+      : undefined
+    const processingFailure = recovery?.failedRequestTurnNumber === operation.progress?.request_turn_number
+      && recovery !== undefined
     const status: ChatSendOutcome['status'] = operation.progress?.failure_stage === 'preparation'
       || processingFailure
       ? 'retryable_failure'
@@ -677,35 +700,24 @@ export default function ChatWindow({
         ? 'non_retryable_failure'
         : 'sent'
     const backendMessages = backendMessagesToFrontend(response.messages.messages)
-    loadedUserPieceIdsRef.current.set(effectiveConvId, userPieceIds(response.messages))
-
-    if (processingFailure) {
-      const errorMessageIndex = response.messages.messages.findIndex(
-        (message) => message.role === 'assistant'
-          && message.turn_number === targetResponseStatus.response_turn_number,
-      )
-      if (errorMessageIndex < 0) {
-        throw new Error('Target response status did not match an assistant message.')
-      }
-      setRecoverableSends((currentRecoveries) => ({
-        ...currentRecoveries,
-        [effectiveConvId]: {
-          conversationId: effectiveConvId,
-          failedRequestTurnNumber: targetResponseStatus.request_turn_number,
-          failedResponseTurnNumber: targetResponseStatus.response_turn_number,
-          historyCutoffIndex: getRecoveryHistoryCutoff(
-            response.messages.messages, targetResponseStatus.request_turn_number,
-          ),
-          errorMessageIndex,
-          originalValue: operation.originalValue,
-          attachments: operation.attachments,
-          conversions: operation.conversions,
-          source: 'live',
-          missingConverterSelections: false,
-        },
-      }))
+    const recoveredDraft: RecoverableSendDraft | undefined = processingFailure && recovery ? {
+      ...recovery,
+      originalValue: operation.originalValue,
+      attachments: operation.attachments,
+      conversions: operation.conversions,
+      converterGeneration: operation.converterGeneration,
+      source: 'live',
+      missingConverterSelections: false,
+    } : recovery
+    if (isLatestRead) {
+      loadedUserPieceIdsRef.current.set(effectiveConvId, userPieceIds(response.messages))
+      setRecoverableSends((currentRecoveries) => {
+        const next = { ...currentRecoveries }
+        if (recoveredDraft) { next[effectiveConvId] = recoveredDraft } else { delete next[effectiveConvId] }
+        return next
+      })
     }
-    if (isViewingSend(operation)) {
+    if (isLatestRead && isViewingSend(operation)) {
       invalidateConversationLoads(effectiveConvId)
       setMessages(backendMessages)
       markConversationLoaded(effectiveConvId)
@@ -733,14 +745,20 @@ export default function ChatWindow({
         if (!isCurrentSend(operation)) { return { status: 'non_retryable_failure', clearDraft: false } }
         operation.progress = progress
       }
+      nextConversationLoadRequestIdRef.current += 1
+      operation.responseReadId = nextConversationLoadRequestIdRef.current
+      latestConversationLoadRequestIdsRef.current.set(operation.conversationId, operation.responseReadId)
       const [attack, conversation] = await Promise.all([
         attacksApi.getAttack(operation.attackResultId),
         attacksApi.getMessages(operation.attackResultId, operation.conversationId),
       ])
       if (!isCurrentSend(operation)) { return { status: 'non_retryable_failure', clearDraft: false } }
-      const outcome = applySendResponse(operation, { attack, messages: conversation })
+      const isLatestRead = latestConversationLoadRequestIdsRef.current.get(operation.conversationId)
+        === operation.responseReadId
+      const outcome = applySendResponse(operation, { attack, messages: conversation }, isLatestRead)
       const progress = operation.progress
       const hasProcessingRecovery = conversation.target_response_status?.response_error === 'processing'
+        && conversation.target_response_status.request_turn_number === progress?.request_turn_number
       if (!progress || progress.failure_stage === 'interrupted' || progress.failure_stage === 'finalization'
         || (progress.failure_stage === 'sending' && !hasProcessingRecovery)) {
         operation.needsRefresh = true
@@ -799,7 +817,8 @@ export default function ChatWindow({
     attachments: MessageAttachment[],
   ): Promise<ChatSendOutcome> => {
     if (
-      !activeTarget
+      !runtime.ready
+      || !activeTarget
       || isLoadingAttack
       || isLoadingMessages
       || awaitingConversationLoad
@@ -836,6 +855,7 @@ export default function ChatWindow({
       priorUserPieceIds: new Set(loadedUserPieceIdsRef.current.get(initialSendConvId)),
       initialMessages: [...messages],
       navigationRevision: navigationRevisionRef.current,
+      converterGeneration: runtime.generation,
       attackResultId,
       conversationId: initialSendConvId,
       needsRefresh: false,
@@ -1103,6 +1123,7 @@ export default function ChatWindow({
       || !recoverableSend
       || isMutationLocked
       || sendIssue?.blocking
+      || isSending
       || recoveryInFlightRef.current
     ) {
       return
@@ -1149,6 +1170,7 @@ export default function ChatWindow({
     appendConversationCreationError,
     attackResultId,
     isMutationLocked,
+    isSending,
     isNarrowScreen,
     onSelectConversation,
     recoverableSend,
@@ -1638,7 +1660,7 @@ export default function ChatWindow({
                   ? 'Edit in new conversation'
                   : 'Edit in clean conversation',
                 description: processingRecoveryDescription,
-                disabled: isRecoveringProcessingError || isMutationLocked || Boolean(sendIssue?.blocking),
+                disabled: isRecoveringProcessingError || isMutationLocked || isSending || Boolean(sendIssue?.blocking),
                 onRecover: handleRecoverProcessingError,
               }}
         />
@@ -1662,7 +1684,8 @@ export default function ChatWindow({
           systemPrompt={systemPrompt}
           onSystemPromptChange={setSystemPrompt}
           disabled={
-            isSending
+            !runtime.ready
+            || isSending
             || !activeTarget
             || isLoadingAttack
             || singleTurnLimitReached

@@ -13,6 +13,7 @@ import type {
 } from "@/types";
 
 import { makeTarget } from "./_targets";
+import { READY_RUNTIME } from "./_runtime";
 import { fulfillMessageSend, makeAddMessageResponse, readMessageSendResult } from "./_attacks";
 
 // ---------------------------------------------------------------------------
@@ -106,6 +107,7 @@ const IMAGE_OUTPUT_CONVERTERS: Record<string, string> = {
  * accumulates messages for multi-turn, and mirrors real API shapes.
  */
 async function mockBackendAPIs(page: Page) {
+  await page.route("**/api/runtime", async (route) => { await route.fulfill({ json: READY_RUNTIME }); });
   let accumulatedMessages: Record<string, unknown>[] = [];
   // Track the converter type for each registered converter instance so the
   // preview mock can decide between text and image_path output.

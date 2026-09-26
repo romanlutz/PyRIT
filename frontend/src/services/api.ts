@@ -165,6 +165,12 @@ export const authApi = {
 }
 
 export const configurationApi = {
+  getRuntimeStatus: async (): Promise<RuntimeStatus> => {
+    return (await apiClient.get('/config/runtime')).data
+  },
+  reinitialize: async (version: string): Promise<RuntimeStatus> => {
+    return (await apiClient.post('/config/runtime/apply', { version })).data
+  },
   getContent: async (): Promise<ConfigurationFileContent> => {
     const response = await apiClient.get('/config')
     return response.data
@@ -191,6 +197,12 @@ export const configurationApi = {
   ): Promise<EnvironmentFileContent> => {
     const response = await apiClient.put(`/config/env-files/${encodeURIComponent(fileId)}`, request)
     return response.data
+  },
+}
+
+export const runtimeApi = {
+  getReadiness: async (): Promise<RuntimeReadiness> => {
+    return (await apiClient.get('/runtime')).data
   },
 }
 
@@ -518,3 +530,4 @@ export const scenariosApi = {
     return response.data
   },
 }
+import type { RuntimeReadiness, RuntimeStatus } from '@/types'

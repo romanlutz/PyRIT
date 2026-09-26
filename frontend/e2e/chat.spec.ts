@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { test, expect, type Locator, type Page, type Request } from "@playwright/test";
 import type { BackendMessage, BackendMessagePiece } from "@/types";
 import { fulfillMessageSend, makeAddMessageResponse } from "./_attacks";
+import { READY_RUNTIME } from "./_runtime";
 import { makeTarget } from "./_targets";
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/runtime", async (route) => { await route.fulfill({ json: READY_RUNTIME }); });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers – mock backend API responses so tests don't require an OpenAI key

@@ -7,8 +7,10 @@ Tests for the FastAPI application entry point (main.py).
 Covers the lifespan manager and setup_frontend function.
 """
 
+import asyncio
 import logging
 import os
+from collections.abc import Iterator
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.datastructures import State
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pyrit.backend.main import SPAStaticFiles, app, lifespan, setup_frontend
@@ -24,6 +27,7 @@ from pyrit.backend.services.converter_service import ConverterService, get_conve
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.message_send_service import get_message_send_service
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.backend.services.service_lifecycle import close_services_async
 from pyrit.memory import AzureSQLMemory
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
@@ -33,14 +37,34 @@ def mock_scenario_run_lifecycle():
     """Mock scenario scheduling lifecycle hooks."""
     service = MagicMock(
         reconcile_interrupted_runs_async=AsyncMock(return_value=0),
+        has_active_work=MagicMock(return_value=False),
         shutdown_async=AsyncMock(),
     )
-    with patch("pyrit.backend.main.get_scenario_run_service", return_value=service):
+    with (
+        patch("pyrit.backend.services.runtime_lifecycle.get_scenario_run_service", return_value=service),
+        patch("pyrit.backend.services.runtime_lifecycle.peek_scenario_run_service", return_value=service),
+    ):
         yield service
 
 
 class TestLifespan:
     """Tests for the application lifespan context manager."""
+
+    async def test_cancelled_manual_shutdown_still_closes_converter_and_clears_caches_async(
+        self, *, patch_central_database: MagicMock
+    ) -> None:
+        service = get_message_send_service()
+        converter = get_converter_service()
+        with (
+            patch.object(service, "shutdown_async", side_effect=asyncio.CancelledError),
+            patch.object(converter, "close_async", wraps=converter.close_async) as close,
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await close_services_async()
+        close.assert_awaited_once()
+        assert get_message_send_service.cache_info().currsize == 0
+        assert get_manual_send_scheduler.cache_info().currsize == 0
+        assert get_converter_service.cache_info().currsize == 0
 
     @pytest.mark.parametrize("scenario_failure", [False, True])
     async def test_manual_sends_stop_before_converter_cleanup_and_caches_reset_async(
@@ -77,6 +101,11 @@ class TestLifespan:
         assert get_message_send_service.cache_info().currsize == 0
         assert get_manual_send_scheduler.cache_info().currsize == 0
         assert get_converter_service.cache_info().currsize == 0
+
+    @pytest.fixture(autouse=True)
+    def isolated_lifespan_state(self) -> Iterator[None]:
+        with patch.object(app, "state", State()):
+            yield
 
     @pytest.mark.parametrize("fail_during_lifespan", [False, True])
     async def test_lifespan_cleans_converter_uploads(
@@ -141,7 +170,7 @@ class TestLifespan:
             async with lifespan(app):
                 pass
 
-            init_mock.assert_awaited_once_with(raise_on_initializer_error=False)
+            init_mock.assert_awaited_once_with(raise_on_initializer_error=True)
             assert app.state.default_labels == {}
             assert app.state.max_concurrent_scenario_runs == fake_config.max_concurrent_scenario_runs
             assert app.state.allow_custom_initializers is False
@@ -155,7 +184,7 @@ class TestLifespan:
             patch.object(ConfigurationLoader, "load_with_overrides", return_value=fake_config),
             patch.object(ConfigurationLoader, "initialize_pyrit_async", new=AsyncMock()),
             patch("pyrit.backend.main.setup_frontend"),
-            patch.object(logging.getLogger("pyrit.backend.main"), "warning") as mock_warning,
+            patch.object(logging.getLogger("pyrit.backend.services.runtime_lifecycle"), "warning") as mock_warning,
         ):
             async with lifespan(app):
                 pass
@@ -174,7 +203,8 @@ class TestLifespan:
         with (
             patch.object(ConfigurationLoader, "load_with_overrides", return_value=fake_config),
             patch.object(ConfigurationLoader, "initialize_pyrit_async", new=AsyncMock()),
-            patch("pyrit.backend.main.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.services.runtime_lifecycle.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.services.runtime_lifecycle.peek_scenario_run_service", return_value=service),
             patch("pyrit.backend.main.setup_frontend"),
         ):
             async with lifespan(app):
@@ -239,7 +269,10 @@ class TestLifespan:
         with (
             patch.object(ConfigurationLoader, "load_with_overrides", return_value=fake_config),
             patch.object(ConfigurationLoader, "initialize_pyrit_async", new=AsyncMock()),
-            patch("pyrit.backend.main.InitializerRegistry.get_registry_singleton", return_value=registry),
+            patch(
+                "pyrit.backend.services.runtime_lifecycle.InitializerRegistry.get_registry_singleton",
+                return_value=registry,
+            ),
             patch("pyrit.backend.main.setup_frontend"),
         ):
             async with lifespan(app):
@@ -253,22 +286,25 @@ class TestLifespan:
         fake_config = ConfigurationLoader(allow_custom_initializers=True)
         call_order: list[str] = []
         registry = MagicMock()
-        registry.register_stored_initializers.side_effect = lambda: call_order.append("custom")
+        registry.register_stored_initializers.side_effect = lambda **kwargs: call_order.append("custom")
 
         async def initialize_async(*, raise_on_initializer_error: bool) -> None:
-            assert raise_on_initializer_error is False
+            assert raise_on_initializer_error is True
             call_order.append("configured")
 
         with (
             patch.object(ConfigurationLoader, "load_with_overrides", return_value=fake_config),
             patch.object(ConfigurationLoader, "initialize_pyrit_async", new=AsyncMock(side_effect=initialize_async)),
-            patch("pyrit.backend.main.InitializerRegistry.get_registry_singleton", return_value=registry),
+            patch(
+                "pyrit.backend.services.runtime_lifecycle.InitializerRegistry.get_registry_singleton",
+                return_value=registry,
+            ),
             patch("pyrit.backend.main.setup_frontend"),
         ):
             async with lifespan(app):
                 pass
 
-        registry.register_stored_initializers.assert_called_once_with()
+        registry.register_stored_initializers.assert_called_once_with(strict=True)
         assert call_order == ["custom", "configured"]
 
     async def test_lifespan_downloads_blob_config_to_temporary_file(self, mock_scenario_run_lifecycle) -> None:
@@ -277,7 +313,9 @@ class TestLifespan:
         config_content = b"operator: blob-user\n"
         loaded_path: Path | None = None
 
-        def load_config(*, config_file: Path, env_akv_ref: list[str] | None = None) -> ConfigurationLoader:
+        def load_config(
+            *, config_file: Path, env_akv_ref: list[str] | None = None, strict: bool = False
+        ) -> ConfigurationLoader:
             nonlocal loaded_path
             assert env_akv_ref is None
             loaded_path = config_file
@@ -320,14 +358,11 @@ class TestSetupFrontend:
             mock_print.assert_called_once()
             assert "DEVELOPMENT" in mock_print.call_args[0][0]
 
-    def test_frontend_exists_mounts_static(self) -> None:
+    def test_frontend_exists_mounts_static(self, tmp_path: Path) -> None:
         """Test that setup_frontend mounts StaticFiles when frontend exists."""
         mock_frontend_path = MagicMock()
         mock_frontend_path.exists.return_value = True
-        mock_frontend_path.__str__ = lambda self: "/tmp/fake_frontend"
-
-        # Create the directory so StaticFiles doesn't raise
-        os.makedirs("/tmp/fake_frontend", exist_ok=True)
+        mock_frontend_path.__str__ = lambda self: str(tmp_path)
 
         with (
             patch("pyrit.backend.main.DEV_MODE", False),

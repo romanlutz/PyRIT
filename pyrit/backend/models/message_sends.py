@@ -60,6 +60,7 @@ class MessageSendStatus(BaseModel):
     send_id: str
     attack_result_id: str
     conversation_id: str
+    request_turn_number: int | None = Field(None, description="This send's request turn, assigned during preparation")
     state: MessageSendState = MessageSendState.QUEUED
     error: str | None = None
     failure_stage: MessageSendFailureStage | None = None

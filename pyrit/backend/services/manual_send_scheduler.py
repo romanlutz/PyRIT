@@ -51,6 +51,10 @@ class ManualSendScheduler:
         """Reject new operations while existing owners finish cancellation cleanup."""
         self._closing = True
 
+    def has_active_work(self) -> bool:
+        """Return whether any manual operation still owns a conversation."""
+        return bool(self._conversations)
+
     @contextmanager
     def reserve(self, *, conversation_id: str) -> Iterator[None]:
         """

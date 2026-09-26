@@ -79,6 +79,9 @@ sending includes target-side normalization, provider I/O, response conversion, a
 Finalization updates attack metadata. Stages are not inferred from stored message counts,
 and no stage guarantees that retrying delivery is safe. Stored target errors and
 `target_response_status` remain available through the ordinary conversation API.
+Terminal states are published only after finalization and ownership release. Progress also
+includes the `request_turn_number` assigned during preparation, so clients can distinguish
+this send's response from a later turn written by another client.
 
 The optional `wait_ms` query parameter (0-1000) waits for completion, returning immediately
 if the operation settles. Cancelling this read, disconnecting, or navigating away does not
@@ -98,6 +101,11 @@ when running multiple workers. Missing progress never authorizes an automatic re
 Shutdown stops admission, cancels accepted operations, and joins unavoidable offloaded
 writes before releasing conversation ownership and clearing loop-bound caches. Interrupted
 delivery can be uncertain: refresh saved evidence instead of automatically resending.
+Live runtime reinitialization treats accepted manual sends as active work even after
+their submission requests have returned. It rejects replacement until they settle,
+then clears the sender and scheduler caches along with the other runtime services.
+The chat preserves failed drafts across replacement, but requires converter choices
+to be reviewed again rather than restoring outputs tied to the previous registry.
 
 The offline browser fixture `frontend.e2e.fixtures.manual_send_backend:app` uses the real
 backend lifecycle with isolated in-memory SQLite, no environment files, and no default

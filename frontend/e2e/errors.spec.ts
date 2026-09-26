@@ -1,7 +1,12 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import type { BackendMessage } from "@/types";
 import { fulfillMessageSend, makeAddMessageResponse } from "./_attacks";
+import { READY_RUNTIME } from "./_runtime";
 import { makeTarget } from "./_targets";
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/runtime", async (route) => { await route.fulfill({ json: READY_RUNTIME }); });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers

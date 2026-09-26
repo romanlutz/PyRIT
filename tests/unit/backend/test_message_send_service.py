@@ -2577,6 +2577,84 @@ async def _settle_send_async(*, service: MessageSendService, status: MessageSend
 @pytest.mark.timeout(20)
 @pytest.mark.usefixtures("patch_central_database")
 class TestAsyncMessageSend:
+    async def test_failure_is_not_terminal_until_evidence_reads_and_finalization_finish_async(
+        self,
+        *,
+        message_send_service: MessageSendService,
+        mock_memory: MagicMock,
+        send_dependencies: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        reading, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        calls = 0
+        stored_error = MessagePiece(role="assistant", original_value="failure", response_error="processing")
+
+        def read_pieces(**_: Any) -> list[MessagePiece]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return []
+            if calls == 2:
+                loop.call_soon_threadsafe(reading.set)
+                assert release.wait(timeout=10)
+            return [stored_error]
+
+        async def fail_async(**kwargs: Any) -> None:
+            kwargs["on_target_dispatch"]()
+            raise RuntimeError("target failed")
+
+        send_dependencies[1].side_effect = fail_async
+        with patch.object(mock_memory, "get_message_pieces", side_effect=read_pieces):
+            status = await message_send_service.submit_async(attack_result_id="attack", request=_submission())
+            try:
+                await reading.wait()
+                during = await message_send_service.get_status_async(
+                    attack_result_id="attack", send_id=status.send_id, wait_ms=1
+                )
+                assert during.state == MessageSendState.SENDING
+                assert during.failure_stage == MessageSendFailureStage.SENDING
+                assert message_send_service._scheduler._conversations == {"main"}
+            finally:
+                release.set()
+                final = await _settle_send_async(service=message_send_service, status=status)
+        assert final.state == MessageSendState.FAILED
+        assert not message_send_service._scheduler._conversations
+
+    async def test_shutdown_waiting_for_validation_survives_cancellation_without_dispatch_async(
+        self,
+        *,
+        message_send_service: MessageSendService,
+        send_dependencies: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        validating, release = asyncio.Event(), asyncio.Event()
+        validate = message_send_service._validate_message_async
+
+        async def hold_validation_async(**kwargs: Any) -> Any:
+            validated = await validate(**kwargs)
+            validating.set()
+            await release.wait()
+            return validated
+
+        with patch.object(message_send_service, "_validate_message_async", side_effect=hold_validation_async):
+            submission = asyncio.create_task(
+                message_send_service.submit_async(attack_result_id="attack", request=_submission())
+            )
+            await validating.wait()
+            shutdown = asyncio.create_task(message_send_service.shutdown_async())
+            await asyncio.sleep(0)
+            shutdown.cancel()
+            await asyncio.sleep(0)
+            try:
+                assert not shutdown.done()
+            finally:
+                release.set()
+                await asyncio.gather(submission, shutdown, return_exceptions=True)
+                await message_send_service.shutdown_async()
+        with pytest.raises(ManualSendQueueFullError, match="shutting down"):
+            submission.result()
+        send_dependencies[1].assert_not_awaited()
+        assert not message_send_service._scheduler._conversations
+
     async def test_default_budget_admits_64_operations_with_only_four_dispatching_async(
         self,
         *,
@@ -2667,10 +2745,17 @@ class TestAsyncMessageSend:
             release.set()
             current = await _settle_send_async(service=service, status=status)
             assert current.state == MessageSendState.COMPLETED
+            assert current.request_turn_number == 0
             provider.assert_awaited_once()
         pieces = await asyncio.to_thread(sqlite_instance.get_message_pieces, conversation_id=ar.conversation_id)
         assert [piece.role for piece in pieces] == ["user", "assistant"]
         assert not service._scheduler._conversations
+        next_send = await service.submit_async(
+            attack_result_id=ar.attack_result_id,
+            request=_submission(conversation_id=ar.conversation_id, submission_id="next"),
+        )
+        next_send = await _settle_send_async(service=service, status=next_send)
+        assert next_send.request_turn_number == 2
         current.state = MessageSendState.FAILED
         assert (
             await service.get_status_async(attack_result_id=ar.attack_result_id, send_id=status.send_id)

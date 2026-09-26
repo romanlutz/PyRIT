@@ -39,6 +39,9 @@ jest.mock('@/components/Layout/MainLayout', () => {
   }
 })
 jest.mock('@/services/api', () => ({
+  runtimeApi: {
+    getReadiness: jest.fn().mockResolvedValue({ ready: true, state: 'ready', generation: '' }),
+  },
   attacksApi: {
     getAttack: jest.fn(),
     getMessages: jest.fn(),
@@ -128,7 +131,7 @@ describe('App target selection with the chat composer', () => {
     })
     jest.mocked(attacksApi.submitMessageSend).mockResolvedValue({
       send_id: 'saved-send', attack_result_id: 'saved-attack', conversation_id: 'saved-conversation',
-      state: 'completed', error: null, failure_stage: null,
+      state: 'completed', error: null, failure_stage: null, request_turn_number: 0,
     })
   })
 

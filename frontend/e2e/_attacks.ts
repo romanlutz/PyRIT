@@ -43,6 +43,7 @@ export async function fulfillMessageSend(route: Route, response: AddMessageRespo
     send_id: request.submission_id,
     attack_result_id: attackId,
     conversation_id: conversationId,
+    request_turn_number: response.messages.target_response_status?.request_turn_number ?? null,
     state: processingError ? "failed" : "completed",
     failure_stage: processingError ? "sending" : null,
     error: processingError ? "Target processing failed." : null,

@@ -122,6 +122,7 @@ class MessageSendService:
         self._terminal: OrderedDict[str, float] = OrderedDict()
         self._accept_lock = asyncio.Lock()
         self._closing = False
+        self._shutdown_task: asyncio.Task[None] | None = None
 
     async def submit_async(self, *, attack_result_id: str, request: MessageSendRequest) -> MessageSendStatus:
         """
@@ -148,6 +149,8 @@ class MessageSendService:
                 reservation.enter_context(self._scheduler.reserve(conversation_id=request.target_conversation_id))
                 owned_request = request.model_copy(deep=True)
                 validated = await self._validate_message_async(attack_result_id=attack_result_id, request=owned_request)
+                if self._closing:
+                    raise ManualSendQueueFullError("Manual message operations are shutting down")
                 operation = _Send(
                     status=MessageSendStatus(
                         send_id=str(uuid.uuid4()),
@@ -189,18 +192,15 @@ class MessageSendService:
         """Stop admission, cancel accepted sends, and join their unavoidable writes before releasing ownership."""
         self._closing = True
         self._scheduler.stop_admission()
-        async with self._accept_lock:
-            tasks = [operation.task for operation in self._sends.values() if operation.task is not None]
-        for task in tasks:
-            task.cancel()
-        settled = asyncio.gather(*tasks, return_exceptions=True)
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._settle_sends_async())
         cancelled = False
-        while not settled.done():
+        while not self._shutdown_task.done():
             try:
-                await asyncio.shield(settled)
+                await asyncio.shield(self._shutdown_task)
             except asyncio.CancelledError:
                 cancelled = True
-        settled.result()
+        self._shutdown_task.result()
         if cancelled:
             raise asyncio.CancelledError
 
@@ -301,7 +301,6 @@ class MessageSendService:
             await self._execute_validated_message_async(
                 attack_result_id=progress.attack_result_id, request=request, validated=validated, progress=progress
             )
-            progress.state = MessageSendState.FAILED if progress.failure_stage else MessageSendState.COMPLETED
         except asyncio.CancelledError:
             self._record_failure(progress=progress, interrupted=True)
         except Exception:
@@ -313,9 +312,23 @@ class MessageSendService:
         if task.cancelled():
             self._record_failure(progress=operation.status, interrupted=True)
         operation.reservation.close()
+        operation.status.state = (
+            MessageSendState.INTERRUPTED
+            if operation.status.failure_stage == MessageSendFailureStage.INTERRUPTED
+            else MessageSendState.FAILED
+            if operation.status.failure_stage
+            else MessageSendState.COMPLETED
+        )
         operation.task = None
         self._terminal[operation.status.send_id] = time.monotonic()
         self._expire_terminal_sends()
+
+    async def _settle_sends_async(self) -> None:
+        async with self._accept_lock:
+            tasks = [operation.task for operation in self._sends.values() if operation.task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _expire_terminal_sends(self) -> None:
         cutoff = time.monotonic() - self.TERMINAL_TTL_SECONDS
@@ -329,8 +342,6 @@ class MessageSendService:
 
     @classmethod
     def _record_failure(cls, *, progress: MessageSendStatus, interrupted: bool = False) -> None:
-        if not interrupted and progress.failure_stage is not None and progress.state == MessageSendState.FAILED:
-            return
         if interrupted:
             stage = MessageSendFailureStage.INTERRUPTED
         elif progress.state in (MessageSendState.QUEUED, MessageSendState.PREPARING):
@@ -341,7 +352,6 @@ class MessageSendService:
             stage = MessageSendFailureStage.SENDING
         progress.failure_stage = stage
         progress.error = cls.FAILURE_MESSAGES[stage]
-        progress.state = MessageSendState.INTERRUPTED if interrupted else MessageSendState.FAILED
 
     async def _execute_message_async(
         self,
@@ -362,6 +372,8 @@ class MessageSendService:
 
         existing = await asyncio.to_thread(self._memory.get_message_pieces, conversation_id=msg_conversation_id)
         sequence = max((p.sequence for p in existing), default=-1) + 1
+        if progress is not None:
+            progress.request_turn_number = sequence
 
         if request.send:
             assert target is not None  # validated before acquiring the execution slot

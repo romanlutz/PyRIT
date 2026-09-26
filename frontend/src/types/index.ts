@@ -182,6 +182,7 @@ export interface ConfigurationFileContent {
   content: string
   source: string
   version: string
+  live_reinitialization_enabled: boolean
 }
 
 export interface UpdateConfigurationFileRequest {
@@ -635,6 +636,7 @@ export interface MessageSendStatus {
   send_id: string
   attack_result_id: string
   conversation_id: string
+  request_turn_number: number | null
   state: 'queued' | 'preparing' | 'sending' | 'finalizing' | 'completed' | 'failed' | 'interrupted'
   error: string | null
   failure_stage: 'preparation' | 'sending' | 'finalization' | 'interrupted' | null
@@ -1145,4 +1147,19 @@ export interface ScenarioRunProgress {
   next_cursor?: string | null
   has_more: boolean
   plan_complete: boolean
+}
+export interface RuntimeReadiness {
+  ready: boolean
+  state: string
+  generation: string
+}
+
+export interface RuntimeStatus {
+  state: string
+  generation: string
+  version: string | null
+  enabled: boolean
+  applying: boolean
+  outcome: string
+  message: string
 }

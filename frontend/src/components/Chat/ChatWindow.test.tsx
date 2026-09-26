@@ -5,9 +5,11 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import ChatWindow from "./ChatWindow";
 import { makeTarget } from "@/test-utils/targetFixtures";
 import { UserPreferencesProvider } from "@/hooks/useUserPreferences";
+import * as runtimeHooks from "@/hooks/useRuntime";
 import { readUserPreferences } from "@/utils/userPreferences";
 import {
   AddMessageResponse,
+  AttackSummary,
   BackendMessage,
   AttackTargetResolutionStatus,
   ConverterInstance,
@@ -415,6 +417,7 @@ describe("ChatWindow Integration", () => {
         send_id: submissionId,
         attack_result_id: attackId,
         conversation_id: request.target_conversation_id,
+        request_turn_number: response.messages.target_response_status?.request_turn_number ?? null,
         state: "completed",
         error: null,
         failure_stage: null,
@@ -467,6 +470,7 @@ describe("ChatWindow Integration", () => {
       send_id: "async-send",
       attack_result_id: props.attackResultId,
       conversation_id: props.conversationId,
+      request_turn_number: 0,
       state: "queued",
       error: null,
       failure_stage: null,
@@ -478,6 +482,19 @@ describe("ChatWindow Integration", () => {
       isAxiosError: true,
       response: { status: 503, data: { detail: "Read temporarily unavailable" } },
     };
+    const attack: AttackSummary = {
+      attack_result_id: props.attackResultId,
+      conversation_id: props.conversationId,
+      attack_type: "ManualAttack",
+      objective: "",
+      outcome: "undetermined",
+      converters: [],
+      message_count: 2,
+      related_conversation_ids: [],
+      labels: {},
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:01Z",
+    };
 
     beforeEach(() => {
       mockedMapper.buildMessagePieces.mockImplementation(actualMessageMapper.buildMessagePieces);
@@ -485,19 +502,7 @@ describe("ChatWindow Integration", () => {
       mockedAttacksApi.getMessages.mockResolvedValue(empty);
       mockedAttacksApi.submitMessageSend.mockResolvedValue(queued);
       mockedAttacksApi.getMessageSend.mockResolvedValue(complete);
-      mockedAttacksApi.getAttack.mockResolvedValue({
-        attack_result_id: props.attackResultId,
-        conversation_id: props.conversationId,
-        attack_type: "ManualAttack",
-        objective: "",
-        outcome: "undetermined",
-        converters: [],
-        message_count: 2,
-        related_conversation_ids: [],
-        labels: {},
-        created_at: "2026-01-01T00:00:00Z",
-        updated_at: "2026-01-01T00:00:01Z",
-      });
+      mockedAttacksApi.getAttack.mockResolvedValue(attack);
     });
 
     async function sendDraft(user: ReturnType<typeof userEvent.setup>): Promise<void> {
@@ -506,6 +511,50 @@ describe("ChatWindow Integration", () => {
       await waitFor(() => expect(screen.getByRole("button", { name: /send message/i })).toBeEnabled());
       await user.click(screen.getByRole("button", { name: /send message/i }));
     }
+
+    it("keeps a newer conversation refresh when an older completion read returns late", async () => {
+      const user = userEvent.setup();
+      const onAttackChange = jest.fn();
+      let finishMetadata: (value: AttackSummary) => void = () => {};
+      mockedAttacksApi.getAttack.mockImplementationOnce(() => new Promise((resolve) => {
+        finishMetadata = resolve;
+      }));
+      mockedAttacksApi.getConversations.mockResolvedValue({
+        attack_result_id: props.attackResultId, main_conversation_id: props.conversationId,
+        conversations: [{ conversation_id: props.conversationId, message_count: 0 }],
+      });
+      mockedAttacksApi.getMessages.mockResolvedValueOnce(empty).mockResolvedValueOnce(reply);
+      render(<TestWrapper><ChatWindow {...props} relatedConversationCount={1} onAttackChange={onAttackChange} /></TestWrapper>);
+      await sendDraft(user);
+      await waitFor(() => expect(mockedAttacksApi.getMessages).toHaveBeenCalledTimes(2));
+      const newer = { ...makeTextResponse("Newer conversation reply").messages, conversation_id: props.conversationId };
+      mockedAttacksApi.getMessages.mockResolvedValue(newer);
+      await user.click(screen.getByRole("button", { name: `Select conversation ${props.conversationId}` }));
+      expect(await screen.findByText("Newer conversation reply")).toBeInTheDocument();
+      await act(async () => { finishMetadata(attack); });
+      expect(screen.getByText("Newer conversation reply")).toBeInTheDocument();
+      expect(screen.queryByText("Async reply")).not.toBeInTheDocument();
+      expect(screen.queryByText("...")).not.toBeInTheDocument();
+      expect(onAttackChange).not.toHaveBeenCalled();
+    });
+
+    it("restores a newer failed request from history instead of the earlier successful draft", async () => {
+      const user = userEvent.setup();
+      const laterFailure = {
+        ...makeErrorResponse("processing", "Later request failed", 2).messages, conversation_id: props.conversationId,
+      };
+      laterFailure.messages[0].message_pieces[0].original_value = "Request from another client";
+      laterFailure.messages[0].message_pieces[0].converted_value = "Request from another client";
+      mockedAttacksApi.getMessages.mockResolvedValueOnce(empty).mockResolvedValue(laterFailure);
+      mockedAttacksApi.createConversation.mockResolvedValue({
+        conversation_id: "clean-conversation", created_at: "2026-01-01T00:00:03Z",
+      });
+      render(<TestWrapper><ChatWindow {...props} /></TestWrapper>);
+      await sendDraft(user);
+      await user.click(await screen.findByRole("button", { name: /edit in clean conversation/i }));
+      expect(screen.getByRole("textbox")).toHaveValue("Request from another client");
+      expect(screen.getByText(/restored from conversation history/)).toBeInTheDocument();
+    });
 
     it("finishes immediately without advancing a polling timer", async () => {
       jest.useFakeTimers({ doNotFake: ["queueMicrotask"] });
@@ -642,6 +691,25 @@ describe("ChatWindow Integration", () => {
         expect(within(screen.getByTestId("message-list")).getAllByText("Draft to send")).toHaveLength(1);
       });
       expect(mockedAttacksApi.getMessageSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for accepted work to settle before allowing processing-error recovery", async () => {
+      const user = userEvent.setup();
+      mockedAttacksApi.getMessageSend.mockImplementation(() => new Promise(() => {}));
+      mockedAttacksApi.getConversations.mockResolvedValue({
+        attack_result_id: props.attackResultId, main_conversation_id: props.conversationId,
+        conversations: [{ conversation_id: props.conversationId, message_count: 0 }],
+      });
+      render(<TestWrapper><ChatWindow {...props} relatedConversationCount={1} /></TestWrapper>);
+      await sendDraft(user);
+      mockedAttacksApi.getMessages.mockResolvedValue({
+        ...makeErrorResponse("processing", "Stored processing error").messages, conversation_id: props.conversationId,
+      });
+      await user.click(screen.getByRole("button", { name: `Select conversation ${props.conversationId}` }));
+      const recovery = await screen.findByRole("button", { name: /edit in clean conversation/i });
+      expect(recovery).toBeDisabled();
+      await user.click(recovery);
+      expect(mockedAttacksApi.createConversation).not.toHaveBeenCalled();
     });
 
     it("does not let an old attack completion update or unlock a newer send", async () => {
@@ -3127,8 +3195,11 @@ describe("ChatWindow Integration", () => {
     }
   );
 
-  it("should retain the matching live draft and converters while updating its recovery position", async () => {
+  it.each([false, true])("should restore the matching live draft with reinitialization %s", async (reinitialized: boolean) => {
     const user = userEvent.setup();
+    const runtime = jest.spyOn(runtimeHooks, "useRuntime").mockReturnValue({
+      ready: true, state: "ready", generation: "original",
+    });
     const onSelectConversation = jest.fn();
     const failedResponse = makeErrorResponse("processing", "The target could not process this message.", 2, true);
     const file = new File(["image content"], "live.png", { type: "image/png" });
@@ -3210,6 +3281,10 @@ describe("ChatWindow Integration", () => {
     await user.click(screen.getByRole("button", { name: /send message/i }));
     expect(await screen.findByRole("button", { name: /edit in clean conversation/i })).toBeEnabled();
 
+    if (reinitialized) {
+      runtime.mockReturnValue({ ready: true, state: "ready", generation: "replacement" });
+      rendered.rerender(<TestWrapper><ChatWindow {...props} /></TestWrapper>);
+    }
     mockedAttacksApi.getMessages.mockResolvedValue({
       conversation_id: props.conversationId,
       messages: [
@@ -3222,7 +3297,9 @@ describe("ChatWindow Integration", () => {
       await screen.findByRole("button", { name: "Select conversation conv-matching-failure" })
     );
     const recoveryButton = await screen.findByTestId("recover-processing-error-btn-3");
-    expect(screen.getByText(/converter choices are preserved/i)).toBeInTheDocument();
+    expect(screen.getByText(reinitialized
+      ? /converter choices could not be restored/i
+      : /converter choices are preserved/i)).toBeInTheDocument();
     await user.click(recoveryButton);
     await waitFor(() => {
       expect(onSelectConversation).toHaveBeenCalledWith("conv-matching-recovery");
@@ -3239,17 +3316,26 @@ describe("ChatWindow Integration", () => {
 
     expect(await screen.findByText(/live\.png/)).toBeInTheDocument();
     expect(screen.getByTestId("chat-input")).toHaveValue("live draft");
-    expect(await screen.findByTestId("converted-file-chip")).toHaveTextContent("live.pdf");
+    if (reinitialized) {
+      expect(screen.queryByTestId("converted-file-chip")).not.toBeInTheDocument();
+    } else {
+      expect(await screen.findByTestId("converted-file-chip")).toHaveTextContent("live.pdf");
+    }
     await user.click(screen.getByRole("button", { name: /send message/i }));
     await waitFor(() => {
       expect(mockSendResult).toHaveBeenLastCalledWith(
         props.attackResultId,
         expect.objectContaining({
           target_conversation_id: "conv-matching-recovery",
-          pieces: expect.arrayContaining([expect.objectContaining({ applied_converter_ids: ["live-pdf-converter"] })]),
+          pieces: expect.arrayContaining([reinitialized
+            ? expect.objectContaining({ original_value: "live draft" })
+            : expect.objectContaining({ applied_converter_ids: ["live-pdf-converter"] })]),
         })
       );
     });
+    if (reinitialized) {
+      expect(mockSendResult.mock.calls.at(-1)?.[1].pieces.every((piece) => !piece.applied_converter_ids)).toBe(true);
+    }
     expect(mockedMapper.buildMessagePieces).toHaveBeenLastCalledWith(
       "live draft",
       [expect.objectContaining({ file, name: "live.png" })]
