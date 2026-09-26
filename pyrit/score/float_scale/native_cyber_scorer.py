@@ -50,7 +50,7 @@ class NativeCyberReportScorer(SubmissionReportScorer):
                     "report_sha256": report.sha256(),
                     "binding": report.binding_name,
                     "run_status": report.status.value,
-                    "simulated": int(report.simulated),
+                    "simulated": int(report.simulated) if report.simulated is not None else "unknown",
                     "publication_role": "final_run_result",
                     "publication_boundary": "pyrit_score_commit",
                 },

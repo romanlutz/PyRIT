@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import stat
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -30,7 +33,6 @@ from tests.unit.prompt_target.target.test_native_agent_target import SdkSessionF
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
     from pyrit.memory import SQLiteMemory
 
@@ -48,9 +50,14 @@ class FixtureRuntime:
         self.order = order
         self.grade_count = 0
         self.closed = False
+        self.storage_checked = False
+
+    async def validate_agent_storage_async(self, *, directory: Path) -> None:
+        assert await asyncio.to_thread(directory.is_dir)
+        self.storage_checked = True
 
     async def grade_async(self, *, evidence: NativeAgentEvidence) -> NativeCyberJudgment:
-        assert self.sdk.disconnected and not self.closed
+        assert self.sdk.disconnected and not self.closed and self.storage_checked
         assert evidence.coverage_complete and evidence.idle
         self.grade_count += 1
         self.order.append("grade")
@@ -67,6 +74,10 @@ class FixtureBinding(NativeCyberTaskBinding):
         self.blocked = blocked
         self.open_count = 0
         self.close_count = 0
+
+    async def validate_host_storage_async(self, *, directory: Path) -> None:
+        """Keep the inert fixture independent of production Windows ACL qualification."""
+        assert await asyncio.to_thread(directory.is_dir)
 
     async def readiness_async(self) -> NativeCyberReadiness:
         return NativeCyberReadiness(
@@ -119,6 +130,188 @@ async def test_blocked_preflight_does_not_open_or_grade_async(tmp_path: Path) ->
     assert run.score.is_undetermined and run.report.agent is None
 
 
+@pytest.mark.parametrize(
+    ("error_type", "status"),
+    [(OSError, "error"), (TimeoutError, "expired"), (asyncio.CancelledError, "cancelled")],
+)
+async def test_raising_readiness_retains_unknown_provenance_and_undetermined_result_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory, error_type: type[BaseException], status: str
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(binding, "readiness_async", new_callable=AsyncMock, side_effect=error_type("readiness failed")):
+        if error_type is asyncio.CancelledError:
+            with pytest.raises(asyncio.CancelledError, match="readiness failed"):
+                await run.start_async()
+        else:
+            await run.start_async()
+    assert run.view().status == status and not run.view().can_step
+    assert binding.open_count == binding.close_count == binding.runtime.grade_count == 0
+    assert binding.runtime.sdk.prompts == []
+    assert run.report.readiness is None and run.report.simulated is None and run.report.agent is None
+    assert run.report.cleanup == "not_opened"
+    assert any("readiness failed" in item for item in run.report.errors)
+    assert run.score.is_undetermined and run.score.score_metadata["simulated"] == "unknown"
+    assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
+    retained = await asyncio.to_thread((run.directory / f"{run.report.sha256()}.json").read_text, encoding="utf-8")
+    assert retained == run.report.canonical_json()
+    stored = sqlite_instance.get_scorable_content(content_ids=[run.score.scorable.content_id])
+    assert NativeCyberReport.model_validate_json(stored[run.score.scorable.content_id].value) == run.report
+    with pytest.raises(ValueError, match="only once"):
+        await run.start_async()
+
+
+async def test_mkdir_failure_retains_only_memory_content_and_never_claims_a_report_file_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    occupied = tmp_path / "not-a-directory"
+    await asyncio.to_thread(occupied.write_text, "do not overwrite", encoding="utf-8")
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=occupied)
+    with patch.object(binding, "readiness_async", new_callable=AsyncMock) as readiness:
+        view = await run.start_async()
+    readiness.assert_not_awaited()
+    assert view.status == "error" and run.score.is_undetermined
+    assert view.content_id and view.report_sha256
+    assert run.report.readiness is None and run.report.simulated is None
+    assert run.report.agent is None and run.report.cleanup == "not_opened" and run.report.errors
+    assert binding.open_count == binding.close_count == 0
+    assert not await asyncio.to_thread(run.directory.exists)
+    assert await asyncio.to_thread(occupied.read_text, encoding="utf-8") == "do not overwrite"
+    stored = sqlite_instance.get_scorable_content(content_ids=[run.score.scorable.content_id])
+    assert NativeCyberReport.model_validate_json(stored[run.score.scorable.content_id].value) == run.report
+
+
+async def test_unavailable_directory_and_memory_propagates_retention_failure_async(tmp_path: Path) -> None:
+    occupied = tmp_path / "not-a-directory"
+    await asyncio.to_thread(occupied.write_text, "fixture", encoding="utf-8")
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=occupied)
+    with patch.object(
+        NativeCyberReportScorer, "score_async", new_callable=AsyncMock, side_effect=OSError("memory unavailable")
+    ):
+        with pytest.raises(OSError, match="memory unavailable"):
+            await run.start_async()
+    assert run.status == "error" and run.report is None and run.score is None
+    assert binding.open_count == binding.close_count == 0
+
+
+async def test_report_file_failure_retains_an_explicit_memory_error_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding(blocked=True)
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch(
+        "pyrit.executor.workflow.native_cyber_eval.aiofiles.open", side_effect=PermissionError("report read-only")
+    ):
+        view = await run.start_async()
+    assert view.status == "error" and run.score.is_undetermined
+    assert any("Report file retention failed" in error for error in run.report.errors)
+    assert not await asyncio.to_thread((run.directory / f"{run.report.sha256()}.json").exists)
+    stored = sqlite_instance.get_scorable_content(content_ids=[run.score.scorable.content_id])
+    assert NativeCyberReport.model_validate_json(stored[run.score.scorable.content_id].value) == run.report
+
+
+@pytest.mark.parametrize("simulated", [False, True])
+async def test_unknown_readiness_cannot_be_relabelled_as_live_or_simulated_async(
+    *, tmp_path: Path, simulated: bool
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(binding, "readiness_async", new_callable=AsyncMock, side_effect=OSError("readiness failed")):
+        await run.start_async()
+    payload = run.report.model_dump()
+    payload["simulated"] = simulated
+    with pytest.raises(ValueError, match="unknown native provenance"):
+        NativeCyberReport.model_validate(payload)
+
+
+@pytest.mark.parametrize("guard", ["host", "agent"])
+async def test_storage_qualification_failure_prevents_prompts_and_raw_report_files_async(
+    *, tmp_path: Path, guard: str
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    owner = binding if guard == "host" else binding.runtime
+    with patch.object(
+        owner,
+        f"validate_{guard}_storage_async",
+        new_callable=AsyncMock,
+        side_effect=PermissionError("storage unverified"),
+    ) as validation:
+        result = await run.start_async()
+    validation.assert_awaited_once()
+    assert validation.call_args.kwargs["directory"] == run.directory
+    assert result.status == "error" and run.score.is_undetermined
+    assert any("storage unverified" in error for error in run.report.errors)
+    assert binding.runtime.sdk.prompts == [] and binding.runtime.grade_count == 0
+    assert binding.open_count == binding.close_count == (0 if guard == "host" else 1)
+    assert not await asyncio.to_thread(run.directory.exists)
+
+
+async def test_unverified_guest_and_failed_cleanup_never_publish_raw_content_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    class UnclosedBinding(FixtureBinding):
+        @asynccontextmanager
+        async def open_runtime(self, *, run_id: str, request: NativeCyberRequest) -> AsyncIterator[FixtureRuntime]:
+            self.open_count += 1
+            try:
+                yield self.runtime
+            finally:
+                self.close_count += 1
+                raise OSError("environment removal unconfirmed")
+
+    binding = UnclosedBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(
+        binding.runtime,
+        "validate_agent_storage_async",
+        new_callable=AsyncMock,
+        side_effect=PermissionError("guest mount"),
+    ):
+        with pytest.raises(PermissionError, match="unverified agent storage boundary remains open"):
+            await run.start_async()
+    assert run.status == "error" and run.report is None and run.score is None
+    assert binding.open_count == binding.close_count == 1
+    assert binding.runtime.sdk.prompts == [] and binding.runtime.grade_count == 0
+    assert sqlite_instance.get_scores(score_type="float_scale") == []
+    assert await asyncio.to_thread(lambda: list(run.directory.iterdir())) == []
+
+
+async def test_default_windows_storage_policy_requires_actual_acl_verification_async(tmp_path: Path) -> None:
+    with patch("pyrit.executor.workflow.native_cyber_eval.os", spec=os) as platform:
+        platform.name = "nt"
+        with pytest.raises(PermissionError, match="verify host directory ACLs"):
+            await NativeCyberTaskBinding.validate_host_storage_async(FixtureBinding(), directory=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("mode", "owner", "accepted"),
+    [
+        (stat.S_IFDIR | 0o700, 1000, True),
+        (stat.S_IFDIR | 0o755, 1000, False),
+        (stat.S_IFDIR | 0o700, 2000, False),
+        (stat.S_IFLNK | 0o700, 1000, False),
+    ],
+)
+async def test_default_posix_storage_policy_checks_owner_permissions_and_directory_async(
+    *, mode: int, owner: int, accepted: bool
+) -> None:
+    directory = MagicMock(spec=Path)
+    directory.parent = MagicMock(spec=Path)
+    metadata = os.stat_result((mode, 0, 0, 1, owner, owner, 0, 0, 0, 0))
+    directory.lstat.return_value = directory.parent.lstat.return_value = metadata
+    with patch("pyrit.executor.workflow.native_cyber_eval.os", spec=os) as platform:
+        platform.name = "posix"
+        platform.getuid = MagicMock(return_value=1000)
+        if accepted:
+            await NativeCyberTaskBinding.validate_host_storage_async(FixtureBinding(), directory=directory)
+        else:
+            with pytest.raises(PermissionError, match="private directories"):
+                await NativeCyberTaskBinding.validate_host_storage_async(FixtureBinding(), directory=directory)
+
+
 async def test_retained_step_uses_same_session_and_scores_only_at_finish_async(tmp_path: Path) -> None:
     binding = FixtureBinding(steps=True)
     run = NativeCyberEvaluation(
@@ -169,22 +362,44 @@ async def test_missing_native_event_blocks_grade_even_if_agent_returns_async(tmp
     assert run.report.agent.gaps and binding.close_count == 1
 
 
+async def test_execution_before_request_never_reaches_original_grader_async(tmp_path: Path) -> None:
+    binding = FixtureBinding()
+    turn = binding.runtime.sdk.turns[0]
+    turn[0], turn[1] = turn[1], turn[0]
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    result = await run.start_async()
+    assert result.status == "error" and run.score.is_undetermined
+    assert binding.runtime.grade_count == 0 and binding.close_count == 1
+    assert run.report.agent.idle and not run.report.agent.coverage_complete
+    assert any("started before its model tool request" in gap for gap in run.report.agent.gaps)
+
+
 async def test_fresh_rerun_has_distinct_lineage_environment_and_content_async(tmp_path: Path) -> None:
-    first = NativeCyberEvaluation(
-        binding=FixtureBinding(), request=NativeCyberRequest(instruction="First"), directory=tmp_path
-    )
+    binding = FixtureBinding()
+    first = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="First"), directory=tmp_path)
     await first.start_async()
-    second = NativeCyberEvaluation(
-        binding=FixtureBinding(),
-        request=NativeCyberRequest(instruction="Edited", parent_run_id=first.run_id),
-        directory=tmp_path,
-    )
+    binding.runtime = FixtureRuntime(turns=3, steps=False, order=binding.order)
+    second = first.rerun(request=NativeCyberRequest(instruction="Edited"))
     await second.start_async()
     assert second.report.request.parent_run_id == first.run_id
     assert first.run_id != second.run_id
     assert first.report.agent.environment_id != second.report.agent.environment_id
     assert first.report.agent.session_id != second.report.agent.session_id
     assert first.report.input_sha256 != second.report.input_sha256
+
+
+async def test_direct_constructor_lineage_cannot_reuse_a_parent_environment_async(tmp_path: Path) -> None:
+    binding = FixtureBinding()
+    parent = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="first"), directory=tmp_path)
+    await parent.start_async()
+    with pytest.raises(ValueError, match="constructor lineage is unverified"):
+        NativeCyberEvaluation(
+            binding=binding,
+            request=NativeCyberRequest(instruction="second", parent_run_id=parent.run_id),
+            directory=tmp_path,
+        )
+    assert binding.open_count == binding.close_count == 1
+    assert binding.runtime.sdk.prompts == ["first"]
 
 
 async def test_binding_field_capability_gates_async(tmp_path: Path) -> None:
@@ -201,8 +416,10 @@ async def test_binding_field_capability_gates_async(tmp_path: Path) -> None:
     run = NativeCyberEvaluation(
         binding=FixtureBinding(), request=NativeCyberRequest(instruction="x", operator_steps=True), directory=tmp_path
     )
-    with pytest.raises(ValueError, match="not qualified"):
-        await run.start_async()
+    result = await run.start_async()
+    assert result.status == "error" and run.score.is_undetermined
+    assert any("not qualified" in error for error in run.report.errors)
+    assert run.report.cleanup == "not_opened" and run.report.agent is None
 
 
 async def test_original_grader_failure_keeps_environment_cleanup_and_no_retry_async(tmp_path: Path) -> None:
@@ -318,6 +535,26 @@ async def test_real_rerun_method_rejects_reused_environment_async(tmp_path: Path
     assert view.status == "error"
     assert child.score.is_undetermined
     assert any("reuse" in item for item in child.report.errors)
+
+
+@pytest.mark.parametrize("identity", ["environment_id", "session_id"])
+async def test_rerun_keeps_ancestry_through_an_unopened_child_async(*, tmp_path: Path, identity: str) -> None:
+    binding = FixtureBinding()
+    parent = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="first"), directory=tmp_path)
+    await parent.start_async()
+    binding.blocked = True
+    child = parent.rerun(request=NativeCyberRequest(instruction="blocked"))
+    await child.start_async()
+    assert child.report.agent is None and child.status == "blocked"
+    binding.blocked = False
+    binding.runtime = FixtureRuntime(turns=3, steps=False, order=binding.order)
+    setattr(binding.runtime.session, identity, getattr(parent.report.agent, identity))
+    grandchild = child.rerun(request=NativeCyberRequest(instruction="third"))
+    view = await grandchild.start_async()
+    assert view.status == "error" and grandchild.score.is_undetermined
+    assert any("reuse" in error for error in grandchild.report.errors)
+    assert binding.runtime.sdk.prompts == [] and binding.runtime.grade_count == 0
+    assert grandchild.request.parent_run_id == child.run_id
 
 
 async def test_literal_baseline_uses_the_existing_converter_pipeline_async(tmp_path: Path) -> None:

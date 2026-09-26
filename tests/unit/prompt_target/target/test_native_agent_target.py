@@ -176,6 +176,24 @@ async def test_trace_gaps_are_explicit_not_success_async(defect: str) -> None:
     assert session.evidence().gaps
 
 
+async def test_start_before_model_request_is_a_permanent_causality_gap_async() -> None:
+    events = tool_turn(final=None)
+    events[0], events[1] = events[1], events[0]
+    session = agent_session(SdkSessionFixture([events]))
+    await session.send_async(prompt="fixture", timeout_seconds=1)
+    evidence = session.evidence()
+    assert evidence.idle and not evidence.coverage_complete
+    assert any("started before its model tool request" in gap for gap in evidence.gaps)
+    assert evidence.tools[0].call_id == evidence.tool_requests[0].call_id == "call-1"
+    assert evidence.tools[0].start_sequence == 1
+    assert evidence.tool_requests[0].request_sequence == 2
+    assert evidence.tools[0].completion_sequence == 3
+    assert evidence.tools[0].request_sequence is None
+    assert len(evidence.events) == len(events)
+    await session.quiesce_async()
+    assert not session.evidence().coverage_complete
+
+
 async def test_session_must_observe_root_idle_and_cannot_clone_workspace_async() -> None:
     session = agent_session(SdkSessionFixture([[event("session.idle", {}, agentId="child")]]), steps=True)
     with pytest.raises(RuntimeError, match="root session.idle"):

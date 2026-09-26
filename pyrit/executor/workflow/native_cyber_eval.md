@@ -17,6 +17,8 @@ execution before advertising readiness.
 | Runtime `grade_async` | Original grader and immutable artifact acquisition while the workspace still exists |
 | `NativeCyberReportScorer` | Read-only grade projection from retained canonical report content |
 | Runtime context owner | Agent environment creation and cleanup, exactly once |
+| Binding `validate_host_storage_async` | Effective host access controls on the run directory and its private parent |
+| Runtime `validate_agent_storage_async` | Actual guest exclusion from host reports and PyRIT memory, including mounts and host tools |
 
 The literal baseline has no objective or auxiliary scorer inside the attack.
 The original grader is invoked once after the agent is quiescent and before
@@ -35,7 +37,6 @@ public presets or source.
 
 ```python
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from pyrit.executor.workflow.native_cyber_eval import (
     NativeCyberEvaluation,
@@ -47,6 +48,9 @@ from pyrit.models.native_cyber import NativeCyberRequest
 
 
 class TaskBinding(NativeCyberTaskBinding):
+    async def validate_host_storage_async(self, *, directory):
+        await self.host_storage_policy.verify_async(directory=directory)
+
     async def readiness_async(self):
         # Return actual qualification or explicit blockers, not a successful fallback.
         return self.qualified_readiness
@@ -62,13 +66,17 @@ get_native_cyber_bindings().register(binding, name=binding.name)
 run = NativeCyberEvaluation(
     binding=binding,
     request=NativeCyberRequest(instruction="The exact approved task input"),
-    directory=Path("results") / "native-agent-eval",
+    directory=private_host_evidence_root,
 )
 view = await run.start_async()
 ```
 
 `NativeCyberRuntime.target` is a `NativeAgentTarget` around a fresh
-`NativeAgentSession`. `grade_async(*, evidence)` returns `NativeCyberJudgment`
+`NativeAgentSession`. Its required `validate_agent_storage_async(*, directory)`
+must verify that the actual runtime cannot read or write the host report directory
+or PyRIT memory. This check runs before any instruction or raw event-file write;
+missing or failed verification prevents execution and triggers owned cleanup.
+`grade_async(*, evidence)` returns `NativeCyberJudgment`
 with an optional numeric value, rationale, complete flag, retained artifact
 references and acquired original evidence. A missing or failed acquisition has
 no numeric value. Artifact references describe bytes the binding has already
@@ -79,6 +87,40 @@ converter registry names, stepping, bounded TTL/turn timeout and parent lineage.
 The binding caps TTL and explicitly allows converters and technique factories.
 Task-specific interfaces must further constrain instruction variants and protect
 the original grading rules, trust policy, fixture and credentials.
+
+## Private host evidence boundary
+
+The caller supplies a private host evidence root and an already-working, private
+PyRIT memory backend. Neither may be exposed through agent mounts, host tools,
+working directories or artifact-download endpoints. An absolute path, a user
+profile location and a safe UI DTO are not access-control evidence.
+
+Before readiness or runtime creation, the controller creates only its unique
+empty child directory and calls `binding.validate_host_storage_async(*, directory)`.
+The default checks POSIX ownership, directory type and owner-only permissions on
+the root and child. Windows bindings must override it with effective ACL
+verification; the default rejects Windows rather than pretending `chmod(0700)`
+establishes a private DACL. Host verification and the runtime's guest-exclusion
+check are distinct responsibilities. They may not simply return success based on
+the requested directory name or on a preset.
+
+The host validator is read-only. A Windows override must check both the child
+and provisioned root, reject redirected/reparse paths, and verify a non-null
+effective DACL granting data access only to the trusted service identity and
+SYSTEM. Broad inherited grants must fail verification. The generic controller
+does not modify ACLs or consider a user-profile location sufficient.
+
+Preparation errors, including readiness exceptions and directory creation
+failure, end in an explicit error/expired/cancelled state. If qualification never
+returned, report `readiness` and `simulated` are `null`, and score metadata says
+`simulated: "unknown"`. They never imply a simulated or live run. Error reports
+and undetermined scores are retained through working PyRIT memory even if the
+directory cannot be used. `directory` is only the intended location, not proof
+that a report file exists. Failure of memory retention propagates to the caller;
+there is no invented receipt or numeric fallback.
+If guest exclusion cannot be verified and environment removal also fails, the
+controller propagates that failure without publishing raw content to potentially
+agent-visible storage. That case has no report or score receipt.
 
 ## True session continuation, not cloning
 
@@ -99,7 +141,11 @@ cleanup, never an asserted cloned session.
 `rerun(request=...)` creates a fresh run with immutable `parent_run_id`; it does
 not reuse the old target, environment or conversation. The binding must produce
 fresh resources for every context. Runtime environment identity reuse is rejected
-on this explicit rerun path.
+along with native session identity reuse, including ancestry through a blocked
+child with no runtime. Direct constructor `parent_run_id` is rejected.
+Cross-restart reruns are currently unsupported: the backend must retain the
+verified parent controller or disable rerun. A client-provided parent ID or a
+reconstructed controller without ancestry must not substitute for that state.
 
 ## Event fidelity and coverage
 
@@ -108,6 +154,9 @@ observed ordering, native session ID and the unmodified JSON envelope, including
 ephemeral usage and idle events. Tool request/start/completion identities and
 arguments are correlated. Missing, repeated or mismatched events are explicit
 coverage gaps and cannot produce a clean grade.
+Execution observed before its model request is a permanent ordering gap even
+if an otherwise matching request arrives later; the adapter never backfills
+causality.
 
 `NativeToolTrace.model_visible_output` is the actual `result.content`, while
 `detailed_output` retains `detailedContent` separately. The complete original

@@ -195,8 +195,8 @@ class NativeCyberReport(BaseModel):
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     seed_id: str | None = None
     status: NativeCyberStatus
-    simulated: bool
-    readiness: NativeCyberReadiness
+    simulated: bool | None
+    readiness: NativeCyberReadiness | None
     started_at: AwareDatetime
     expires_at: AwareDatetime
     ended_at: AwareDatetime
@@ -210,10 +210,29 @@ class NativeCyberReport(BaseModel):
 
     @model_validator(mode="after")
     def _validate_result(self) -> NativeCyberReport:
-        if self.simulated != self.readiness.simulated or (self.agent and self.agent.simulated != self.simulated):
+        if self.readiness is None:
+            if (
+                self.simulated is not None
+                or self.agent is not None
+                or self.judgment is not None
+                or self.cleanup is not NativeCyberCleanup.NOT_OPENED
+                or not self.errors
+                or self.status
+                not in {
+                    NativeCyberStatus.ERROR,
+                    NativeCyberStatus.CANCELLED,
+                    NativeCyberStatus.EXPIRED,
+                }
+            ):
+                raise ValueError("Unavailable qualification permits only an error with unknown native provenance.")
+        elif self.simulated != self.readiness.simulated:
+            raise ValueError("Native provenance must remain consistent.")
+        if self.agent and self.agent.simulated != self.simulated:
             raise ValueError("Native provenance must remain consistent.")
         if self.status is NativeCyberStatus.COMPLETED and (
-            self.agent is None
+            self.readiness is None
+            or not self.readiness.ready
+            or self.agent is None
             or not self.agent.coverage_complete
             or not self.agent.idle
             or self.judgment is None

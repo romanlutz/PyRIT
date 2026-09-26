@@ -268,7 +268,9 @@ class CopilotSdkAgentSession:
                 request_sequence=self._requests[call_id].request_sequence if call_id in self._requests else None,
             )
             request = self._requests.get(call_id)
-            if request and (request.name != name or request.arguments != data.get("arguments")):
+            if request is None:
+                raise ValueError("Native tool execution started before its model tool request was observed.")
+            if request.name != name or request.arguments != data.get("arguments"):
                 raise ValueError("Native tool execution differs from its model-requested name or arguments.")
         elif event.event_type == "tool.execution_complete":
             call_id, success = data.get("toolCallId"), data.get("success")

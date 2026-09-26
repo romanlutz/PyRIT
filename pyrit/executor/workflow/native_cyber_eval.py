@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import stat
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from functools import cache
@@ -50,6 +52,10 @@ class NativeCyberRuntime(Protocol):
 
     target: NativeAgentTarget
 
+    async def validate_agent_storage_async(self, *, directory: Path) -> None:
+        """Verify the agent cannot access host reports or memory, including through mounts or host tools."""
+        ...
+
     async def grade_async(self, *, evidence: NativeAgentEvidence) -> NativeCyberJudgment:
         """Acquire original grading and immutable artifacts exactly once while the environment exists."""
         ...
@@ -90,6 +96,17 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         """Describe actual transport/image/auth qualification without starting the evaluated agent."""
         ...
 
+    async def validate_host_storage_async(self, *, directory: Path) -> None:
+        """
+        Verify private host report storage independently of the runtime's guest-exclusion check.
+
+        Windows bindings must override this with actual ACL verification; chmod is not sufficient.
+
+        Raises:
+            PermissionError: If owner-only storage is not established.
+        """
+        await asyncio.to_thread(self._validate_posix_storage, directory)
+
     @abstractmethod
     def open_runtime(
         self, *, run_id: str, request: NativeCyberRequest
@@ -123,6 +140,19 @@ class NativeCyberTaskBinding(Identifiable, ABC):
             },
         )
 
+    @staticmethod
+    def _validate_posix_storage(directory: Path) -> None:
+        if os.name != "posix":
+            raise PermissionError("This binding must verify host directory ACLs before retaining native evidence.")
+        for path in (directory.parent, directory):
+            metadata = path.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise PermissionError("Native evidence requires caller-owned private directories with mode 0700.")
+
 
 @cache
 def get_native_cyber_bindings() -> InstanceRegistry[NativeCyberTaskBinding]:
@@ -154,8 +184,12 @@ class NativeCyberEvaluation:
         Create a fresh run without opening an agent or executing a tool.
 
         Raises:
-            ValueError: If edits exceed the binding's allow-list.
+            ValueError: If edits exceed the binding's allow-list or lineage is not verified by ``rerun``.
         """
+        if request.parent_run_id is not None:
+            raise ValueError(
+                "Parent lineage requires an existing evaluation's rerun(); constructor lineage is unverified."
+            )
         if request.ttl_seconds > binding.max_ttl_seconds:
             raise ValueError("Requested TTL exceeds the binding's approved maximum.")
         if request.technique != "literal" and request.technique not in binding.techniques:
@@ -193,6 +227,10 @@ class NativeCyberEvaluation:
         self._judgment: NativeCyberJudgment | None = None
         self._grading_started = False
         self._seen_environments: set[str] = set()
+        self._seen_sessions: set[str] = set()
+        self._directory_created = False
+        self._host_storage_verified = False
+        self._agent_storage_verified = False
 
     async def start_async(self) -> NativeCyberRunView:
         """
@@ -202,35 +240,45 @@ class NativeCyberEvaluation:
             NativeCyberRunView: Current operational state and persistent references when finalized.
 
         Raises:
-            ValueError: If the run was already started or stepping is unsupported.
-            RuntimeError: If native event coverage is insufficient for a retained session.
+            ValueError: If the run was already started.
+            RuntimeError: If incomplete native evidence cannot be retained.
+            OSError: If neither report-file nor memory retention succeeds.
             asyncio.CancelledError: If the caller cancels; owned cleanup is still attempted.
         """
         async with self._lock:
             if self._start_called:
                 raise ValueError("Each native run starts only once; reruns require a new evaluation.")
             self._start_called = True
-            await asyncio.to_thread(self.directory.mkdir, parents=True, exist_ok=False)
-            self._readiness = await self.binding.readiness_async()
-            if not self._readiness.ready:
-                self.status = NativeCyberStatus.BLOCKED
-                await self._publish_async(judgment=None)
-                return self.view()
-            if self.request.operator_steps and (
-                not self._readiness.capabilities.operator_steps or self.request.technique != "literal"
-            ):
-                raise ValueError("Operator stepping is not qualified for this binding/backend.")
             try:
+                await asyncio.to_thread(self.directory.mkdir, mode=0o700, parents=True, exist_ok=False)
+                self._directory_created = True
+                async with asyncio.timeout(self._remaining_seconds()):
+                    await self.binding.validate_host_storage_async(directory=self.directory)
+                    self._host_storage_verified = True
+                    self._readiness = await self.binding.readiness_async()
+                if not self._readiness.ready:
+                    self.status = NativeCyberStatus.BLOCKED
+                    await self._publish_async(judgment=None)
+                    return self.view()
+                if self.request.operator_steps and (
+                    not self._readiness.capabilities.operator_steps or self.request.technique != "literal"
+                ):
+                    raise ValueError("Operator stepping is not qualified for this binding/backend.")
                 self._context = self.binding.open_runtime(run_id=self.run_id, request=self.request)
                 self._runtime = await self._context.__aenter__()
                 self._entered = True
                 self._cleanup = NativeCyberCleanup.UNKNOWN
+                async with asyncio.timeout(self._remaining_seconds()):
+                    await self._runtime.validate_agent_storage_async(directory=self.directory)
+                self._agent_storage_verified = True
                 if self._runtime.target.session.simulated != self._readiness.simulated:
                     raise ValueError("Runtime provenance disagrees with binding qualification.")
                 if self._runtime.target.session.capabilities != self._readiness.capabilities:
                     raise ValueError("Runtime capabilities disagree with qualified binding capabilities.")
                 if self._runtime.target.session.environment_id in self._seen_environments:
                     raise ValueError("A fresh rerun cannot reuse a previous task environment.")
+                if self._runtime.target.session.session_id in self._seen_sessions:
+                    raise ValueError("A fresh rerun cannot reuse a previous native session.")
                 self.status = NativeCyberStatus.RUNNING
                 factory = self.binding.techniques.get(self.request.technique) or AttackTechniqueFactory(
                     name="literal",
@@ -339,6 +387,8 @@ class NativeCyberEvaluation:
         """
         Create a fresh run with immutable parent lineage, never cloning a live session.
 
+        Cross-restart reruns without this controller's verified ancestry are not supported.
+
         Returns:
             NativeCyberEvaluation: An unstarted child run with a fresh identity.
 
@@ -351,11 +401,15 @@ class NativeCyberEvaluation:
             raise ValueError("Rerun lineage must reference the source run.")
         child = NativeCyberEvaluation(
             binding=self.binding,
-            request=request.model_copy(update={"parent_run_id": self.run_id}),
+            request=request.model_copy(update={"parent_run_id": None}),
             directory=self.directory.parent,
         )
+        child.request = request.model_copy(update={"parent_run_id": self.run_id})
+        child._seen_environments = self._seen_environments.copy()
+        child._seen_sessions = self._seen_sessions.copy()
         if self.report.agent:
-            child._seen_environments = {*self._seen_environments, self.report.agent.environment_id}
+            child._seen_environments.add(self.report.agent.environment_id)
+            child._seen_sessions.add(self.report.agent.session_id)
         return child
 
     async def cancel_async(self) -> NativeCyberRunView:
@@ -466,7 +520,7 @@ class NativeCyberEvaluation:
             raise
 
     async def _retain_events_async(self) -> None:
-        if self._runtime is None:
+        if self._runtime is None or not self._agent_storage_verified:
             return
         events = self._runtime.target.session.evidence().events
         async with aiofiles.open(self.directory / "native-events.jsonl", "a", encoding="utf-8", newline="\n") as stream:
@@ -499,6 +553,16 @@ class NativeCyberEvaluation:
                 await self._close_async()
             except (Exception, asyncio.CancelledError):
                 logger.exception("Native evaluation cleanup was not confirmed.")
+            if (
+                self._directory_created
+                and not self._can_write_report_file()
+                and (not self._entered or self._cleanup is NativeCyberCleanup.CLOSED)
+            ):
+                try:
+                    await asyncio.to_thread(self.directory.rmdir)
+                except OSError as directory_error:
+                    self._errors.append(f"Empty report directory cleanup failed: {directory_error}")
+                    logger.exception("Native report directory cleanup was not confirmed.")
             await self._publish_async(judgment=self._judgment)
 
     async def _settle_async(self, operation: Coroutine[Any, Any, None]) -> None:
@@ -536,8 +600,31 @@ class NativeCyberEvaluation:
     async def _publish_async(self, *, judgment: NativeCyberJudgment | None) -> None:
         if self.report is not None:
             return
-        assert self._readiness is not None
-        report = NativeCyberReport(
+        if self._entered and not self._agent_storage_verified and self._cleanup is not NativeCyberCleanup.CLOSED:
+            raise PermissionError("Cannot retain raw evidence while an unverified agent storage boundary remains open.")
+        report = self._build_report(judgment)
+        if self._can_write_report_file():
+            try:
+                async with aiofiles.open(
+                    self.directory / f"{report.sha256()}.json", "x", encoding="utf-8", newline="\n"
+                ) as stream:
+                    await stream.write(report.canonical_json())
+                    await stream.flush()
+            except OSError as error:
+                self.status = NativeCyberStatus.ERROR
+                self._errors.append(f"Report file retention failed: {type(error).__name__}: {error}")
+                logger.exception("Native report file retention failed; attempting undetermined memory retention.")
+                report = self._build_report(judgment)
+        scores = await NativeCyberReportScorer(report_sha256=report.sha256()).score_async(
+            scorable=ContentScorable(value=report.canonical_json())
+        )
+        self.score = scores[0]
+        self.report = report
+        if self._expiry is not None and self._expiry is not asyncio.current_task():
+            self._expiry.cancel()
+
+    def _build_report(self, judgment: NativeCyberJudgment | None) -> NativeCyberReport:
+        return NativeCyberReport(
             run_id=self.run_id,
             binding_name=self.binding.name,
             binding_version=self.binding.version,
@@ -547,7 +634,7 @@ class NativeCyberEvaluation:
             ).hexdigest(),
             seed_id=str(self._seed.id) if self._seed else None,
             status=self.status,
-            simulated=self._readiness.simulated,
+            simulated=self._readiness.simulated if self._readiness else None,
             readiness=self._readiness,
             started_at=self.started_at,
             expires_at=self.expires_at,
@@ -560,18 +647,9 @@ class NativeCyberEvaluation:
             cleanup=self._cleanup,
             errors=tuple(self._errors),
         )
-        async with aiofiles.open(
-            self.directory / f"{report.sha256()}.json", "x", encoding="utf-8", newline="\n"
-        ) as stream:
-            await stream.write(report.canonical_json())
-            await stream.flush()
-        scores = await NativeCyberReportScorer(report_sha256=report.sha256()).score_async(
-            scorable=ContentScorable(value=report.canonical_json())
-        )
-        self.score = scores[0]
-        self.report = report
-        if self._expiry is not None and self._expiry is not asyncio.current_task():
-            self._expiry.cancel()
+
+    def _can_write_report_file(self) -> bool:
+        return self._host_storage_verified and (not self._entered or self._agent_storage_verified)
 
     async def _expire_async(self) -> None:
         await asyncio.sleep(max(0, (self.expires_at - datetime.now(UTC)).total_seconds()))
