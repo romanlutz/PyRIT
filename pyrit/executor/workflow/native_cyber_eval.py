@@ -96,6 +96,21 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         """Describe actual transport/image/auth qualification without starting the evaluated agent."""
         ...
 
+    async def create_host_storage_async(self, *, directory: Path) -> None:
+        """
+        Verify the existing private parent and create only the exact absent run directory.
+
+        Windows bindings must override this with a guarded creator that verifies
+        effective parent ACLs and protected ancestry before using inherited permissions.
+        A failing override owns cleanup of any empty child it created; successful
+        return transfers that ownership to the controller. Never modify existing paths.
+
+        Raises:
+            PermissionError: If private parent storage cannot be established.
+            OSError: If the parent is missing or the fresh child cannot be created.
+        """
+        await asyncio.to_thread(self._create_posix_storage, directory)
+
     async def validate_host_storage_async(self, *, directory: Path) -> None:
         """
         Verify private host report storage independently of the runtime's guest-exclusion check.
@@ -140,18 +155,25 @@ class NativeCyberTaskBinding(Identifiable, ABC):
             },
         )
 
+    def _create_posix_storage(self, directory: Path) -> None:
+        self._validate_posix_directory(directory.parent)
+        directory.mkdir(mode=0o700, exist_ok=False)
+
+    def _validate_posix_storage(self, directory: Path) -> None:
+        for path in (directory.parent, directory):
+            self._validate_posix_directory(path)
+
     @staticmethod
-    def _validate_posix_storage(directory: Path) -> None:
+    def _validate_posix_directory(directory: Path) -> None:
         if os.name != "posix":
             raise PermissionError("This binding must verify host directory ACLs before retaining native evidence.")
-        for path in (directory.parent, directory):
-            metadata = path.lstat()
-            if (
-                not stat.S_ISDIR(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o700
-            ):
-                raise PermissionError("Native evidence requires caller-owned private directories with mode 0700.")
+        metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise PermissionError("Native evidence requires caller-owned private directories with mode 0700.")
 
 
 @cache
@@ -250,8 +272,7 @@ class NativeCyberEvaluation:
                 raise ValueError("Each native run starts only once; reruns require a new evaluation.")
             self._start_called = True
             try:
-                await asyncio.to_thread(self.directory.mkdir, mode=0o700, parents=True, exist_ok=False)
-                self._directory_created = True
+                await self._settle_async(self._create_host_storage_async())
                 async with asyncio.timeout(self._remaining_seconds()):
                     await self.binding.validate_host_storage_async(directory=self.directory)
                     self._host_storage_verified = True
@@ -478,6 +499,10 @@ class NativeCyberEvaluation:
         if remaining <= 0:
             raise TimeoutError("The native environment lease expired.")
         return remaining
+
+    async def _create_host_storage_async(self) -> None:
+        await self.binding.create_host_storage_async(directory=self.directory)
+        self._directory_created = True
 
     async def _finalize_async(self, *, cancelled: bool = False) -> None:
         if self.report is not None:

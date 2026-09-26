@@ -75,6 +75,10 @@ class FixtureBinding(NativeCyberTaskBinding):
         self.open_count = 0
         self.close_count = 0
 
+    async def create_host_storage_async(self, *, directory: Path) -> None:
+        """Create only inert test storage, without claiming production Windows ACL qualification."""
+        await asyncio.to_thread(directory.mkdir, exist_ok=False)
+
     async def validate_host_storage_async(self, *, directory: Path) -> None:
         """Keep the inert fixture independent of production Windows ACL qualification."""
         assert await asyncio.to_thread(directory.is_dir)
@@ -284,6 +288,148 @@ async def test_default_windows_storage_policy_requires_actual_acl_verification_a
         platform.name = "nt"
         with pytest.raises(PermissionError, match="verify host directory ACLs"):
             await NativeCyberTaskBinding.validate_host_storage_async(FixtureBinding(), directory=tmp_path)
+
+
+async def test_default_windows_creator_rejects_before_any_directory_creation_async() -> None:
+    directory = MagicMock(spec=Path)
+    directory.parent = MagicMock(spec=Path)
+    with patch("pyrit.executor.workflow.native_cyber_eval.os", spec=os) as platform:
+        platform.name = "nt"
+        with pytest.raises(PermissionError, match="verify host directory ACLs"):
+            await NativeCyberTaskBinding.create_host_storage_async(FixtureBinding(), directory=directory)
+    directory.mkdir.assert_not_called()
+    directory.parent.lstat.assert_not_called()
+    directory.parent.mkdir.assert_not_called()
+
+
+@pytest.mark.parametrize("safe_parent", [True, False])
+async def test_posix_creator_verifies_existing_parent_before_exclusive_0700_child_async(safe_parent: bool) -> None:
+    directory = MagicMock(spec=Path)
+    directory.parent = MagicMock(spec=Path)
+    order: list[str] = []
+
+    def parent_metadata() -> os.stat_result:
+        order.append("verify_parent")
+        return os.stat_result((stat.S_IFDIR | (0o700 if safe_parent else 0o755), 0, 0, 1, 1000, 1000, 0, 0, 0, 0))
+
+    directory.parent.lstat.side_effect = parent_metadata
+    directory.mkdir.side_effect = lambda **kwargs: order.append("create")
+    with patch("pyrit.executor.workflow.native_cyber_eval.os", spec=os) as platform:
+        platform.name = "posix"
+        platform.getuid = MagicMock(return_value=1000)
+        if safe_parent:
+            await NativeCyberTaskBinding.create_host_storage_async(FixtureBinding(), directory=directory)
+        else:
+            with pytest.raises(PermissionError, match="private directories"):
+                await NativeCyberTaskBinding.create_host_storage_async(FixtureBinding(), directory=directory)
+    assert order == (["verify_parent", "create"] if safe_parent else ["verify_parent"])
+    if safe_parent:
+        directory.mkdir.assert_called_once()
+        assert directory.mkdir.call_args.kwargs == {"mode": 0o700, "exist_ok": False}
+    else:
+        directory.mkdir.assert_not_called()
+    directory.parent.mkdir.assert_not_called()
+    directory.parent.chmod.assert_not_called()
+
+
+@pytest.mark.parametrize("safe_parent", [True, False])
+async def test_inert_windows_creator_guards_parent_before_default_mode_and_strict_validation_async(
+    *, tmp_path: Path, safe_parent: bool
+) -> None:
+    binding = FixtureBinding(blocked=True)
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    order: list[str] = []
+
+    async def verify_parent_async(*, directory: Path) -> None:
+        assert directory == tmp_path and not await asyncio.to_thread(run.directory.exists)
+        order.append("verify_parent")
+        if not safe_parent:
+            raise PermissionError("Unverified parent DACL or protected ancestry")
+
+    async def create_async(*, directory: Path) -> None:
+        await verify_parent_async(directory=directory.parent)
+        order.append("create")
+        await asyncio.to_thread(directory.mkdir, exist_ok=False)
+
+    async def validate_async(*, directory: Path) -> None:
+        assert directory == run.directory
+        assert await asyncio.to_thread(lambda: list(directory.iterdir())) == []
+        order.append("validate_child")
+
+    original_readiness = binding.readiness_async
+
+    async def readiness_async() -> NativeCyberReadiness:
+        order.append("readiness")
+        return await original_readiness()
+
+    with (
+        patch.object(binding, "create_host_storage_async", side_effect=create_async) as creator,
+        patch.object(binding, "validate_host_storage_async", side_effect=validate_async) as validator,
+        patch.object(binding, "readiness_async", side_effect=readiness_async),
+        patch.object(Path, "mkdir", autospec=True, side_effect=Path.mkdir) as mkdir,
+    ):
+        result = await run.start_async()
+    creator.assert_awaited_once()
+    assert creator.call_args.kwargs == {"directory": run.directory}
+    assert order == (["verify_parent", "create", "validate_child", "readiness"] if safe_parent else ["verify_parent"])
+    child_calls = [call for call in mkdir.call_args_list if call.args[0] == run.directory]
+    assert len(child_calls) == int(safe_parent)
+    if safe_parent:
+        assert child_calls[0].kwargs == {"exist_ok": False}
+        validator.assert_awaited_once()
+        assert result.status == "blocked"
+        assert await asyncio.to_thread((run.directory / f"{run.report.sha256()}.json").is_file)
+    else:
+        validator.assert_not_awaited()
+        assert result.status == "error" and run.report.readiness is None
+        assert not await asyncio.to_thread(run.directory.exists)
+    assert binding.open_count == binding.close_count == binding.runtime.grade_count == 0
+    assert run.score.is_undetermined and binding.runtime.sdk.prompts == []
+
+
+async def test_existing_run_directory_is_not_adopted_or_cleaned_up_async(tmp_path: Path) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    await asyncio.to_thread(run.directory.mkdir)
+    marker = run.directory / "existing.txt"
+    await asyncio.to_thread(marker.write_text, "existing evidence", encoding="utf-8")
+    with patch.object(binding, "validate_host_storage_async", new_callable=AsyncMock) as validator:
+        result = await run.start_async()
+    validator.assert_not_awaited()
+    assert result.status == "error" and run.score.is_undetermined
+    assert any("FileExistsError" in error for error in run.report.errors)
+    assert await asyncio.to_thread(marker.read_text, encoding="utf-8") == "existing evidence"
+    assert await asyncio.to_thread(lambda: list(run.directory.iterdir())) == [marker]
+    assert binding.open_count == 0 and run.report.readiness is None
+
+
+async def test_creation_settles_before_cancellation_cleanup_async(tmp_path: Path) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_create = binding.create_host_storage_async
+
+    async def create_async(*, directory: Path) -> None:
+        await original_create(directory=directory)
+        entered.set()
+        await release.wait()
+
+    with (
+        patch.object(binding, "create_host_storage_async", side_effect=create_async) as creator,
+        patch.object(binding, "validate_host_storage_async", new_callable=AsyncMock) as validator,
+    ):
+        task = asyncio.create_task(run.start_async())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    creator.assert_awaited_once()
+    validator.assert_not_awaited()
+    assert run.status == "cancelled" and run.score.is_undetermined
+    assert run.report.readiness is None and run.report.cleanup == "not_opened"
+    assert not await asyncio.to_thread(run.directory.exists)
+    assert binding.open_count == binding.close_count == 0
 
 
 @pytest.mark.parametrize(

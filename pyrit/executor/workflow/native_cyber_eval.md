@@ -17,6 +17,7 @@ execution before advertising readiness.
 | Runtime `grade_async` | Original grader and immutable artifact acquisition while the workspace still exists |
 | `NativeCyberReportScorer` | Read-only grade projection from retained canonical report content |
 | Runtime context owner | Agent environment creation and cleanup, exactly once |
+| Binding `create_host_storage_async` | Verifying an existing private parent before exclusively creating the exact empty run child |
 | Binding `validate_host_storage_async` | Effective host access controls on the run directory and its private parent |
 | Runtime `validate_agent_storage_async` | Actual guest exclusion from host reports and PyRIT memory, including mounts and host tools |
 
@@ -48,6 +49,9 @@ from pyrit.models.native_cyber import NativeCyberRequest
 
 
 class TaskBinding(NativeCyberTaskBinding):
+    async def create_host_storage_async(self, *, directory):
+        await self.host_storage_policy.create_child_async(directory=directory)
+
     async def validate_host_storage_async(self, *, directory):
         await self.host_storage_policy.verify_async(directory=directory)
 
@@ -95,14 +99,34 @@ PyRIT memory backend. Neither may be exposed through agent mounts, host tools,
 working directories or artifact-download endpoints. An absolute path, a user
 profile location and a safe UI DTO are not access-control evidence.
 
-Before readiness or runtime creation, the controller creates only its unique
-empty child directory and calls `binding.validate_host_storage_async(*, directory)`.
-The default checks POSIX ownership, directory type and owner-only permissions on
-the root and child. Windows bindings must override it with effective ACL
-verification; the default rejects Windows rather than pretending `chmod(0700)`
-establishes a private DACL. Host verification and the runtime's guest-exclusion
-check are distinct responsibilities. They may not simply return success based on
-the requested directory name or on a preset.
+Before readiness or runtime creation, the controller calls
+`binding.create_host_storage_async(*, directory: Path) -> None`, then independently
+calls `binding.validate_host_storage_async(*, directory)`. Creation must verify
+the existing private parent before creating only the exact absent run child.
+The POSIX default verifies parent ownership/type/mode, uses `mkdir(mode=0o700,
+exist_ok=False)` without recursive parent creation, and checks both parent and
+child again during validation. Both defaults reject Windows.
+
+A trusted Windows binding must implement guarded creation as well as strict
+validation. Before creation it verifies effective owner+SYSTEM parent permissions
+and protected root ancestry, rejecting redirected/reparse paths and broad grants.
+The direct parent may inherit its exact approved ACL from a protected ancestor;
+it need not itself have a protected DACL. Only then may it create the absent
+child with `Path.mkdir(exist_ok=False)`, omitting `mode`, so that approved
+permissions are inherited. Explicit `mode=0o700` is not portable ACL hardening:
+it can replace Windows inheritance with an unexpected DACL. The strict child
+validator must still run; do not loosen its ACE checks or mutate old roots,
+children or ACLs. Public tests exercise injected inert creation/verifier behavior,
+not Windows DACL inheritance. The coordinated private OS measurements remain
+separate evidence.
+
+Successful creation transfers ownership of that empty child to the controller.
+A creator that fails or is cancelled must clean up only any empty child it
+created, never an existing path. The controller settles creation before handling
+caller cancellation, then removes its owned empty child if host validation did
+not succeed. Failed creation or validation never permits raw report/event writes.
+Host verification and the runtime's guest-exclusion check are distinct
+responsibilities, not promises inferred from a directory name or preset.
 
 The host validator is read-only. A Windows override must check both the child
 and provisioned root, reject redirected/reparse paths, and verify a non-null
