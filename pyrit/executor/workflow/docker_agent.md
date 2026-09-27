@@ -33,7 +33,8 @@ This first launcher uses fixed documented JSONL argv:
 No shell, candidate flags, host coding CLI, primary credential, stdin protocol,
 download, auth fallback or permission-bypass flags are added. The profile
 identifier is a binding identity, not an implicit CLI `--profile` option.
-Any required CLI configuration must already be staged by the trusted image.
+Codex user configuration is staged and read back by the narrow provider
+primitive below; other required CLI configuration belongs to the trusted image.
 The prepared prompt travels in Engine JSON over the host socket, not a host
 subprocess command line.
 
@@ -86,7 +87,7 @@ identity inside the run. The controller must close/revoke its run-scoped app at
 the end. Sensitive raw guest output remains governed by the evidence policy;
 this provider does not promise arbitrary guest output redaction.
 
-### Codex user-level configuration is a bootstrap requirement
+### Codex user-level configuration staging and readback
 
 `codex_gateway_config(model=route.model, base_url=config.model_gateway_endpoint)`
 returns the exact **credential-free** TOML template for
@@ -103,14 +104,48 @@ route model/base URL. The trusted prebuilt image and container must assert
 Missing or mismatched pins fail before exec; Claude instead requires the image
 to pin the exact `ANTHROPIC_MODEL`.
 
-**Those labels are bootstrap assertions, not proof that the file exists.**
+**Those labels authorize the expected template; they do not prove file presence.**
 HOME is on empty tmpfs: baking a file under image HOME would hide it at startup.
-Compose explicitly clears the image entrypoint, so the separately approved
-Compose service command must create HOME and copy the pinned template there,
-or a separately reviewed exact staging primitive must do so before readiness.
-No archive/copy/staging primitive is implemented by this patch. Actual bootstrap
-behavior, file presence/ownership, CLI profile selection and authenticated
-model-route use must be qualified before a real binding is declared runnable.
+The provider now uses `DockerCodexConfigStager` after verifying the exact
+Compose/Engine agent allocation, before any CLI exec. It generates the approved
+credential-free template itself and uses the same host-only Engine connection:
+
+1. HEAD archive-path stat checks every ancestor down to the approved tmpfs
+   mount, requiring exact non-link directories and `0700` on the mount root.
+   Engine `mode` is interpreted as Go's file-mode bitfield, not a POSIX stat value.
+2. The destination must be absent. HOME may be the exact approved mount root,
+   with a new `.codex` child, or a wholly new subtree below that root. Existing
+   non-mount HOME directories are rejected because Engine HEAD stat has no
+   UID/GID to prove their ownership. No existing HOME, config, credential file
+   or unrelated directory is adopted or overwritten.
+3. A bounded in-memory USTAR containing only the necessary new directories
+   (`0700`) and `config.toml` (`0600`) is PUT to that exact full container ID
+   and mount path, with `copyUIDGID=true` and `noOverwriteDirNonDir=true`.
+   Every entry has the approved service UID/GID. The archive contains no token,
+   primary credential, candidate content, link, device or host path.
+4. HEAD rechecks the created directories and GET reads back only that new
+   subtree, capped at 64 KiB and uncompressed. Without extracting anything on
+   the host, the verifier requires the exact directory/file set, ownership,
+   modes, file bytes and SHA256. Missing/extra/repeated paths, links, PAX
+   overrides, devices, compressed/truncated archives and nonzero trailing data
+   fail closed. The same readback is repeated immediately before CLI creation.
+
+`lease.staged_codex_config` exposes the resulting immutable in-memory receipt,
+not a task outcome or model-route proof. Staging failure/cancellation during
+acquisition rolls back the owned project; post-acquisition file drift prevents
+CLI creation. No guest helper executable is invoked, and no generic
+candidate-controlled archive or host extraction API is provided. Claude does
+not run this staging path.
+
+These invariants are tested only with mocked Engine stat/archive responses.
+Real Engine archive behavior, UID/GID preservation, symlink/stat semantics and
+the approved CLI's use of this user-level configuration still need live
+qualification, as does the authenticated model route. The trusted startup
+command must not create conflicting HOME/config state; Compose clears the
+image entrypoint. Task workspace/asset staging is separate. Exclusive daemon
+administration and no untrusted actor mutating the subtree before launch remain
+assumptions; the read/write/readback sequence is not an atomic filesystem transaction.
+No real binding is declared runnable from mock results or the labels alone.
 
 ### Completion belongs to the controller and evidence store
 
