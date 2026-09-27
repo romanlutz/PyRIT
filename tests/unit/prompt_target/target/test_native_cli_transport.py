@@ -59,10 +59,11 @@ def _turn(*, thread_id: str = "thread-1", text: str = "H\u00e9llo") -> bytes:
 
 
 class _Recorder:
-    def __init__(self, *, fail_raw: bool = False) -> None:
+    def __init__(self, *, fail_raw: bool = False, fail_event: bool = False) -> None:
         self.raw: list[NativeCliRawChunk] = []
         self.events: list[NativeCliEvent] = []
         self.fail_raw = fail_raw
+        self.fail_event = fail_event
 
     async def record_raw_async(self, *, chunk: NativeCliRawChunk) -> None:
         if self.fail_raw:
@@ -70,6 +71,8 @@ class _Recorder:
         self.raw.append(chunk)
 
     async def record_event_async(self, *, event: NativeCliEvent) -> None:
+        if self.fail_event:
+            raise OSError("Inert event recorder unavailable")
         self.events.append(event)
 
 
@@ -297,6 +300,19 @@ async def test_recorder_error_survives_failed_sandbox_stop_async() -> None:
     assert sandbox.stop_count == 1
     assert any("cleanup state is unknown" in note for note in caught.value.__notes__)
     assert sink.events[-1].observation.kind is NativeCliEventKind.ERROR
+
+
+@pytest.mark.parametrize("fail_raw", [False, True])
+async def test_recorder_abort_failure_keeps_primary_error_and_stops_sandbox_async(*, fail_raw: bool) -> None:
+    sandbox = _Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_turn())])
+    sink = _Recorder(fail_raw=fail_raw, fail_event=True)
+    message = "Inert recorder unavailable" if fail_raw else "Inert event recorder unavailable"
+    with pytest.raises(OSError, match=message) as caught:
+        await NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=sink).run_async(
+            config=_config(), prompt="Fixture"
+        )
+    assert sandbox.stop_count == 1
+    assert any("failure observation could not be retained" in note for note in caught.value.__notes__)
 
 
 async def test_cancellation_survives_failed_sandbox_stop_async() -> None:

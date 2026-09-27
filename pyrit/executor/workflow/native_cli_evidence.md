@@ -1,0 +1,36 @@
+# Native coding CLI evidence recorder
+
+`NativeCliDatabaseEvidenceSink` is a caller-owned recorder for an existing
+`NativeCyberEvidenceStore` episode. Before launching a Codex or Claude Code
+process, the controller must create that episode with
+`required_raw_streams=NativeCliDatabaseEvidenceSink.required_raw_streams(protocol=...)`
+and any additional **task-required model gateway streams**, then call
+`start_async`. The recorder opens an outer turn and both process pipes before
+the target runs. It does not start a CLI, create a sandbox, hold credentials,
+grade, or finalize a report.
+
+`NativeCliRunner` awaits every DB write before parsing the next chunk. The
+recorder stores exact stdout/stderr bytes in bounded DB chunks and records
+cross-pipe read order as separate typed source events with pipe, offset, size
+and digest. Provider JSONL observations retain real source IDs, including
+repeated Codex item IDs and Claude message IDs, with distinct observed
+request/start/completion/result phases. No Codex model tool request is
+invented from a CLI tool start. Normalized event payloads have the memory
+layer's size limit; oversized observations fail capture instead of silently
+truncating a complete run.
+
+`PromptNormalizer` persists the user MessagePiece only *after* the target
+returns (including its error path). The controller therefore calls
+`finish_async` after that boundary with IDs of already-persisted request and
+response pieces, plus the observed `NativeCliRunOutcome`. Missing pieces,
+incomplete process coverage, a recorder failure, unsealed pipes, missing raw
+bytes or quota omission remain required capture gaps. The controller must
+not claim an original grade from this recorder: a future CLI-specific DB
+finalizer must compare the canonical CLI report to the persisted events,
+raw streams and any host-side model observations, then atomically publish
+or downgrade a single PyRIT Score. Existing GHCP-specific finalization
+does not accept CLI event shapes.
+
+Current tests use inert process bytes and SQLite only. A qualified sandbox
+launcher, model gateway listener/observer, original grader and task image
+remain separate prerequisites; no real CLI or Docker run is implied.

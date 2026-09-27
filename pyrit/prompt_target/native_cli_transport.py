@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import TYPE_CHECKING, Protocol, cast
 
 from pyrit.prompt_target.native_cli_adapters import ClaudePrintStreamJsonAdapter, CodexExecJsonAdapter, NativeCliAdapter
@@ -22,6 +23,8 @@ from pyrit.prompt_target.native_cli_models import (
     NativeCliStream,
 )
 from pyrit.prompt_target.native_cli_models import NativeCliObservation as Observation
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -471,19 +474,21 @@ class NativeCliRunner:
                 )
         except TimeoutError as error:
             primary_error = error
-            await self._sink.record_event_async(event=parser.abort(detail="Native CLI run exceeded timeout_seconds."))
+            await self._record_abort_async(
+                parser=parser, detail="Native CLI run exceeded timeout_seconds.", primary_error=error
+            )
             raise
         except asyncio.CancelledError as error:
             primary_error = error
-            await self._sink.record_event_async(event=parser.abort(detail="Native CLI run was cancelled."))
+            await self._record_abort_async(parser=parser, detail="Native CLI run was cancelled.", primary_error=error)
             raise
         except NativeCliStreamLimitError as error:
             primary_error = error
             raise
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             primary_error = error
-            await self._sink.record_event_async(
-                event=parser.abort(detail=f"Native CLI transport failed: {error.__class__.__name__}.")
+            await self._record_abort_async(
+                parser=parser, detail=f"Native CLI transport failed: {error.__class__.__name__}.", primary_error=error
             )
             raise
         except BaseException as error:
@@ -499,6 +504,18 @@ class NativeCliRunner:
                     primary_error.add_note(
                         f"Native CLI sandbox stop failed ({type(cleanup_error).__name__}); cleanup state is unknown."
                     )
+
+    async def _record_abort_async(
+        self, *, parser: NativeCliJsonlParser, detail: str, primary_error: BaseException
+    ) -> None:
+        try:
+            await self._sink.record_event_async(event=parser.abort(detail=detail))
+        except (Exception, asyncio.CancelledError) as retention_error:
+            primary_error.add_note(
+                f"Native CLI failure observation could not be retained ({type(retention_error).__name__}); "
+                "evidence is incomplete."
+            )
+            logger.error("Native CLI failure observation could not be retained (%s).", type(retention_error).__name__)
 
     async def _record_events_async(self, *, events: tuple[NativeCliEvent, ...]) -> None:
         for event in events:
