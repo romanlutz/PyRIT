@@ -23,7 +23,11 @@ from pyrit.executor.workflow.docker_agent import (
 )
 from pyrit.executor.workflow.docker_compose import ComposeEnvironmentSpec, ComposeServiceSpec
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError
-from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
+from pyrit.executor.workflow.docker_guest_auth import (
+    DockerGuestAuth,
+    codex_gateway_config,
+    codex_gateway_template_sha256,
+)
 from pyrit.prompt_target.gateway.responses_contract import GatewayRoute
 from pyrit.prompt_target.native_cli_models import (
     NativeCliEvent,
@@ -88,7 +92,9 @@ def make_agent(
 ) -> tuple[DockerStopOnlyAgentLease, FakeDockerRunner, FakeEngine, DockerEngineClient, NativeCliRunConfig]:
     approved = run_config or config()
     route = route or GatewayRoute(run_id="inert-run", model="inert-model", guest_token="guest-only-" + "g" * 40)
-    auth = DockerGuestAuth.from_route(route=route, protocol=approved.protocol)
+    auth = DockerGuestAuth.from_route(
+        route=route, protocol=approved.protocol, gateway_endpoint=approved.model_gateway_endpoint
+    )
     agent = service_spec("agent", role="agent")
     services = (
         agent,
@@ -99,8 +105,7 @@ def make_agent(
     fake = FakeEngine()
     fake.wire = (wire_frame(1, codex_output()), wire_frame(2, b"diagnostic\xff\r\n"))
     engine = fake.client(control_timeout_seconds=0.25)
-    gateway_key = "OPENAI_BASE_URL" if approved.protocol is NativeCliProtocol.CODEX_EXEC_JSON else "ANTHROPIC_BASE_URL"
-    environment = ["PATH=/usr/bin", "HOME=/tmp/home", "TMPDIR=/tmp", f"{gateway_key}={approved.model_gateway_endpoint}"]
+    environment = ["PATH=/usr/bin", "HOME=/tmp/home", "TMPDIR=/tmp"]
     config_digest = (
         hashlib.sha256(
             codex_gateway_config(model=route.model, base_url=approved.model_gateway_endpoint).encode()
@@ -110,14 +115,12 @@ def make_agent(
     )
     labels = (
         {
-            "org.pyrit.native.codex-user-config-sha256": config_digest,
+            "org.pyrit.native.codex-config-template-sha256": codex_gateway_template_sha256(),
             "org.pyrit.native.codex-user-config-path": "/tmp/home/.codex/config.toml",
         }
         if config_digest
         else {}
     )
-    if approved.protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
-        environment.append(f"ANTHROPIC_MODEL={route.model}")
     command.mutate_image = lambda image: image["Config"].update(Env=environment.copy(), Labels=labels.copy())
 
     def populate(runner: FakeDockerRunner) -> None:
@@ -440,6 +443,7 @@ async def test_role_collisions_are_rejected_before_any_io_async(roles: tuple[fro
             guest_auth=DockerGuestAuth.from_route(
                 route=GatewayRoute(run_id="run", model="inert", guest_token="g" * 40),
                 protocol=NativeCliProtocol.CODEX_EXEC_JSON,
+                gateway_endpoint=config().model_gateway_endpoint,
             ),
         )
     assert not fake.requests and not command.calls

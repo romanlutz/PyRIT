@@ -22,7 +22,11 @@ from pyrit.executor.workflow.docker_compose import (
 )
 from pyrit.executor.workflow.docker_config_staging import CodexConfigStaging, DockerCodexConfigStager
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError, DockerExecHandle
-from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
+from pyrit.executor.workflow.docker_guest_auth import (
+    DockerGuestAuth,
+    codex_gateway_config,
+    codex_gateway_template_sha256,
+)
 from pyrit.models.environment_lease import EnvironmentLeaseState
 from pyrit.prompt_target.native_cli_models import NativeCliProtocol, NativeCliRunConfig
 
@@ -137,7 +141,7 @@ class AgentStopObservation:
 class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
     """Compose lease with one agent-only service and a serialized, latched stop barrier."""
 
-    _CODEX_CONFIG_DIGEST_LABEL = "org.pyrit.native.codex-user-config-sha256"
+    _CODEX_TEMPLATE_DIGEST_LABEL = "org.pyrit.native.codex-config-template-sha256"
     _CODEX_CONFIG_PATH_LABEL = "org.pyrit.native.codex-user-config-path"
 
     def __init__(
@@ -162,8 +166,9 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             not isinstance(guest_auth, DockerGuestAuth)
             or guest_auth.run_id != run_id
             or guest_auth.protocol is not profile.config.protocol
+            or guest_auth.gateway_endpoint != profile.config.model_gateway_endpoint
         ):
-            raise ValueError("Guest gateway authentication must name this exact run and CLI protocol.")
+            raise ValueError("Guest gateway authentication must name this exact run, CLI protocol and gateway URL.")
         if (
             guest_auth.token.get_secret_value() in repr(profile)
             or guest_auth.token.get_secret_value() in spec.model_dump_json()
@@ -248,6 +253,10 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
                     model=self._guest_auth.model,
                     base_url=self._profile.config.model_gateway_endpoint,
                 )
+                if self._staged_config.sha256 != self._profile.codex_config_sha256:
+                    raise DockerEngineError(
+                        "Staged Codex configuration does not match the exact per-run profile digest."
+                    )
                 await self._audit_engine_async(require_agent_running=True)
         return allocation
 
@@ -447,20 +456,11 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         if not isinstance(values, list) or not all(isinstance(value, str) and "=" in value for value in values):
             raise DockerEngineError("The pinned agent image must declare an explicit nonsecret environment.")
         environment = dict(value.split("=", 1) for value in values)
-        gateway_key = (
-            "OPENAI_BASE_URL"
-            if self._profile.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON
-            else "ANTHROPIC_BASE_URL"
-        )
-        allowed = {"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", gateway_key}
-        if self._profile.config.protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
-            allowed.add("ANTHROPIC_MODEL")
+        allowed = {"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"}
         if len(environment) != len(values) or set(environment) - allowed:
             raise DockerEngineError(
                 "Agent image environment contains duplicate or unapproved credential/configuration fields."
             )
-        if environment.get(gateway_key) != self._profile.config.model_gateway_endpoint:
-            raise DockerEngineError("The pinned agent gateway does not match the approved CLI profile.")
         if not environment.get("HOME"):
             raise DockerEngineError("The stop-only CLI requires an explicit ephemeral guest HOME.")
         if self._profile.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
@@ -480,14 +480,12 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             ):
                 if (
                     not isinstance(labels, dict)
-                    or labels.get(self._CODEX_CONFIG_DIGEST_LABEL) != expected_digest
+                    or labels.get(self._CODEX_TEMPLATE_DIGEST_LABEL) != codex_gateway_template_sha256()
                     or labels.get(self._CODEX_CONFIG_PATH_LABEL) != expected_path
                 ):
                     raise DockerEngineError(
-                        "Codex requires trusted image provenance for the exact user-level gateway config."
+                        "Codex requires trusted image provenance for its static template and user-level path."
                     )
-        elif environment.get("ANTHROPIC_MODEL") != self._guest_auth.model:
-            raise DockerEngineError("The Claude image must pin the exact run-scoped gateway model.")
         for name in ("HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
             if name in environment:
                 path = PurePosixPath(environment[name])

@@ -38,12 +38,13 @@ primitive below; other required CLI configuration belongs to the trusted image.
 The prepared prompt travels in Engine JSON over the host socket, not a host
 subprocess command line.
 
-The image environment is limited to PATH/locale, HOME/tmp/XDG paths, the
-protocol's exact approved base-URL field, and Claude's pinned `ANTHROPIC_MODEL`.
-Image-baked credentials and unknown fields are rejected. HOME/cache paths must
-lie under approved ephemeral mounts; the base URL and model must match the
-run route. Only the separate guest-only exec credentials described below are
-injected dynamically. These checks do not prove live routing or connectivity.
+The image environment is limited to route-independent PATH/locale and
+HOME/tmp/XDG paths. Image-baked credentials, gateway URLs, model selections and
+unknown fields are rejected. HOME/cache paths must lie under approved ephemeral
+mounts. Per-run URL/model routing is bound to the host-approved run config, not
+the prebuilt image. It is supplied only through the generated Codex config or
+the approved Claude exec environment below. These checks do not prove live
+routing or connectivity.
 
 Stopping the agent discards its tmpfs. **This profile is only for graders that
 need target-side state and no agent-workspace artifacts after stop.**
@@ -57,20 +58,21 @@ The host controller generates a **new** independent guest token for every run,
 for example with `secrets.token_urlsafe(32)`, and creates one
 `GatewayRoute(run_id, model, guest_token)` for the run's budget-capped app.
 The provider receives
-`DockerGuestAuth.from_route(route=route, protocol=config.protocol)` through the
+`DockerGuestAuth.from_route(route=route, protocol=config.protocol,
+gateway_endpoint=config.model_gateway_endpoint)` through the
 required `DockerStopOnlyAgentLease(..., guest_auth=...)` argument. It validates
-the exact run/protocol, retains the token as `SecretStr` with a redacted repr,
+the exact run/protocol/approved URL, retains the token as `SecretStr` with a redacted repr,
 and accepts no primary host credential. The host-only `HttpxResponsesBackend`
 or `HttpxMessagesBackend` constructor separately rejects reuse of this guest
 token as its upstream credential. The host key is never passed to DockerAgent
 or Engine even for that comparison.
 
-Only the following two entries are sent in the **exec-create JSON body**:
+Only the following allow-listed entries are sent in the **exec-create JSON body**:
 
 | CLI | Exec-scoped environment |
 | --- | --- |
 | Codex | `PYRIT_GUEST_MODEL_TOKEN=<guest token>`, `PYRIT_RUN_ID=<exact run ID>` |
-| Claude | `ANTHROPIC_AUTH_TOKEN=<guest token>`, `ANTHROPIC_CUSTOM_HEADERS=X-PyRIT-Run-ID: <exact run ID>` |
+| Claude | `ANTHROPIC_AUTH_TOKEN=<guest token>`, `ANTHROPIC_CUSTOM_HEADERS=X-PyRIT-Run-ID: <exact run ID>`, `ANTHROPIC_BASE_URL=<approved run URL>`, `ANTHROPIC_MODEL=<route model>` |
 
 These are not image/Compose environment, host environment, CLI argv, profile
 metadata or log fields. Engine handles and stop observations do not retain
@@ -97,12 +99,22 @@ returns the exact **credential-free** TOML template for
 `env_http_headers = { "X-PyRIT-Run-ID" = "PYRIT_RUN_ID" }`. No provider key,
 literal guest token or workspace-level auth override belongs in this template.
 
-The profile's `codex_config_sha256` must match its UTF-8 bytes for the exact
-route model/base URL. The trusted prebuilt image and container must assert
-`org.pyrit.native.codex-user-config-sha256` and
-`org.pyrit.native.codex-user-config-path` for that digest and user-level path.
-Missing or mismatched pins fail before exec; Claude instead requires the image
-to pin the exact `ANTHROPIC_MODEL`.
+The host profile's `codex_config_sha256` must match its rendered UTF-8 bytes for
+the exact run model/base URL. Staging and prelaunch readback verify this per-run
+hash. **That rendered hash is not an image label.** The trusted prebuilt image
+and container instead assert `org.pyrit.native.codex-config-template-sha256`,
+equal to `codex_gateway_template_sha256()`, and the static
+`org.pyrit.native.codex-user-config-path`. The template hash uses canonical
+`<model>` and `<gateway-url>` placeholders, so it is independent of any run.
+Missing or mismatched template/path pins fail before exec. Claude obtains its
+exact route model and URL from the exec-scoped environment, not image Env.
+
+Consequently, the same immutable image and template labels can be reused across
+concurrent runs with different private bridge IPs, ports, models and guest
+tokens. Each run still has a separate project/container identity, matched
+profile/route URL and credential, and a different rendered Codex config where
+applicable. No dynamic Compose environment, image rebuild, candidate environment
+mapping or weakening of effective image/mount/security audits is introduced.
 
 **Those labels authorize the expected template; they do not prove file presence.**
 HOME is on empty tmpfs: baking a file under image HOME would hide it at startup.
