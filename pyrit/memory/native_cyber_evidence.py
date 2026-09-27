@@ -33,7 +33,7 @@ from pyrit.memory.memory_models import (
 from pyrit.memory.memory_session import _begin_sqlite_write
 from pyrit.memory.native_cli_evidence_validation import _NativeCliEvidenceValidator
 from pyrit.models import ContentEntryScorable, ContentScorable, Score, ScoreStatus
-from pyrit.models.native_cli_report import NativeCliReportStatus, NativeCliRunReport
+from pyrit.models.native_cli_report import NativeCliReportCleanup, NativeCliReportStatus, NativeCliRunReport
 from pyrit.models.native_cyber import NativeCyberReport, NativeCyberStatus
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
@@ -636,16 +636,13 @@ class NativeCyberEvidenceStore:
         with self._write_session(run_id=report.run_id) as session:
             episode = self._lock_episode(session=session, run_id=report.run_id)
             self._require_open(episode)
-            validator = _NativeCliEvidenceValidator(
+            required, optional = self._cli_capture_gaps(
                 session=session,
                 episode=episode,
                 report=report,
                 expected_turns=expected_turns,
-                digest_stream=lambda stream: self._hash_stream(session=session, stream=stream),
-                digest_event=self._hash_payload,
-                verify_pieces=lambda links: self._piece_links_intact(session=session, links=links),
+                phase=NativeCyberCoveragePhase.FINAL,
             )
-            required, optional = validator.validate()
             complete = (
                 report.status is NativeCliReportStatus.COMPLETED and report.evidence.coverage_complete and not required
             )
@@ -661,6 +658,70 @@ class NativeCyberEvidenceStore:
             episode.finalized_at = datetime.now(UTC)
             session.flush()
         return self.get_episode(run_id=report.run_id)
+
+    def assess_cli_pregrading_coverage(
+        self, *, report: NativeCliRunReport, expected_turns: int
+    ) -> NativeCyberCoverageAssessment:
+        """
+        Check sealed CLI source evidence before calling the original grader.
+
+        The draft has no judgment or verified cleanup yet. This uses the same
+        persisted provenance, byte, gateway and tool checks as finalization;
+        only the post-grading verdict and artifact checks are deferred.
+
+        Returns:
+            NativeCyberCoverageAssessment: Typed PREGRADING verdict and explicit gaps.
+
+        Raises:
+            ValueError: If the report is not an ungraded, still-live draft or the turn count is invalid.
+        """
+        if expected_turns < 0:
+            raise ValueError("A CLI expected outer-turn count cannot be negative.")
+        report = NativeCliRunReport.model_validate(report.model_dump(mode="json"))
+        if (
+            report.status is not NativeCliReportStatus.INCOMPLETE
+            or report.cleanup is not NativeCliReportCleanup.UNKNOWN
+            or report.judgment is not None
+        ):
+            raise ValueError("CLI pregrading requires an incomplete live-lease report without an original judgment.")
+        with self._write_session(run_id=report.run_id) as session:
+            episode = self._lock_episode(session=session, run_id=report.run_id)
+            self._require_open(episode)
+            required, optional = self._cli_capture_gaps(
+                session=session,
+                episode=episode,
+                report=report,
+                expected_turns=expected_turns,
+                phase=NativeCyberCoveragePhase.PREGRADING,
+            )
+            return NativeCyberCoverageAssessment(
+                phase=NativeCyberCoveragePhase.PREGRADING,
+                required_complete=report.evidence.coverage_complete and not required,
+                required_gaps=tuple(required),
+                optional_gaps=tuple(optional),
+            )
+
+    def _cli_capture_gaps(
+        self,
+        *,
+        session: Session,
+        episode: NativeCyberEpisodeEntry,
+        report: NativeCliRunReport,
+        expected_turns: int,
+        phase: NativeCyberCoveragePhase,
+    ) -> tuple[list[str], list[str]]:
+        validator = _NativeCliEvidenceValidator(
+            session=session,
+            episode=episode,
+            report=report,
+            expected_turns=expected_turns,
+            phase=phase,
+            digest_stream=lambda stream: self._hash_stream(session=session, stream=stream),
+            digest_event=self._hash_payload,
+            verify_pieces=lambda links: self._piece_links_intact(session=session, links=links),
+            is_terminal_event=self._is_terminal_event,
+        )
+        return validator.validate()
 
     @staticmethod
     def _validate_cli_score(*, report: NativeCliRunReport, score: Score) -> None:
@@ -1721,17 +1782,33 @@ class NativeCyberEvidenceStore:
     def _has_terminal_event(*, events: Sequence[NativeCyberEventEntry]) -> bool:
         last_action = max((event.sequence for event in events if event.source in {"model", "tool"}), default=0)
         terminal = max(
-            (
-                event.sequence
-                for event in events
-                if event.source == "harness"
-                and event.event_type in {"session.idle", "turn.completed"}
-                and not (event.event_type == "session.idle" and event.payload.get("agentId"))
-                and not (isinstance(data := event.payload.get("data"), dict) and data.get("aborted") is True)
-            ),
+            (event.sequence for event in events if NativeCyberEvidenceStore._is_terminal_event(event)),
             default=None,
         )
         return terminal is not None and terminal >= last_action
+
+    @staticmethod
+    def _is_terminal_event(event: NativeCyberEventEntry) -> bool:
+        if event.source != "harness":
+            return False
+        payload = event.payload
+        if event.event_type in {"session.idle", "turn.completed"}:
+            data = payload.get("data")
+            return not (
+                (event.event_type == "session.idle" and payload.get("agentId"))
+                or (isinstance(data, dict) and data.get("aborted") is True)
+            )
+        if event.event_type not in {"native_cli.turn_completed", "native_cli.run_finished"}:
+            return False
+        frame_number = payload.get("frame_number")
+        status = payload.get("status")
+        if type(frame_number) is not int or not isinstance(status, str) or status != "completed":
+            return False
+        if event.event_type == "native_cli.run_finished":
+            source_status = payload.get("source_status")
+            if not isinstance(source_status, str) or source_status != "success":
+                return False
+        return frame_number > 0 and event.observed_stream_id is not None and event.stream_offset is not None
 
     @staticmethod
     def _piece_links_intact(*, session: Session, links: Sequence[NativeCyberTurnMessagePieceEntry]) -> bool:

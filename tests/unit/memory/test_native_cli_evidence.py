@@ -30,6 +30,7 @@ from pyrit.memory.memory_models import (
 )
 from pyrit.models import ContentEntryScorable, ContentScorable, MessagePiece, Score, ScoreStatus
 from pyrit.models.native_cli_report import (
+    NativeCliArtifactReference,
     NativeCliOriginalJudgment,
     NativeCliReportCleanup,
     NativeCliReportStatus,
@@ -37,12 +38,15 @@ from pyrit.models.native_cli_report import (
 )
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
+    NativeCyberCoveragePhase,
     NativeCyberEpisodeStart,
     NativeCyberEvidenceSource,
     NativeCyberObservedEvent,
     NativeCyberRawKind,
     NativeCyberRawStreamKey,
     NativeCyberRawStreamStart,
+    NativeCyberResponseMode,
+    NativeCyberResponsePolicy,
     NativeCyberTurnFinish,
 )
 from pyrit.prompt_target.gateway.responses_contract import GatewayCoverage, GatewayFrameKind, GatewayObservation
@@ -279,6 +283,8 @@ async def _capture_case_async(
     declare_task_identity: bool = True,
     link_request: bool = True,
     link_response: bool = True,
+    response_mode: NativeCyberResponseMode = NativeCyberResponseMode.MESSAGE_REQUIRED,
+    with_artifact: bool = False,
     stderr_bytes: bytes = b"synthetic stderr\xff\n",
     raw_byte_limit: int = 268_435_456,
 ) -> _CliCase:
@@ -301,6 +307,9 @@ async def _capture_case_async(
             task_id="synthetic-task" if declare_task_identity else None,
             task_version="revision-1" if declare_task_identity else None,
             simulated=True,
+            response_policy=NativeCyberResponsePolicy(
+                allow_artifact_only=response_mode is NativeCyberResponseMode.ARTIFACT_ONLY,
+            ),
             required_raw_streams=sink.required_raw_streams(
                 protocol=protocol,
                 include_model_gateway=declare_gateway,
@@ -308,7 +317,7 @@ async def _capture_case_async(
             raw_byte_limit=raw_byte_limit,
         ),
     )
-    await sink.start_async(started_at=datetime.now(UTC))
+    await sink.start_async(started_at=datetime.now(UTC), response_mode=response_mode)
     if with_gateway and protocol is NativeCliProtocol.CODEX_EXEC_JSON:
         request_wire = b'{"model":"synthetic","input":"inert"}'
         await sink.record_gateway_observation_async(
@@ -387,6 +396,25 @@ async def _capture_case_async(
             data=stdout[split:],
         )
     )
+    gateway_success = (
+        await asyncio.to_thread(
+            _record_fake_messages_gateway,
+            store=store,
+            run_id=run_id,
+            response_present=gateway_response,
+            gateway_error=gateway_error,
+            provider_error=provider_error,
+            streaming=gateway_streaming,
+            fake_done=anthropic_fake_done,
+            response_coverage=response_coverage,
+        )
+        if protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE and with_gateway
+        else True
+    )
+    if protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE and with_gateway:
+        # The older fake sink has no Messages callback; account for its DB events
+        # before asking it to append the provider's own parser observations.
+        sink._controller_sequence = len(store.get_episode(run_id=run_id).events)
     parser = NativeCliJsonlParser(config=config)
     parser_events = (*parser.feed(data=stdout), *parser.finish())
     for event in parser_events:
@@ -416,23 +444,8 @@ async def _capture_case_async(
         original_value="Synthetic answer.",
         sequence=1,
     )
-    memory.add_message_pieces_to_memory(message_pieces=[request, response])
+    memory.add_message_pieces_to_memory(message_pieces=[request, response] if link_response else [request])
     if protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
-        gateway_success = (
-            await asyncio.to_thread(
-                _record_fake_messages_gateway,
-                store=store,
-                run_id=run_id,
-                response_present=gateway_response,
-                gateway_error=gateway_error,
-                provider_error=provider_error,
-                streaming=gateway_streaming,
-                fake_done=anthropic_fake_done,
-                response_coverage=response_coverage,
-            )
-            if with_gateway
-            else True
-        )
         episode = await asyncio.to_thread(store.get_episode, run_id=run_id)
         for stream in episode.raw_streams:
             if stream.key.kind not in {NativeCyberRawKind.STDOUT, NativeCyberRawKind.STDERR}:
@@ -487,6 +500,18 @@ async def _capture_case_async(
             complete=True,
             rationale="Synthetic original task grade.",
         ),
+        artifacts=(
+            (
+                NativeCliArtifactReference(
+                    name="synthetic.txt",
+                    sha256=hashlib.sha256(b"synthetic retained artifact").hexdigest(),
+                    size_bytes=len(b"synthetic retained artifact"),
+                    evidence_ref="trusted-task-retained-artifact",
+                ),
+            )
+            if with_artifact
+            else ()
+        ),
         raw_evidence_ref=f"db-episode:{run_id}",
     )
     return _CliCase(
@@ -498,6 +523,320 @@ async def _capture_case_async(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def _pregrading_report(*, report: NativeCliRunReport) -> NativeCliRunReport:
+    """Use the sealed source evidence without claiming a judgment or cleaned-up lease."""
+    return NativeCliRunReport.model_validate(
+        {
+            **report.model_dump(mode="json"),
+            "status": NativeCliReportStatus.INCOMPLETE.value,
+            "cleanup": NativeCliReportCleanup.UNKNOWN.value,
+            "judgment": None,
+            "artifacts": [],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "tool"),
+    [
+        (NativeCliProtocol.CODEX_EXEC_JSON, False),
+        (NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE, False),
+        (NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE, True),
+    ],
+)
+async def test_cli_pregrading_accepts_sealed_source_without_original_judgment_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    protocol: NativeCliProtocol,
+    tool: bool,
+) -> None:
+    case = await _capture_case_async(memory=sqlite_instance, protocol=protocol, tool=tool)
+    draft = _pregrading_report(report=case.report)
+    assert draft.status is NativeCliReportStatus.INCOMPLETE
+    assert draft.cleanup is NativeCliReportCleanup.UNKNOWN
+    assert draft.judgment is None
+    assert draft.evidence.coverage_complete
+    assert draft.evidence.raw_evidence_ref == case.report.evidence.raw_evidence_ref
+    assert sqlite_instance.get_scores(score_ids=[str(case.score.id)]) == []
+
+    assessment = case.store.assess_cli_pregrading_coverage(report=draft, expected_turns=1)
+
+    assert assessment.phase is NativeCyberCoveragePhase.PREGRADING
+    assert assessment.required_complete
+    assert assessment.required_gaps == ()
+    pending = case.store.get_episode(run_id=case.report.run_id)
+    assert pending.finalized_at is None and pending.score_id is None and pending.report_content_id is None
+    assert sqlite_instance._query_entries(ScorableContentEntry) == []
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+
+    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    assert snapshot.coverage_complete
+    assert snapshot.score_status is ScoreStatus.COMPLETE
+    assert snapshot.score_id == case.score.id
+
+
+async def test_cli_pregrading_rejects_graded_or_closed_reports_async(*, sqlite_instance: SQLiteMemory) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
+    draft = _pregrading_report(report=case.report)
+
+    with pytest.raises(ValueError, match="without an original judgment"):
+        case.store.assess_cli_pregrading_coverage(report=case.report, expected_turns=1)
+    with pytest.raises(ValueError, match="incomplete live-lease report"):
+        case.store.assess_cli_pregrading_coverage(
+            report=NativeCliRunReport.model_validate(
+                {**draft.model_dump(mode="json"), "cleanup": NativeCliReportCleanup.CLOSED.value}
+            ),
+            expected_turns=1,
+        )
+    with pytest.raises(ValueError, match="turn count"):
+        case.store.assess_cli_pregrading_coverage(report=draft, expected_turns=-1)
+    assert case.store.get_episode(run_id=case.report.run_id).finalized_at is None
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "gap"),
+    [
+        ("task_version", "different-revision", "task identity"),
+        ("turn_id", "unobserved-turn", "turn identity"),
+        ("simulated", False, "simulation provenance"),
+    ],
+)
+async def test_cli_pregrading_checks_task_turn_and_simulation_identity_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    field: str,
+    value: str | bool,
+    gap: str,
+) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
+    draft = _pregrading_report(report=case.report)
+    modified = NativeCliRunReport.model_validate({**draft.model_dump(mode="json"), field: value})
+
+    assessment = case.store.assess_cli_pregrading_coverage(report=modified, expected_turns=1)
+
+    assert assessment.phase is NativeCyberCoveragePhase.PREGRADING
+    assert not assessment.required_complete
+    assert any(gap in reason for reason in assessment.required_gaps)
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+
+
+async def test_cli_finalizer_cannot_complete_a_pregrading_draft_async(*, sqlite_instance: SQLiteMemory) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
+    draft = _pregrading_report(report=case.report)
+    assert case.store.assess_cli_pregrading_coverage(report=draft, expected_turns=1).required_complete
+    draft_score = build_native_cli_report_score(report=draft)
+
+    snapshot = case.store.finalize_cli_episode_atomic(report=draft, score=draft_score, expected_turns=1)
+
+    assert snapshot.score_status is ScoreStatus.UNDETERMINED
+    assert any("original CLI grader judgment" in gap for gap in snapshot.gaps)
+    assert any("complete source coverage" in gap for gap in snapshot.gaps)
+    assert sqlite_instance.get_scores(score_ids=[str(draft_score.id)])[0].is_undetermined
+
+
+@pytest.mark.parametrize(
+    ("protocol", "with_gateway", "raw_byte_limit", "tool", "link_request", "expected_gap"),
+    [
+        (NativeCliProtocol.CODEX_EXEC_JSON, False, 268_435_456, False, True, "gateway"),
+        (NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE, False, 268_435_456, False, True, "gateway"),
+        (NativeCliProtocol.CODEX_EXEC_JSON, True, 64, False, True, "raw bytes"),
+        (NativeCliProtocol.CODEX_EXEC_JSON, True, 268_435_456, True, True, "no provable model-visible request"),
+        (
+            NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+            True,
+            268_435_456,
+            False,
+            False,
+            "genuine persisted request",
+        ),
+    ],
+)
+async def test_cli_pregrading_rejects_missing_gateway_bytes_tool_cause_or_request_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    protocol: NativeCliProtocol,
+    with_gateway: bool,
+    raw_byte_limit: int,
+    tool: bool,
+    link_request: bool,
+    expected_gap: str,
+) -> None:
+    case = await _capture_case_async(
+        memory=sqlite_instance,
+        protocol=protocol,
+        with_gateway=with_gateway,
+        declare_gateway=with_gateway,
+        raw_byte_limit=raw_byte_limit,
+        tool=tool,
+        link_request=link_request,
+    )
+
+    assessment = case.store.assess_cli_pregrading_coverage(
+        report=_pregrading_report(report=case.report),
+        expected_turns=1,
+    )
+
+    assert assessment.phase is NativeCyberCoveragePhase.PREGRADING
+    assert not assessment.required_complete
+    assert any(expected_gap in gap for gap in assessment.required_gaps)
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    assert snapshot.score_status is ScoreStatus.UNDETERMINED
+    assert snapshot.score_id == case.score.id
+
+
+async def test_cli_pregrading_rejects_corrupt_raw_chunk_before_grading_async(*, sqlite_instance: SQLiteMemory) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
+    with sqlite_instance.get_session() as session:
+        stdout = session.scalar(
+            select(NativeCyberRawStreamEntry).where(
+                NativeCyberRawStreamEntry.run_id == case.report.run_id,
+                NativeCyberRawStreamEntry.kind == "stdout",
+            )
+        )
+        assert stdout is not None
+        first = session.get(NativeCyberRawChunkEntry, (stdout.stream_id, 1))
+        assert first is not None and first.data
+        first.data = b"x" + first.data[1:]
+        session.commit()
+
+    assessment = case.store.assess_cli_pregrading_coverage(
+        report=_pregrading_report(report=case.report), expected_turns=1
+    )
+
+    assert assessment.phase is NativeCyberCoveragePhase.PREGRADING
+    assert not assessment.required_complete
+    assert any("missing or corrupt database chunk" in gap for gap in assessment.required_gaps)
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+    assert (
+        case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1).score_status
+        is ScoreStatus.UNDETERMINED
+    )
+
+
+async def test_cli_pregrading_rejects_host_gateway_error_before_grading_async(*, sqlite_instance: SQLiteMemory) -> None:
+    case = await _capture_case_async(memory=sqlite_instance, gateway_error=True, gateway_response=False)
+
+    assessment = case.store.assess_cli_pregrading_coverage(
+        report=_pregrading_report(report=case.report), expected_turns=1
+    )
+
+    assert not assessment.required_complete
+    assert any("host-generated error" in gap for gap in assessment.required_gaps)
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+    assert (
+        case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1).score_status
+        is ScoreStatus.UNDETERMINED
+    )
+
+
+@pytest.mark.parametrize("with_artifact", [True, False])
+@pytest.mark.parametrize("protocol", list(NativeCliProtocol))
+async def test_cli_artifact_only_pregrading_defers_artifact_but_checks_final_judgment_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    protocol: NativeCliProtocol,
+    with_artifact: bool,
+) -> None:
+    case = await _capture_case_async(
+        memory=sqlite_instance,
+        protocol=protocol,
+        response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
+        link_response=False,
+        with_artifact=with_artifact,
+    )
+    assert case.store.get_episode(run_id=case.report.run_id).turns[0].source_complete
+    assert [
+        piece.role
+        for piece in sqlite_instance.get_message_pieces(
+            conversation_id=case.report.conversation_id,
+        )
+    ] == ["user"]
+    draft = _pregrading_report(report=case.report)
+
+    pregrade = case.store.assess_cli_pregrading_coverage(report=draft, expected_turns=1)
+
+    assert pregrade.phase is NativeCyberCoveragePhase.PREGRADING
+    assert pregrade.required_complete and pregrade.required_gaps == ()
+    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    if with_artifact:
+        assert snapshot.score_status is ScoreStatus.COMPLETE and snapshot.coverage_complete
+        assert snapshot.gaps == ()
+    else:
+        assert snapshot.score_status is ScoreStatus.UNDETERMINED and not snapshot.coverage_complete
+        assert any("original grading and retained artifact" in gap for gap in snapshot.gaps)
+    assert snapshot.turns[0].response_piece_ids == ()
+    retained_report = NativeCliRunReport.model_validate_json(
+        sqlite_instance.get_scorable_content(content_ids=[snapshot.report_content_id])[snapshot.report_content_id].value
+    )
+    assert retained_report.judgment is not None and retained_report.judgment.value == 0.75
+    assert bool(retained_report.artifacts) is with_artifact
+
+
+@pytest.mark.parametrize("protocol", list(NativeCliProtocol))
+async def test_cli_artifact_only_requires_real_request_before_grading_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    protocol: NativeCliProtocol,
+) -> None:
+    case = await _capture_case_async(
+        memory=sqlite_instance,
+        protocol=protocol,
+        response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
+        link_request=False,
+        link_response=False,
+        with_artifact=True,
+    )
+
+    assessment = case.store.assess_cli_pregrading_coverage(
+        report=_pregrading_report(report=case.report), expected_turns=1
+    )
+
+    assert not assessment.required_complete
+    assert any("genuine persisted request" in gap for gap in assessment.required_gaps)
+    assert sqlite_instance._query_entries(ScoreEntry) == []
+    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    assert snapshot.score_status is ScoreStatus.UNDETERMINED
+
+
+@pytest.mark.parametrize("protocol", list(NativeCliProtocol))
+async def test_cli_artifact_only_requires_retained_root_terminal_before_grading_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    protocol: NativeCliProtocol,
+) -> None:
+    case = await _capture_case_async(
+        memory=sqlite_instance,
+        protocol=protocol,
+        response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
+        link_response=False,
+        with_artifact=True,
+    )
+    terminal_kind = (
+        "native_cli.turn_completed" if protocol is NativeCliProtocol.CODEX_EXEC_JSON else "native_cli.run_finished"
+    )
+    with sqlite_instance.get_session() as session:
+        terminal = session.scalar(
+            select(NativeCyberEventEntry).where(
+                NativeCyberEventEntry.run_id == case.report.run_id,
+                NativeCyberEventEntry.event_type == terminal_kind,
+            )
+        )
+        assert terminal is not None
+        terminal.event_type = "native_cli.progress"
+        session.commit()
+
+    assessment = case.store.assess_cli_pregrading_coverage(
+        report=_pregrading_report(report=case.report), expected_turns=1
+    )
+
+    assert not assessment.required_complete
+    assert any("root terminal source event" in gap for gap in assessment.required_gaps)
+    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    assert snapshot.score_status is ScoreStatus.UNDETERMINED
 
 
 @pytest.mark.parametrize("protocol", list(NativeCliProtocol))
