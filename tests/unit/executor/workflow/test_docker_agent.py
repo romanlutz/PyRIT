@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import PurePosixPath
@@ -22,6 +23,8 @@ from pyrit.executor.workflow.docker_agent import (
 )
 from pyrit.executor.workflow.docker_compose import ComposeEnvironmentSpec, ComposeServiceSpec
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError
+from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
+from pyrit.prompt_target.gateway.responses_contract import GatewayRoute
 from pyrit.prompt_target.native_cli_models import (
     NativeCliEvent,
     NativeCliProtocol,
@@ -81,8 +84,11 @@ def make_agent(
     count: int = 2,
     run_config: NativeCliRunConfig | None = None,
     stop_timeout: float = 0.5,
+    route: GatewayRoute | None = None,
 ) -> tuple[DockerStopOnlyAgentLease, FakeDockerRunner, FakeEngine, DockerEngineClient, NativeCliRunConfig]:
     approved = run_config or config()
+    route = route or GatewayRoute(run_id="inert-run", model="inert-model", guest_token="guest-only-" + "g" * 40)
+    auth = DockerGuestAuth.from_route(route=route, protocol=approved.protocol)
     agent = service_spec("agent", role="agent")
     services = (
         agent,
@@ -95,11 +101,29 @@ def make_agent(
     engine = fake.client(control_timeout_seconds=0.25)
     gateway_key = "OPENAI_BASE_URL" if approved.protocol is NativeCliProtocol.CODEX_EXEC_JSON else "ANTHROPIC_BASE_URL"
     environment = ["PATH=/usr/bin", "HOME=/tmp/home", "TMPDIR=/tmp", f"{gateway_key}={approved.model_gateway_endpoint}"]
-    command.mutate_image = lambda image: image["Config"].update(Env=environment.copy())
+    config_digest = (
+        hashlib.sha256(
+            codex_gateway_config(model=route.model, base_url=approved.model_gateway_endpoint).encode()
+        ).hexdigest()
+        if approved.protocol is NativeCliProtocol.CODEX_EXEC_JSON
+        else None
+    )
+    labels = (
+        {
+            "org.pyrit.native.codex-user-config-sha256": config_digest,
+            "org.pyrit.native.codex-user-config-path": "/tmp/home/.codex/config.toml",
+        }
+        if config_digest
+        else {}
+    )
+    if approved.protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
+        environment.append(f"ANTHROPIC_MODEL={route.model}")
+    command.mutate_image = lambda image: image["Config"].update(Env=environment.copy(), Labels=labels.copy())
 
     def populate(runner: FakeDockerRunner) -> None:
         for index, container in enumerate(runner.containers.values(), 1):
             container["Config"]["Env"] = environment.copy()
+            container["Config"]["Labels"].update(labels)
             container["State"].update(Pid=100 + index, Paused=False, Restarting=False, Dead=False)
         fake.containers = runner.containers
         fake.networks = runner.networks
@@ -110,13 +134,15 @@ def make_agent(
         executable=PurePosixPath("/opt/pinned-cli"),
         config=approved,
         artifact_policy=AgentArtifactPolicy.TARGET_SIDE_ONLY,
+        codex_config_sha256=config_digest,
     )
     lease = DockerStopOnlyAgentLease(
-        run_id="inert-run",
+        run_id=route.run_id,
         spec=spec,
         runner=command,
         engine=engine,
         profile=profile,
+        guest_auth=auth,
         stop_timeout_seconds=stop_timeout,
     )
     return lease, command, fake, engine, approved
@@ -150,7 +176,8 @@ async def test_real_runner_consumes_engine_bytes_and_stops_only_agent_before_gra
         "--",
         "literal $(not executed by host)\n--danger",
     ]
-    assert "Env" not in fake.created and fake.created["AttachStdin"] is False and fake.created["Privileged"] is False
+    assert {item.split("=", 1)[0] for item in fake.created["Env"]} == {"PYRIT_GUEST_MODEL_TOKEN", "PYRIT_RUN_ID"}
+    assert fake.created["AttachStdin"] is False and fake.created["Privileged"] is False
     assert kills(fake) == [allocation.container_id("agent")]
     assert lease.agent_stop.stopped and fake.containers[allocation.container_id("agent")]["State"]["Pid"] == 0
     # The target-side grader is safe to run only after NativeCliRunner has returned.
@@ -401,10 +428,19 @@ async def test_role_collisions_are_rejected_before_any_io_async(roles: tuple[fro
         executable=PurePosixPath("/opt/cli"),
         config=config(),
         artifact_policy=AgentArtifactPolicy.TARGET_SIDE_ONLY,
+        codex_config_sha256="a" * 64,
     )
     with pytest.raises(ValueError, match="agent-only"):
         DockerStopOnlyAgentLease(
-            run_id="run", spec=ComposeEnvironmentSpec(services=services), runner=command, engine=engine, profile=profile
+            run_id="run",
+            spec=ComposeEnvironmentSpec(services=services),
+            runner=command,
+            engine=engine,
+            profile=profile,
+            guest_auth=DockerGuestAuth.from_route(
+                route=GatewayRoute(run_id="run", model="inert", guest_token="g" * 40),
+                protocol=NativeCliProtocol.CODEX_EXEC_JSON,
+            ),
         )
     assert not fake.requests and not command.calls
     await engine.close_async()

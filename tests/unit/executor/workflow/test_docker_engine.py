@@ -19,7 +19,7 @@ from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngi
 from pyrit.prompt_target.native_cli_models import NativeCliStream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from pyrit.executor.workflow.docker_engine import DockerExecHandle
 
@@ -77,6 +77,7 @@ class FakeEngine:
         self.created: dict[str, Any] | None = None
         self.running = False
         self.started = False
+        self.on_start: Callable[[], Awaitable[None]] | None = None
         self.exit_code: Any = 0
         self.wire: tuple[bytes, ...] = (wire_frame(1, b"stdout\xff\n"), wire_frame(2, b"stderr\r\n"))
         self.last_stream: WireStream | None = None
@@ -140,6 +141,8 @@ class FakeEngine:
             assert json.loads(request.content) == {"Detach": False, "Tty": False}
             self.started = self.running = True
             self.start_entered.set()
+            if self.on_start is not None:
+                await self.on_start()
             if self.start_gate is not None:
                 await self.start_gate.wait()
             self.last_stream = WireStream(

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -20,6 +21,7 @@ from pyrit.executor.workflow.docker_compose import (
     DockerComposeEnvironmentLease,
 )
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError, DockerExecHandle
+from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
 from pyrit.models.environment_lease import EnvironmentLeaseState
 from pyrit.prompt_target.native_cli_models import NativeCliProtocol, NativeCliRunConfig
 
@@ -69,6 +71,7 @@ class DockerAgentCliProfile:
     executable: PurePosixPath
     config: NativeCliRunConfig
     artifact_policy: AgentArtifactPolicy
+    codex_config_sha256: str | None = None
 
     def __post_init__(self) -> None:
         """
@@ -88,6 +91,11 @@ class DockerAgentCliProfile:
             or not re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", str(self.executable))
         ):
             raise ValueError("The CLI requires a digest-pinned image and absolute immutable guest executable.")
+        if self.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+            if self.codex_config_sha256 is None or not re.fullmatch(r"[0-9a-f]{64}", self.codex_config_sha256):
+                raise ValueError("Codex requires a pinned user-level gateway configuration digest.")
+        elif self.codex_config_sha256 is not None:
+            raise ValueError("A Codex configuration pin cannot qualify a Claude profile.")
 
     def argv(self, prompt: str) -> tuple[str, ...]:
         """
@@ -128,6 +136,9 @@ class AgentStopObservation:
 class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
     """Compose lease with one agent-only service and a serialized, latched stop barrier."""
 
+    _CODEX_CONFIG_DIGEST_LABEL = "org.pyrit.native.codex-user-config-sha256"
+    _CODEX_CONFIG_PATH_LABEL = "org.pyrit.native.codex-user-config-path"
+
     def __init__(
         self,
         *,
@@ -136,6 +147,7 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         runner: DockerCommandRunner,
         engine: DockerEngineClient,
         profile: DockerAgentCliProfile,
+        guest_auth: DockerGuestAuth,
         stop_timeout_seconds: float = 30,
     ) -> None:
         """
@@ -145,6 +157,17 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             ValueError: If roles, immutable executable, profile, or budgets are incompatible.
         """
         super().__init__(run_id=run_id, spec=spec, runner=runner)
+        if (
+            not isinstance(guest_auth, DockerGuestAuth)
+            or guest_auth.run_id != run_id
+            or guest_auth.protocol is not profile.config.protocol
+        ):
+            raise ValueError("Guest gateway authentication must name this exact run and CLI protocol.")
+        if (
+            guest_auth.token.get_secret_value() in repr(profile)
+            or guest_auth.token.get_secret_value() in spec.model_dump_json()
+        ):
+            raise ValueError("The guest token must remain separate from public image/profile configuration.")
         agents = [service for service in spec.services if "agent" in service.roles]
         if (
             len(agents) != 1
@@ -168,6 +191,7 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             )
         self._engine = engine
         self._profile = profile
+        self._guest_auth = guest_auth
         self._agent = agent
         self._stop_timeout = stop_timeout_seconds
         self._lifecycle_lock = asyncio.Lock()
@@ -216,6 +240,8 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         """
         if config != self._profile.config:
             raise ValueError("Run configuration must exactly match the image's trusted CLI profile.")
+        if self._guest_auth.token.get_secret_value() in prompt:
+            raise ValueError("A guest gateway credential cannot be embedded in the CLI prompt/argv.")
         argv = self._profile.argv(prompt)
         claimed = False
         stream: DockerExecStream | None = None
@@ -236,6 +262,7 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
                     argv=argv,
                     user=f"{self._agent.uid}:{self._agent.gid}",
                     working_directory=str(config.agent_workdir),
+                    guest_auth=self._guest_auth,
                 )
                 self._exec_id = handle.exec_id
                 if self._closing_requested:
@@ -382,6 +409,10 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         return observations
 
     def _validate_agent_environment(self, container: dict[str, Any]) -> None:
+        if self._guest_auth.token.get_secret_value() in json.dumps(container["Config"], sort_keys=True):
+            raise DockerEngineError(
+                "A run-scoped guest token must not be baked into the image or container configuration."
+            )
         values = container["Config"].get("Env")
         if not isinstance(values, list) or not all(isinstance(value, str) and "=" in value for value in values):
             raise DockerEngineError("The pinned agent image must declare an explicit nonsecret environment.")
@@ -392,6 +423,8 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             else "ANTHROPIC_BASE_URL"
         )
         allowed = {"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", gateway_key}
+        if self._profile.config.protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
+            allowed.add("ANTHROPIC_MODEL")
         if len(environment) != len(values) or set(environment) - allowed:
             raise DockerEngineError(
                 "Agent image environment contains duplicate or unapproved credential/configuration fields."
@@ -400,6 +433,31 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             raise DockerEngineError("The pinned agent gateway does not match the approved CLI profile.")
         if not environment.get("HOME"):
             raise DockerEngineError("The stop-only CLI requires an explicit ephemeral guest HOME.")
+        if self._profile.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+            expected_digest = hashlib.sha256(
+                codex_gateway_config(
+                    model=self._guest_auth.model, base_url=self._profile.config.model_gateway_endpoint
+                ).encode("utf-8")
+            ).hexdigest()
+            if self._profile.codex_config_sha256 != expected_digest:
+                raise DockerEngineError(
+                    "Codex user-level configuration does not pin this model, gateway and guest auth mapping."
+                )
+            expected_path = str(PurePosixPath(environment["HOME"]) / ".codex" / "config.toml")
+            for labels in (
+                self._images[self._agent.name]["Config"].get("Labels"),
+                container["Config"].get("Labels"),
+            ):
+                if (
+                    not isinstance(labels, dict)
+                    or labels.get(self._CODEX_CONFIG_DIGEST_LABEL) != expected_digest
+                    or labels.get(self._CODEX_CONFIG_PATH_LABEL) != expected_path
+                ):
+                    raise DockerEngineError(
+                        "Codex requires trusted image provenance for the exact user-level gateway config."
+                    )
+        elif environment.get("ANTHROPIC_MODEL") != self._guest_auth.model:
+            raise DockerEngineError("The Claude image must pin the exact run-scoped gateway model.")
         for name in ("HOME", "TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
             if name in environment:
                 path = PurePosixPath(environment[name])

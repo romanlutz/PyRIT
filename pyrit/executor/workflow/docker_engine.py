@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth
 from pyrit.prompt_target.native_cli_models import NativeCliProcessChunk, NativeCliStream
 
 if TYPE_CHECKING:
@@ -187,10 +188,19 @@ class DockerEngineClient:
         )
 
     async def create_exec_async(
-        self, *, container_id: str, argv: tuple[str, ...], user: str, working_directory: str
+        self,
+        *,
+        container_id: str,
+        argv: tuple[str, ...],
+        user: str,
+        working_directory: str,
+        guest_auth: DockerGuestAuth | None = None,
     ) -> DockerExecHandle:
         """
-        Create one nonprivileged, non-TTY exec with no stdin or credential environment override.
+        Create one nonprivileged exec with only an optional run-scoped guest-auth environment.
+
+        Env is sent only in the create body and is never retained in the handle.
+        ExecInspect does not expose Env and cannot prove that the CLI used it.
 
         Returns:
             DockerExecHandle: The daemon-issued identity after exact process inspection.
@@ -200,6 +210,8 @@ class DockerEngineClient:
             DockerEngineError: If create or identity inspection fails.
         """
         self._validate_id(container_id)
+        if guest_auth is not None and not isinstance(guest_auth, DockerGuestAuth):
+            raise ValueError("Engine guest Env accepts only a validated run-scoped credential object.")
         directory = PurePosixPath(working_directory)
         if (
             not argv
@@ -227,6 +239,7 @@ class DockerEngineClient:
                 "Cmd": list(argv),
                 "User": user,
                 "WorkingDir": working_directory,
+                **({"Env": guest_auth.exec_environment()} if guest_auth is not None else {}),
             },
         )
         exec_id = result.get("Id")
