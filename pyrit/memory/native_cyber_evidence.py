@@ -46,6 +46,8 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberRawStreamStart,
     NativeCyberRawStreamSummary,
     NativeCyberRawWrite,
+    NativeCyberResponseMode,
+    NativeCyberResponsePolicy,
     NativeCyberToolCorrelation,
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
@@ -95,6 +97,9 @@ class NativeCyberEvidenceStore:
                     environment_id=start.environment_id,
                     simulated=start.simulated,
                     required_raw_streams=[key.model_dump(mode="json") for key in start.required_raw_streams],
+                    require_separate_tool_results=start.require_separate_tool_results,
+                    response_policy_version=start.response_policy.schema_version,
+                    artifact_only_allowed=start.response_policy.allow_artifact_only,
                     raw_byte_limit=start.raw_byte_limit,
                     stored_raw_bytes=0,
                     capture_gaps=[],
@@ -133,10 +138,13 @@ class NativeCyberEvidenceStore:
                 is not None
             ):
                 raise ValueError("Observed native outer-turn identities must be unique within a run.")
+            if turn.response_mode is NativeCyberResponseMode.ARTIFACT_ONLY and not episode.artifact_only_allowed:
+                raise ValueError("Artifact-only completion requires the task's explicit response-policy approval.")
             entry = NativeCyberTurnEntry(
                 run_id=turn.run_id,
                 turn_index=turn.turn_index,
                 source_turn_id=turn.source_turn_id,
+                response_mode=turn.response_mode.value,
                 started_at=turn.started_at,
                 capture_gaps=[],
             )
@@ -358,6 +366,20 @@ class NativeCyberEvidenceStore:
                 direction="response",
                 piece_ids=finish.response_piece_ids,
             )
+            self._link_pieces(
+                session=session,
+                episode=episode,
+                turn_index=finish.turn_index,
+                direction="tool_request",
+                piece_ids=finish.tool_request_piece_ids,
+            )
+            self._link_pieces(
+                session=session,
+                episode=episode,
+                turn_index=finish.turn_index,
+                direction="tool_result",
+                piece_ids=finish.tool_result_piece_ids,
+            )
             count = session.scalar(
                 select(func.count())
                 .select_from(NativeCyberEventEntry)
@@ -381,8 +403,25 @@ class NativeCyberEvidenceStore:
                     )
                 )
             )
-            if finish.source_complete and directions != {"request", "response"}:
-                gaps.append("Native turn lacks a stored request or response MessagePiece.")
+            if finish.source_complete and "request" not in directions:
+                gaps.append("Native turn lacks a stored request MessagePiece.")
+            if (
+                finish.source_complete
+                and turn.response_mode == NativeCyberResponseMode.MESSAGE_REQUIRED.value
+                and "response" not in directions
+            ):
+                gaps.append("Native chat turn lacks a genuine assistant response MessagePiece.")
+            if finish.source_complete and turn.response_mode == NativeCyberResponseMode.ARTIFACT_ONLY.value:
+                events = list(
+                    session.scalars(
+                        select(NativeCyberEventEntry).where(
+                            NativeCyberEventEntry.run_id == finish.run_id,
+                            NativeCyberEventEntry.turn_index == finish.turn_index,
+                        )
+                    )
+                )
+                if not self._has_terminal_event(events=events):
+                    gaps.append("Artifact-only native turn lacks an observed terminal source event.")
             turn.finished_at = finish.finished_at
             turn.observed_event_count = finish.observed_event_count
             turn.source_complete = finish.source_complete and not gaps
@@ -781,6 +820,8 @@ class NativeCyberEvidenceStore:
             event_counts[event.turn_index] += 1
         for link in tool_links:
             tool_sequences[link.call_id][link.phase] = link.event_sequence
+        if episode.response_policy_version != 1:
+            raise ValueError(f"Native episode {episode.run_id} has an unsupported response policy version.")
         run = NativeCyberEpisodeStart(
             run_id=episode.run_id,
             binding_name=episode.binding_name,
@@ -791,6 +832,11 @@ class NativeCyberEvidenceStore:
             simulated=episode.simulated,
             required_raw_streams=tuple(
                 NativeCyberRawStreamKey.model_validate(key) for key in episode.required_raw_streams
+            ),
+            require_separate_tool_results=episode.require_separate_tool_results,
+            response_policy=NativeCyberResponsePolicy(
+                schema_version=1,
+                allow_artifact_only=episode.artifact_only_allowed,
             ),
             raw_byte_limit=episode.raw_byte_limit,
         )
@@ -810,10 +856,13 @@ class NativeCyberEvidenceStore:
                 NativeCyberTurnSummary(
                     turn_index=turn.turn_index,
                     source_turn_id=turn.source_turn_id,
+                    response_mode=turn.response_mode,
                     started_at=turn.started_at,
                     finished_at=turn.finished_at,
                     request_piece_ids=tuple(piece_ids[(turn.turn_index, "request")]),
                     response_piece_ids=tuple(piece_ids[(turn.turn_index, "response")]),
+                    tool_request_piece_ids=tuple(piece_ids[(turn.turn_index, "tool_request")]),
+                    tool_result_piece_ids=tuple(piece_ids[(turn.turn_index, "tool_result")]),
                     observed_event_count=turn.observed_event_count,
                     stored_event_count=event_counts[turn.turn_index],
                     source_complete=turn.source_complete is True,
@@ -843,6 +892,7 @@ class NativeCyberEvidenceStore:
                     request_sequence=phases.get("request"),
                     start_sequence=phases.get("start"),
                     completion_sequence=phases.get("complete"),
+                    result_sequence=phases.get("result"),
                 )
                 for call_id, phases in sorted(tool_sequences.items())
             ),
@@ -953,11 +1003,27 @@ class NativeCyberEvidenceStore:
                 .order_by(NativeCyberEventEntry.sequence)
             )
         )
+        required.extend(
+            cls._turn_response_gaps(
+                episode=episode,
+                turns=turns,
+                pieces=pieces,
+                events=events,
+                report=report,
+            )
+        )
         required.extend(cls._event_gaps(events=events, report=report))
         links = list(
             session.scalars(select(NativeCyberToolEventEntry).where(NativeCyberToolEventEntry.run_id == episode.run_id))
         )
         required.extend(cls._tool_gaps(events=events, links=links, report=report))
+        required.extend(
+            cls._tool_result_gaps(
+                events=events,
+                links=links,
+                require_separate=episode.require_separate_tool_results,
+            )
+        )
         streams = list(
             session.scalars(select(NativeCyberRawStreamEntry).where(NativeCyberRawStreamEntry.run_id == episode.run_id))
         )
@@ -965,6 +1031,40 @@ class NativeCyberEvidenceStore:
         required.extend(raw_required)
         optional.extend(raw_optional)
         return list(dict.fromkeys(required)), list(dict.fromkeys(optional))
+
+    @classmethod
+    def _turn_response_gaps(
+        cls,
+        *,
+        episode: NativeCyberEpisodeEntry,
+        turns: Sequence[NativeCyberTurnEntry],
+        pieces: Sequence[NativeCyberTurnMessagePieceEntry],
+        events: Sequence[NativeCyberEventEntry],
+        report: NativeCyberReport,
+    ) -> list[str]:
+        directions: dict[int, set[str]] = defaultdict(set)
+        events_by_turn: dict[int, list[NativeCyberEventEntry]] = defaultdict(list)
+        for piece in pieces:
+            directions[piece.turn_index].add(piece.direction)
+        for event in events:
+            events_by_turn[event.turn_index].append(event)
+        gaps: list[str] = []
+        for turn in turns:
+            if "request" not in directions[turn.turn_index]:
+                gaps.append("Native turn lacks a stored request MessagePiece.")
+            if turn.response_mode == NativeCyberResponseMode.MESSAGE_REQUIRED.value:
+                if "response" not in directions[turn.turn_index]:
+                    gaps.append("Native chat turn lacks a genuine assistant response MessagePiece.")
+            elif turn.response_mode == NativeCyberResponseMode.ARTIFACT_ONLY.value:
+                if episode.response_policy_version != 1 or not episode.artifact_only_allowed:
+                    gaps.append("Artifact-only native turn lacks trusted task response-policy approval.")
+                if not cls._has_terminal_event(events=events_by_turn[turn.turn_index]):
+                    gaps.append("Artifact-only native turn lacks an observed terminal source event.")
+                if report.judgment is None or not report.judgment.complete or not report.judgment.artifacts:
+                    gaps.append("Artifact-only native turn lacks a complete judgment with retained artifact.")
+            else:
+                gaps.append("Native turn has an unsupported response mode.")
+        return gaps
 
     @classmethod
     def _event_gaps(
@@ -1064,6 +1164,34 @@ class NativeCyberEvidenceStore:
         event_sequences = {event.sequence for event in events}
         if any(link.event_sequence not in event_sequences for link in links):
             gaps.append("A native tool link has no retained source event.")
+        return gaps
+
+    @staticmethod
+    def _tool_result_gaps(
+        *,
+        events: Sequence[NativeCyberEventEntry],
+        links: Sequence[NativeCyberToolEventEntry],
+        require_separate: bool,
+    ) -> list[str]:
+        phases: dict[str, dict[str, int]] = defaultdict(dict)
+        for link in links:
+            phases[link.call_id][link.phase] = link.event_sequence
+        by_sequence = {event.sequence: event for event in events}
+        gaps: list[str] = []
+        for call_id, observed in phases.items():
+            result_sequence = observed.get("result")
+            if result_sequence is None:
+                if require_separate:
+                    gaps.append("A task-required model-visible tool result was not captured.")
+                continue
+            predecessor = observed.get("complete")
+            if predecessor is None:
+                predecessor = observed.get("request")
+            if predecessor is None or predecessor >= result_sequence:
+                gaps.append("A native tool result did not follow its completion or request.")
+            result = by_sequence.get(result_sequence)
+            if result is None or result.tool_call_id != call_id or result.tool_phase != "result":
+                gaps.append("A native tool result does not match its observed source event.")
         return gaps
 
     @staticmethod
@@ -1316,11 +1444,28 @@ class NativeCyberEvidenceStore:
     ) -> None:
         if len(piece_ids) != len(set(piece_ids)):
             raise ValueError("A native outer turn cannot reference a MessagePiece twice.")
-        valid_roles = {"user"} if direction == "request" else {"assistant", "simulated_assistant"}
+        valid_roles = {
+            "request": {"user"},
+            "response": {"assistant", "simulated_assistant"},
+            "tool_request": {"assistant", "simulated_assistant"},
+            "tool_result": {"tool"},
+        }.get(direction)
+        if valid_roles is None:
+            raise ValueError(f"Unknown native MessagePiece direction: {direction}.")
         for position, piece_id in enumerate(piece_ids):
             piece = session.get(PromptMemoryEntry, piece_id)
             if piece is None or piece.role not in valid_roles or not piece.conversation_id:
                 raise ValueError(f"Native {direction} MessagePiece {piece_id} is absent or has the wrong role.")
+            tool_request_type = piece.original_value_data_type in {"function_call", "tool_call"}
+            if (
+                (
+                    direction == "response"
+                    and piece.original_value_data_type in {"function_call", "tool_call", "function_call_output"}
+                )
+                or (direction == "tool_request" and not tool_request_type)
+                or (direction == "tool_result" and piece.original_value_data_type != "function_call_output")
+            ):
+                raise ValueError(f"Native {direction} MessagePiece {piece_id} has the wrong data type.")
             if episode.conversation_id is None:
                 episode.conversation_id = piece.conversation_id
             elif episode.conversation_id != piece.conversation_id:
@@ -1335,6 +1480,22 @@ class NativeCyberEvidenceStore:
                     piece_sha256=_message_piece_digest(piece.get_message_piece(), include_id=True),
                 )
             )
+
+    @staticmethod
+    def _has_terminal_event(*, events: Sequence[NativeCyberEventEntry]) -> bool:
+        last_action = max((event.sequence for event in events if event.source in {"model", "tool"}), default=0)
+        terminal = max(
+            (
+                event.sequence
+                for event in events
+                if event.source == "harness"
+                and event.event_type in {"session.idle", "turn.completed"}
+                and not (event.event_type == "session.idle" and event.payload.get("agentId"))
+                and not (isinstance(data := event.payload.get("data"), dict) and data.get("aborted") is True)
+            ),
+            default=None,
+        )
+        return terminal is not None and terminal >= last_action
 
     @staticmethod
     def _piece_links_intact(*, session: Session, links: Sequence[NativeCyberTurnMessagePieceEntry]) -> bool:

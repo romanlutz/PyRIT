@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -39,6 +40,23 @@ class NativeCyberToolPhase(str, Enum):
     REQUEST = "request"
     START = "start"
     COMPLETE = "complete"
+    RESULT = "result"
+
+
+class NativeCyberResponseMode(str, Enum):
+    """Whether the task needs an assistant message or approves artifact-only completion."""
+
+    MESSAGE_REQUIRED = "message_required"
+    ARTIFACT_ONLY = "artifact_only"
+
+
+class NativeCyberResponsePolicy(BaseModel):
+    """Versioned task-owned approval; individual turns still opt in explicitly."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    allow_artifact_only: bool = False
 
 
 class NativeCyberRawStreamKey(BaseModel):
@@ -64,6 +82,8 @@ class NativeCyberEpisodeStart(BaseModel):
     environment_id: str | None = Field(default=None, min_length=1, max_length=128)
     simulated: bool | None = None
     required_raw_streams: tuple[NativeCyberRawStreamKey, ...] = ()
+    require_separate_tool_results: bool = False
+    response_policy: NativeCyberResponsePolicy = Field(default_factory=NativeCyberResponsePolicy)
     raw_byte_limit: int = Field(default=268_435_456, ge=1, le=1_099_511_627_776)
 
     @model_validator(mode="after")
@@ -84,6 +104,7 @@ class NativeCyberTurnStart(BaseModel):
     source_turn_id: str | None = Field(default=None, min_length=1, max_length=128)
     started_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     request_piece_ids: tuple[uuid.UUID, ...] = ()
+    response_mode: NativeCyberResponseMode = NativeCyberResponseMode.MESSAGE_REQUIRED
 
 
 class NativeCyberTurnFinish(BaseModel):
@@ -95,6 +116,8 @@ class NativeCyberTurnFinish(BaseModel):
     turn_index: int = Field(ge=1)
     finished_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     response_piece_ids: tuple[uuid.UUID, ...] = ()
+    tool_request_piece_ids: tuple[uuid.UUID, ...] = ()
+    tool_result_piece_ids: tuple[uuid.UUID, ...] = ()
     observed_event_count: int = Field(ge=0)
     source_complete: bool
     gaps: tuple[str, ...] = ()
@@ -218,7 +241,7 @@ class NativeCyberEventSummary(BaseModel):
 
 
 class NativeCyberToolCorrelation(BaseModel):
-    """The observed request/start/completion event positions for one tool call."""
+    """Observed tool phases, keeping model-visible output distinct from execution completion."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -226,6 +249,7 @@ class NativeCyberToolCorrelation(BaseModel):
     request_sequence: int | None
     start_sequence: int | None
     completion_sequence: int | None
+    result_sequence: int | None
 
 
 class NativeCyberTurnSummary(BaseModel):
@@ -235,10 +259,13 @@ class NativeCyberTurnSummary(BaseModel):
 
     turn_index: int
     source_turn_id: str | None
+    response_mode: NativeCyberResponseMode
     started_at: AwareDatetime
     finished_at: AwareDatetime | None
     request_piece_ids: tuple[uuid.UUID, ...]
     response_piece_ids: tuple[uuid.UUID, ...]
+    tool_request_piece_ids: tuple[uuid.UUID, ...]
+    tool_result_piece_ids: tuple[uuid.UUID, ...]
     observed_event_count: int | None
     stored_event_count: int
     source_complete: bool
