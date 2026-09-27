@@ -84,6 +84,8 @@ class NativeCyberEpisodeStart(BaseModel):
     run_id: str = Field(min_length=1, max_length=128)
     binding_name: str = Field(min_length=1, max_length=128)
     binding_version: str = Field(min_length=1, max_length=128)
+    task_id: str | None = Field(default=None, min_length=1, max_length=128)
+    task_version: str | None = Field(default=None, min_length=1, max_length=128)
     started_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     source_session_id: str | None = Field(default=None, min_length=1, max_length=128)
     environment_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -95,6 +97,12 @@ class NativeCyberEpisodeStart(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sources(self) -> NativeCyberEpisodeStart:
+        if (self.task_id is None) != (self.task_version is None):
+            raise ValueError("Native CLI task ID and version must be declared together.")
+        if self.task_id is not None and (
+            not self.task_id.strip() or self.task_version is None or not self.task_version.strip()
+        ):
+            raise ValueError("Native CLI task identity cannot consist only of whitespace.")
         keys = [(key.source, key.kind, key.observed_source_id) for key in self.required_raw_streams]
         if len(keys) != len(set(keys)):
             raise ValueError("Required native raw streams must have distinct observed identities.")

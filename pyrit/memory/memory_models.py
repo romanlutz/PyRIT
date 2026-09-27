@@ -2252,6 +2252,8 @@ class NativeCyberEpisodeEntry(Base):
     run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     binding_name: Mapped[str] = mapped_column(Unicode(128), nullable=False)
     binding_version: Mapped[str] = mapped_column(Unicode(128), nullable=False)
+    task_id: Mapped[str | None] = mapped_column(Unicode(128))
+    task_version: Mapped[str | None] = mapped_column(Unicode(128))
     started_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     source_session_id: Mapped[str | None] = mapped_column(Unicode(128))
     environment_id: Mapped[str | None] = mapped_column(Unicode(128))
@@ -2410,6 +2412,7 @@ class NativeCyberRawChunkEntry(Base):
     """A bounded database-resident range of captured bytes."""
 
     __tablename__ = "NativeCyberRawChunkEntries"
+    __table_args__ = (Index("ix_NativeCyberRawChunkEntries_stream_offset", "stream_id", "byte_offset"),)
 
     stream_id: Mapped[uuid.UUID] = mapped_column(
         CustomUUID, ForeignKey(f"{NativeCyberRawStreamEntry.__tablename__}.stream_id"), primary_key=True
