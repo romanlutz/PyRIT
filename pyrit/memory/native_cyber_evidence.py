@@ -36,6 +36,7 @@ from pyrit.models.native_cyber import NativeCyberReport, NativeCyberStatus
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
     NativeCyberCoverageAssessment,
+    NativeCyberCoveragePhase,
     NativeCyberEpisodeSnapshot,
     NativeCyberEpisodeStart,
     NativeCyberEventSummary,
@@ -451,14 +452,53 @@ class NativeCyberEvidenceStore:
         expected_turns: int,
     ) -> NativeCyberCoverageAssessment:
         """
-        Assess captured evidence before scoring without changing the report or Score.
+        Assess final capture and acquired judgment before scoring.
 
         Returns:
-            NativeCyberCoverageAssessment: Required verdict gate and optional telemetry gaps.
+            NativeCyberCoverageAssessment: Final verdict gate and optional telemetry gaps.
 
         Raises:
             ValueError: If the turn count or report provenance is invalid.
         """
+        return self._assess_coverage(
+            report=report,
+            expected_turns=expected_turns,
+            phase=NativeCyberCoveragePhase.FINAL,
+        )
+
+    def assess_pregrading_coverage(
+        self,
+        *,
+        report: NativeCyberReport,
+        expected_turns: int,
+    ) -> NativeCyberCoverageAssessment:
+        """
+        Check captured source evidence before the original grader acquires a judgment.
+
+        An artifact-only turn still needs its real request and terminal event, but
+        its not-yet-acquired judgment and artifact are checked only at FINAL.
+
+        Returns:
+            NativeCyberCoverageAssessment: Pregrading gate and optional telemetry gaps.
+
+        Raises:
+            ValueError: If the report already includes a judgment or its provenance is invalid.
+        """
+        if report.judgment is not None:
+            raise ValueError("Pregrading coverage requires a report without an acquired original judgment.")
+        return self._assess_coverage(
+            report=report,
+            expected_turns=expected_turns,
+            phase=NativeCyberCoveragePhase.PREGRADING,
+        )
+
+    def _assess_coverage(
+        self,
+        *,
+        report: NativeCyberReport,
+        expected_turns: int,
+        phase: NativeCyberCoveragePhase,
+    ) -> NativeCyberCoverageAssessment:
         if expected_turns < 0:
             raise ValueError("The expected outer-turn count cannot be negative.")
         with self._write_session(run_id=report.run_id) as session:
@@ -470,8 +510,10 @@ class NativeCyberEvidenceStore:
                 episode=episode,
                 report=report,
                 expected_turns=expected_turns,
+                phase=phase,
             )
             return NativeCyberCoverageAssessment(
+                phase=phase,
                 required_complete=bool(report.agent and report.agent.coverage_complete and not required),
                 required_gaps=tuple(required),
                 optional_gaps=tuple(optional),
@@ -562,6 +604,7 @@ class NativeCyberEvidenceStore:
             episode=episode,
             report=report,
             expected_turns=expected_turns,
+            phase=NativeCyberCoveragePhase.FINAL,
         )
         required_complete = bool(report.agent and report.agent.coverage_complete and not required_gaps)
         canonical_score = self._score_for_capture(
@@ -972,9 +1015,16 @@ class NativeCyberEvidenceStore:
         episode: NativeCyberEpisodeEntry,
         report: NativeCyberReport,
         expected_turns: int,
+        phase: NativeCyberCoveragePhase,
     ) -> tuple[list[str], list[str]]:
         required = list(episode.capture_gaps)
         optional = list(episode.optional_gaps)
+        if (
+            phase is NativeCyberCoveragePhase.FINAL
+            and report.agent is not None
+            and (report.judgment is None or not report.judgment.complete)
+        ):
+            required.append("Original native judgment has not been completely acquired.")
         turns = list(
             session.scalars(
                 select(NativeCyberTurnEntry)
@@ -1010,6 +1060,7 @@ class NativeCyberEvidenceStore:
                 pieces=pieces,
                 events=events,
                 report=report,
+                phase=phase,
             )
         )
         required.extend(cls._event_gaps(events=events, report=report))
@@ -1041,6 +1092,7 @@ class NativeCyberEvidenceStore:
         pieces: Sequence[NativeCyberTurnMessagePieceEntry],
         events: Sequence[NativeCyberEventEntry],
         report: NativeCyberReport,
+        phase: NativeCyberCoveragePhase,
     ) -> list[str]:
         directions: dict[int, set[str]] = defaultdict(set)
         events_by_turn: dict[int, list[NativeCyberEventEntry]] = defaultdict(list)
@@ -1060,7 +1112,9 @@ class NativeCyberEvidenceStore:
                     gaps.append("Artifact-only native turn lacks trusted task response-policy approval.")
                 if not cls._has_terminal_event(events=events_by_turn[turn.turn_index]):
                     gaps.append("Artifact-only native turn lacks an observed terminal source event.")
-                if report.judgment is None or not report.judgment.complete or not report.judgment.artifacts:
+                if phase is NativeCyberCoveragePhase.FINAL and (
+                    report.judgment is None or not report.judgment.complete or not report.judgment.artifacts
+                ):
                     gaps.append("Artifact-only native turn lacks a complete judgment with retained artifact.")
             else:
                 gaps.append("Native turn has an unsupported response mode.")

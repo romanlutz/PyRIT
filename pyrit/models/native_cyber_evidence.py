@@ -50,6 +50,13 @@ class NativeCyberResponseMode(str, Enum):
     ARTIFACT_ONLY = "artifact_only"
 
 
+class NativeCyberCoveragePhase(str, Enum):
+    """The evidence available before grading versus after acquiring the judgment."""
+
+    PREGRADING = "pregrading"
+    FINAL = "final"
+
+
 class NativeCyberResponsePolicy(BaseModel):
     """Versioned task-owned approval; individual turns still opt in explicitly."""
 
@@ -217,6 +224,7 @@ class NativeCyberCoverageAssessment(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    phase: NativeCyberCoveragePhase
     required_complete: bool
     required_gaps: tuple[str, ...]
     optional_gaps: tuple[str, ...]

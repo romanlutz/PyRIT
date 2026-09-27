@@ -42,6 +42,7 @@ from pyrit.models.native_cyber import (
 )
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
+    NativeCyberCoveragePhase,
     NativeCyberEpisodeStart,
     NativeCyberEvidenceSource,
     NativeCyberObservedEvent,
@@ -291,12 +292,24 @@ def _unpersisted_score(*, report: NativeCyberReport) -> Score:
     )
 
 
+def _pregrading_report(*, report: NativeCyberReport) -> NativeCyberReport:
+    return NativeCyberReport.model_validate(
+        {
+            **report.model_dump(mode="json"),
+            "status": NativeCyberStatus.FINALIZING.value,
+            "cleanup": NativeCyberCleanup.UNKNOWN.value,
+            "judgment": None,
+        }
+    )
+
+
 def _prepare_artifact_only_case(
     *,
     memory: MemoryInterface,
     with_terminal_event: bool = True,
     with_artifact: bool = True,
     subagent_idle: bool = False,
+    with_request_piece: bool = True,
 ) -> _ArtifactCase:
     started_at = datetime.now(UTC)
     run_id = str(uuid4())
@@ -307,7 +320,8 @@ def _prepare_artifact_only_case(
         conversation_id=conversation_id,
         sequence=0,
     )
-    memory.add_message_pieces_to_memory(message_pieces=[request])
+    if with_request_piece:
+        memory.add_message_pieces_to_memory(message_pieces=[request])
     idle = NativeAgentEvent(
         sequence=1,
         event_id="artifact-idle-1",
@@ -394,7 +408,7 @@ def _prepare_artifact_only_case(
             run_id=run_id,
             turn_index=1,
             started_at=started_at,
-            request_piece_ids=(request.id,),
+            request_piece_ids=(request.id,) if with_request_piece else (),
             response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
         )
     )
@@ -435,13 +449,47 @@ def _prepare_artifact_only_case(
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestNativeCyberEvidence:
+    def test_pregrading_chat_coverage_waits_for_original_judgment_at_final(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        _finish_turn(case=case)
+        before_grade = _pregrading_report(report=case.report)
+
+        pregrading = case.store.assess_pregrading_coverage(report=before_grade, expected_turns=1)
+        final_without_grade = case.store.assess_required_coverage(report=before_grade, expected_turns=1)
+
+        assert pregrading.phase is NativeCyberCoveragePhase.PREGRADING
+        assert pregrading.required_complete
+        assert final_without_grade.phase is NativeCyberCoveragePhase.FINAL
+        assert not final_without_grade.required_complete
+        assert any("judgment" in gap for gap in final_without_grade.required_gaps)
+        with pytest.raises(ValueError, match="without an acquired original judgment"):
+            case.store.assess_pregrading_coverage(report=case.report, expected_turns=1)
+        assert case.store.assess_required_coverage(report=case.report, expected_turns=1).required_complete
+
     def test_artifact_only_turn_with_no_assistant_message_can_complete(
         self,
         *,
         sqlite_instance: MemoryInterface,
     ) -> None:
         case = _prepare_artifact_only_case(memory=sqlite_instance)
+        pregrading_report = _pregrading_report(report=case.report)
+        assert pregrading_report.judgment is None
+        pregrading = case.store.assess_pregrading_coverage(report=pregrading_report, expected_turns=1)
+        assert pregrading.phase is NativeCyberCoveragePhase.PREGRADING
+        assert pregrading.required_complete
+        assert pregrading.required_gaps == ()
+        assert sqlite_instance._query_entries(ScoreEntry) == []
+        not_yet_final = case.store.assess_required_coverage(report=pregrading_report, expected_turns=1)
+        assert not not_yet_final.required_complete
+        assert any("retained artifact" in gap for gap in not_yet_final.required_gaps)
         coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert coverage.phase is NativeCyberCoveragePhase.FINAL
         assert coverage.required_complete
         assert coverage.required_gaps == ()
 
@@ -468,11 +516,19 @@ class TestNativeCyberEvidence:
         assert len(saved_report.judgment.artifacts) == 1
 
     @pytest.mark.parametrize(
-        ("with_terminal_event", "with_artifact", "subagent_idle", "expected_gap"),
+        (
+            "with_terminal_event",
+            "with_artifact",
+            "subagent_idle",
+            "with_request_piece",
+            "pregrading_complete",
+            "expected_gap",
+        ),
         [
-            (False, True, False, "terminal source event"),
-            (True, False, False, "retained artifact"),
-            (True, True, True, "terminal source event"),
+            (False, True, False, True, False, "terminal source event"),
+            (True, False, False, True, True, "retained artifact"),
+            (True, True, True, True, False, "terminal source event"),
+            (True, True, False, False, False, "stored request"),
         ],
     )
     def test_artifact_only_turn_rejects_missing_source_or_grader_evidence(
@@ -482,6 +538,8 @@ class TestNativeCyberEvidence:
         with_terminal_event: bool,
         with_artifact: bool,
         subagent_idle: bool,
+        with_request_piece: bool,
+        pregrading_complete: bool,
         expected_gap: str,
     ) -> None:
         case = _prepare_artifact_only_case(
@@ -489,20 +547,41 @@ class TestNativeCyberEvidence:
             with_terminal_event=with_terminal_event,
             with_artifact=with_artifact,
             subagent_idle=subagent_idle,
+            with_request_piece=with_request_piece,
         )
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert pregrading.phase is NativeCyberCoveragePhase.PREGRADING
+        assert pregrading.required_complete is pregrading_complete
+        if not pregrading_complete:
+            assert any(expected_gap in gap for gap in pregrading.required_gaps)
         coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert coverage.phase is NativeCyberCoveragePhase.FINAL
         assert not coverage.required_complete
         assert any(expected_gap in gap for gap in coverage.required_gaps)
 
+        score = _unpersisted_score(report=case.report)
         snapshot = case.store.finalize_episode_atomic(
             report=case.report,
-            score=_unpersisted_score(report=case.report),
+            score=score,
             expected_turns=1,
         )
 
+        assert snapshot.score_id == score.id
         assert snapshot.score_status is ScoreStatus.UNDETERMINED
+        assert sqlite_instance.get_scores(score_ids=[str(score.id)])[0].is_undetermined
         assert snapshot.turns[0].response_piece_ids == ()
-        assert snapshot.turns[0].request_piece_ids == (case.request_piece_id,)
+        assert snapshot.turns[0].request_piece_ids == ((case.request_piece_id,) if with_request_piece else ())
+        if not with_artifact:
+            retained = sqlite_instance.get_scorable_content(content_ids=[snapshot.report_content_id])[
+                snapshot.report_content_id
+            ]
+            saved_report = NativeCyberReport.model_validate_json(retained.value)
+            assert saved_report.judgment is not None
+            assert saved_report.judgment.value == 0.75
+            assert saved_report.judgment.artifacts == ()
 
     def test_artifact_only_requires_explicit_task_approval(
         self,
@@ -612,6 +691,13 @@ class TestNativeCyberEvidence:
             )
         )
 
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert pregrading.phase is NativeCyberCoveragePhase.PREGRADING
+        assert not pregrading.required_complete
+        assert any("genuine assistant response" in gap for gap in pregrading.required_gaps)
         coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
         assert not coverage.required_complete
         assert any("genuine assistant response" in gap for gap in coverage.required_gaps)
@@ -1341,6 +1427,12 @@ class TestNativeCyberEvidence:
         case = _prepare_case(memory=sqlite_instance)
         _append_events(case=case)
         _finish_turn(case=case)
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert not pregrading.required_complete
+        assert any("never opened" in gap for gap in pregrading.required_gaps)
         assessment = case.store.assess_required_coverage(report=case.report, expected_turns=1)
         assert not assessment.required_complete
         assert any("never opened" in gap for gap in assessment.required_gaps)
@@ -1368,6 +1460,12 @@ class TestNativeCyberEvidence:
         _append_events(case=case)
         _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
         _finish_turn(case=case)
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert not pregrading.required_complete
+        assert any("task-required model-visible tool result" in gap for gap in pregrading.required_gaps)
         assessment = case.store.assess_required_coverage(report=case.report, expected_turns=1)
         assert not assessment.required_complete
         assert any("task-required model-visible tool result" in gap for gap in assessment.required_gaps)
