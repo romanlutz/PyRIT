@@ -222,6 +222,46 @@ async def test_gateway_listener_accepts_only_matching_run_scoped_gateway_app_asy
     await listener.close_async()
 
 
+async def test_two_run_owned_listeners_keep_distinct_bridge_routes_without_shared_credentials_async() -> None:
+    first_binding = _binding()
+    second_binding = GatewayBridgeBinding(
+        run_id="run-inert-2",
+        network_id="b" * 64,
+        address=IPv4Address("172.31.0.1"),
+        subnet=IPv4Network("172.31.0.0/16"),
+        port=43124,
+    )
+    first_route = GatewayRoute(run_id=first_binding.run_id, model="offline-model", guest_token="g" * 40)
+    second_route = GatewayRoute(run_id=second_binding.run_id, model="offline-model", guest_token="h" * 40)
+    with patch.object(uvicorn, "Server", return_value=_FakeServer()):
+        first = RunScopedModelGatewayListener(
+            route=first_route,
+            binding=first_binding,
+            app=create_codex_responses_app(route=first_route, limits=GatewayLimits()),
+            listening_socket=_socket(binding=first_binding),
+        )
+    with patch.object(uvicorn, "Server", return_value=_FakeServer()):
+        second = RunScopedModelGatewayListener(
+            route=second_route,
+            binding=second_binding,
+            app=create_codex_responses_app(route=second_route, limits=GatewayLimits()),
+            listening_socket=_socket(binding=second_binding),
+        )
+    try:
+        await asyncio.gather(first.start_async(), second.start_async())
+        assert first.is_locally_running and second.is_locally_running
+        assert first.base_url != second.base_url
+        with pytest.raises(ValueError, match="exact configured run-scoped gateway app"):
+            RunScopedModelGatewayListener(
+                route=first_route,
+                binding=first_binding,
+                app=create_codex_responses_app(route=second_route, limits=GatewayLimits()),
+                listening_socket=_socket(binding=first_binding),
+            )
+    finally:
+        await asyncio.gather(first.close_async(), second.close_async())
+
+
 def test_gateway_listener_rejects_app_bound_to_another_route_before_server() -> None:
     binding = _binding()
     route = GatewayRoute(run_id=binding.run_id, model="offline-model", guest_token="g" * 40)
