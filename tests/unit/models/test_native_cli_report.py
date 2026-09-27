@@ -475,11 +475,22 @@ def test_prelaunch_error_is_not_a_fabricated_cli_session() -> None:
     assert report.cleanup is NativeCliReportCleanup.NOT_OPENED
 
 
-def test_turn_parent_and_artifact_references_cannot_be_ambiguous() -> None:
+def test_same_retained_run_can_represent_second_outer_turn_without_parent_run() -> None:
+    first = _complete_report()
+    data = first.model_dump(mode="json")
+    data.update(turn_id="fixture-turn-2", turn_index=2, parent_run_id=None)
+    second = NativeCliRunReport.model_validate(data)
+    assert second.run_id == first.run_id
+    assert second.task_id == first.task_id and second.task_version == first.task_version
+    assert second.turn_id == "fixture-turn-2" and second.turn_index == 2
+    assert second.parent_run_id is None
+    assert second.evidence.source_session_id == first.evidence.source_session_id
+    assert second.sha256() != first.sha256()
+
+
+def test_distinct_parent_run_and_artifact_references_cannot_be_ambiguous() -> None:
     data = _complete_report().model_dump(mode="json")
     data["turn_index"] = 2
-    with pytest.raises(ValueError, match="parent run ID"):
-        NativeCliRunReport.model_validate(data)
     data["parent_run_id"] = "fixture-prior-run"
     assert NativeCliRunReport.model_validate(data).turn_index == 2
     data["parent_run_id"] = data["run_id"]

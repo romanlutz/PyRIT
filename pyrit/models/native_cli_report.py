@@ -375,8 +375,8 @@ class NativeCliRunReport(BaseModel):
             raise ValueError("CLI task version, task/run/turn IDs, and errors must not be blank.")
         if any(item is not None and not item.strip() for item in (self.parent_run_id, self.conversation_id)):
             raise ValueError("CLI parent run and conversation IDs must not be blank.")
-        if self.parent_run_id == self.run_id or (self.turn_index > 1 and not self.parent_run_id):
-            raise ValueError("A subsequent CLI turn requires a distinct parent run ID.")
+        if self.parent_run_id == self.run_id:
+            raise ValueError("A CLI parent run ID must differ from the current run ID.")
         if self.evidence.observed_steps is not None and self.evidence.observed_steps > self.max_steps:
             raise ValueError("Observed CLI steps cannot exceed the configured step budget.")
         if self.evidence.coverage_complete:
