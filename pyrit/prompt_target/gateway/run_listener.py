@@ -86,6 +86,8 @@ class RunScopedModelGatewayListener:
         """
         if route.run_id != binding.run_id:
             raise ValueError("The gateway app route and listener binding must belong to the same run.")
+        if getattr(getattr(app, "state", None), "pyrit_gateway_route", None) != route:
+            raise ValueError("The listener must serve the exact configured run-scoped gateway app.")
         if (
             type(startup_seconds) not in (int, float)
             or not math.isfinite(startup_seconds)

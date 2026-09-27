@@ -15,9 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import uvicorn
-from starlette.applications import Starlette
 
-from pyrit.prompt_target.gateway.responses_contract import GatewayRoute
+from pyrit.prompt_target.gateway.claude_messages import create_claude_messages_app
+from pyrit.prompt_target.gateway.codex_responses import create_codex_responses_app
+from pyrit.prompt_target.gateway.responses_contract import GatewayLimits, GatewayRoute
 from pyrit.prompt_target.gateway.run_listener import (
     GatewayBridgeBinding,
     GatewayListenerCleanupError,
@@ -94,7 +95,7 @@ def _listener(
         return RunScopedModelGatewayListener(
             route=route,
             binding=selected,
-            app=Starlette(),
+            app=create_codex_responses_app(route=route, limits=GatewayLimits()),
             listening_socket=listening_socket or _socket(binding=selected),
             startup_seconds=startup_seconds,
             cleanup_seconds=cleanup_seconds,
@@ -125,7 +126,7 @@ def test_gateway_listener_disables_access_logs_proxy_headers_and_websockets() ->
         RunScopedModelGatewayListener(
             route=route,
             binding=binding,
-            app=Starlette(),
+            app=create_codex_responses_app(route=route, limits=GatewayLimits()),
             listening_socket=_socket(binding=binding),
         )
     config = factory.call_args.args[0]
@@ -144,7 +145,10 @@ def test_gateway_listener_requires_real_finite_deadlines(startup: float, cleanup
         RunScopedModelGatewayListener(
             route=GatewayRoute(run_id=binding.run_id, model="offline-model", guest_token="g" * 40),
             binding=binding,
-            app=Starlette(),
+            app=create_codex_responses_app(
+                route=GatewayRoute(run_id=binding.run_id, model="offline-model", guest_token="g" * 40),
+                limits=GatewayLimits(),
+            ),
             listening_socket=_socket(binding=binding),
             startup_seconds=startup,
             cleanup_seconds=cleanup,
@@ -193,8 +197,44 @@ def test_gateway_listener_rejects_foreign_or_unbound_socket_before_server(defect
         RunScopedModelGatewayListener(
             route=route,
             binding=binding,
-            app=Starlette(),
+            app=create_codex_responses_app(route=route, limits=GatewayLimits()),
             listening_socket=sock,
+        )
+    server.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["codex", "claude"])
+async def test_gateway_listener_accepts_only_matching_run_scoped_gateway_app_async(kind: str) -> None:
+    binding = _binding()
+    route = GatewayRoute(run_id=binding.run_id, model="offline-model", guest_token="g" * 40)
+    app = (
+        create_codex_responses_app(route=route, limits=GatewayLimits())
+        if kind == "codex"
+        else create_claude_messages_app(route=route, limits=GatewayLimits())
+    )
+    server = _FakeServer()
+    with patch.object(uvicorn, "Server", return_value=server):
+        listener = RunScopedModelGatewayListener(
+            route=route, binding=binding, app=app, listening_socket=_socket(binding=binding)
+        )
+    await listener.start_async()
+    assert listener.is_locally_running
+    await listener.close_async()
+
+
+def test_gateway_listener_rejects_app_bound_to_another_route_before_server() -> None:
+    binding = _binding()
+    route = GatewayRoute(run_id=binding.run_id, model="offline-model", guest_token="g" * 40)
+    other = GatewayRoute(run_id=binding.run_id, model="different-model", guest_token="h" * 40)
+    with (
+        patch.object(uvicorn, "Server") as server,
+        pytest.raises(ValueError, match="exact configured run-scoped gateway app"),
+    ):
+        RunScopedModelGatewayListener(
+            route=route,
+            binding=binding,
+            app=create_codex_responses_app(route=other, limits=GatewayLimits()),
+            listening_socket=_socket(binding=binding),
         )
     server.assert_not_called()
 

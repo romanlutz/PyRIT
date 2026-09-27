@@ -529,5 +529,6 @@ def create_claude_messages_app(
         route=route, limits=limits, backend=backend, observation_callback=observation_callback
     )
     app = Starlette(routes=[Route("/v1/messages", gateway._handle_async, methods=["POST"])])
+    app.state.pyrit_gateway_route = route
     app.router.redirect_slashes = False
     return app

@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
-from starlette.applications import Starlette
 
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError
 from pyrit.executor.workflow.docker_gateway_bridge import (
     acquire_gateway_bridge_binding_async,
     derive_gateway_bridge_binding,
 )
-from pyrit.prompt_target.gateway.responses_contract import GatewayRoute
+from pyrit.prompt_target.gateway.codex_responses import create_codex_responses_app
+from pyrit.prompt_target.gateway.responses_contract import GatewayLimits, GatewayRoute
 from pyrit.prompt_target.gateway.run_listener import RunScopedModelGatewayListener
 from tests.unit.executor.workflow.test_docker_compose import make_lease
 from tests.unit.prompt_target.gateway.test_run_listener import _FakeServer, _socket
@@ -55,11 +55,12 @@ async def test_gateway_bridge_candidate_is_accepted_by_run_owned_fake_listener_a
     lease, allocation, network = await _bridge_case_async()
     binding = derive_gateway_bridge_binding(lease=lease, allocation=allocation, network=network, port=43123)
     sock = _socket(binding=binding)
+    route = GatewayRoute(run_id=lease.run_id, model="offline-model", guest_token="g" * 40)
     with patch.object(uvicorn, "Server", return_value=_FakeServer()):
         listener = RunScopedModelGatewayListener(
-            route=GatewayRoute(run_id=lease.run_id, model="offline-model", guest_token="g" * 40),
+            route=route,
             binding=binding,
-            app=Starlette(),
+            app=create_codex_responses_app(route=route, limits=GatewayLimits()),
             listening_socket=sock,
         )
     try:
