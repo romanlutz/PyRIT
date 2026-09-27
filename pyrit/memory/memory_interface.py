@@ -29,6 +29,7 @@ from pyrit.common.deprecation import print_deprecation_message
 
 if TYPE_CHECKING:
     from pyrit.memory.memory_embedding import MemoryEmbedding
+    from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
 
 from pyrit.memory.memory_models import (
     AtomicAttackIdentifierEntry,
@@ -40,6 +41,7 @@ from pyrit.memory.memory_models import (
     ConversationEntry,
     ConverterIdentifierEntry,
     EmbeddingDataEntry,
+    NativeCyberTurnMessagePieceEntry,
     ObservationEntry,
     ObservationMessagePieceEntry,
     PromptConverterIdentifierEntry,
@@ -1592,6 +1594,13 @@ class MemoryInterface(abc.ABC):
             Session: A SQLAlchemy session bound to the engine.
         """
 
+    @property
+    def native_cyber_evidence(self) -> "NativeCyberEvidenceStore":
+        """The database-backed native episode, event and raw-log store."""
+        from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
+
+        return NativeCyberEvidenceStore(memory=self)
+
     def _update_entry(self, entry: Base) -> None:
         """
         Update an existing entry in the Table using merge.
@@ -1652,7 +1661,9 @@ class MemoryInterface(abc.ABC):
                     session=session,
                     piece_ids=prompt_entry_ids,
                 ):
-                    raise ValueError("Prompt entries used by scorer observations are immutable.")
+                    raise ValueError(
+                        "Prompt entries used by scorer observations or native cyber evidence are immutable."
+                    )
                 for entry in entries:
                     entry_in_session = session.get(type(entry), entry.id)  # type: ignore[ty:unresolved-attribute]
                     if entry_in_session is None:
@@ -2935,7 +2946,7 @@ class MemoryInterface(abc.ABC):
             return False
         entry_ids = [entry.id for entry in entries_to_update if isinstance(entry, PromptMemoryEntry)]
         if self._message_pieces_are_observation_referenced(piece_ids=entry_ids):
-            raise ValueError(f"Conversation {conversation_id} contains immutable scorer observation evidence.")
+            raise ValueError(f"Conversation {conversation_id} contains immutable observation or native cyber evidence.")
 
         # Use the utility function to update the entries
         success = self._update_entries(entries=entries_to_update, update_fields=update_fields)
@@ -2952,10 +2963,10 @@ class MemoryInterface(abc.ABC):
         piece_ids: Sequence[uuid.UUID],
     ) -> bool:
         """
-        Check whether message pieces are retained by an LLM observation.
+        Check whether message pieces are retained by an observation or native run.
 
         Returns:
-            bool: True when any piece is a scored input or retained judge response.
+            bool: True when any piece is a scored input, judge response or native turn.
         """
         if not piece_ids:
             return False
@@ -2973,10 +2984,10 @@ class MemoryInterface(abc.ABC):
         piece_ids: Sequence[uuid.UUID],
     ) -> bool:
         """
-        Check observation references in the caller's transaction.
+        Check observation and native-turn references in the caller's transaction.
 
         Returns:
-            bool: True when any message piece is immutable observation evidence.
+            bool: True when any message piece is immutable evidence.
         """
         for start in range(0, len(piece_ids), cls._MAX_BIND_VARS):
             batch = piece_ids[start : start + cls._MAX_BIND_VARS]
@@ -2991,6 +3002,13 @@ class MemoryInterface(abc.ABC):
                 select(ObservationEntry.id).where(ObservationEntry.scored_message_piece_id.in_(batch)).limit(1)
             )
             if scored_observation is not None:
+                return True
+            native_piece = session.scalar(
+                select(NativeCyberTurnMessagePieceEntry.message_piece_id)
+                .where(NativeCyberTurnMessagePieceEntry.message_piece_id.in_(batch))
+                .limit(1)
+            )
+            if native_piece is not None:
                 return True
         return False
 

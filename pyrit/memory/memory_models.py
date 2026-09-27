@@ -15,16 +15,20 @@ from sqlalchemy import (
     ARRAY,
     INTEGER,
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
+    LargeBinary,
     String,
     TypeDecorator,
     Unicode,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.mssql import VARBINARY
 from sqlalchemy.dialects.sqlite import CHAR
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -2236,3 +2240,172 @@ class ScenarioResultEntry(Base):
             str: String representation of the scenario result entry
         """
         return f"ScenarioResultEntry: {self.scenario_name} (version {self.scenario_version})"
+
+
+class NativeCyberEpisodeEntry(Base):
+    """One append-only native run, with a write-once report and score anchor."""
+
+    __tablename__ = "NativeCyberEpisodeEntries"
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    binding_name: Mapped[str] = mapped_column(Unicode(128), nullable=False)
+    binding_version: Mapped[str] = mapped_column(Unicode(128), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    source_session_id: Mapped[str | None] = mapped_column(Unicode(128))
+    environment_id: Mapped[str | None] = mapped_column(Unicode(128))
+    simulated: Mapped[bool | None] = mapped_column(Boolean)
+    required_raw_streams: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    raw_byte_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    stored_raw_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    conversation_id: Mapped[str | None] = mapped_column(String(128))
+    capture_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    optional_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    coverage_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    report_content_id: Mapped[uuid.UUID | None] = mapped_column(
+        CustomUUID, ForeignKey(f"{ScorableContentEntry.__tablename__}.id")
+    )
+    report_sha256: Mapped[str | None] = mapped_column(String(64))
+    score_id: Mapped[uuid.UUID | None] = mapped_column(CustomUUID, ForeignKey(f"{ScoreEntry.__tablename__}.id"))
+
+
+class NativeCyberTurnEntry(Base):
+    """A stable outer turn, separate from the internal agent's tool turns."""
+
+    __tablename__ = "NativeCyberTurnEntries"
+
+    run_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey(f"{NativeCyberEpisodeEntry.__tablename__}.run_id"), primary_key=True
+    )
+    turn_index: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    source_turn_id: Mapped[str | None] = mapped_column(Unicode(128))
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    observed_event_count: Mapped[int | None] = mapped_column(INTEGER)
+    source_complete: Mapped[bool | None] = mapped_column(Boolean)
+    capture_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+
+class NativeCyberTurnMessagePieceEntry(Base):
+    """An existing genuine message piece used in one outer turn."""
+
+    __tablename__ = "NativeCyberTurnMessagePieceEntries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "turn_index"],
+            ["NativeCyberTurnEntries.run_id", "NativeCyberTurnEntries.turn_index"],
+        ),
+        UniqueConstraint("run_id", "message_piece_id", name="uq_native_cyber_turn_piece"),
+        Index("ix_NativeCyberTurnMessagePieceEntries_piece_id", "message_piece_id"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    turn_index: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    direction: Mapped[str] = mapped_column(String(16), primary_key=True)
+    position: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    message_piece_id: Mapped[uuid.UUID] = mapped_column(
+        CustomUUID, ForeignKey(f"{PromptMemoryEntry.__tablename__}.id"), nullable=False
+    )
+    piece_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class NativeCyberEventEntry(Base):
+    """An ordered source event with unchanged structured payload and digest."""
+
+    __tablename__ = "NativeCyberEventEntries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "turn_index"],
+            ["NativeCyberTurnEntries.run_id", "NativeCyberTurnEntries.turn_index"],
+        ),
+        Index("ix_NativeCyberEventEntries_observed_id", "run_id", "observed_event_id", "sequence"),
+        Index("ix_NativeCyberEventEntries_run_turn_sequence", "run_id", "turn_index", "sequence"),
+        Index("ix_NativeCyberEventEntries_stream_offset", "run_id", "observed_stream_id", "stream_offset"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    sequence: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    turn_index: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    observed_event_id: Mapped[str | None] = mapped_column(Unicode(256))
+    observed_session_id: Mapped[str | None] = mapped_column(Unicode(128))
+    observed_stream_id: Mapped[str | None] = mapped_column(Unicode(128))
+    stream_offset: Mapped[int | None] = mapped_column(BigInteger)
+    tool_call_id: Mapped[str | None] = mapped_column(Unicode(128))
+    tool_phase: Mapped[str | None] = mapped_column(String(16))
+    event_type: Mapped[str] = mapped_column(Unicode(128), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
+class NativeCyberToolEventEntry(Base):
+    """A tool call's observed request, start or completion event, never a fake chat message."""
+
+    __tablename__ = "NativeCyberToolEventEntries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "event_sequence"],
+            ["NativeCyberEventEntries.run_id", "NativeCyberEventEntries.sequence"],
+        ),
+        Index("ix_NativeCyberToolEventEntries_event", "run_id", "event_sequence"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    call_id: Mapped[str] = mapped_column(Unicode(128), primary_key=True)
+    phase: Mapped[str] = mapped_column(String(16), primary_key=True)
+    event_sequence: Mapped[int] = mapped_column(INTEGER, nullable=False)
+
+
+class NativeCyberRawStreamEntry(Base):
+    """One identified byte stream and its explicit capture coverage."""
+
+    __tablename__ = "NativeCyberRawStreamEntries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "turn_index"],
+            ["NativeCyberTurnEntries.run_id", "NativeCyberTurnEntries.turn_index"],
+        ),
+        Index(
+            "ix_NativeCyberRawStreamEntries_observed_source",
+            "run_id",
+            "source",
+            "kind",
+            "observed_source_id",
+        ),
+        Index("ix_NativeCyberRawStreamEntries_run_turn", "run_id", "turn_index"),
+    )
+
+    stream_id: Mapped[uuid.UUID] = mapped_column(CustomUUID, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey(f"{NativeCyberEpisodeEntry.__tablename__}.run_id"), nullable=False
+    )
+    turn_index: Mapped[int | None] = mapped_column(INTEGER)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    observed_source_id: Mapped[str] = mapped_column(Unicode(128), nullable=False)
+    tool_call_id: Mapped[str | None] = mapped_column(Unicode(128))
+    received_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    stored_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    truncated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_complete: Mapped[bool | None] = mapped_column(Boolean)
+    expected_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    stored_sha256: Mapped[str | None] = mapped_column(String(64))
+    observed_sha256: Mapped[str | None] = mapped_column(String(64))
+    capture_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+
+class NativeCyberRawChunkEntry(Base):
+    """A bounded database-resident range of captured bytes."""
+
+    __tablename__ = "NativeCyberRawChunkEntries"
+
+    stream_id: Mapped[uuid.UUID] = mapped_column(
+        CustomUUID, ForeignKey(f"{NativeCyberRawStreamEntry.__tablename__}.stream_id"), primary_key=True
+    )
+    sequence: Mapped[int] = mapped_column(INTEGER, primary_key=True)
+    byte_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    byte_length: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary().with_variant(VARBINARY(None), "mssql"), nullable=False)
