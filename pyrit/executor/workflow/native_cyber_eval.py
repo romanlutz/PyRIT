@@ -18,8 +18,10 @@ import aiofiles
 
 from pyrit.executor.attack import PromptSendingAttack
 from pyrit.executor.attack.core import AttackConverterConfig, AttackScoringConfig
+from pyrit.executor.workflow.environment_lease import EnvironmentLease
 from pyrit.memory import CentralMemory
 from pyrit.models import ComponentIdentifier, ContentEntryScorable, ContentScorable, Identifiable, Message, SeedPrompt
+from pyrit.models.environment_lease import EnvironmentLeaseSnapshot, EnvironmentResourceHandle, EnvironmentServiceHandle
 from pyrit.models.native_cyber import (
     NativeAgentEvidence,
     NativeCyberCleanup,
@@ -59,6 +61,42 @@ class NativeCyberRuntime(Protocol):
     async def grade_async(self, *, evidence: NativeAgentEvidence) -> NativeCyberJudgment:
         """Acquire original grading and immutable artifacts exactly once while the environment exists."""
         ...
+
+
+class _NativeRuntimeLease(EnvironmentLease[NativeCyberRuntime]):
+    """Adapt the existing single runtime context without moving task or grader logic."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        provider: str,
+        context: AbstractAsyncContextManager[NativeCyberRuntime],
+    ) -> None:
+        super().__init__(run_id=run_id)
+        self._provider = provider
+        self._context = context
+        self._context_entered = False
+
+    async def _acquire_async(self) -> NativeCyberRuntime:
+        handle = EnvironmentResourceHandle(
+            run_id=self.run_id, provider=self._provider, resource_id=self.lease_id, kind="runtime_context"
+        )
+        runtime = await self._acquire_resource_async(
+            handle=handle, acquire_async=self._enter_async, release_async=self._exit_async
+        )
+        self._register_service(EnvironmentServiceHandle(name="runtime", roles=frozenset({"agent"}), resource=handle))
+        return runtime
+
+    async def _enter_async(self, handle: EnvironmentResourceHandle) -> NativeCyberRuntime:
+        runtime = await self._context.__aenter__()
+        self._context_entered = True
+        return runtime
+
+    async def _exit_async(self, handle: EnvironmentResourceHandle) -> None:
+        if not self._context_entered:
+            raise RuntimeError("Legacy binding entry failed; its partial-acquisition rollback is not observable.")
+        await self._context.__aexit__(None, None, None)
 
 
 class NativeCyberTaskBinding(Identifiable, ABC):
@@ -122,12 +160,31 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         """
         await asyncio.to_thread(self._validate_posix_storage, directory)
 
-    @abstractmethod
     def open_runtime(
         self, *, run_id: str, request: NativeCyberRequest
     ) -> AbstractAsyncContextManager[NativeCyberRuntime]:
-        """Create one fresh owned environment; context exit must remove only its resources."""
-        ...
+        """
+        Create the legacy single runtime context, including its own rollback on failed entry.
+
+        Raises:
+            NotImplementedError: If neither runtime construction hook was supplied.
+        """
+        raise NotImplementedError("A binding must implement open_runtime or create_environment_lease.")
+
+    def create_environment_lease(
+        self, *, run_id: str, request: NativeCyberRequest
+    ) -> EnvironmentLease[NativeCyberRuntime]:
+        """
+        Build a provider-neutral lease; existing single-runtime bindings need no changes.
+
+        Returns:
+            EnvironmentLease[NativeCyberRuntime]: An unused run-owned lease.
+        """
+        return _NativeRuntimeLease(
+            run_id=run_id,
+            provider=f"{self.name}@{self.version}",
+            context=self.open_runtime(run_id=run_id, request=request),
+        )
 
     def seed(self, request: NativeCyberRequest) -> SeedPrompt:
         """
@@ -231,8 +288,8 @@ class NativeCyberEvaluation:
         self.score: Score | None = None
         self._readiness: NativeCyberReadiness | None = None
         self._runtime: NativeCyberRuntime | None = None
-        self._context: AbstractAsyncContextManager[NativeCyberRuntime] | None = None
-        self._entered = False
+        self._context: EnvironmentLease[NativeCyberRuntime] | None = None
+        self._lease_started = False
         self._closed = False
         self._cleanup = NativeCyberCleanup.NOT_OPENED
         self._attack_result: AttackResult | None = None
@@ -253,6 +310,11 @@ class NativeCyberEvaluation:
         self._directory_created = False
         self._host_storage_verified = False
         self._agent_storage_verified = False
+
+    @property
+    def environment_lease(self) -> EnvironmentLeaseSnapshot | None:
+        """The current in-memory environment lifecycle snapshot, separate from the task report."""
+        return self._context.snapshot() if self._context is not None else None
 
     async def start_async(self) -> NativeCyberRunView:
         """
@@ -285,10 +347,13 @@ class NativeCyberEvaluation:
                     not self._readiness.capabilities.operator_steps or self.request.technique != "literal"
                 ):
                     raise ValueError("Operator stepping is not qualified for this binding/backend.")
-                self._context = self.binding.open_runtime(run_id=self.run_id, request=self.request)
-                self._runtime = await self._context.__aenter__()
-                self._entered = True
+                self._context = self.binding.create_environment_lease(run_id=self.run_id, request=self.request)
+                if self._context.run_id != self.run_id:
+                    raise ValueError("The environment lease must belong to this run.")
+                self._lease_started = True
                 self._cleanup = NativeCyberCleanup.UNKNOWN
+                async with asyncio.timeout(self._remaining_seconds()):
+                    self._runtime = await self._context.acquire_async()
                 async with asyncio.timeout(self._remaining_seconds()):
                     await self._runtime.validate_agent_storage_async(directory=self.directory)
                 self._agent_storage_verified = True
@@ -531,13 +596,13 @@ class NativeCyberEvaluation:
         await self._publish_async(judgment=self._judgment)
 
     async def _close_async(self) -> None:
-        if self._closed or not self._entered:
+        if self._closed or not self._lease_started:
             return
         self._closed = True
         assert self._context is not None
         try:
             async with asyncio.timeout(self._CLEANUP_SECONDS):
-                await self._context.__aexit__(None, None, None)
+                await self._context.close_async()
             self._cleanup = NativeCyberCleanup.CLOSED
         except (Exception, asyncio.CancelledError) as error:
             self._cleanup = NativeCyberCleanup.FAILED
@@ -581,7 +646,7 @@ class NativeCyberEvaluation:
             if (
                 self._directory_created
                 and not self._can_write_report_file()
-                and (not self._entered or self._cleanup is NativeCyberCleanup.CLOSED)
+                and (not self._lease_started or self._cleanup is NativeCyberCleanup.CLOSED)
             ):
                 try:
                     await asyncio.to_thread(self.directory.rmdir)
@@ -625,7 +690,7 @@ class NativeCyberEvaluation:
     async def _publish_async(self, *, judgment: NativeCyberJudgment | None) -> None:
         if self.report is not None:
             return
-        if self._entered and not self._agent_storage_verified and self._cleanup is not NativeCyberCleanup.CLOSED:
+        if self._lease_started and not self._agent_storage_verified and self._cleanup is not NativeCyberCleanup.CLOSED:
             raise PermissionError("Cannot retain raw evidence while an unverified agent storage boundary remains open.")
         report = self._build_report(judgment)
         if self._can_write_report_file():
@@ -674,7 +739,7 @@ class NativeCyberEvaluation:
         )
 
     def _can_write_report_file(self) -> bool:
-        return self._host_storage_verified and (not self._entered or self._agent_storage_verified)
+        return self._host_storage_verified and (not self._lease_started or self._agent_storage_verified)
 
     async def _expire_async(self) -> None:
         await asyncio.sleep(max(0, (self.expires_at - datetime.now(UTC)).total_seconds()))

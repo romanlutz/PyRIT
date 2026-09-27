@@ -7,7 +7,7 @@ import asyncio
 import hashlib
 import os
 import stat
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,12 +29,16 @@ from pyrit.models.native_cyber import (
 from pyrit.prompt_target import NativeAgentTarget
 from pyrit.registry import ConverterRegistry
 from pyrit.score.float_scale.native_cyber_scorer import NativeCyberReportScorer
+from tests.unit.executor.workflow.test_environment_lease import FOUR_SERVICES, ONE_SERVICE, TWO_SERVICES, InertLease
 from tests.unit.prompt_target.target.test_native_agent_target import SdkSessionFixture, agent_session, tool_turn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from pyrit.executor.workflow.environment_lease import EnvironmentLease
+    from pyrit.executor.workflow.native_cyber_eval import NativeCyberRuntime
     from pyrit.memory import SQLiteMemory
+    from pyrit.models.environment_lease import EnvironmentResourceHandle
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
 
@@ -720,3 +724,178 @@ async def test_literal_baseline_uses_the_existing_converter_pipeline_async(tmp_p
     assert view.status == "completed"
     assert binding.runtime.sdk.prompts == [base64.b64encode(b"literal fixture").decode()]
     assert run.report.input_sha256 == hashlib.sha256(b"literal fixture").hexdigest()
+
+
+class LeasedFixtureBinding(FixtureBinding):
+    def __init__(
+        self,
+        *,
+        services: tuple[tuple[str, str, str | None], ...] = TWO_SERVICES,
+        steps: bool = False,
+    ) -> None:
+        super().__init__(steps=steps)
+        self.services = services
+        self.lease: InertLease[NativeCyberRuntime] | None = None
+
+    def create_environment_lease(
+        self, *, run_id: str, request: NativeCyberRequest
+    ) -> EnvironmentLease[NativeCyberRuntime]:
+        self.lease = InertLease(run_id=run_id, runtime=self.runtime, services=self.services, order=self.order)
+        return self.lease
+
+
+@pytest.mark.parametrize("services", [ONE_SERVICE, TWO_SERVICES, FOUR_SERVICES])
+async def test_native_workflow_uses_provider_lease_without_changing_grade_or_report_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory, services: tuple[tuple[str, str, str | None], ...]
+) -> None:
+    binding = LeasedFixtureBinding(services=services)
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    assert run.environment_lease is None
+    with patch.object(binding, "open_runtime", side_effect=AssertionError("Do not use the legacy context.")):
+        result = await run.start_async()
+    assert result.status == "completed" and run.score.get_value() == 0.75
+    assert binding.runtime.grade_count == 1
+    assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
+    assert run.environment_lease.state == "closed"
+    assert len(run.environment_lease.services) == len(services)
+    assert binding.order[len(services) : len(services) + 3] == ["setup", "health", "grade"]
+    assert all(value.startswith("release:") for value in binding.order[-len(services) :])
+    assert all(resource.status == "confirmed" for resource in run.environment_lease.resources)
+    assert "environment_lease" not in run.report.model_dump()
+    await run.finish_async()
+    assert binding.runtime.grade_count == 1
+
+
+async def test_legacy_single_runtime_is_wrapped_without_claiming_setup_or_health_async(tmp_path: Path) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    await run.start_async()
+    snapshot = run.environment_lease
+    assert snapshot.run_id == run.run_id and snapshot.state == "closed"
+    assert len(snapshot.services) == len(snapshot.resources) == 1
+    assert snapshot.services[0].roles == frozenset({"agent"})
+    assert snapshot.resources[0].resource.kind == "runtime_context"
+    assert not snapshot.setup_completed and not snapshot.health and not snapshot.capabilities
+    assert binding.order == ["open", "grade", "close"]
+
+
+async def test_retained_native_session_keeps_every_lease_service_until_grading_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding(steps=True, services=FOUR_SERVICES)
+    run = NativeCyberEvaluation(
+        binding=binding, request=NativeCyberRequest(instruction="first", operator_steps=True), directory=tmp_path
+    )
+    first = await run.start_async()
+    second = await run.step_async("second")
+    assert first.conversation_id == second.conversation_id
+    assert run.environment_lease.state == "ready"
+    assert all(resource.status == "pending" for resource in run.environment_lease.resources)
+    assert binding.runtime.grade_count == 0
+    await run.finish_async()
+    assert run.environment_lease.state == "closed" and binding.runtime.grade_count == 1
+
+
+async def test_native_partial_acquire_rolls_back_without_a_grade_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding()
+    original_factory = binding.create_environment_lease
+
+    def create_lease(*, run_id: str, request: NativeCyberRequest) -> EnvironmentLease[NativeCyberRuntime]:
+        lease = original_factory(run_id=run_id, request=request)
+        binding.lease.fail_acquire = f"{run_id}:web"
+        return lease
+
+    with patch.object(binding, "create_environment_lease", side_effect=create_lease):
+        run = NativeCyberEvaluation(
+            binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path
+        )
+        result = await run.start_async()
+    assert result.status == "error" and run.score.is_undetermined
+    assert run.report.agent is None and run.report.cleanup == "closed"
+    assert binding.runtime.sdk.prompts == [] and binding.runtime.grade_count == 0
+    assert all(resource.status == "confirmed" for resource in run.environment_lease.resources)
+    assert binding.lease.live == {"externally-owned-controller", "another-runs-resource"}
+
+
+async def test_native_lease_cleanup_failure_retains_judgment_without_numeric_score_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding()
+    original_factory = binding.create_environment_lease
+
+    def create_lease(*, run_id: str, request: NativeCyberRequest) -> EnvironmentLease[NativeCyberRuntime]:
+        lease = original_factory(run_id=run_id, request=request)
+        binding.lease.fail_release = f"{run_id}:web"
+        return lease
+
+    with patch.object(binding, "create_environment_lease", side_effect=create_lease):
+        run = NativeCyberEvaluation(
+            binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path
+        )
+        result = await run.start_async()
+    assert result.status == "error" and run.score.is_undetermined
+    assert run.report.judgment.value == 0.75 and run.report.cleanup == "failed"
+    assert run.environment_lease.state == "cleanup_failed"
+    assert binding.runtime.grade_count == 1
+    assert sum(item.startswith("release:") for item in binding.order) == 2
+
+
+async def test_native_cancellation_during_lease_acquisition_retains_partial_failure_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding()
+    entered = asyncio.Event()
+    original_factory = binding.create_environment_lease
+
+    def create_lease(*, run_id: str, request: NativeCyberRequest) -> EnvironmentLease[NativeCyberRuntime]:
+        original_factory(run_id=run_id, request=request)
+        lease = binding.lease
+        assert lease is not None
+        allocate = lease._allocate_async
+
+        async def paused_allocate_async(handle: EnvironmentResourceHandle) -> None:
+            await allocate(handle)
+            entered.set()
+            await asyncio.Event().wait()
+
+        lease._allocate_async = paused_allocate_async
+        return lease
+
+    with patch.object(binding, "create_environment_lease", side_effect=create_lease):
+        run = NativeCyberEvaluation(
+            binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path
+        )
+        task = asyncio.create_task(run.start_async())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert run.status == "cancelled" and run.score.is_undetermined
+    assert run.report.cleanup == "closed" and run.report.agent is None
+    assert binding.runtime.grade_count == 0 and binding.runtime.sdk.prompts == []
+    assert len(run.environment_lease.resources) == 1
+    assert run.environment_lease.resources[0].status == "confirmed"
+
+
+async def test_foreign_lease_is_never_acquired_or_cleaned_by_this_run_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding()
+    foreign = InertLease(run_id="another-run", runtime=binding.runtime)
+    with patch.object(binding, "create_environment_lease", return_value=foreign):
+        run = NativeCyberEvaluation(
+            binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path
+        )
+        result = await run.start_async()
+    assert result.status == "error" and run.score.is_undetermined
+    assert run.report.cleanup == "not_opened"
+    assert foreign.snapshot().state == "new" and foreign.order == []
+
+
+async def test_failed_legacy_entry_does_not_invent_rollback_confirmation_async(tmp_path: Path) -> None:
+    context = MagicMock(spec=AbstractAsyncContextManager)
+    context.__aenter__ = AsyncMock(side_effect=OSError("Legacy acquire failed."))
+    context.__aexit__ = AsyncMock()
+    binding = FixtureBinding()
+    with patch.object(binding, "open_runtime", return_value=context):
+        run = NativeCyberEvaluation(
+            binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path
+        )
+        with pytest.raises(PermissionError, match="storage boundary remains open"):
+            await run.start_async()
+    context.__aexit__.assert_not_awaited()
+    assert run.report is None and run.score is None
+    assert run.environment_lease.state == "cleanup_failed"
+    assert any("rollback is not observable" in error for error in run.environment_lease.errors)
