@@ -10,7 +10,8 @@ import os
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -33,6 +34,50 @@ class ComposePlatform(str, Enum):
     ARM64 = "linux/arm64"
 
 
+class ComposeTmpfsSpec(BaseModel):
+    """One explicitly approved, bounded, ephemeral service-owned writable path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    _RESERVED_PATHS: ClassVar[tuple[str, ...]] = (
+        "/bin",
+        "/dev",
+        "/etc",
+        "/lib",
+        "/lib64",
+        "/proc",
+        "/run",
+        "/sbin",
+        "/sys",
+        "/usr",
+        "/var/lock",
+        "/var/run",
+    )
+
+    path: str = Field(min_length=2, max_length=255)
+    size_bytes: int = Field(ge=1, le=1_073_741_824, strict=True)
+    executable: bool = Field(default=False, strict=True)
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            not re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value)
+            or str(path) != value
+            or ".." in path.parts
+        ):
+            raise ValueError(
+                "Runtime-state paths must be canonical absolute Linux paths without traversal or interpolation."
+            )
+        if any(
+            path.is_relative_to(reserved) or PurePosixPath(reserved).is_relative_to(path)
+            for reserved in cls._RESERVED_PATHS
+        ):
+            raise ValueError("Runtime state cannot overlap system, device or Docker-managed filesystem paths.")
+        return value
+
+
 class ComposeServiceSpec(BaseModel):
     """Trusted approved argv and limits, not an arbitrary Compose service mapping."""
 
@@ -51,6 +96,7 @@ class ComposeServiceSpec(BaseModel):
     memory_bytes: int = Field(ge=33_554_432, le=34_359_738_368, strict=True)
     pids_limit: int = Field(ge=1, le=4096, strict=True)
     tmpfs_bytes: int = Field(ge=1, le=1_073_741_824, strict=True)
+    runtime_state: tuple[ComposeTmpfsSpec, ...] | None = Field(default=None, min_length=1, max_length=8)
 
     @field_validator("command", "healthcheck")
     @classmethod
@@ -63,11 +109,33 @@ class ComposeServiceSpec(BaseModel):
     def _validate_tmpfs(self) -> ComposeServiceSpec:
         if self.tmpfs_bytes > self.memory_bytes:
             raise ValueError("Temporary filesystem size cannot exceed the service memory limit.")
+        if self.runtime_state is not None:
+            paths: list[PurePosixPath] = []
+            for mount in self.runtime_state:
+                path = PurePosixPath(mount.path)
+                if any(path.is_relative_to(other) or other.is_relative_to(path) for other in paths):
+                    raise ValueError("Runtime-state paths cannot be duplicated or overlap.")
+                if any(PurePosixPath(argv[0]).is_relative_to(path) for argv in (self.command, self.healthcheck)):
+                    raise ValueError("Runtime state cannot hide an approved command or health-check executable.")
+                paths.append(path)
+            if PurePosixPath("/tmp") not in paths:
+                raise ValueError("An opt-in runtime-state policy must explicitly include /tmp.")
+            if sum(mount.size_bytes for mount in self.runtime_state) > self.tmpfs_bytes:
+                raise ValueError("Combined runtime-state sizes exceed the service tmpfs budget.")
         return self
+
+    @property
+    def tmpfs_mounts(self) -> tuple[ComposeTmpfsSpec, ...]:
+        """The explicit runtime-state policy or the unchanged strict single-/tmp default."""
+        return (
+            self.runtime_state
+            if self.runtime_state is not None
+            else (ComposeTmpfsSpec(path="/tmp", size_bytes=self.tmpfs_bytes),)
+        )
 
 
 class ComposeEnvironmentSpec(BaseModel):
-    """An approved static topology with no mounts, ports, env, builds or arbitrary options."""
+    """An approved static topology with only bounded tmpfs, never host mounts or persistent volumes."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -269,6 +337,12 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
             raise DockerComposeError(
                 "Volumes are not approved by this provider; refusing project teardown or readiness."
             )
+        services = {service.name: service for service in self._spec.services}
+        for container in inventory.containers:
+            name = self._labels(container, "container").get(self._SERVICE_LABEL)
+            if not isinstance(name, str) or name not in services:
+                raise DockerComposeError("A container has no approved service runtime-state policy.")
+            self._validate_runtime_state(service=services[name], container=container)
         if not require_ready:
             return
         expected = {service.name for service in self._spec.services}
@@ -343,9 +417,6 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
         if any(host.get(key) != value for key, value in expected_host.items()):
             raise DockerComposeError("Container isolation or resource limits differ from the approved specification.")
         forbidden = (
-            "Binds",
-            "Mounts",
-            "VolumesFrom",
             "PortBindings",
             "Devices",
             "DeviceRequests",
@@ -359,19 +430,8 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
         )
         if any(host.get(key) for key in forbidden):
             raise DockerComposeError("Unapproved mount, port, device, capability or host namespace was observed.")
-        if host.get("CapDrop") != ["ALL"] or host.get("SecurityOpt") not in (
-            ["no-new-privileges:true"],
-            ["no-new-privileges"],
-        ):
-            raise DockerComposeError("Capability dropping and no-new-privileges are required.")
-        if host.get("Tmpfs") != {"/tmp": self._tmpfs(service)}:
-            raise DockerComposeError("Unexpected writable filesystem configuration.")
         if host.get("RestartPolicy", {}).get("Name") != "no":
             raise DockerComposeError("An unapproved restart policy was observed.")
-        if any(
-            mount.get("Type") != "tmpfs" or mount.get("Destination") != "/tmp" for mount in container.get("Mounts", [])
-        ):
-            raise DockerComposeError("A host or volume mount was observed.")
         networks = container.get("NetworkSettings", {}).get("Networks")
         ports = container.get("NetworkSettings", {}).get("Ports") or {}
         if not isinstance(ports, dict) or any(ports.values()):
@@ -392,6 +452,66 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
             raise DockerComposeError(
                 "Every named service requires its approved health check and healthy running state."
             )
+
+    def _validate_runtime_state(self, *, service: ComposeServiceSpec, container: dict[str, Any]) -> None:
+        config, host = container.get("Config"), container.get("HostConfig")
+        if not isinstance(config, dict) or not isinstance(host, dict):
+            raise DockerComposeError("Runtime-state inspection lacks container configuration.")
+        image = self._images.get(service.name)
+        if (
+            image is None
+            or container.get("Image") != image["Id"]
+            or config.get("Image") != service.image
+            or image["Config"].get("Volumes")
+            or config.get("Volumes")
+        ):
+            raise DockerComposeError("Runtime state requires the approved immutable image without VOLUME declarations.")
+        if (
+            config.get("User") != f"{service.uid}:{service.gid}"
+            or host.get("ReadonlyRootfs") is not True
+            or host.get("Privileged") is not False
+            or host.get("CapAdd")
+            or host.get("CapDrop") != ["ALL"]
+            or host.get("SecurityOpt") not in (["no-new-privileges:true"], ["no-new-privileges"])
+        ):
+            raise DockerComposeError("Runtime-state ownership or required container security differs from approval.")
+        if any(host.get(key) for key in ("Binds", "Mounts", "VolumesFrom")):
+            raise DockerComposeError(
+                "Runtime state cannot use host mounts, alternate mount options or persistent volumes."
+            )
+        expected = self._tmpfs_options(service)
+        if host.get("Tmpfs") != expected:
+            raise DockerComposeError(
+                "Effective tmpfs paths, bounds or permissions differ from the approved runtime state."
+            )
+        mounts = container.get("Mounts")
+        if not isinstance(mounts, list):
+            raise DockerComposeError("Effective container mount inspection is unavailable.")
+        destinations: set[str] = set()
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                raise DockerComposeError("Effective mount inspection contains a malformed record.")
+            if set(mount) - {"Type", "Source", "Name", "Driver", "Destination", "Mode", "RW", "Propagation"}:
+                raise DockerComposeError("Effective mount inspection contains unsupported properties.")
+            destination = mount.get("Destination")
+            if not isinstance(destination, str) or destination not in expected or destination in destinations:
+                raise DockerComposeError("Effective mounts contain an unapproved, aliased or duplicate path.")
+            destinations.add(destination)
+            mode = mount.get("Mode", "")
+            if (
+                mount.get("Type") != "tmpfs"
+                or mount.get("Source") not in (None, "")
+                or mount.get("Name")
+                or mount.get("Driver")
+                or mount.get("RW") is not True
+                or mount.get("Propagation") not in (None, "", "private", "rprivate")
+                or not isinstance(mode, str)
+                or (mode and not set(mode.split(",")).issubset(expected[destination].split(",")))
+            ):
+                raise DockerComposeError("Effective mount type, source, permission or propagation is unapproved.")
+        # Docker may report HostConfig.Tmpfs without duplicating those entries in Mounts.
+        if mounts and destinations != set(expected):
+            raise DockerComposeError("Effective tmpfs mount records do not cover the full approved runtime state.")
 
     async def _inventory_async(self) -> _Inventory:
         found: dict[str, tuple[dict[str, Any], ...]] = {}
@@ -467,8 +587,14 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
         return f"{self._project}-{service.name}"
 
     @staticmethod
-    def _tmpfs(service: ComposeServiceSpec) -> str:
-        return f"rw,noexec,nosuid,nodev,size={service.tmpfs_bytes},uid={service.uid},gid={service.gid},mode=0700"
+    def _tmpfs_options(service: ComposeServiceSpec) -> dict[str, str]:
+        return {
+            mount.path: (
+                f"rw,{'exec' if mount.executable else 'noexec'},nosuid,nodev,size={mount.size_bytes},"
+                f"uid={service.uid},gid={service.gid},mode=0700"
+            )
+            for mount in service.tmpfs_mounts
+        }
 
     def _document(self) -> dict[str, Any]:
         return {
@@ -492,7 +618,7 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
                     "mem_limit": service.memory_bytes,
                     "memswap_limit": service.memory_bytes,
                     "pids_limit": service.pids_limit,
-                    "tmpfs": ["/tmp:" + self._tmpfs(service)],
+                    "tmpfs": [f"{path}:{options}" for path, options in self._tmpfs_options(service).items()],
                     "networks": ["challenge"],
                     "healthcheck": {
                         "test": ["CMD", *service.healthcheck],

@@ -18,27 +18,74 @@ earlier-declared parent references. Each service supplies:
 - Nonroot UID/GID and explicit CPU, memory, PID and bounded `/tmp` sizes.
 
 There is no arbitrary YAML/JSON loader, extra-options dictionary, candidate
-environment, mount, port, device, secret, build, privilege or capability option.
+environment, host mount, volume, port, device, secret, build, privilege or capability option.
 Unknown fields, unpinned images and interpolation tokens fail validation.
 Commands and health checks may not contain `$`, NUL or line breaks: Compose
 interpolates strings even when its input is JSON. Labels also use literal
 validated run identities. Task images and their baked-in content/environment
 remain trusted approved inputs, not something this provider can certify.
 
-The generated manifest uses an internal bridge challenge network, no published
+The default manifest uses an internal bridge challenge network, no published
 ports, read-only root filesystems, nonroot users, all capabilities dropped,
-no-new-privileges and a bounded noexec/nosuid/nodev `/tmp`. This deliberately
-does **not** support workloads requiring privileged tooling, writable images,
-executable temporary storage, host services or Internet/model access. An
+no-new-privileges and a bounded noexec/nosuid/nodev `/tmp`. These defaults are
+unchanged when `runtime_state` is omitted. Privileged tooling, writable root
+filesystems, host services and Internet/model access remain unsupported. An
 internal Docker network is not a claim of a fully qualified hostile-code sandbox
 or isolation from every Docker-host service. Those boundaries require separate
 provider qualification.
 In particular, compatibility with the original GDM target image is unproven:
 services such as Grafana may require writable runtime state, and sandbox-local
-CLI harnesses may require an executable extraction/cache path. This profile is
-not qualified for GDM, GHCP, Claude or Codex. Reviewed per-service storage/exec
-capabilities, original benchmark parity and a reconciled cleanup budget are
-readiness blockers for those future bindings, not reasons to weaken this default.
+CLI harnesses may require an executable extraction/cache path. The opt-in policy
+below models these needs; it does not qualify GDM, GHCP, Claude or Codex.
+Original image/benchmark parity, safe staging and model transport, and a
+reconciled cleanup budget remain readiness blockers for those future bindings.
+
+## Opt-in ephemeral runtime state
+
+`ComposeServiceSpec.runtime_state` optionally specifies a complete tuple of
+`ComposeTmpfsSpec(path, size_bytes, executable=False)` mounts for that service.
+It must include `/tmp` explicitly. The existing `tmpfs_bytes` field is the total
+budget: all mount sizes combined must fit within it and the service memory
+limit. At most eight nonoverlapping paths and at most 1 GiB total are supported.
+No policy enables persistence or a host source.
+
+Each path is a canonical absolute Linux directory with no lexical traversal or normalization aliases,
+interpolation, option delimiters or whitespace. Duplicate paths, ancestor/child
+overlaps, system/device/Docker-managed paths, and mounts hiding the approved
+command or health-check executable are rejected. All mounts are writable, owned
+by the service's nonroot UID/GID, `mode=0700`, `nosuid` and `nodev`. Only an
+explicit `executable=True` changes `noexec` to `exec` for that one path.
+Owner, permission and arbitrary mount-option overrides are not accepted.
+
+For example, a **trusted image binding**, not candidate input, could select:
+
+```python
+from pyrit.executor.workflow.docker_compose import ComposeTmpfsSpec
+
+runtime_state = (
+    ComposeTmpfsSpec(path="/tmp", size_bytes=16 * 1024 * 1024),
+    ComposeTmpfsSpec(path="/workspace", size_bytes=32 * 1024 * 1024, executable=True),
+    ComposeTmpfsSpec(path="/home/runner", size_bytes=16 * 1024 * 1024),
+)
+```
+
+This requires `tmpfs_bytes=64 * 1024 * 1024` and a sufficient service memory
+limit. A separate target could instead approve noexec `/var/lib/grafana` and
+`/var/log/grafana`. Those are storage-policy examples, not tested Grafana paths
+or real pinned CLI images. Tmpfs starts empty and hides image content at its
+mountpoint. A separately reviewed bootstrap in the prebuilt digest-pinned image
+must stage any required workspace files, binaries and nonsecret HOME/cache
+configuration. This policy adds no asset-transfer or guest-exec API and no
+runtime environment override. Compose still starts the approved service command
+and runs its declared health check. No downloads, authentication or SDK setup
+are added by this policy.
+
+Image-declared `VOLUME` remains a blocker even if its destination matches an
+approved tmpfs path. Named/anonymous volumes and persistence are never silently
+substituted. If the original target requires them or relies on mountpoint
+content that cannot be safely staged into empty tmpfs, the binding must stop
+and report that incompatibility. No original Grafana parity or CLI startup is
+proven by the mocked profile tests.
 
 ## Control transport
 
@@ -77,11 +124,24 @@ running/healthy states are checked. Effective mounts, HostConfig privilege,
 capabilities, security options, ports, host namespaces and resource limits are
 also checked. Generating a safe-looking manifest alone is insufficient.
 
+Runtime-state inspection compares the complete `HostConfig.Tmpfs` path/options
+map, including each size, exec choice, UID/GID and permission. Any reported
+`Mounts` entries must be the exact approved tmpfs destinations, writable without
+host/volume sources, extra or repeated paths, conflicting modes or shared
+propagation. Some Docker responses omit tmpfs entries from `Mounts`; an empty
+list is accepted only with the exact approved `HostConfig.Tmpfs` map. These are
+daemon inspection checks, not in-guest kernel or image-symlink attestation.
+Their effective behavior still needs separate real-provider qualification.
+
 Even failed/cancelled `up` can create resources. Rollback first re-inventories
-and verifies all ownership labels and network attachments. Only then may it run
+and verifies all ownership labels, network attachments and the runtime-state,
+image-VOLUME and related user/security policy for every remaining container.
+Stopped or unhealthy owned services can be removed; unapproved or unmappable
+runtime state, unknown mounts and image/permission drift refuse teardown and
+remain explicit cleanup failures. Only after those checks may it run
 `compose down` for this exact project and identical manifest, including verified
-owned orphans. It never prunes, removes images, removes volumes, or downs another
-project. Foreign/unknown resources or an attached foreign container stop cleanup
+owned duplicates with an approved service policy. It never prunes, removes images,
+removes volumes, or downs another project. Foreign/unknown resources or an attached foreign container stop cleanup
 instead of broadening deletion. Nonzero `down` or residual resources leave an
 explicit failed-cleanup snapshot, without implicit retry or a clean-success
 claim. An operator may need to resolve that retained failure separately.
