@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from pyrit.memory.memory_models import (
     NativeCyberEventEntry,
     NativeCyberRawChunkEntry,
+    NativeCyberToolEventEntry,
     NativeCyberTurnMessagePieceEntry,
     PromptMemoryEntry,
     ScorableContentEntry,
@@ -29,6 +30,7 @@ from pyrit.models.native_cyber import (
     NativeAgentCapabilities,
     NativeAgentEvent,
     NativeAgentEvidence,
+    NativeCyberArtifact,
     NativeCyberCleanup,
     NativeCyberJudgment,
     NativeCyberReadiness,
@@ -46,6 +48,8 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberRawKind,
     NativeCyberRawStreamKey,
     NativeCyberRawStreamStart,
+    NativeCyberResponseMode,
+    NativeCyberResponsePolicy,
     NativeCyberToolPhase,
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
@@ -65,6 +69,13 @@ class _Case:
     required_stream: NativeCyberRawStreamKey
     request_piece_id: UUID
     response_piece_id: UUID
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ArtifactCase:
+    store: NativeCyberEvidenceStore
+    report: NativeCyberReport
+    request_piece_id: UUID
 
 
 def _events() -> tuple[NativeAgentEvent, ...]:
@@ -142,6 +153,7 @@ def _prepare_case(
     memory: MemoryInterface,
     raw_byte_limit: int = 268_435_456,
     require_stream: bool = True,
+    require_separate_tool_results: bool = False,
 ) -> _Case:
     started_at = datetime.now(UTC)
     report = _report(run_id=str(uuid4()), started_at=started_at)
@@ -174,6 +186,7 @@ def _prepare_case(
             environment_id="synthetic-environment-1",
             simulated=True,
             required_raw_streams=(required_stream,) if require_stream else (),
+            require_separate_tool_results=require_separate_tool_results,
             raw_byte_limit=raw_byte_limit,
         )
     )
@@ -278,8 +291,480 @@ def _unpersisted_score(*, report: NativeCyberReport) -> Score:
     )
 
 
+def _prepare_artifact_only_case(
+    *,
+    memory: MemoryInterface,
+    with_terminal_event: bool = True,
+    with_artifact: bool = True,
+    subagent_idle: bool = False,
+) -> _ArtifactCase:
+    started_at = datetime.now(UTC)
+    run_id = str(uuid4())
+    conversation_id = str(uuid4())
+    request = MessagePiece(
+        role="user",
+        original_value="synthetic artifact-only instruction",
+        conversation_id=conversation_id,
+        sequence=0,
+    )
+    memory.add_message_pieces_to_memory(message_pieces=[request])
+    idle = NativeAgentEvent(
+        sequence=1,
+        event_id="artifact-idle-1",
+        session_id="artifact-session-1",
+        event_type="session.idle",
+        payload={
+            "id": "artifact-idle-1",
+            "sessionId": "artifact-session-1",
+            "type": "session.idle",
+            "data": {"aborted": False},
+            **({"agentId": "synthetic-subagent"} if subagent_idle else {}),
+        },
+    )
+    observed_events = (idle,) if with_terminal_event else ()
+    artifact_bytes = b"synthetic retained artifact"
+    artifacts = (
+        (
+            NativeCyberArtifact(
+                name="synthetic.bin",
+                sha256=hashlib.sha256(artifact_bytes).hexdigest(),
+                size_bytes=len(artifact_bytes),
+                evidence_ref="synthetic-artifact-1",
+            ),
+        )
+        if with_artifact
+        else ()
+    )
+    report = NativeCyberReport(
+        run_id=run_id,
+        binding_name="synthetic-artifact-task",
+        binding_version="1",
+        request=NativeCyberRequest(instruction=request.original_value),
+        input_sha256=hashlib.sha256(request.original_value.encode()).hexdigest(),
+        status=NativeCyberStatus.COMPLETED,
+        simulated=True,
+        readiness=NativeCyberReadiness(
+            ready=True,
+            simulated=True,
+            capabilities=NativeAgentCapabilities(),
+        ),
+        started_at=started_at,
+        expires_at=started_at + timedelta(minutes=1),
+        ended_at=started_at + timedelta(seconds=1),
+        conversation_id=conversation_id,
+        agent=NativeAgentEvidence(
+            session_id="artifact-session-1",
+            environment_id="synthetic-artifact-environment",
+            simulated=True,
+            events=observed_events,
+            tools=(),
+            idle=True,
+            coverage_complete=True,
+            gaps=(),
+        ),
+        judgment=NativeCyberJudgment(
+            value=0.75,
+            rationale="synthetic original artifact grade",
+            complete=True,
+            artifacts=artifacts,
+        ),
+        cleanup=NativeCyberCleanup.CLOSED,
+    )
+    key = NativeCyberRawStreamKey(
+        source=NativeCyberEvidenceSource.HARNESS,
+        kind=NativeCyberRawKind.JSONL,
+        observed_source_id="synthetic-artifact-jsonl",
+    )
+    store = memory.native_cyber_evidence
+    store.create_episode(
+        start=NativeCyberEpisodeStart(
+            run_id=run_id,
+            binding_name=report.binding_name,
+            binding_version=report.binding_version,
+            started_at=started_at,
+            source_session_id="artifact-session-1",
+            environment_id="synthetic-artifact-environment",
+            simulated=True,
+            required_raw_streams=(key,),
+            response_policy=NativeCyberResponsePolicy(allow_artifact_only=True),
+        )
+    )
+    store.begin_turn(
+        turn=NativeCyberTurnStart(
+            run_id=run_id,
+            turn_index=1,
+            started_at=started_at,
+            request_piece_ids=(request.id,),
+            response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
+        )
+    )
+    if observed_events:
+        store.append_events(
+            run_id=run_id,
+            turn_index=1,
+            events=[
+                NativeCyberCapturedEvent.from_native_agent_event(
+                    source=NativeCyberEvidenceSource.HARNESS,
+                    event=idle,
+                )
+            ],
+        )
+    stream = NativeCyberRawStreamStart(run_id=run_id, key=key, turn_index=1)
+    store.open_raw_stream(stream=stream)
+    raw = b'{"type":"session.idle"}\n' if with_terminal_event else b""
+    if raw:
+        store.append_raw(run_id=run_id, stream_id=stream.stream_id, data=raw)
+    store.close_raw_stream(
+        run_id=run_id,
+        stream_id=stream.stream_id,
+        source_complete=True,
+        expected_bytes=len(raw),
+        observed_sha256=hashlib.sha256(raw).hexdigest(),
+    )
+    store.finish_turn(
+        finish=NativeCyberTurnFinish(
+            run_id=run_id,
+            turn_index=1,
+            finished_at=report.ended_at,
+            observed_event_count=len(observed_events),
+            source_complete=True,
+        )
+    )
+    return _ArtifactCase(store=store, report=report, request_piece_id=request.id)
+
+
 @pytest.mark.usefixtures("patch_central_database")
 class TestNativeCyberEvidence:
+    def test_artifact_only_turn_with_no_assistant_message_can_complete(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_artifact_only_case(memory=sqlite_instance)
+        coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert coverage.required_complete
+        assert coverage.required_gaps == ()
+
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+
+        assert snapshot.score_status is ScoreStatus.COMPLETE
+        assert snapshot.run.response_policy.schema_version == 1
+        assert snapshot.run.response_policy.allow_artifact_only
+        assert snapshot.turns[0].response_mode is NativeCyberResponseMode.ARTIFACT_ONLY
+        assert snapshot.turns[0].request_piece_ids == (case.request_piece_id,)
+        assert snapshot.turns[0].response_piece_ids == ()
+        assert len(snapshot.events) == 1
+        assert [entry.role for entry in sqlite_instance._query_entries(PromptMemoryEntry)] == ["user"]
+        retained = sqlite_instance.get_scorable_content(content_ids=[snapshot.report_content_id])[
+            snapshot.report_content_id
+        ]
+        saved_report = NativeCyberReport.model_validate_json(retained.value)
+        assert saved_report.judgment is not None
+        assert saved_report.judgment.value == 0.75
+        assert len(saved_report.judgment.artifacts) == 1
+
+    @pytest.mark.parametrize(
+        ("with_terminal_event", "with_artifact", "subagent_idle", "expected_gap"),
+        [
+            (False, True, False, "terminal source event"),
+            (True, False, False, "retained artifact"),
+            (True, True, True, "terminal source event"),
+        ],
+    )
+    def test_artifact_only_turn_rejects_missing_source_or_grader_evidence(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+        with_terminal_event: bool,
+        with_artifact: bool,
+        subagent_idle: bool,
+        expected_gap: str,
+    ) -> None:
+        case = _prepare_artifact_only_case(
+            memory=sqlite_instance,
+            with_terminal_event=with_terminal_event,
+            with_artifact=with_artifact,
+            subagent_idle=subagent_idle,
+        )
+        coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert not coverage.required_complete
+        assert any(expected_gap in gap for gap in coverage.required_gaps)
+
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+
+        assert snapshot.score_status is ScoreStatus.UNDETERMINED
+        assert snapshot.turns[0].response_piece_ids == ()
+        assert snapshot.turns[0].request_piece_ids == (case.request_piece_id,)
+
+    def test_artifact_only_requires_explicit_task_approval(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        run_id = str(uuid4())
+        store = sqlite_instance.native_cyber_evidence
+        store.create_episode(
+            start=NativeCyberEpisodeStart(run_id=run_id, binding_name="synthetic", binding_version="1")
+        )
+
+        with pytest.raises(ValueError, match="response-policy approval"):
+            store.begin_turn(
+                turn=NativeCyberTurnStart(
+                    run_id=run_id,
+                    turn_index=1,
+                    response_mode=NativeCyberResponseMode.ARTIFACT_ONLY,
+                )
+            )
+
+        assert store.get_episode(run_id=run_id).turns == ()
+
+    def test_tool_request_and_result_pieces_do_not_become_assistant_responses(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        tool_request = MessagePiece(
+            role="assistant",
+            original_value_data_type="function_call",
+            original_value="synthetic tool request",
+            conversation_id=case.report.conversation_id,
+            sequence=2,
+        )
+        tool_result = MessagePiece(
+            role="tool",
+            original_value_data_type="function_call_output",
+            original_value="synthetic model-visible tool response",
+            conversation_id=case.report.conversation_id,
+            sequence=3,
+        )
+        sqlite_instance.add_message_pieces_to_memory(message_pieces=[tool_request, tool_result])
+
+        with pytest.raises(ValueError, match="wrong data type"):
+            case.store.finish_turn(
+                finish=NativeCyberTurnFinish(
+                    run_id=case.report.run_id,
+                    turn_index=1,
+                    finished_at=case.report.ended_at,
+                    response_piece_ids=(tool_request.id,),
+                    observed_event_count=4,
+                    source_complete=True,
+                )
+            )
+        case.store.finish_turn(
+            finish=NativeCyberTurnFinish(
+                run_id=case.report.run_id,
+                turn_index=1,
+                finished_at=case.report.ended_at,
+                response_piece_ids=(case.response_piece_id,),
+                tool_request_piece_ids=(tool_request.id,),
+                tool_result_piece_ids=(tool_result.id,),
+                observed_event_count=4,
+                source_complete=True,
+            )
+        )
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+
+        assert snapshot.score_status is ScoreStatus.COMPLETE
+        assert snapshot.turns[0].response_piece_ids == (case.response_piece_id,)
+        assert snapshot.turns[0].tool_request_piece_ids == (tool_request.id,)
+        assert snapshot.turns[0].tool_result_piece_ids == (tool_result.id,)
+        assert sqlite_instance.get_message_pieces(prompt_ids=[tool_result.id])[0].role == "tool"
+
+    def test_tool_only_piece_does_not_satisfy_ordinary_chat_response(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        tool_result = MessagePiece(
+            role="tool",
+            original_value_data_type="function_call_output",
+            original_value="synthetic tool output",
+            conversation_id=case.report.conversation_id,
+            sequence=2,
+        )
+        sqlite_instance.add_message_pieces_to_memory(message_pieces=[tool_result])
+        case.store.finish_turn(
+            finish=NativeCyberTurnFinish(
+                run_id=case.report.run_id,
+                turn_index=1,
+                finished_at=case.report.ended_at,
+                tool_result_piece_ids=(tool_result.id,),
+                observed_event_count=4,
+                source_complete=True,
+            )
+        )
+
+        coverage = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert not coverage.required_complete
+        assert any("genuine assistant response" in gap for gap in coverage.required_gaps)
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+        assert snapshot.score_status is ScoreStatus.UNDETERMINED
+        assert snapshot.turns[0].response_piece_ids == ()
+        assert snapshot.turns[0].tool_result_piece_ids == (tool_result.id,)
+
+    def test_one_assistant_event_links_two_real_tool_requests_without_fake_events(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance)
+        assert case.report.agent is not None
+        events = case.report.agent.events
+        request_event = NativeAgentEvent(
+            sequence=1,
+            event_id=events[0].event_id,
+            session_id=events[0].session_id,
+            event_type="assistant.message",
+            payload={
+                "id": events[0].event_id,
+                "sessionId": events[0].session_id,
+                "type": "assistant.message",
+                "data": {
+                    "toolRequests": [
+                        {"toolCallId": "call-1", "name": "read", "arguments": {"x": 1}},
+                        {"toolCallId": "call-2", "name": "read", "arguments": {"x": 2}},
+                    ],
+                },
+            },
+        )
+        second_start = NativeAgentEvent(
+            sequence=4,
+            event_id="source-event-4",
+            session_id="native-session-1",
+            event_type="tool.execution_start",
+            payload={
+                "id": "source-event-4",
+                "sessionId": "native-session-1",
+                "type": "tool.execution_start",
+                "data": {"toolCallId": "call-2", "toolName": "read", "arguments": {"x": 2}},
+            },
+        )
+        second_complete = NativeAgentEvent(
+            sequence=5,
+            event_id="source-event-5",
+            session_id="native-session-1",
+            event_type="tool.execution_complete",
+            payload={
+                "id": "source-event-5",
+                "sessionId": "native-session-1",
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": "call-2",
+                    "success": True,
+                    "result": {"content": "synthetic second tool result"},
+                },
+            },
+        )
+        idle = NativeAgentEvent(
+            sequence=6,
+            event_id="source-event-6",
+            session_id="native-session-1",
+            event_type="session.idle",
+            payload={
+                "id": "source-event-6",
+                "sessionId": "native-session-1",
+                "type": "session.idle",
+                "data": {"aborted": False},
+            },
+        )
+        all_events = (request_event, events[1], events[2], second_start, second_complete, idle)
+        second_request = NativeToolRequest(
+            call_id="call-2",
+            name="read",
+            arguments={"x": 2},
+            request_sequence=1,
+        )
+        second_tool = NativeToolTrace(
+            call_id="call-2",
+            name="read",
+            arguments={"x": 2},
+            request_sequence=1,
+            start_sequence=4,
+            completion_sequence=5,
+            success=True,
+            result={"content": "synthetic second tool result"},
+            status="succeeded",
+            model_visible_output="synthetic second tool result",
+        )
+        agent = NativeAgentEvidence.model_validate(
+            {
+                **case.report.agent.model_dump(mode="json"),
+                "events": [event.model_dump(mode="json") for event in all_events],
+                "tools": [
+                    case.report.agent.tools[0].model_dump(mode="json"),
+                    second_tool.model_dump(mode="json"),
+                ],
+                "tool_requests": [
+                    case.report.agent.tool_requests[0].model_dump(mode="json"),
+                    second_request.model_dump(mode="json"),
+                ],
+            }
+        )
+        report = NativeCyberReport.model_validate(
+            {**case.report.model_dump(mode="json"), "agent": agent.model_dump(mode="json")}
+        )
+        case.store.append_events(
+            run_id=report.run_id,
+            turn_index=1,
+            events=[
+                NativeCyberCapturedEvent.from_native_agent_event(
+                    source=NativeCyberEvidenceSource.MODEL
+                    if event.event_type == "assistant.message"
+                    else NativeCyberEvidenceSource.HARNESS
+                    if event.event_type == "session.idle"
+                    else NativeCyberEvidenceSource.TOOL,
+                    event=event,
+                )
+                for event in all_events
+            ],
+        )
+        _close_stream(case=case, key=case.required_stream, data=b"synthetic JSONL", turn_index=1)
+        _finish_turn(case=case, observed_event_count=6)
+
+        coverage = case.store.assess_required_coverage(report=report, expected_turns=1)
+        assert coverage.required_complete
+        assert coverage.required_gaps == ()
+        snapshot = case.store.finalize_episode_atomic(
+            report=report, score=_unpersisted_score(report=report), expected_turns=1
+        )
+
+        assert snapshot.score_status is ScoreStatus.COMPLETE
+        assert len(snapshot.events) == 6
+        assert len(snapshot.tools) == 2
+        assert [(tool.call_id, tool.request_sequence, tool.completion_sequence) for tool in snapshot.tools] == [
+            ("call-1", 1, 3),
+            ("call-2", 1, 5),
+        ]
+        assert all(tool.result_sequence is None for tool in snapshot.tools)
+        request_links = [
+            link for link in sqlite_instance._query_entries(NativeCyberToolEventEntry) if link.phase == "request"
+        ]
+        assert len(request_links) == 2
+        assert {link.call_id for link in request_links} == {"call-1", "call-2"}
+        assert {link.event_sequence for link in request_links} == {1}
+
     def test_repeated_observed_stream_id_retains_distinct_raw_segments(
         self,
         *,
@@ -382,6 +867,96 @@ class TestNativeCyberEvidence:
             assert snapshot.tools[0].completion_sequence == 3
         else:
             assert snapshot.tools == ()
+
+    @pytest.mark.parametrize(
+        ("source", "event_types", "phases", "source_id", "call_id"),
+        [
+            (
+                NativeCyberEvidenceSource.TOOL,
+                ("item.started", "item.completed", "item.result"),
+                (NativeCyberToolPhase.START, NativeCyberToolPhase.COMPLETE, NativeCyberToolPhase.RESULT),
+                "codex-item-1",
+                "codex-item-1",
+            ),
+            (
+                NativeCyberEvidenceSource.MODEL,
+                ("assistant.tool_request", "assistant.tool_result"),
+                (NativeCyberToolPhase.REQUEST, NativeCyberToolPhase.RESULT),
+                "claude-message-1",
+                "claude-tool-1",
+            ),
+        ],
+    )
+    def test_separate_result_preserves_model_visible_tool_output(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+        source: NativeCyberEvidenceSource,
+        event_types: tuple[str, ...],
+        phases: tuple[NativeCyberToolPhase, ...],
+        source_id: str,
+        call_id: str,
+    ) -> None:
+        run_id = str(uuid4())
+        store = sqlite_instance.native_cyber_evidence
+        store.create_episode(
+            start=NativeCyberEpisodeStart(
+                run_id=run_id,
+                binding_name="synthetic-cli",
+                binding_version="1",
+                require_separate_tool_results=True,
+            )
+        )
+        store.begin_turn(turn=NativeCyberTurnStart(run_id=run_id, turn_index=1))
+        store.append_events(
+            run_id=run_id,
+            turn_index=1,
+            events=[
+                NativeCyberCapturedEvent(
+                    source=source,
+                    event=NativeCyberObservedEvent(
+                        controller_sequence=index,
+                        source_event_id=source_id,
+                        event_type=event_type,
+                        payload={
+                            "type": event_type,
+                            "content": "synthetic model-visible response"
+                            if phase is NativeCyberToolPhase.RESULT
+                            else "synthetic tool action",
+                        },
+                        tool_call_id=call_id,
+                        tool_phase=phase,
+                    ),
+                )
+                for index, (event_type, phase) in enumerate(zip(event_types, phases, strict=True), start=1)
+            ],
+        )
+
+        snapshot = store.get_episode(run_id=run_id)
+        assert snapshot.run.require_separate_tool_results
+        assert [event.observed_event_id for event in snapshot.events] == [source_id] * len(phases)
+        assert len(snapshot.tools) == 1
+        correlation = snapshot.tools[0]
+        assert correlation.call_id == call_id
+        assert correlation.result_sequence == len(phases)
+        assert correlation.result_sequence != correlation.completion_sequence
+        if source is NativeCyberEvidenceSource.TOOL:
+            assert correlation.start_sequence == 1
+            assert correlation.completion_sequence == 2
+            assert correlation.request_sequence is None
+        else:
+            assert correlation.request_sequence == 1
+            assert correlation.start_sequence is None
+            assert correlation.completion_sequence is None
+        assert {
+            entry.phase: entry.event_sequence for entry in sqlite_instance._query_entries(NativeCyberToolEventEntry)
+        } == dict(zip((phase.value for phase in phases), range(1, len(phases) + 1), strict=True))
+        assert "synthetic model-visible response" not in snapshot.model_dump_json()
+        with pytest.raises(PermissionError, match="authorized internal read"):
+            store.read_event_payloads(run_id=run_id)
+        retained = store.read_event_payloads(run_id=run_id, allow_sensitive=True)
+        assert retained[-1].event.payload["content"] == "synthetic model-visible response"
+        assert retained[-1].event.tool_phase is NativeCyberToolPhase.RESULT
 
     def test_cli_frames_without_provider_event_ids_keep_controller_order_and_offsets(
         self,
@@ -553,6 +1128,7 @@ class TestNativeCyberEvidence:
         assert snapshot.score_id == score.id
         assert snapshot.score_status is ScoreStatus.COMPLETE
         assert snapshot.coverage_complete
+        assert snapshot.tools[0].result_sequence is None
         assert len(sqlite_instance._query_entries(ScoreEntry)) == 1
         assert len(sqlite_instance._query_entries(ScorableContentEntry)) == 1
         stored_score = sqlite_instance.get_scores(score_ids=[str(score.id)])[0]
@@ -782,6 +1358,124 @@ class TestNativeCyberEvidence:
             snapshot.report_content_id
         ]
         assert NativeCyberReport.model_validate_json(retained.value).judgment.value == 0.75
+
+    def test_missing_declared_tool_result_downgrades_without_erasing_original_judgment(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance, require_separate_tool_results=True)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        _finish_turn(case=case)
+        assessment = case.store.assess_required_coverage(report=case.report, expected_turns=1)
+        assert not assessment.required_complete
+        assert any("task-required model-visible tool result" in gap for gap in assessment.required_gaps)
+
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+
+        assert snapshot.run.require_separate_tool_results
+        assert snapshot.score_status is ScoreStatus.UNDETERMINED
+        assert snapshot.tools[0].completion_sequence == 3
+        assert snapshot.tools[0].result_sequence is None
+        retained = sqlite_instance.get_scorable_content(content_ids=[snapshot.report_content_id])[
+            snapshot.report_content_id
+        ]
+        assert NativeCyberReport.model_validate_json(retained.value).judgment.value == 0.75
+
+    def test_declared_tool_result_after_completion_is_complete_and_keeps_output(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance, require_separate_tool_results=True)
+        assert case.report.agent is not None
+        tool_result = NativeAgentEvent(
+            sequence=4,
+            event_id="source-event-result",
+            session_id="native-session-1",
+            event_type="tool.result",
+            payload={
+                "id": "source-event-result",
+                "sessionId": "native-session-1",
+                "type": "tool.result",
+                "data": {"toolCallId": "call-1", "content": "synthetic model-visible output"},
+            },
+        )
+        idle = NativeAgentEvent(
+            sequence=5,
+            event_id="source-event-5",
+            session_id="native-session-1",
+            event_type="session.idle",
+            payload={
+                "id": "source-event-5",
+                "sessionId": "native-session-1",
+                "type": "session.idle",
+                "data": {"aborted": False},
+            },
+        )
+        agent = NativeAgentEvidence.model_validate(
+            {
+                **case.report.agent.model_dump(mode="json"),
+                "events": [
+                    event.model_dump(mode="json") for event in (*case.report.agent.events[:3], tool_result, idle)
+                ],
+            }
+        )
+        report = NativeCyberReport.model_validate(
+            {**case.report.model_dump(mode="json"), "agent": agent.model_dump(mode="json")}
+        )
+        _append_events(case=case, count=3)
+        case.store.append_events(
+            run_id=report.run_id,
+            turn_index=1,
+            events=[
+                NativeCyberCapturedEvent(
+                    source=NativeCyberEvidenceSource.TOOL,
+                    event=NativeCyberObservedEvent(
+                        controller_sequence=4,
+                        source_event_id=tool_result.event_id,
+                        source_session_id=tool_result.session_id,
+                        event_type=tool_result.event_type,
+                        payload=tool_result.payload,
+                        tool_call_id="call-1",
+                        tool_phase=NativeCyberToolPhase.RESULT,
+                    ),
+                ),
+                NativeCyberCapturedEvent.from_native_agent_event(
+                    source=NativeCyberEvidenceSource.HARNESS,
+                    event=idle,
+                ),
+            ],
+        )
+        _close_stream(case=case, key=case.required_stream, data=b"synthetic JSONL", turn_index=1)
+        _finish_turn(case=case, observed_event_count=5)
+
+        assessment = case.store.assess_required_coverage(report=report, expected_turns=1)
+        assert assessment.required_complete
+        assert assessment.required_gaps == ()
+        snapshot = case.store.finalize_episode_atomic(
+            report=report,
+            score=_unpersisted_score(report=report),
+            expected_turns=1,
+        )
+
+        assert snapshot.score_status is ScoreStatus.COMPLETE
+        assert snapshot.tools[0].completion_sequence == 3
+        assert snapshot.tools[0].result_sequence == 4
+        assert len(sqlite_instance._query_entries(NativeCyberTurnMessagePieceEntry)) == 2
+        assert "synthetic model-visible output" not in snapshot.model_dump_json()
+        assert (
+            case.store.read_event_payloads(
+                run_id=report.run_id,
+                allow_sensitive=True,
+            )[3].event.payload["data"]["content"]
+            == "synthetic model-visible output"
+        )
 
     async def test_pre_score_coverage_gate_prevents_transient_complete_score_async(
         self,

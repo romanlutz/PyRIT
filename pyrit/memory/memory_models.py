@@ -27,6 +27,8 @@ from sqlalchemy import (
     TypeDecorator,
     Unicode,
     UniqueConstraint,
+    false,
+    text,
 )
 from sqlalchemy.dialects.mssql import VARBINARY
 from sqlalchemy.dialects.sqlite import CHAR
@@ -2255,6 +2257,11 @@ class NativeCyberEpisodeEntry(Base):
     environment_id: Mapped[str | None] = mapped_column(Unicode(128))
     simulated: Mapped[bool | None] = mapped_column(Boolean)
     required_raw_streams: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    require_separate_tool_results: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    response_policy_version: Mapped[int] = mapped_column(INTEGER, nullable=False, default=1, server_default=text("1"))
+    artifact_only_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     raw_byte_limit: Mapped[int] = mapped_column(BigInteger, nullable=False)
     stored_raw_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     conversation_id: Mapped[str | None] = mapped_column(String(128))
@@ -2279,6 +2286,9 @@ class NativeCyberTurnEntry(Base):
     )
     turn_index: Mapped[int] = mapped_column(INTEGER, primary_key=True)
     source_turn_id: Mapped[str | None] = mapped_column(Unicode(128))
+    response_mode: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="message_required", server_default="message_required"
+    )
     started_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     observed_event_count: Mapped[int | None] = mapped_column(INTEGER)

@@ -77,6 +77,82 @@ def test_native_cyber_migration_up_down_preserves_prior_tables() -> None:
         engine.dispose()
 
 
+def test_separate_tool_result_policy_upgrade_preserves_existing_episodes() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            config = _make_config(connection=connection)
+            command.upgrade(config, "c7e4d9a1b2f0")
+            connection.exec_driver_sql(
+                'INSERT INTO "NativeCyberEpisodeEntries" '
+                "(run_id, binding_name, binding_version, started_at, required_raw_streams, "
+                "raw_byte_limit, stored_raw_bytes, capture_gaps, optional_gaps, coverage_complete) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("pre-policy-run", "synthetic", "1", "2026-01-01 00:00:00", "[]", 1024, 0, "[]", "[]", 0),
+            )
+            connection.exec_driver_sql(
+                'INSERT INTO "NativeCyberTurnEntries" (run_id, turn_index, started_at, capture_gaps) '
+                "VALUES (?, ?, ?, ?)",
+                ("pre-policy-run", 1, "2026-01-01 00:00:00", "[]"),
+            )
+
+            command.upgrade(config, "head")
+            columns = {
+                column["name"]: column for column in inspect(connection).get_columns("NativeCyberEpisodeEntries")
+            }
+            assert not columns["require_separate_tool_results"]["nullable"]
+            assert connection.exec_driver_sql(
+                "SELECT require_separate_tool_results, response_policy_version, artifact_only_allowed "
+                'FROM "NativeCyberEpisodeEntries" WHERE run_id = ?',
+                ("pre-policy-run",),
+            ).one() == (0, 1, 0)
+            assert (
+                connection.exec_driver_sql(
+                    'SELECT response_mode FROM "NativeCyberTurnEntries" WHERE run_id = ?',
+                    ("pre-policy-run",),
+                ).scalar_one()
+                == "message_required"
+            )
+
+            command.downgrade(config, "c7e4d9a1b2f0")
+            assert {
+                "require_separate_tool_results",
+                "response_policy_version",
+                "artifact_only_allowed",
+            }.isdisjoint({column["name"] for column in inspect(connection).get_columns("NativeCyberEpisodeEntries")})
+            assert "response_mode" not in {
+                column["name"] for column in inspect(connection).get_columns("NativeCyberTurnEntries")
+            }
+            assert (
+                connection.exec_driver_sql(
+                    'SELECT run_id FROM "NativeCyberEpisodeEntries" WHERE run_id = ?',
+                    ("pre-policy-run",),
+                ).scalar_one()
+                == "pre-policy-run"
+            )
+            assert (
+                connection.exec_driver_sql(
+                    'SELECT turn_index FROM "NativeCyberTurnEntries" WHERE run_id = ?',
+                    ("pre-policy-run",),
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                len(
+                    set(
+                        connection.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_native_cyber_%'"
+                        ).scalars()
+                    )
+                )
+                == 6
+            )
+            command.upgrade(config, "head")
+        check_schema_migrations(engine=engine, silent=True)
+    finally:
+        engine.dispose()
+
+
 def test_native_cyber_sql_server_schema_uses_bounded_index_keys() -> None:
     dialect = mssql.dialect()
     for table in _NATIVE_TABLES:
@@ -119,3 +195,8 @@ def test_native_cyber_sql_server_schema_uses_bounded_index_keys() -> None:
     )
     assert not raw_source_index.unique
     assert "CREATE INDEX" in str(CreateIndex(raw_source_index).compile(dialect=dialect))
+    assert NativeCyberEpisodeEntry.__table__.c.require_separate_tool_results.type.compile(dialect=dialect) == "BIT"
+    assert NativeCyberEpisodeEntry.__table__.c.artifact_only_allowed.type.compile(dialect=dialect) == "BIT"
+    assert NativeCyberEpisodeEntry.__table__.c.response_policy_version.type.compile(dialect=dialect) == "INTEGER"
+    assert NativeCyberTurnEntry.__table__.c.response_mode.type.compile(dialect=dialect) == "VARCHAR(24)"
+    assert NativeCyberToolEventEntry.__table__.c.phase.type.compile(dialect=dialect) == "VARCHAR(16)"
