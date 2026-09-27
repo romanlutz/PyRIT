@@ -16,8 +16,14 @@ import pytest
 
 from pyrit.executor.workflow.native_cli_evidence import NativeCliDatabaseEvidenceSink
 from pyrit.executor.workflow.native_cli_report_adapter import build_native_cli_run_report
-from pyrit.models import Message
-from pyrit.models.native_cli_report import NativeCliReportCleanup, NativeCliReportEventKind, NativeCliReportStatus
+from pyrit.models import ContentEntryScorable, Message, ScoreStatus
+from pyrit.models.native_cli_report import (
+    NativeCliOriginalJudgment,
+    NativeCliReportCleanup,
+    NativeCliReportEventKind,
+    NativeCliReportStatus,
+    NativeCliRunReport,
+)
 from pyrit.models.native_cyber_evidence import NativeCyberEpisodeStart
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import NativeCliTarget
@@ -74,6 +80,9 @@ async def _start_sink_async(
             run_id=run_id,
             binding_name="inert_cli",
             binding_version="1",
+            task_id="inert_cli",
+            task_version="1",
+            simulated=True,
             required_raw_streams=sink.required_raw_streams(
                 protocol=protocol, include_model_gateway=include_model_gateway
             ),
@@ -83,6 +92,34 @@ async def _start_sink_async(
     )
     await sink.start_async(started_at=datetime.now(UTC))
     return sink
+
+
+async def _complete_report_async(
+    *, sink: NativeCliDatabaseEvidenceSink, target: NativeCliTarget, protocol: NativeCliProtocol
+) -> NativeCliRunReport:
+    run = target.last_run
+    assert run is not None and run.outcome.coverage_complete
+    return build_native_cli_run_report(
+        config=_config(protocol=protocol),
+        outcome=run.outcome,
+        events=await sink.read_report_events_async(),
+        task_id="inert_cli",
+        task_version="1",
+        run_id=sink.run_id,
+        turn_id=sink.turn_id,
+        conversation_id=run.conversation_id,
+        status=NativeCliReportStatus.COMPLETED,
+        cleanup=NativeCliReportCleanup.CLOSED,
+        simulated=True,
+        judgment=NativeCliOriginalJudgment(
+            grader_ref="inert-original-grader",
+            grader_evidence_ref=f"synthetic-original-feedback:{sink.run_id}",
+            value=0.75,
+            complete=True,
+            rationale="Synthetic task criterion passed.",
+        ),
+        raw_evidence_ref=f"db-episode:{sink.run_id}",
+    )
 
 
 async def test_cli_sink_records_exact_pipes_tool_phases_and_delayed_real_request_async(
@@ -246,6 +283,126 @@ async def test_cli_sink_records_model_gateway_request_and_response_wire_in_same_
     assert len(report_events) == target.last_run.outcome.frame_count + 1
 
 
+@pytest.mark.parametrize(
+    "protocol",
+    [NativeCliProtocol.CODEX_EXEC_JSON, NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE],
+)
+async def test_fake_cli_and_model_gateway_atomically_publish_one_original_grade_async(
+    *, sqlite_instance: SQLiteMemory, protocol: NativeCliProtocol
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, protocol=protocol, include_model_gateway=True)
+    guest_token = "g" * 40
+    if protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+        route = GatewayRoute(run_id=sink.run_id, model="codex-fixture", guest_token=guest_token)
+        app = create_codex_responses_app(
+            route=route,
+            limits=GatewayLimits(),
+            backend=FakeModelOnlyBackend(),
+            observation_callback=sink.record_gateway_observation_async,
+        )
+        model_url = "/v1/responses"
+        body = {"model": route.model, "input": "inert model request", "store": False}
+        headers = {"Authorization": "Bearer " + guest_token, "X-PyRIT-Run-ID": sink.run_id}
+        stdout = _codex()
+    else:
+        route = GatewayRoute(run_id=sink.run_id, model="claude-offline-model", guest_token=guest_token)
+        app = create_claude_messages_app(
+            route=route,
+            limits=LIMITS,
+            backend=FakeMessagesBackend(),
+            observation_callback=sink.record_messages_observation_async,
+        )
+        model_url = "/v1/messages"
+        body = request_body()
+        headers = {
+            "Authorization": "Bearer " + guest_token,
+            "X-PyRIT-Run-ID": sink.run_id,
+            "anthropic-version": "2023-06-01",
+        }
+        stdout = _claude(assistant_text="Working.", result_text="Done.")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        model_reply = await client.post(model_url, json=body, headers=headers)
+    assert model_reply.status_code == 200
+
+    target = NativeCliTarget(
+        run_config=_config(protocol=protocol),
+        launcher=_Launcher(
+            sandbox=_Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=stdout)])
+        ),
+        evidence_sink=sink,
+    )
+    request = Message.from_prompt(prompt="Synthetic task instruction", role="user")
+    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert target.last_run and target.last_run.outcome.coverage_complete
+    await sink.finish_async(
+        outcome=target.last_run.outcome,
+        request_piece_ids=(request.get_piece().id,),
+        response_piece_ids=(response.get_piece().id,),
+    )
+    report = await _complete_report_async(sink=sink, target=target, protocol=protocol)
+    score = build_native_cli_report_score(report=report)
+    assert score.status is ScoreStatus.COMPLETE
+    assert not await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)])
+    store = sqlite_instance.native_cyber_evidence
+    snapshot = await asyncio.to_thread(store.finalize_cli_episode_atomic, report=report, score=score, expected_turns=1)
+    assert snapshot.coverage_complete and snapshot.score_status is ScoreStatus.COMPLETE
+    assert snapshot.score_id == score.id and snapshot.report_sha256 == report.sha256()
+    assert snapshot.run.task_id == report.task_id and snapshot.run.task_version == report.task_version
+    assert snapshot.turns[0].source_turn_id == sink.turn_id
+    persisted = (await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)]))[0]
+    assert persisted.get_value() == 0.75 and isinstance(persisted.scorable, ContentEntryScorable)
+    assert persisted.score_metadata["publication_state"] == "committed_final_result"
+    content = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[snapshot.report_content_id])
+    assert NativeCliRunReport.model_validate_json(content[snapshot.report_content_id].value) == report
+
+
+async def test_codex_tool_without_model_observed_request_downgrades_original_grade_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    route = GatewayRoute(run_id=sink.run_id, model="codex-fixture", guest_token="g" * 40)
+    app = create_codex_responses_app(
+        route=route,
+        limits=GatewayLimits(),
+        backend=FakeModelOnlyBackend(),
+        observation_callback=sink.record_gateway_observation_async,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        reply = await client.post(
+            "/v1/responses",
+            json={"model": route.model, "input": "inert model request", "store": False},
+            headers={"Authorization": "Bearer " + route.guest_token, "X-PyRIT-Run-ID": sink.run_id},
+        )
+    assert reply.status_code == 200
+    target = NativeCliTarget(
+        run_config=_config(),
+        launcher=_Launcher(
+            sandbox=_Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_codex(tool=True))])
+        ),
+        evidence_sink=sink,
+    )
+    request = Message.from_prompt(prompt="Synthetic tool task", role="user")
+    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert target.last_run and target.last_run.outcome.coverage_complete
+    await sink.finish_async(
+        outcome=target.last_run.outcome,
+        request_piece_ids=(request.get_piece().id,),
+        response_piece_ids=(response.get_piece().id,),
+    )
+    report = await _complete_report_async(sink=sink, target=target, protocol=NativeCliProtocol.CODEX_EXEC_JSON)
+    score = build_native_cli_report_score(report=report)
+    assert score.status is ScoreStatus.COMPLETE
+    store = sqlite_instance.native_cyber_evidence
+    snapshot = await asyncio.to_thread(store.finalize_cli_episode_atomic, report=report, score=score, expected_turns=1)
+    assert snapshot.score_id == score.id and snapshot.score_status is ScoreStatus.UNDETERMINED
+    assert not snapshot.coverage_complete
+    assert any("Codex tool execution has no provable model-visible request" in gap for gap in snapshot.gaps)
+    persisted = (await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)]))[0]
+    assert persisted.is_undetermined and persisted.score_metadata["native_required_capture"] == "incomplete"
+    content = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[snapshot.report_content_id])
+    assert NativeCliRunReport.model_validate_json(content[snapshot.report_content_id].value).judgment.value == 0.75
+
+
 async def test_claude_messages_gateway_wire_retained_without_responses_translation_async(
     *, sqlite_instance: SQLiteMemory
 ) -> None:
@@ -407,6 +564,81 @@ async def test_claude_provider_error_remains_provider_response_not_host_error_as
     assert [item.event.event_type for item in provider] == ["messages_gateway.request", "messages_gateway.response"]
     assert provider[-1].event.payload["status_code"] == 429
     assert MessagesCoverage.FAILED.value in provider[-1].event.payload["coverage"]
+
+
+async def test_claude_provider_error_downgrades_original_grader_result_async(*, sqlite_instance: SQLiteMemory) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    route = GatewayRoute(run_id=sink.run_id, model="claude-offline-model", guest_token="c" * 40)
+    provider_body = b'{"type":"error","error":{"type":"rate_limit_error","message":"offline rate limit"}}'
+    app = create_claude_messages_app(
+        route=route,
+        limits=LIMITS,
+        backend=FakeMessagesBackend(
+            responses=[
+                MessagesResponse(
+                    status_code=429,
+                    body=provider_body,
+                    headers=(("content-type", "application/json"), ("retry-after", "1")),
+                )
+            ]
+        ),
+        observation_callback=sink.record_messages_observation_async,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        reply = await client.post(
+            "/v1/messages",
+            json=request_body(),
+            headers={
+                "Authorization": "Bearer " + route.guest_token,
+                "X-PyRIT-Run-ID": sink.run_id,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    assert reply.status_code == 429 and reply.content == provider_body
+    target = NativeCliTarget(
+        run_config=_config(protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE),
+        launcher=_Launcher(
+            sandbox=_Sandbox(
+                chunks=[
+                    NativeCliProcessChunk(
+                        stream=NativeCliStream.STDOUT,
+                        data=_claude(assistant_text="Working.", result_text="Done."),
+                    )
+                ]
+            )
+        ),
+        evidence_sink=sink,
+    )
+    request = Message.from_prompt(prompt="Synthetic task instruction", role="user")
+    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert target.last_run and target.last_run.outcome.coverage_complete
+    await sink.finish_async(
+        outcome=target.last_run.outcome,
+        request_piece_ids=(request.get_piece().id,),
+        response_piece_ids=(response.get_piece().id,),
+    )
+    report = await _complete_report_async(
+        sink=sink, target=target, protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE
+    )
+    score = build_native_cli_report_score(report=report)
+    snapshot = await asyncio.to_thread(
+        sqlite_instance.native_cyber_evidence.finalize_cli_episode_atomic,
+        report=report,
+        score=score,
+        expected_turns=1,
+    )
+    assert snapshot.score_id == score.id and snapshot.score_status is ScoreStatus.UNDETERMINED
+    assert not snapshot.coverage_complete
+    assert any("Original Anthropic provider returned a failed response" in gap for gap in snapshot.gaps)
+    assert not any("host-generated error" in gap for gap in snapshot.gaps)
+    stored = (await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)]))[0]
+    assert stored.is_undetermined
+    content = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[snapshot.report_content_id])
+    assert NativeCliRunReport.model_validate_json(content[snapshot.report_content_id].value).judgment.value == 0.75
 
 
 async def test_claude_host_error_uses_separate_required_gap_and_never_forges_provider_response_async(

@@ -54,12 +54,14 @@ adapter; neither raw frames nor model/tool text are copied into that report.
 Set the report's `raw_evidence_ref` to `db-episode:<run_id>`; the atomic
 finalizer rejects a pointer to another run as complete evidence.
 Capture rejects more than 10,000 parser observations, cross-pipe chunks or
-model gateway frames
-instead of allowing an unbounded in-memory projection. A future CLI-specific DB
-finalizer must compare the canonical CLI report to the persisted events,
-raw streams and any host-side model observations, then atomically publish
-or downgrade a single PyRIT Score. Existing GHCP-specific finalization
-does not accept CLI event shapes.
+model gateway frames instead of allowing an unbounded in-memory projection.
+`memory.native_cyber_evidence.finalize_cli_episode_atomic` compares the
+canonical CLI report to the persisted events, raw streams and host-side
+model observations, then atomically publishes or downgrades a single PyRIT
+Score. The caller must still gate the original grader on pre-grading
+coverage, confirm guest stop, grade while the target lives and record
+cleanup before finalizing. Existing GHCP-specific finalization does not
+accept CLI event shapes.
 
 Current tests use inert process bytes and SQLite only. A qualified sandbox
 launcher, model gateway listener/observer, original grader and task image
