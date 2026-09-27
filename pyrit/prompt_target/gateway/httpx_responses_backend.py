@@ -10,7 +10,7 @@ import hmac
 import json
 import math
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -26,57 +26,22 @@ from pyrit.prompt_target.gateway.responses_contract import (
     ModelRequest,
 )
 from pyrit.prompt_target.gateway.responses_validation import ResponsesValidator, strict_json_loads
+from pyrit.prompt_target.gateway.secret_frame_guard import CredentialEchoError, SecretFrameGuard
 
 
 def _upstream_error(*, code: ModelBackendErrorCode) -> ModelBackendError:
     return ModelBackendError(code=code)
 
 
-def _strings(value: object) -> Iterator[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield str(key)
-            yield from _strings(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from _strings(item)
-
-
-class _CredentialFrameGuard:
-    """Hold possible credential prefixes until a later frame makes them safe."""
-
-    _OUTPUT_FIELDS = frozenset({"delta", "text", "arguments", "input", "output", "refusal", "encrypted_content"})
-
-    def __init__(self, *, token: str) -> None:
-        self._token = token
-        self._token_bytes = token.encode()
-        self._pending: list[bytes] = []
-        self._prefix_table = self._build_prefix_table(token=token)
-        self._matched_prefix = 0
+class _CredentialFrameGuard(SecretFrameGuard):
+    """Parse Responses SSE frames before applying the shared credential guard."""
 
     def accept(self, *, frame: bytes) -> list[bytes]:
-        if self._token_bytes in frame:
-            raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
         data = self._event_data(frame=frame)
         try:
-            if any(self._token in value for value in _strings(data)):
-                raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
-            for text in self._output_strings(value=data):
-                self._check_text(text=text)
-        except RecursionError:
+            return super().accept_payload(frame=frame, data=data)
+        except (CredentialEchoError, RecursionError):
             raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR) from None
-        self._pending.append(frame)
-        if self._matched_prefix:
-            return []
-        return self.finish()
-
-    def finish(self) -> list[bytes]:
-        frames = self._pending
-        self._pending = []
-        self._matched_prefix = 0
-        return frames
 
     def _event_data(self, *, frame: bytes) -> dict[str, Any]:
         try:
@@ -90,38 +55,6 @@ class _CredentialFrameGuard:
         if not isinstance(data, dict) or data.get("type") != lines[0][7:]:
             raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
         return data
-
-    def _output_strings(self, *, value: object) -> Iterator[str]:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in self._OUTPUT_FIELDS and isinstance(child, str):
-                    yield child
-                else:
-                    yield from self._output_strings(value=child)
-        elif isinstance(value, list):
-            for child in value:
-                yield from self._output_strings(value=child)
-
-    def _check_text(self, *, text: str) -> None:
-        for character in text:
-            while self._matched_prefix and character != self._token[self._matched_prefix]:
-                self._matched_prefix = self._prefix_table[self._matched_prefix - 1]
-            if character == self._token[self._matched_prefix]:
-                self._matched_prefix += 1
-            if self._matched_prefix == len(self._token):
-                raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
-
-    @staticmethod
-    def _build_prefix_table(*, token: str) -> list[int]:
-        prefixes = [0] * len(token)
-        matched = 0
-        for index in range(1, len(token)):
-            while matched and token[index] != token[matched]:
-                matched = prefixes[matched - 1]
-            if token[index] == token[matched]:
-                matched += 1
-                prefixes[index] = matched
-        return prefixes
 
 
 class HttpxResponsesBackend:
@@ -381,8 +314,11 @@ class HttpxResponsesBackend:
             raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
         try:
             parsed = strict_json_loads(value=raw)
-            if not isinstance(parsed, dict) or any(self._auth_token in value for value in _strings(parsed)):
+            if not isinstance(parsed, dict):
                 raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR)
+            SecretFrameGuard(token=self._auth_token).check_body(raw=raw, parsed=parsed)
+        except CredentialEchoError:
+            raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR) from None
         except (ValueError, RecursionError):
             raise _upstream_error(code=ModelBackendErrorCode.UPSTREAM_STREAM_ERROR) from None
 
