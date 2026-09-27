@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
+import io
 import json
 import os
+import tarfile
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -99,6 +102,7 @@ class FakeEngine:
         self.containers: dict[str, dict[str, Any]] = {}
         self.networks: dict[str, dict[str, Any]] = {}
         self.container_change: Callable[[dict[str, Any]], None] | None = None
+        self.config_archive = FakeConfigArchive()
 
     def client(self, **kwargs: Any) -> DockerEngineClient:
         return DockerEngineClient(transport=httpx.MockTransport(self.handle_async), **kwargs)
@@ -108,6 +112,8 @@ class FakeEngine:
         assert "authorization" not in request.headers and "cookie" not in request.headers
         self.requests.append(request)
         path = request.url.path.removeprefix("/v1.47")
+        if path.startswith("/containers/") and path.endswith("/archive"):
+            return self.config_archive.handle(request)
         if path.startswith("/containers/") and path.endswith("/exec"):
             self.container_id = path.split("/")[2]
             self.created = json.loads(request.content)
@@ -180,6 +186,59 @@ class FakeEngine:
 
     def _exited(self) -> None:
         self.running = False
+
+
+class FakeConfigArchive:
+    """Model archive bytes in memory without extracting files on host or guest."""
+
+    def __init__(self) -> None:
+        self.directories: dict[str, int] = {"/tmp": 0o700}
+        self.writes: list[bytes] = []
+        self.reads = 0
+        self.stat_change: Callable[[str, dict[str, Any]], None] | None = None
+        self.readback: Callable[[bytes], bytes] | None = None
+        self.put_status = 200
+        self.get_headers: dict[str, str] = {}
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.params["path"]
+        if request.method == "PUT":
+            assert dict(request.url.params) == {
+                "path": path,
+                "noOverwriteDirNonDir": "true",
+                "copyUIDGID": "true",
+            }
+            assert request.headers["content-type"] == "application/x-tar"
+            if self.put_status != 200:
+                return httpx.Response(self.put_status)
+            self.writes.append(request.content)
+            with tarfile.open(fileobj=io.BytesIO(request.content), mode="r:") as archive:
+                for member in archive:
+                    if member.isdir():
+                        self.directories[str(PurePosixPath(path) / member.name)] = member.mode
+            return httpx.Response(200)
+        if path not in self.directories:
+            return httpx.Response(404)
+        stat = {
+            "name": PurePosixPath(path).name,
+            "mode": (1 << 31) | self.directories[path],
+            "size": 0,
+            "mtime": "2026-09-26T00:00:00Z",
+            "linkTarget": "",
+        }
+        if self.stat_change:
+            self.stat_change(path, stat)
+        headers = {"x-docker-container-path-stat": base64.b64encode(json.dumps(stat).encode()).decode()}
+        if request.method == "HEAD":
+            return httpx.Response(200, headers=headers)
+        assert request.method == "GET" and self.writes
+        self.reads += 1
+        content = self.readback(self.writes[-1]) if self.readback else self.writes[-1]
+        return httpx.Response(
+            200,
+            headers={**headers, "content-type": "application/x-tar", **self.get_headers},
+            stream=WireStream((content,)),
+        )
 
 
 async def create_exec(engine: DockerEngineClient) -> DockerExecHandle:

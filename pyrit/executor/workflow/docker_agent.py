@@ -20,6 +20,7 @@ from pyrit.executor.workflow.docker_compose import (
     ComposeEnvironmentSpec,
     DockerComposeEnvironmentLease,
 )
+from pyrit.executor.workflow.docker_config_staging import CodexConfigStaging, DockerCodexConfigStager
 from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError, DockerExecHandle
 from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
 from pyrit.models.environment_lease import EnvironmentLeaseState
@@ -190,6 +191,8 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
                 "The profile needs an approved agent workspace and a bounded stop budget within runner cleanup."
             )
         self._engine = engine
+        self._config_stager = DockerCodexConfigStager(engine=engine)
+        self._staged_config: CodexConfigStaging | None = None
         self._profile = profile
         self._guest_auth = guest_auth
         self._agent = agent
@@ -208,6 +211,11 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         """The most recent latched stop observation; absence is not confirmed quiescence."""
         return self._stop_observation
 
+    @property
+    def staged_codex_config(self) -> CodexConfigStaging | None:
+        """The verified credential-free subtree readback, distinct from model-route evidence."""
+        return self._staged_config
+
     async def _acquire_async(self) -> ComposeAllocation:
         allocation = await super()._acquire_async()
         inventory = await self._inventory_async()
@@ -224,6 +232,23 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
             raise DockerEngineError("Engine exec and Compose controls do not observe the same approved network.")
         self._validate_agent_environment(by_id[allocation.container_id(self._agent.name)])
         await self._audit_engine_async(require_agent_running=True)
+        if self._profile.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+            environment = dict(
+                item.split("=", 1) for item in by_id[allocation.container_id(self._agent.name)]["Config"]["Env"]
+            )
+            home = PurePosixPath(environment["HOME"])
+            mount = next(mount for mount in self._agent.tmpfs_mounts if home.is_relative_to(mount.path))
+            async with self._lifecycle_lock:
+                self._staged_config = await self._config_stager.stage_async(
+                    container_id=allocation.container_id(self._agent.name),
+                    home=home,
+                    mount_path=PurePosixPath(mount.path),
+                    uid=self._agent.uid,
+                    gid=self._agent.gid,
+                    model=self._guest_auth.model,
+                    base_url=self._profile.config.model_gateway_endpoint,
+                )
+                await self._audit_engine_async(require_agent_running=True)
         return allocation
 
     async def launch_process_async(self, *, config: NativeCliRunConfig, prompt: str) -> DockerSandboxProcessSession:
@@ -236,6 +261,7 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         Raises:
             ValueError: If caller configuration differs from the approved profile.
             RuntimeError: If the lease cannot accept this one-shot launch.
+            DockerEngineError: If the staged user configuration no longer matches its readback.
             asyncio.CancelledError: If cancelled, after compensating guest stop is attempted.
         """
         if config != self._profile.config:
@@ -255,6 +281,10 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
                 ):
                     raise RuntimeError("Agent launch requires an unused, ready, stop-only lease.")
                 await self._audit_engine_async(require_agent_running=True)
+                if self._profile.config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+                    if self._staged_config is None:
+                        raise DockerEngineError("Codex user configuration has not been staged and read back.")
+                    await self._config_stager.verify_async(self._staged_config)
                 self._launch_attempted = claimed = True
                 assert self._allocation is not None
                 handle = await self._engine.create_exec_async(

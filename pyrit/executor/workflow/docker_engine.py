@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -416,6 +416,61 @@ class DockerEngineClient:
         request = self._client.build_request(method, self._prefix + path, json=body)
         request.headers.pop("cookie", None)
         return request
+
+    async def _config_archive_async(
+        self,
+        *,
+        container_id: str,
+        method: Literal["HEAD", "PUT", "GET"],
+        path: PurePosixPath,
+        archive: bytes | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        self._validate_id(container_id)
+        if (
+            not path.is_absolute()
+            or ".." in path.parts
+            or not re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", str(path))
+            or (archive is not None and (method != "PUT" or len(archive) > 65_536))
+        ):
+            raise ValueError("Config archive operations require exact bounded guest paths and bytes.")
+        params = {"path": str(path)}
+        if method == "PUT":
+            params.update(noOverwriteDirNonDir="true", copyUIDGID="true")
+        request = self._client.build_request(
+            method,
+            self._prefix + f"/containers/{container_id}/archive",
+            params=params,
+            content=archive,
+            headers={"Content-Type": "application/x-tar", "Accept-Encoding": "identity"},
+        )
+        request.headers.pop("cookie", None)
+        try:
+            async with asyncio.timeout(self._control_timeout):
+                response = await self._client.send(request, stream=True)
+                try:
+                    allowed = {200, 404} if method == "HEAD" else {200}
+                    if (
+                        response.status_code not in allowed
+                        or response.headers.get("content-encoding", "identity") != "identity"
+                    ):
+                        raise DockerEngineError("Engine config archive operation failed or used unsupported encoding.")
+                    if (
+                        method == "GET"
+                        and response.headers.get("content-type", "").split(";", 1)[0] != "application/x-tar"
+                    ):
+                        raise DockerEngineError("Engine config readback is not an uncompressed tar archive.")
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=16_384):
+                        if len(content) + len(chunk) > 65_536:
+                            raise DockerEngineError("Engine config archive response exceeded its fixed byte limit.")
+                        content.extend(chunk)
+                    if method == "HEAD" and content:
+                        raise DockerEngineError("Engine config path stat unexpectedly included content.")
+                    return response.status_code, dict(response.headers), bytes(content)
+                finally:
+                    await response.aclose()
+        except httpx.HTTPError as error:
+            raise DockerEngineError("Engine config archive transport failed; staging is unverified.") from error
 
     @staticmethod
     def _validate_id(value: str) -> None:
