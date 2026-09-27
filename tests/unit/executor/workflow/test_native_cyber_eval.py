@@ -28,6 +28,11 @@ from pyrit.models.native_cyber import (
     NativeCyberReport,
     NativeCyberRequest,
 )
+from pyrit.models.native_cyber_evidence import (
+    NativeCyberEpisodeStart,
+    NativeCyberResponseMode,
+    NativeCyberResponsePolicy,
+)
 from pyrit.prompt_target import NativeAgentTarget
 from pyrit.registry import ConverterRegistry
 from pyrit.score.float_scale.native_cyber_scorer import NativeCyberReportScorer
@@ -36,6 +41,7 @@ from tests.unit.prompt_target.target.test_native_agent_target import (
     EventFixture,
     SdkSessionFixture,
     agent_session,
+    event,
     tool_turn,
 )
 
@@ -52,7 +58,7 @@ pytestmark = pytest.mark.usefixtures("patch_central_database")
 
 class FixtureRuntime:
     def __init__(self, *, turns: int, steps: bool, order: list[str], missing_tool: bool = False) -> None:
-        sdk_turns = [tool_turn(call_id=f"call-{i}", final=None) for i in range(turns)]
+        sdk_turns = [tool_turn(call_id=f"call-{i}", final="Done") for i in range(turns)]
         if missing_tool:
             sdk_turns[0].pop(2)
         self.sdk = SdkSessionFixture(sdk_turns)
@@ -78,8 +84,21 @@ class FixtureRuntime:
 
 
 class FixtureBinding(NativeCyberTaskBinding):
-    def __init__(self, *, steps: bool = False, blocked: bool = False, missing_tool: bool = False) -> None:
-        super().__init__(name="inert_case", version="1", description="OFFLINE/SIMULATED only", max_ttl_seconds=180)
+    def __init__(
+        self,
+        *,
+        steps: bool = False,
+        blocked: bool = False,
+        missing_tool: bool = False,
+        response_policy: NativeCyberResponsePolicy | None = None,
+    ) -> None:
+        super().__init__(
+            name="inert_case",
+            version="1",
+            description="OFFLINE/SIMULATED only",
+            max_ttl_seconds=180,
+            response_policy=response_policy,
+        )
         self.order: list[str] = []
         self.runtime = FixtureRuntime(turns=3, steps=steps, order=self.order, missing_tool=missing_tool)
         self.blocked = blocked
@@ -115,6 +134,15 @@ class FixtureBinding(NativeCyberTaskBinding):
             self.runtime.closed = True
 
 
+class ArtifactOnlyBinding(FixtureBinding):
+    def __init__(self) -> None:
+        super().__init__(response_policy=NativeCyberResponsePolicy(allow_artifact_only=True))
+        self.runtime.sdk.turns[0] = tool_turn(call_id="call-0", final=None)
+
+    def response_mode(self, *, request: NativeCyberRequest, turn_index: int) -> NativeCyberResponseMode:
+        return NativeCyberResponseMode.ARTIFACT_ONLY
+
+
 async def test_native_literal_attack_scores_before_single_cleanup_async(
     *, tmp_path: Path, sqlite_instance: SQLiteMemory
 ) -> None:
@@ -138,6 +166,7 @@ async def test_native_literal_attack_scores_before_single_cleanup_async(
     assert episode.report_sha256 == run.report.sha256()
     assert len(episode.turns) == 1
     assert episode.turns[0].request_piece_ids and episode.turns[0].response_piece_ids
+    assert episode.turns[0].tool_request_piece_ids and episode.turns[0].tool_result_piece_ids
     assert [event.sequence for event in episode.events] == list(range(1, len(run.report.agent.events) + 1))
     assert episode.tools[0].request_sequence < episode.tools[0].start_sequence < episode.tools[0].completion_sequence
     assert len(episode.raw_streams) == 1 and episode.raw_streams[0].source_complete
@@ -156,6 +185,41 @@ async def test_native_literal_attack_scores_before_single_cleanup_async(
     )
     await run.finish_async()
     assert binding.runtime.grade_count == 1
+
+
+async def test_one_model_event_requests_two_distinct_tools_without_fabricated_ids_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    turn = binding.runtime.sdk.turns[0]
+    second_request = {"toolCallId": "call-extra", "name": "bash", "arguments": {"command": "printf second"}}
+    turn[0]["data"]["toolRequests"].append(second_request)
+    turn[3:3] = [
+        event(
+            "tool.execution_start",
+            {
+                "toolCallId": second_request["toolCallId"],
+                "toolName": second_request["name"],
+                "arguments": second_request["arguments"],
+            },
+        ),
+        event(
+            "tool.execution_complete",
+            {
+                "toolCallId": second_request["toolCallId"],
+                "success": True,
+                "result": {"content": "second"},
+            },
+        ),
+    ]
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert view.status == "completed" and episode.coverage_complete
+    assert len(episode.events) == len(turn) and len(episode.tools) == 2
+    assert {tool.call_id for tool in episode.tools} == {"call-0", "call-extra"}
+    assert episode.tools[0].request_sequence == episode.tools[1].request_sequence == 1
+    assert len(episode.turns[0].tool_request_piece_ids) == len(episode.turns[0].tool_result_piece_ids) == 2
 
 
 async def test_blocked_preflight_does_not_open_or_grade_async(*, tmp_path: Path, sqlite_instance: SQLiteMemory) -> None:
@@ -285,6 +349,27 @@ async def test_native_raw_write_failure_blocks_original_grade_and_numeric_score_
     assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
 
 
+async def test_native_raw_quota_gap_blocks_grading_but_keeps_observed_byte_count_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    create_episode = run._evidence_store.create_episode
+
+    def create_limited_episode(*, start: NativeCyberEpisodeStart) -> None:
+        create_episode(start=start.model_copy(update={"raw_byte_limit": 8}))
+
+    with patch.object(run._evidence_store, "create_episode", side_effect=create_limited_episode):
+        view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    raw = episode.raw_streams[0]
+    assert view.status == "error" and run.score.is_undetermined
+    assert binding.runtime.grade_count == 0 and binding.close_count == 1
+    assert not episode.coverage_complete and raw.truncated and raw.stored_bytes == 8
+    assert raw.received_bytes > raw.stored_bytes and raw.omitted_bytes == raw.received_bytes - 8
+    assert raw.expected_bytes == raw.received_bytes
+
+
 async def test_failed_agent_send_retains_partial_events_in_database_async(
     *, tmp_path: Path, sqlite_instance: SQLiteMemory
 ) -> None:
@@ -305,6 +390,63 @@ async def test_failed_agent_send_retains_partial_events_in_database_async(
     assert len(episode.events) == 1 and episode.events[0].observed_event_id == sdk.turns[0][0]["id"]
     assert len(episode.turns) == 1 and not episode.turns[0].source_complete
     assert episode.raw_streams[0].stored_bytes > 0 and not episode.coverage_complete
+
+
+async def test_artifact_only_turn_uses_original_grader_without_fake_assistant_reply_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = ArtifactOnlyBinding()
+    artifact = b"OFFLINE/SIMULATED artifact"
+    artifact_path = tmp_path / "inert.txt"
+    await asyncio.to_thread(artifact_path.write_bytes, artifact)
+    judgment = NativeCyberJudgment(
+        value=0.75,
+        complete=True,
+        rationale="Inert original artifact grader",
+        artifacts=(
+            NativeCyberArtifact(
+                name="inert.txt",
+                sha256=hashlib.sha256(artifact).hexdigest(),
+                size_bytes=len(artifact),
+                evidence_ref=str(artifact_path),
+            ),
+        ),
+    )
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(binding.runtime, "grade_async", new_callable=AsyncMock, return_value=judgment) as grader:
+        view = await run.start_async()
+    grader.assert_awaited_once()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert view.status == "completed" and run.score.get_value() == 0.75
+    assert episode.coverage_complete and episode.run.response_policy.allow_artifact_only
+    assert episode.turns[0].response_mode is NativeCyberResponseMode.ARTIFACT_ONLY
+    assert episode.turns[0].request_piece_ids and not episode.turns[0].response_piece_ids
+    assert episode.turns[0].tool_request_piece_ids and episode.turns[0].tool_result_piece_ids
+    assert run.report.judgment == judgment and run.report.agent.events[-1].event_type == "session.idle"
+
+
+async def test_artifact_only_without_retained_artifact_downgrades_original_judgment_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = ArtifactOnlyBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert binding.runtime.grade_count == 1 and binding.close_count == 1
+    assert run.report.judgment.value == 0.75 and view.status == "error" and run.score.is_undetermined
+    assert not episode.coverage_complete and any("retained artifact" in gap for gap in episode.gaps)
+
+
+async def test_artifact_only_without_terminal_source_event_skips_original_grader_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = ArtifactOnlyBinding()
+    binding.runtime.sdk.turns[0].pop()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert view.status == "error" and run.score.is_undetermined and binding.runtime.grade_count == 0
+    assert not episode.coverage_complete and not episode.turns[0].source_complete
 
 
 async def test_report_file_failure_retains_an_explicit_memory_error_async(

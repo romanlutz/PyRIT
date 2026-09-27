@@ -269,9 +269,11 @@ the session evidence and are retained before owned cleanup.
 
 The controller declares a required, bounded
 `harness/jsonl/controller-serialized-sdk-events` stream before sending the
-first instruction. Each completed outer turn links real request/response
-MessagePieces and appends the observed SDK events and their serialized JSONL
-bytes to PyRIT memory. This is a **controller serialization of SDK events**,
+first instruction. Each completed outer turn links real user requests,
+assistant messages, assistant function calls and model-visible tool results as
+distinct MessagePiece directions, then appends observed SDK events and their
+serialized JSONL bytes to PyRIT memory. Tool calls/results never count as a
+fabricated assistant reply. This is a **controller serialization of SDK events**,
 not the original SDK wire stream or a claim to have observed every guest
 process. Sensitive payload/byte reads require an explicit opt-in. The file
 `native-events.jsonl` remains a private supplementary copy, not the source
@@ -285,6 +287,16 @@ Score and episode link, downgrading that Score to undetermined on required
 capture gaps. If memory finalization fails, the caller receives the error
 and must explicitly recover the unfinished episode; the workflow does not
 retry grading or publish a score-shaped fallback.
+
+Chat turns require a genuine non-tool assistant response. A task with
+artifact-only output must declare
+`NativeCyberResponsePolicy(allow_artifact_only=True)` in its trusted binding
+and override `response_mode(*, request, turn_index)` for the intended turns;
+missing assistant text does **not** select that mode automatically. An
+artifact-only turn must have a persisted request and observed root terminal
+event. Final publication additionally requires a completed original judgment
+with a retained typed artifact. The pre-grading capture check does not require
+that not-yet-acquired judgment.
 
 ## GHCP container transport: source-supported path, unqualified authentication
 

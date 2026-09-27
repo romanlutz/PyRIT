@@ -39,6 +39,8 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberRawKind,
     NativeCyberRawStreamKey,
     NativeCyberRawStreamStart,
+    NativeCyberResponseMode,
+    NativeCyberResponsePolicy,
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
 )
@@ -127,6 +129,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         max_ttl_seconds: int = 180,
         allowed_converter_names: tuple[str, ...] = (),
         techniques: tuple[AttackTechniqueFactory, ...] = (),
+        response_policy: NativeCyberResponsePolicy | None = None,
     ) -> None:
         """
         Initialize public catalog metadata and allow-listed technique choices.
@@ -144,6 +147,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         self.max_ttl_seconds = max_ttl_seconds
         self.allowed_converter_names = allowed_converter_names
         self.techniques = {factory.name: factory for factory in techniques}
+        self.response_policy = response_policy or NativeCyberResponsePolicy()
 
     @abstractmethod
     async def readiness_async(self) -> NativeCyberReadiness:
@@ -216,6 +220,15 @@ class NativeCyberTaskBinding(Identifiable, ABC):
             metadata={"native_binding": self.name, "native_binding_version": self.version},
         )
 
+    def response_mode(self, *, request: NativeCyberRequest, turn_index: int) -> NativeCyberResponseMode:
+        """
+        Select the task-approved evidence mode for one actual outer turn.
+
+        Returns:
+            NativeCyberResponseMode: Chat by default; artifact-only requires an explicit binding override.
+        """
+        return NativeCyberResponseMode.MESSAGE_REQUIRED
+
     def _build_identifier(self) -> ComponentIdentifier:
         return ComponentIdentifier.of(
             self,
@@ -225,6 +238,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
                 "max_ttl_seconds": self.max_ttl_seconds,
                 "allowed_converters": list(self.allowed_converter_names),
                 "techniques": ["literal", *self.techniques],
+                "response_policy": self.response_policy.model_dump(mode="json"),
             },
         )
 
@@ -368,6 +382,7 @@ class NativeCyberEvaluation:
                         binding_version=self.binding.version,
                         started_at=self.started_at,
                         required_raw_streams=(_SDK_EVENT_RAW_KEY,),
+                        response_policy=self.binding.response_policy,
                     ),
                 )
             except (Exception, asyncio.CancelledError) as error:
@@ -640,7 +655,7 @@ class NativeCyberEvaluation:
         await self._seal_raw_stream_async()
         evidence = self._runtime.target.session.evidence()
         coverage = await asyncio.to_thread(
-            self._evidence_store.assess_required_coverage,
+            self._evidence_store.assess_pregrading_coverage,
             report=self._build_report(None),
             expected_turns=self.turn_count,
         )
@@ -701,7 +716,23 @@ class NativeCyberEvaluation:
                 if piece.id not in self._linked_piece_ids
             ]
             requests = tuple(piece.id for piece in pieces if piece.role == "user")
-            responses = tuple(piece.id for piece in pieces if piece.role in {"assistant", "simulated_assistant"})
+            responses = tuple(
+                piece.id
+                for piece in pieces
+                if piece.role in {"assistant", "simulated_assistant"}
+                and piece.original_value_data_type not in {"function_call", "tool_call", "function_call_output"}
+            )
+            tool_requests = tuple(
+                piece.id
+                for piece in pieces
+                if piece.role in {"assistant", "simulated_assistant"}
+                and piece.original_value_data_type in {"function_call", "tool_call"}
+            )
+            tool_results = tuple(
+                piece.id
+                for piece in pieces
+                if piece.role == "tool" and piece.original_value_data_type == "function_call_output"
+            )
             await asyncio.to_thread(
                 self._evidence_store.begin_turn,
                 turn=NativeCyberTurnStart(
@@ -709,6 +740,7 @@ class NativeCyberEvaluation:
                     turn_index=self.turn_count,
                     started_at=started_at,
                     request_piece_ids=requests,
+                    response_mode=self.binding.response_mode(request=self.request, turn_index=self.turn_count),
                 ),
             )
             evidence = self._runtime.target.session.evidence()
@@ -753,6 +785,8 @@ class NativeCyberEvaluation:
                     run_id=self.run_id,
                     turn_index=self.turn_count,
                     response_piece_ids=responses,
+                    tool_request_piece_ids=tool_requests,
+                    tool_result_piece_ids=tool_results,
                     observed_event_count=len(new_events),
                     source_complete=evidence.coverage_complete and evidence.idle,
                     gaps=evidence.gaps,
