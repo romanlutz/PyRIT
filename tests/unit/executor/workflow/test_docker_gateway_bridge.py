@@ -8,13 +8,17 @@ from __future__ import annotations
 import copy
 from ipaddress import IPv4Address, IPv4Network
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
 from starlette.applications import Starlette
 
-from pyrit.executor.workflow.docker_gateway_bridge import derive_gateway_bridge_binding
+from pyrit.executor.workflow.docker_engine import DockerEngineClient, DockerEngineError
+from pyrit.executor.workflow.docker_gateway_bridge import (
+    acquire_gateway_bridge_binding_async,
+    derive_gateway_bridge_binding,
+)
 from pyrit.prompt_target.gateway.responses_contract import GatewayRoute
 from pyrit.prompt_target.gateway.run_listener import RunScopedModelGatewayListener
 from tests.unit.executor.workflow.test_docker_compose import make_lease
@@ -65,6 +69,32 @@ async def test_gateway_bridge_candidate_is_accepted_by_run_owned_fake_listener_a
         await listener.close_async()
         await lease.close_async()
     sock.close.assert_called_once()
+
+
+async def test_gateway_bridge_reinspects_exact_network_before_listener_setup_async() -> None:
+    lease, allocation, network = await _bridge_case_async()
+    engine = MagicMock(spec=DockerEngineClient)
+    engine.inspect_network_async = AsyncMock(return_value=network)
+    try:
+        binding = await acquire_gateway_bridge_binding_async(
+            lease=lease, allocation=allocation, engine=engine, port=43123
+        )
+        assert binding.network_id == allocation.network_id
+        engine.inspect_network_async.assert_awaited_once_with(allocation.network_id)
+    finally:
+        await lease.close_async()
+
+
+async def test_gateway_bridge_engine_failure_is_not_replaced_by_cached_metadata_async() -> None:
+    lease, allocation, _network = await _bridge_case_async()
+    engine = MagicMock(spec=DockerEngineClient)
+    engine.inspect_network_async = AsyncMock(side_effect=DockerEngineError("inert inspection unavailable"))
+    try:
+        with pytest.raises(DockerEngineError, match="inspection unavailable"):
+            await acquire_gateway_bridge_binding_async(lease=lease, allocation=allocation, engine=engine, port=43123)
+        engine.inspect_network_async.assert_awaited_once_with(allocation.network_id)
+    finally:
+        await lease.close_async()
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,29 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from pyrit.executor.workflow.docker_compose import ComposeAllocation, DockerComposeEnvironmentLease
+    from pyrit.executor.workflow.docker_engine import DockerEngineClient
+
+
+async def acquire_gateway_bridge_binding_async(
+    *,
+    lease: DockerComposeEnvironmentLease,
+    allocation: ComposeAllocation,
+    engine: DockerEngineClient,
+    port: int,
+) -> GatewayBridgeBinding:
+    """
+    Reinspect this exact run-owned Engine network immediately before socket setup.
+
+    Returns:
+        GatewayBridgeBinding: Syntactically approved bridge IPAM metadata.
+
+    Raises:
+        ValueError: If the lease or inspected network no longer matches the allocation.
+    """
+    if lease.snapshot().state is not EnvironmentLeaseState.READY:
+        raise ValueError("A gateway bridge candidate needs an acquired, ready run-owned lease.")
+    inspected = await engine.inspect_network_async(allocation.network_id)
+    return derive_gateway_bridge_binding(lease=lease, allocation=allocation, network=inspected, port=port)
 
 
 def derive_gateway_bridge_binding(

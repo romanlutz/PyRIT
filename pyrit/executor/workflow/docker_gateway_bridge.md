@@ -7,6 +7,9 @@ external or non-bridge networks, unknown attachments, IPv6 and ambiguous IPAM
 configurations. It returns a `GatewayBridgeBinding` for the host-only
 `RunScopedModelGatewayListener`, whose separately provided socket must already
 be bound to that exact private address and port.
+For runtime construction, call `acquire_gateway_bridge_binding_async` to fetch
+the exact network ID again through the host-only Engine client before applying
+these checks; never trust a candidate-supplied or cached inspection.
 
 This is a **candidate address, not a connectivity or firewall proof**. Docker
 IPAM metadata does not establish that the host can bind the address, that
