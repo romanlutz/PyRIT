@@ -635,8 +635,9 @@ class NativeCliEvaluation:
             or not binding.version.strip()
             or not isinstance(binding.task_id, str)
             or not binding.task_id.strip()
+            or not isinstance(binding.task_version, str)
+            or not binding.task_version.strip()
             or not isinstance(binding.run_config, NativeCliRunConfig)
-            or binding.task_version != binding.version
             or type(binding.simulated) is not bool
             or not isinstance(binding.response_policy, NativeCyberResponsePolicy)
             or not isinstance(binding.response_mode, NativeCyberResponseMode)

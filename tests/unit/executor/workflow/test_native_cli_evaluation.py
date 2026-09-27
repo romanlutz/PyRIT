@@ -394,7 +394,7 @@ class _FakeBinding:
 
     async def open_runtime_async(self, *, run_id: str, sink: NativeCliDatabaseEvidenceSink) -> _FakeRuntime:
         episode = await asyncio.to_thread(self.memory.native_cyber_evidence.get_episode, run_id=run_id)
-        assert episode.run.task_version == self.version
+        assert episode.run.task_version == self.task_version
         assert episode.turns[0].source_turn_id == sink.turn_id
         assert {item.key.observed_source_id for item in episode.raw_streams} >= {
             "codex_exec_json.stdout",
@@ -417,6 +417,23 @@ class _FakeBinding:
             identity_mode=self.identity_mode,
         )
         return self.runtime
+
+
+async def test_original_task_revision_is_independent_of_binding_implementation_version_async(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    binding = _FakeBinding(memory=sqlite_instance)
+    binding.version = "binding-implementation-v2"
+    binding.task_version = "original-task-v1"
+    result = await NativeCliEvaluation(
+        binding=binding, instruction="inert instruction", memory=sqlite_instance
+    ).run_async()
+
+    assert result.score.status is ScoreStatus.COMPLETE
+    assert result.report.task_version == "original-task-v1"
+    assert result.episode.run.task_version == "original-task-v1"
+    assert result.episode.run.binding_version == "binding-implementation-v2"
+    assert result.score.score_metadata["task_version"] == "original-task-v1"
 
 
 async def test_one_shot_evaluation_uses_real_db_pregrade_and_finalizes_single_score_async(
@@ -473,7 +490,8 @@ async def test_one_shot_evaluation_uses_real_db_pregrade_and_finalizes_single_sc
         < binding.trace.index("atomic_finalizer")
     )
     assert result.report.cleanup is NativeCliReportCleanup.CLOSED
-    assert result.report.task_version == result.episode.run.binding_version == "rev-1"
+    assert result.report.task_version == result.episode.run.task_version == "rev-1"
+    assert result.episode.run.binding_version == "rev-1"
     assert result.report.conversation_id == evaluation.conversation_id
     assert result.episode.turns[0].request_piece_ids and result.episode.turns[0].response_piece_ids
     messages = sqlite_instance.get_conversation_messages(conversation_id=evaluation.conversation_id)
@@ -830,9 +848,9 @@ async def test_cli_timeout_stops_agent_and_persists_no_numeric_grade_async(sqlit
     assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
 
 
-def test_binding_rejects_task_version_mismatch_before_resource_acquisition(sqlite_instance: SQLiteMemory) -> None:
+def test_binding_rejects_blank_original_task_version_before_resource_acquisition(sqlite_instance: SQLiteMemory) -> None:
     binding = _FakeBinding(memory=sqlite_instance)
-    binding.task_version = "foreign-task-revision"
+    binding.task_version = "   "
     with pytest.raises(ValueError, match="task provenance"):
         NativeCliEvaluation(binding=binding, instruction="offline fixture", memory=sqlite_instance)
     assert not binding.trace
