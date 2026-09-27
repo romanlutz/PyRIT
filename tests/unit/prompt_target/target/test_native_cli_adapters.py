@@ -272,6 +272,96 @@ def test_codex_unobserved_start_and_unknown_completion_status_remain_partial() -
     assert not parser.coverage_complete
 
 
+@pytest.mark.parametrize(
+    ("output_fields", "has_result"),
+    [({}, False), ({"aggregated_output": None}, False), ({"aggregated_output": ""}, True)],
+)
+def test_codex_completed_command_requires_observed_result_at_eof(
+    output_fields: dict[str, object], has_result: bool
+) -> None:
+    parser = NativeCliJsonlParser(config=_config())
+    item: dict[str, object] = {
+        "id": "cmd-1",
+        "type": "command_execution",
+        "command": "printf fixture",
+        "status": "completed",
+        "exit_code": 0,
+    }
+    item.update(output_fields)
+    events = (
+        *parser.feed(
+            data=b"".join(
+                (
+                    _frame(kind="thread.started", thread_id="thread-1"),
+                    _frame(kind="turn.started"),
+                    _frame(
+                        kind="item.started",
+                        item={
+                            "id": "cmd-1",
+                            "type": "command_execution",
+                            "command": "printf fixture",
+                            "status": "in_progress",
+                        },
+                    ),
+                    _frame(kind="item.completed", item=item),
+                    _frame(kind="turn.completed"),
+                )
+            )
+        ),
+        *parser.finish(),
+    )
+    completed = _of_kind(events=events, kind=NativeCliEventKind.TOOL_COMPLETED)
+    results = _of_kind(events=events, kind=NativeCliEventKind.TOOL_RESULT)
+    assert len(completed) == 1 and completed[0].observation.source_tool_id == "cmd-1"
+    assert len(results) == int(has_result)
+    assert parser.terminal_observed and parser.coverage_complete is has_result
+    if has_result:
+        assert results[0].observation.result == ""
+    else:
+        assert any("cmd-1" in gap and "result" in gap for gap in parser.gaps)
+        assert any(
+            event.observation.source_tool_id == "cmd-1"
+            for event in _of_kind(events=events, kind=NativeCliEventKind.PARTIAL)
+        )
+
+
+@pytest.mark.parametrize(
+    ("tool_type", "output_fields", "has_result"),
+    [
+        ("file_change", {"changes": None}, False),
+        ("file_change", {"changes": "not a change list"}, False),
+        ("file_change", {"changes": []}, True),
+        ("mcp_tool_call", {"result": None}, False),
+        ("mcp_tool_call", {"result": {}}, True),
+        ("web_search", {"results": None}, False),
+        ("web_search", {"results": []}, True),
+    ],
+)
+def test_codex_other_tool_results_require_observed_supported_payload(
+    tool_type: str, output_fields: dict[str, object], has_result: bool
+) -> None:
+    parser = NativeCliJsonlParser(config=_config())
+    completed_item = {"id": "tool-1", "type": tool_type, "status": "completed", **output_fields}
+    events = (
+        *parser.feed(
+            data=b"".join(
+                (
+                    _frame(kind="thread.started", thread_id="thread-1"),
+                    _frame(kind="turn.started"),
+                    _frame(kind="item.started", item={"id": "tool-1", "type": tool_type, "status": "in_progress"}),
+                    _frame(kind="item.completed", item=completed_item),
+                    _frame(kind="turn.completed"),
+                )
+            )
+        ),
+        *parser.finish(),
+    )
+    assert len(_of_kind(events=events, kind=NativeCliEventKind.TOOL_RESULT)) == int(has_result)
+    assert parser.coverage_complete is has_result
+    if not has_result:
+        assert any("tool-1" in gap and "result" in gap for gap in parser.gaps)
+
+
 def test_unknown_frames_and_unselected_token_deltas_cannot_claim_complete_coverage() -> None:
     parser = NativeCliJsonlParser(config=_config(protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE))
     events = (

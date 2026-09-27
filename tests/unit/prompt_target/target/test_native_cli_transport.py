@@ -74,10 +74,18 @@ class _Recorder:
 
 
 class _Sandbox:
-    def __init__(self, *, chunks: list[NativeCliProcessChunk], exit_code: int = 0, pause: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        chunks: list[NativeCliProcessChunk],
+        exit_code: int = 0,
+        pause: bool = False,
+        stop_error: Exception | None = None,
+    ) -> None:
         self.chunks = chunks
         self.exit_code = exit_code
         self.pause = pause
+        self.stop_error = stop_error
         self.read_paused = asyncio.Event()
         self.resume = asyncio.Event()
         self.stop_count = 0
@@ -95,6 +103,8 @@ class _Sandbox:
     async def stop_async(self) -> None:
         self.stop_count += 1
         self.resume.set()
+        if self.stop_error is not None:
+            raise self.stop_error
 
 
 class _Launcher:
@@ -163,6 +173,39 @@ async def test_nonzero_process_exit_is_an_error_even_after_terminal_event_async(
     assert sink.events[-1].observation.kind is NativeCliEventKind.ERROR
     assert sink.events[-1].observation.status is NativeCliEventStatus.FAILED
     assert sandbox.stop_count == 1
+
+
+async def test_zero_exit_with_missing_codex_tool_result_has_incomplete_coverage_async() -> None:
+    raw = b"".join(
+        (
+            _frame(kind="thread.started", thread_id="thread-1"),
+            _frame(kind="turn.started"),
+            _frame(
+                kind="item.started",
+                item={"id": "cmd-1", "type": "command_execution", "command": "true", "status": "in_progress"},
+            ),
+            _frame(
+                kind="item.completed",
+                item={
+                    "id": "cmd-1",
+                    "type": "command_execution",
+                    "command": "true",
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+            ),
+            _frame(kind="turn.completed"),
+        )
+    )
+    sandbox = _Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=raw)])
+    sink = _Recorder()
+    outcome = await NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=sink).run_async(
+        config=_config(), prompt="Fixture"
+    )
+    assert outcome.exit_code == 0 and outcome.terminal_observed and not outcome.coverage_complete
+    assert any("cmd-1" in gap and "result" in gap for gap in outcome.gaps)
+    assert sink.raw[0].data == raw and sandbox.stop_count == 1
+    assert not any(event.observation.kind is NativeCliEventKind.TOOL_RESULT for event in sink.events)
 
 
 async def test_cancellation_stops_sandbox_and_records_incomplete_run_async() -> None:
@@ -239,6 +282,66 @@ async def test_recorder_error_is_propagated_and_sandbox_is_stopped_async() -> No
     assert sandbox.stop_count == 1
     assert not sink.raw
     assert sink.events[-1].observation.kind is NativeCliEventKind.ERROR
+
+
+async def test_recorder_error_survives_failed_sandbox_stop_async() -> None:
+    sandbox = _Sandbox(
+        chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_turn())],
+        stop_error=RuntimeError("inert stop failure"),
+    )
+    sink = _Recorder(fail_raw=True)
+    with pytest.raises(OSError, match="recorder unavailable") as caught:
+        await NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=sink).run_async(
+            config=_config(), prompt="Fixture"
+        )
+    assert sandbox.stop_count == 1
+    assert any("cleanup state is unknown" in note for note in caught.value.__notes__)
+    assert sink.events[-1].observation.kind is NativeCliEventKind.ERROR
+
+
+async def test_cancellation_survives_failed_sandbox_stop_async() -> None:
+    sandbox = _Sandbox(chunks=[], pause=True, stop_error=RuntimeError("inert stop failure"))
+    sink = _Recorder()
+    task = asyncio.create_task(
+        NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=sink).run_async(config=_config(), prompt="Fixture")
+    )
+    await asyncio.wait_for(sandbox.read_paused.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert sandbox.stop_count == 1
+    assert any("cleanup state is unknown" in note for note in caught.value.__notes__)
+    assert sink.events[-1].observation.kind is NativeCliEventKind.ERROR
+
+
+async def test_successful_stream_with_failed_sandbox_stop_surfaces_failure_async() -> None:
+    raw = _turn()
+    sandbox = _Sandbox(
+        chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=raw)],
+        stop_error=RuntimeError("inert stop failure"),
+    )
+    sink = _Recorder()
+    with pytest.raises(RuntimeError, match="inert stop failure"):
+        await NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=sink).run_async(
+            config=_config(), prompt="Fixture"
+        )
+    assert sandbox.stop_count == 1 and sink.raw[0].data == raw
+
+
+async def test_stop_failure_does_not_inherit_unrelated_caller_exception_async() -> None:
+    sandbox = _Sandbox(
+        chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_turn())],
+        stop_error=RuntimeError("inert stop failure"),
+    )
+    try:
+        raise ValueError("an unrelated handled error")
+    except ValueError as outer_error:
+        with pytest.raises(RuntimeError, match="inert stop failure"):
+            await NativeCliRunner(launcher=_Launcher(sessions=[sandbox]), sink=_Recorder()).run_async(
+                config=_config(), prompt="Fixture"
+            )
+        assert not getattr(outer_error, "__notes__", [])
+    assert sandbox.stop_count == 1
 
 
 async def test_empty_prompt_rejected_without_launching_sandbox_async() -> None:

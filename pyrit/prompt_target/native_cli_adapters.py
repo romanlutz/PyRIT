@@ -154,13 +154,15 @@ class CodexExecJsonAdapter:
 
     @staticmethod
     def _tool_result(*, item: dict[str, JsonValue], item_type: str) -> tuple[JsonValue, bool]:
-        for field in {
-            "command_execution": ("aggregated_output",),
-            "file_change": ("changes",),
-            "mcp_tool_call": ("result", "error"),
-            "web_search": ("result", "results"),
-        }[item_type]:
-            if field in item:
+        if item_type == "command_execution":
+            output = item.get("aggregated_output")
+            return (output, True) if isinstance(output, str) else (None, False)
+        if item_type == "file_change":
+            changes = item.get("changes")
+            return (changes, True) if isinstance(changes, list) else (None, False)
+        fields = ("result", "error") if item_type == "mcp_tool_call" else ("result", "results")
+        for field in fields:
+            if field in item and item[field] is not None:
                 return item[field], True
         return None, False
 

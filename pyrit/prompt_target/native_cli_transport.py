@@ -114,7 +114,7 @@ class NativeCliJsonlParser:
         self._steps = 0
         self._message_ids: set[str] = set()
         self._open_tools: dict[tuple[str | None, str], NativeCliEventKind] = {}
-        self._completed_tools: set[tuple[str | None, str]] = set()
+        self._completed_tools: dict[tuple[str | None, str], None] = {}
         self._gaps: list[str] = []
         self._fatal_reason: str | None = None
 
@@ -215,6 +215,14 @@ class NativeCliJsonlParser:
             events.append(
                 self._diagnostic(
                     detail=f"Observed {phase.value} for tool {tool_id} has no completion/result at EOF.",
+                    tool_id=tool_id,
+                    parent_id=parent_id,
+                )
+            )
+        for parent_id, tool_id in self._completed_tools:
+            events.append(
+                self._diagnostic(
+                    detail=f"Observed tool {tool_id} completed without a result at EOF.",
                     tool_id=tool_id,
                     parent_id=parent_id,
                 )
@@ -332,13 +340,13 @@ class NativeCliJsonlParser:
         key = (observation.parent_tool_use_id, tool_id)
         if observation.kind is NativeCliEventKind.TOOL_COMPLETED:
             prior = self._open_tools.pop(key, None)
-            self._completed_tools.add(key)
+            self._completed_tools[key] = None
             if prior is not NativeCliEventKind.TOOL_STARTED:
                 return (self._diagnostic(detail=f"Tool {tool_id} completed without an observed start.", raw=raw),)
         elif self._config.protocol is NativeCliProtocol.CODEX_EXEC_JSON:
             if key not in self._completed_tools:
                 return (self._diagnostic(detail=f"Tool {tool_id} has a result without completion.", raw=raw),)
-            self._completed_tools.remove(key)
+            del self._completed_tools[key]
         elif self._open_tools.pop(key, None) is not NativeCliEventKind.TOOL_REQUESTED:
             return (self._diagnostic(detail=f"Tool {tool_id} has a result without a model request.", raw=raw),)
         return ()
@@ -417,6 +425,7 @@ class NativeCliRunner:
             raise ValueError("A native CLI run requires a nonempty prepared prompt.")
         parser = NativeCliJsonlParser(config=config)
         process: SandboxProcessSession | None = None
+        primary_error: BaseException | None = None
         chunks = stdout_bytes = stderr_bytes = 0
         try:
             async with asyncio.timeout(config.timeout_seconds):
@@ -460,22 +469,36 @@ class NativeCliRunner:
                     raw_stderr_bytes=stderr_bytes,
                     gaps=parser.gaps,
                 )
-        except TimeoutError:
+        except TimeoutError as error:
+            primary_error = error
             await self._sink.record_event_async(event=parser.abort(detail="Native CLI run exceeded timeout_seconds."))
             raise
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            primary_error = error
             await self._sink.record_event_async(event=parser.abort(detail="Native CLI run was cancelled."))
             raise
-        except NativeCliStreamLimitError:
+        except NativeCliStreamLimitError as error:
+            primary_error = error
             raise
         except (OSError, RuntimeError, TypeError, ValueError) as error:
+            primary_error = error
             await self._sink.record_event_async(
                 event=parser.abort(detail=f"Native CLI transport failed: {error.__class__.__name__}.")
             )
             raise
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
             if process is not None:
-                await asyncio.wait_for(process.stop_async(), timeout=config.timeout_seconds)
+                try:
+                    await asyncio.wait_for(process.stop_async(), timeout=config.timeout_seconds)
+                except (Exception, asyncio.CancelledError) as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    primary_error.add_note(
+                        f"Native CLI sandbox stop failed ({type(cleanup_error).__name__}); cleanup state is unknown."
+                    )
 
     async def _record_events_async(self, *, events: tuple[NativeCliEvent, ...]) -> None:
         for event in events:
