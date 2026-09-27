@@ -26,7 +26,10 @@ the sink with `include_model_gateway=True`, and pass its
 `record_gateway_observation_async` as the gateway's host observation callback.
 Request bodies and original response/SSE frames go into separate required DB
 streams, correlated by actual gateway request ID; host-generated failures
-are marked as required gaps, never presented as provider bytes. The third
+or provider responses without a completed-coverage claim remain required
+gaps, never presented as successful provider bytes. A request gets at most
+one terminal response; a second terminal cannot upgrade an incomplete one.
+The third
 optional error stream preserves the generated error frame. The fake ASGI
 test proves this callback contract, **not** that a real CLI reached the
 gateway. The caller must provision a run-isolated listener and model-only

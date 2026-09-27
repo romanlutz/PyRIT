@@ -100,6 +100,7 @@ class NativeCliDatabaseEvidenceSink:
         self._gateway_received = dict.fromkeys(self._gateway_streams, 0)
         self._gateway_hashes = {name: hashlib.sha256() for name in self._gateway_streams}
         self._gateway_requests: dict[str, bool] = {}
+        self._gateway_terminal_requests: set[str] = set()
         self._gateway_failed = False
         self._gateway_observation_count = 0
         self._raw_chunk_sequence = 0
@@ -238,7 +239,7 @@ class NativeCliDatabaseEvidenceSink:
                     if request_id in self._gateway_requests:
                         raise ValueError("A model gateway request identity was repeated.")
                     self._gateway_requests[request_id] = False
-                elif request_id not in self._gateway_requests or self._gateway_requests[request_id]:
+                elif request_id not in self._gateway_requests or request_id in self._gateway_terminal_requests:
                     raise ValueError("Model gateway output has no open observed model request.")
                 name = (
                     "request"
@@ -274,6 +275,7 @@ class NativeCliDatabaseEvidenceSink:
                 )
                 self._gateway_observation_count += 1
                 if kind is GatewayFrameKind.GATEWAY_ERROR:
+                    self._gateway_terminal_requests.add(request_id)
                     self._gateway_failed = True
                     await asyncio.to_thread(
                         self._store.mark_capture_gap,
@@ -284,7 +286,12 @@ class NativeCliDatabaseEvidenceSink:
                     kind is GatewayFrameKind.RESPONSE_EVENT
                     and observation.frame.replace(b"\r\n", b"\n") == b"data: [DONE]\n\n"
                 ):
-                    self._gateway_requests[request_id] = True
+                    self._gateway_terminal_requests.add(request_id)
+                    self._gateway_requests[request_id] = (
+                        GatewayCoverage.COMPLETED in observation.coverage
+                        and GatewayCoverage.INCOMPLETE not in observation.coverage
+                        and GatewayCoverage.FAILED not in observation.coverage
+                    )
             except (Exception, asyncio.CancelledError):
                 self._failed = True
                 raise

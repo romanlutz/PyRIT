@@ -341,6 +341,98 @@ async def test_cli_sink_streaming_model_frames_require_observed_done_async(*, sq
     assert b"".join(chunk.data for chunk in chunks) == response.frame + done
 
 
+@pytest.mark.parametrize(
+    ("response_kind", "frame", "coverage"),
+    [
+        (GatewayFrameKind.RESPONSE, b'{"status":"incomplete"}', frozenset({GatewayCoverage.INCOMPLETE})),
+        (GatewayFrameKind.RESPONSE_EVENT, b"data: [DONE]\n\n", frozenset({GatewayCoverage.STREAMING})),
+    ],
+)
+async def test_cli_sink_unconfirmed_provider_response_never_completes_model_capture_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    response_kind: GatewayFrameKind,
+    frame: bytes,
+    coverage: frozenset[GatewayCoverage],
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    await sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=GatewayFrameKind.REQUEST,
+            frame=b'{"model":"codex-fixture","input":"inert"}',
+            coverage=frozenset(),
+        )
+    )
+    await sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=response_kind,
+            frame=frame,
+            coverage=coverage,
+        )
+    )
+    await sink.finish_async(outcome=None)
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert [event.event_type for event in episode.events] == ["gateway.request", f"gateway.{response_kind.value}"]
+    assert any("Model gateway request/response coverage" in gap for gap in episode.turns[0].gaps)
+
+
+@pytest.mark.parametrize(
+    ("first_kind", "first_coverage"),
+    [
+        (GatewayFrameKind.RESPONSE, frozenset({GatewayCoverage.INCOMPLETE})),
+        (GatewayFrameKind.GATEWAY_ERROR, frozenset({GatewayCoverage.FAILED})),
+    ],
+)
+async def test_cli_sink_duplicate_terminal_cannot_upgrade_failed_model_request_async(
+    *,
+    sqlite_instance: SQLiteMemory,
+    first_kind: GatewayFrameKind,
+    first_coverage: frozenset[GatewayCoverage],
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    await sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=GatewayFrameKind.REQUEST,
+            frame=b'{"model":"codex-fixture","input":"inert"}',
+            coverage=frozenset(),
+        )
+    )
+    await sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=first_kind,
+            frame=b'{"error":{"message":"inert"}}'
+            if first_kind is GatewayFrameKind.GATEWAY_ERROR
+            else b'{"status":"incomplete"}',
+            coverage=first_coverage,
+            error_code="backend_failed" if first_kind is GatewayFrameKind.GATEWAY_ERROR else None,
+            status_code=502 if first_kind is GatewayFrameKind.GATEWAY_ERROR else None,
+        )
+    )
+    with pytest.raises(ValueError, match="no open observed model request"):
+        await sink.record_gateway_observation_async(
+            GatewayObservation(
+                run_id=sink.run_id,
+                request_id="model-1",
+                kind=GatewayFrameKind.RESPONSE,
+                frame=b'{"status":"completed"}',
+                coverage=frozenset({GatewayCoverage.COMPLETED}),
+            )
+        )
+    await sink.finish_async(outcome=None)
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert len([event for event in episode.events if event.event_type.startswith("gateway.")]) == 2
+    assert not episode.turns[0].source_complete
+    assert any("recording failed" in gap for gap in episode.turns[0].gaps)
+
+
 async def test_cli_sink_clean_cli_without_observed_model_request_stays_incomplete_async(
     *, sqlite_instance: SQLiteMemory
 ) -> None:
