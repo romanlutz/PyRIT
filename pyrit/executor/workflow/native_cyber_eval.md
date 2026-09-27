@@ -17,6 +17,7 @@ execution before advertising readiness.
 | Runtime `grade_async` | Original grader and immutable artifact acquisition while the workspace still exists |
 | `NativeCyberReportScorer` | Read-only grade projection from retained canonical report content |
 | Runtime context owner | Agent environment creation and cleanup, exactly once |
+| `EnvironmentLease` | Provider-neutral service handles, optional setup/health, run-owned rollback and release |
 | Binding `create_host_storage_async` | Verifying an existing private parent before exclusively creating the exact empty run child |
 | Binding `validate_host_storage_async` | Effective host access controls on the run directory and its private parent |
 | Runtime `validate_agent_storage_async` | Actual guest exclusion from host reports and PyRIT memory, including mounts and host tools |
@@ -91,6 +92,74 @@ converter registry names, stepping, bounded TTL/turn timeout and parent lineage.
 The binding caps TTL and explicitly allows converters and technique factories.
 Task-specific interfaces must further constrain instruction variants and protect
 the original grading rules, trust policy, fixture and credentials.
+
+## Provider-neutral environment lease
+
+This path is native PyRIT only. It neither imports nor delegates to Inspect or
+Inspect SWE. Providers and future sandbox-local harness adapters remain separate
+from attacks, targets, converters and original graders.
+
+Bindings may override
+`create_environment_lease(*, run_id, request) -> EnvironmentLease[NativeCyberRuntime]`
+instead of `open_runtime`. The factory performs no acquisition. The workflow
+first completes host storage and readiness checks, then acquires the lease under
+the episode deadline. Provider setup and health checks, when declared, complete
+before the runtime is returned. The existing runtime storage guard, native
+attack, retained-session stepping, original grade, cleanup and report projection
+retain their ordering. The lease remains open through original grading.
+
+`pyrit.models.environment_lease` defines opaque provider-scoped resource handles
+and named service handles with open-ended roles and optional parent names. There
+is no fixed service count, agent/target pair, container ID format, socket, mount,
+VM type or controller client in these canonical models. Several services may
+share one owned provider allocation. An external controller can release only
+its per-run allocation; the shared controller is not implicitly owned.
+
+Providers subclass `EnvironmentLease` and use `_acquire_resource_async` before
+each provider acquisition. It reserves the exact run-owned handle and release
+callback **before** awaiting provider I/O. Callbacks receive that same handle.
+Failed or cancelled acquisition, setup or health checks roll back all
+reservations in reverse order, including the failing acquisition. Provider
+release must be safe for an absent or partially created reserved resource and
+confirm release, not delete by a broad name or prune unrelated resources.
+Duplicate cleanup ownership and foreign-run handles are rejected.
+This first lease implementation acquires serially in its owning task. Spawning
+untracked acquisition tasks is rejected before provider I/O, so rollback cannot
+race an allocation still running in a child task.
+
+Cleanup attempts every reservation even if one release fails. It is once-only,
+has a cooperative per-resource timeout, and cannot become successful on a later
+call merely because an earlier attempt failed. Caller cancellation is propagated
+after release settles. Providers must honor cancellation; this abstraction cannot
+terminate an uncooperative external process or recover an unknown allocation ID.
+Reserved IDs must therefore be chosen before acquisition, or the provider must
+own and confirm its own compensating rollback.
+
+Explicit `SETUP` and `HEALTH_CHECK` capabilities are optional; calling an
+unsupported operation raises rather than silently succeeding. A health check
+must observe every named service exactly once, with `healthy=True`; missing,
+unknown or unhealthy observations fail acquisition. Dynamic service acquisition
+and network-phase transitions are represented as future capabilities but are
+rejected by this first implementation, not advertised as working. Role names
+and parent handles leave room for those later providers without fixing a
+two-service topology.
+
+Existing `open_runtime` bindings are wrapped as a single `runtime` service with
+an owned **context** ID, not an invented physical resource ID. This compatibility
+wrapper declares no setup or health capability. It calls the original context
+exit once after successful entry. The binding still owns rollback inside a
+failed `__aenter__`; the wrapper cannot observe its partial resources and reports
+cleanup uncertainty rather than claiming that an entry failure left no resources.
+New multi-resource bindings should use the reservation helper for observable
+rollback.
+
+`evaluation.environment_lease` exposes an immutable in-memory lifecycle snapshot.
+It does not change the existing canonical task report, score, event persistence
+or rerun lineage contract, and it is not a durable raw-log or resource schema.
+Raw-log chunk persistence belongs to a separate memory slice. Tests here use
+only fake one-, two- and four-service allocations and an inert external
+controller. No Docker/VM provider, live harness, network transition or model
+transport is implemented or qualified by these tests.
 
 ## Private host evidence boundary
 
