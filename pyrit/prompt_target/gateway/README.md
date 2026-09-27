@@ -39,6 +39,29 @@ Upstream HTTP, network, payload/stream, and timeout failures now return sanitize
 
 This transport is tested only with injected fake HTTP and ASGI transports. No live model, CLI, container, or network compatibility is claimed. The parent workflow must still mount the ASGI app in the isolated run, provide host-only credentials and a run-scoped listener, and wire the observation callback to persistence.
 
+## Run-owned listener boundary
+
+Import `RunScopedModelGatewayListener` and `GatewayBridgeBinding` from
+`pyrit.prompt_target.gateway.run_listener`. The listener serves either ASGI
+gateway on a **prebound, already-listening** IPv4 socket handed over by a
+trusted provider. Pass a
+`GatewayBridgeBinding(run_id, network_id, address, subnet, port)` matching that
+socket and the app's `GatewayRoute`; the listener rejects wildcard, loopback,
+public, unbound and mismatched socket identities. It starts once, waits for
+Uvicorn's local listening boundary, disables access logs, proxy headers and
+websockets, and latches a failed or timed-out shutdown instead of claiming
+clean cleanup. `base_url` is a candidate guest URL with no credentials:
+Codex needs `/v1` appended, while Claude's `ANTHROPIC_BASE_URL` uses the base.
+
+This is **not network qualification**. The provider must prove the address
+and subnet came from the exact run-owned Docker network, provision and protect
+the socket, restrict host firewall access to the agent service, and verify
+guest reachability before task readiness. A syntactically private address,
+run token or `server.started` alone cannot establish that boundary. The
+binding must stop and verify guest agent activity before closing the listener
+and publishing a final grade. Tests use fake sockets/servers only; no socket
+is bound and no live model route is claimed here.
+
 ## Claude Code: Anthropic Messages
 
 Anthropic [documents](https://code.claude.com/docs/en/llm-gateway-protocol#api-formats) the Anthropic Messages route for `claude -p`: configure `ANTHROPIC_BASE_URL` as the gateway's base URL (before `/v1`) and `ANTHROPIC_AUTH_TOKEN` as an **independently generated, per-run guest token**. Set `ANTHROPIC_CUSTOM_HEADERS` to `X-PyRIT-Run-ID: <run_id>` so the gateway can check the routing identity as well. Claude Code calls `POST /v1/messages?beta=true`; the gateway also accepts the path with no query, and forwards the documented `beta=true` query unchanged. [Non-interactive mode](https://code.claude.com/docs/en/headless) documents `claude -p`. Its optional `--bare` mode changes startup and credential behavior; selecting that mode for a sandbox requires separate validation. These are configuration instructions, not a command to run from this package.
