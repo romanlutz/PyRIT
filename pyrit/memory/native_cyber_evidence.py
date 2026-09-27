@@ -31,7 +31,9 @@ from pyrit.memory.memory_models import (
     ScoreEntry,
 )
 from pyrit.memory.memory_session import _begin_sqlite_write
+from pyrit.memory.native_cli_evidence_validation import _NativeCliEvidenceValidator
 from pyrit.models import ContentEntryScorable, ContentScorable, Score, ScoreStatus
+from pyrit.models.native_cli_report import NativeCliReportStatus, NativeCliRunReport
 from pyrit.models.native_cyber import NativeCyberReport, NativeCyberStatus
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
@@ -93,6 +95,8 @@ class NativeCyberEvidenceStore:
                     run_id=start.run_id,
                     binding_name=start.binding_name,
                     binding_version=start.binding_version,
+                    task_id=start.task_id,
+                    task_version=start.task_version,
                     started_at=start.started_at,
                     source_session_id=start.source_session_id,
                     environment_id=start.environment_id,
@@ -605,6 +609,148 @@ class NativeCyberEvidenceStore:
             )
         return self.get_episode(run_id=report.run_id)
 
+    def finalize_cli_episode_atomic(
+        self,
+        *,
+        report: NativeCliRunReport,
+        score: Score,
+        expected_turns: int,
+    ) -> NativeCyberEpisodeSnapshot:
+        """
+        Commit one CLI report, its existing generic Score type, and episode link atomically.
+
+        Validate the real parser, process, model-gateway, and raw DB rows without
+        projecting CLI events into GHCP events or calling a provider or grader.
+
+        Returns:
+            NativeCyberEpisodeSnapshot: A metadata-only view of the committed CLI outcome.
+
+        Raises:
+            ValueError: If the report or unpersisted canonical Score is invalid.
+            SQLAlchemyError: If no single transaction can retain the report, Score, and link.
+        """
+        if expected_turns < 0:
+            raise ValueError("A CLI expected outer-turn count cannot be negative.")
+        report = NativeCliRunReport.model_validate(report.model_dump(mode="json"))
+        self._validate_cli_score(report=report, score=score)
+        with self._write_session(run_id=report.run_id) as session:
+            episode = self._lock_episode(session=session, run_id=report.run_id)
+            self._require_open(episode)
+            validator = _NativeCliEvidenceValidator(
+                session=session,
+                episode=episode,
+                report=report,
+                expected_turns=expected_turns,
+                digest_stream=lambda stream: self._hash_stream(session=session, stream=stream),
+                digest_event=self._hash_payload,
+                verify_pieces=lambda links: self._piece_links_intact(session=session, links=links),
+            )
+            required, optional = validator.validate()
+            complete = (
+                report.status is NativeCliReportStatus.COMPLETED and report.evidence.coverage_complete and not required
+            )
+            prepared = self._cli_score_for_capture(score=score, complete=complete, gap_count=len(required))
+            stored = self._insert_prepared_score_row(session=session, score=prepared)
+            self._validate_cli_stored_score(session=session, stored=stored, report=report)
+            episode.report_content_id = stored.scorable_content_id
+            episode.report_sha256 = report.sha256()
+            episode.score_id = uuid.UUID(str(stored.id))
+            episode.coverage_complete = complete
+            episode.capture_gaps = required
+            episode.optional_gaps = optional
+            episode.finalized_at = datetime.now(UTC)
+            session.flush()
+        return self.get_episode(run_id=report.run_id)
+
+    @staticmethod
+    def _validate_cli_score(*, report: NativeCliRunReport, score: Score) -> None:
+        scorable = score.scorable
+        if (
+            score.score_type != "float_scale"
+            or score.message_piece_id is not None
+            or score.observation_ids
+            or not isinstance(scorable, ContentScorable)
+            or scorable.data_type != "text"
+            or scorable.value != report.canonical_json()
+        ):
+            raise ValueError("CLI finalization requires one unpersisted canonical report ContentScorable.")
+        expected = {
+            "contract_version": "native-cli-run-v1",
+            "task_id": report.task_id,
+            "task_version": report.task_version,
+            "run_id": report.run_id,
+            "turn_id": report.turn_id,
+            "turn_index": report.turn_index,
+            "report_sha256": report.sha256(),
+            "cli_protocol": report.protocol.value,
+            "cli_version": report.cli_version,
+            "cli_profile": report.cli_profile,
+            "run_status": report.status.value,
+            "publication_state": "unpersisted_candidate",
+        }
+        if any((score.score_metadata or {}).get(key) != value for key, value in expected.items()):
+            raise ValueError("CLI Score does not identify the exact task, turn, and canonical report.")
+        scorer = score.scorer_class_identifier
+        if (
+            scorer is None
+            or scorer.class_name != "NativeCliReportScoreBuilder"
+            or scorer.class_module != "pyrit.score.float_scale.native_cli_report_scorer"
+            or scorer.params.get("contract") != "native-cli-run-v1"
+            or scorer.params.get("report_sha256") != report.sha256()
+        ):
+            raise ValueError("CLI Score was not prepared by the native CLI report contract.")
+        grade = report.judgment.value if report.status is NativeCliReportStatus.COMPLETED and report.judgment else None
+        if grade is None:
+            if score.status is not ScoreStatus.UNDETERMINED or score.score_value is not None:
+                raise ValueError("An incomplete CLI report cannot claim a complete Score.")
+        elif score.status is not ScoreStatus.COMPLETE or score.get_value() != grade:
+            raise ValueError("A CLI Score must retain the exact acquired original grader value.")
+
+    @staticmethod
+    def _cli_score_for_capture(*, score: Score, complete: bool, gap_count: int) -> Score:
+        metadata = {
+            **(score.score_metadata or {}),
+            "publication_state": "committed_final_result",
+            "native_required_capture": "complete" if complete else "incomplete",
+            "native_required_gap_count": gap_count,
+        }
+        rationale = (
+            score.score_rationale
+            if complete or score.status is ScoreStatus.UNDETERMINED
+            else f"Required CLI database capture is incomplete ({gap_count} gap(s)); original judgment is retained."
+        )
+        return Score.model_validate(
+            {
+                **score.model_dump(exclude={"objective"}),
+                "score_value": score.score_value if complete else None,
+                "status": ScoreStatus.COMPLETE if complete else ScoreStatus.UNDETERMINED,
+                "score_rationale": rationale,
+                "score_metadata": metadata,
+            }
+        )
+
+    @staticmethod
+    def _validate_cli_stored_score(*, session: Session, stored: ScoreEntry, report: NativeCliRunReport) -> None:
+        content = session.get(ScorableContentEntry, stored.scorable_content_id) if stored.scorable_content_id else None
+        if (
+            content is None
+            or content.data_type != "text"
+            or content.value != report.canonical_json()
+            or content.value_sha256 != report.sha256()
+            or stored.score_type != "float_scale"
+            or stored.prompt_request_response_id is not None
+            or stored.scorable is None
+            or stored.scorable.get("scorable_type") != "content_entry"
+            or stored.scorable.get("content_id") != str(content.id)
+            or (stored.score_metadata or {}).get("report_sha256") != report.sha256()
+            or (stored.score_metadata or {}).get("run_id") != report.run_id
+        ):
+            raise ValueError("Stored CLI Score is not anchored to the exact canonical report.")
+        if stored.status == ScoreStatus.COMPLETE.value and (
+            report.judgment is None or stored.score_value is None or float(stored.score_value) != report.judgment.value
+        ):
+            raise ValueError("Stored CLI Score differs from the original acquired judgment.")
+
     def _finalize_in_session(
         self,
         *,
@@ -888,6 +1034,8 @@ class NativeCyberEvidenceStore:
             run_id=episode.run_id,
             binding_name=episode.binding_name,
             binding_version=episode.binding_version,
+            task_id=episode.task_id,
+            task_version=episode.task_version,
             started_at=episode.started_at,
             source_session_id=episode.source_session_id,
             environment_id=episode.environment_id,
@@ -1337,6 +1485,22 @@ class NativeCyberEvidenceStore:
         report: NativeCyberReport,
         score: Score,
     ) -> tuple[uuid.UUID, Score]:
+        stored = self._insert_prepared_score_row(session=session, score=score)
+        self._validate_stored_score(session=session, stored=stored, report=report)
+        if stored.scorable_content_id is None:
+            raise ValueError("Atomic native finalization did not retain its report content.")
+        return stored.scorable_content_id, stored.get_score()
+
+    def _insert_prepared_score_row(self, *, session: Session, score: Score) -> ScoreEntry:
+        """
+        Use the existing generic content/Score writers inside the caller's transaction.
+
+        Returns:
+            ScoreEntry: The stored generic Score with one report-content anchor.
+
+        Raises:
+            ValueError: If the Score ID or its canonical content is already persisted.
+        """
         score_id = uuid.UUID(str(score.id))
         if session.get(ScoreEntry, score_id) is not None:
             raise ValueError("Atomic native finalization requires an unpersisted Score ID.")
@@ -1354,8 +1518,7 @@ class NativeCyberEvidenceStore:
         stored = session.get(ScoreEntry, score_id)
         if stored is None or stored.scorable_content_id is None:
             raise ValueError("Atomic native finalization did not persist its report and Score.")
-        self._validate_stored_score(session=session, stored=stored, report=report)
-        return stored.scorable_content_id, stored.get_score()
+        return stored
 
     def _link_score(
         self,
