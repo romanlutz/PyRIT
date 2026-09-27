@@ -23,7 +23,13 @@ truncating a complete run.
 For a qualified model-only route, declare
 `required_raw_streams(protocol=..., include_model_gateway=True)`, construct
 the sink with `include_model_gateway=True`, and pass its
-`record_gateway_observation_async` as the gateway's host observation callback.
+`record_gateway_observation_async` for Codex Responses, or its distinct
+`record_messages_observation_async` for Claude Anthropic Messages, as the
+gateway's host observation callback. Anthropic frames keep their own
+`messages_gateway.*` event types, selected approved headers and `beta=true`
+query, with a real `event: message_stop` terminal rather than a fabricated
+Responses `[DONE]`. Genuine provider HTTP errors remain failed provider
+responses; host-generated errors remain separate harness records.
 Request bodies and original response/SSE frames go into separate required DB
 streams, correlated by actual gateway request ID; host-generated failures
 or provider responses without a completed-coverage claim remain required
@@ -33,7 +39,7 @@ The third
 optional error stream preserves the generated error frame. The fake ASGI
 test proves this callback contract, **not** that a real CLI reached the
 gateway. The caller must provision a run-isolated listener and model-only
-provider separately; Claude's Anthropic Messages route is not qualified here.
+provider separately; neither CLI's live gateway compatibility is qualified.
 
 `PromptNormalizer` persists the user MessagePiece only *after* the target
 returns (including its error path). The controller therefore calls

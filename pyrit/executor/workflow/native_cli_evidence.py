@@ -22,6 +22,7 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
 )
+from pyrit.prompt_target.gateway.messages_contract import MessagesCoverage, MessagesObservation
 from pyrit.prompt_target.gateway.responses_contract import GatewayCoverage, GatewayFrameKind, GatewayObservation
 from pyrit.prompt_target.native_cli_models import NativeCliEventKind, NativeCliProtocol, NativeCliStream
 
@@ -80,6 +81,7 @@ class NativeCliDatabaseEvidenceSink:
         self._run_id = run_id
         self._turn_id = turn_id
         self._turn_index = turn_index
+        self._protocol = protocol
         self._streams = {
             stream: NativeCyberRawStreamStart(run_id=run_id, turn_index=turn_index, key=key)
             for stream, key in zip(
@@ -209,7 +211,7 @@ class NativeCliDatabaseEvidenceSink:
 
     async def record_gateway_observation_async(self, observation: GatewayObservation) -> None:
         """
-        Retain genuine model wire bytes and their host-generated failure boundaries.
+        Retain OpenAI Responses wire bytes and their host-generated failure boundaries.
 
         Raises:
             ValueError: If the frame has no matching run, request, or supported source kind.
@@ -219,82 +221,185 @@ class NativeCliDatabaseEvidenceSink:
             self._require_capture()
             try:
                 if (
-                    not self._include_model_gateway
+                    self._protocol is not NativeCliProtocol.CODEX_EXEC_JSON
+                    or not self._include_model_gateway
                     or not isinstance(observation, GatewayObservation)
                     or observation.run_id != self._run_id
-                    or not isinstance(observation.request_id, str)
-                    or not 0 < len(observation.request_id) <= 128
-                    or not isinstance(observation.kind, GatewayFrameKind)
-                    or not isinstance(observation.frame, bytes)
-                    or not observation.frame
                     or not isinstance(observation.coverage, frozenset)
                     or not all(isinstance(flag, GatewayCoverage) for flag in observation.coverage)
                 ):
-                    raise ValueError("Native CLI model gateway observation has an unapproved source or frame.")
-                if self._gateway_observation_count >= self.MAX_GATEWAY_OBSERVATIONS:
-                    raise ValueError("Native CLI model gateway observation limit exceeded.")
-                kind = observation.kind
-                request_id = observation.request_id
-                if kind is GatewayFrameKind.REQUEST:
-                    if request_id in self._gateway_requests:
-                        raise ValueError("A model gateway request identity was repeated.")
-                    self._gateway_requests[request_id] = False
-                elif request_id not in self._gateway_requests or request_id in self._gateway_terminal_requests:
-                    raise ValueError("Model gateway output has no open observed model request.")
-                name = (
-                    "request"
-                    if kind is GatewayFrameKind.REQUEST
-                    else "error"
-                    if kind is GatewayFrameKind.GATEWAY_ERROR
-                    else "response"
-                )
-                raw_stream = self._gateway_streams[name]
-                offset = self._gateway_received[name]
-                for start in range(0, len(observation.frame), self._store.MAX_APPEND_BYTES):
-                    data = observation.frame[start : start + self._store.MAX_APPEND_BYTES]
-                    await asyncio.to_thread(
-                        self._store.append_raw, run_id=self._run_id, stream_id=raw_stream.stream_id, data=data
-                    )
-                    self._gateway_hashes[name].update(data)
-                    self._gateway_received[name] += len(data)
-                await self._append_event_async(
-                    source=NativeCyberEvidenceSource.HARNESS
-                    if kind is GatewayFrameKind.GATEWAY_ERROR
-                    else NativeCyberEvidenceSource.MODEL,
-                    event_type=f"gateway.{kind.value}",
-                    payload={
-                        "gateway_request_id": request_id,
-                        "frame_sha256": hashlib.sha256(observation.frame).hexdigest(),
-                        "frame_size_bytes": len(observation.frame),
-                        "coverage": sorted(flag.value for flag in observation.coverage),
-                        "error_code": observation.error_code,
-                        "status_code": observation.status_code,
-                    },
-                    observed_stream_id=str(raw_stream.stream_id),
-                    stream_offset=offset,
-                )
-                self._gateway_observation_count += 1
-                if kind is GatewayFrameKind.GATEWAY_ERROR:
-                    self._gateway_terminal_requests.add(request_id)
-                    self._gateway_failed = True
-                    await asyncio.to_thread(
-                        self._store.mark_capture_gap,
-                        run_id=self._run_id,
-                        reason="Model gateway produced a host-generated failure.",
-                    )
-                elif kind is GatewayFrameKind.RESPONSE or (
-                    kind is GatewayFrameKind.RESPONSE_EVENT
+                    raise ValueError("OpenAI Responses observations require an approved Codex gateway route.")
+                terminal = observation.kind in {GatewayFrameKind.RESPONSE, GatewayFrameKind.GATEWAY_ERROR} or (
+                    observation.kind is GatewayFrameKind.RESPONSE_EVENT
                     and observation.frame.replace(b"\r\n", b"\n") == b"data: [DONE]\n\n"
-                ):
-                    self._gateway_terminal_requests.add(request_id)
-                    self._gateway_requests[request_id] = (
-                        GatewayCoverage.COMPLETED in observation.coverage
-                        and GatewayCoverage.INCOMPLETE not in observation.coverage
-                        and GatewayCoverage.FAILED not in observation.coverage
-                    )
+                )
+                await self._record_model_frame_async(
+                    request_id=observation.request_id,
+                    kind=observation.kind,
+                    frame=observation.frame,
+                    coverage=sorted(flag.value for flag in observation.coverage),
+                    event_namespace="gateway",
+                    wire_protocol="openai_responses",
+                    terminal=terminal,
+                    completed=GatewayCoverage.COMPLETED in observation.coverage
+                    and GatewayCoverage.INCOMPLETE not in observation.coverage
+                    and GatewayCoverage.FAILED not in observation.coverage,
+                    error_code=observation.error_code,
+                    status_code=observation.status_code,
+                )
             except (Exception, asyncio.CancelledError):
                 self._failed = True
                 raise
+
+    async def record_messages_observation_async(self, observation: MessagesObservation) -> None:
+        """
+        Retain Anthropic Messages wire bytes without translating them to Responses.
+
+        Raises:
+            ValueError: If the source, headers, query, or terminal event is unsupported.
+            asyncio.CancelledError: If model capture is interrupted.
+        """
+        async with self._lock:
+            self._require_capture()
+            try:
+                if (
+                    self._protocol is not NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE
+                    or not self._include_model_gateway
+                    or not isinstance(observation, MessagesObservation)
+                    or observation.run_id != self._run_id
+                    or not isinstance(observation.coverage, frozenset)
+                    or not all(isinstance(flag, MessagesCoverage) for flag in observation.coverage)
+                    or not isinstance(observation.query_string, str)
+                    or observation.query_string not in {"", "beta=true"}
+                    or not isinstance(observation.headers, tuple)
+                    or any(
+                        len(pair) != 2
+                        or not all(isinstance(item, str) for item in pair)
+                        or (
+                            pair[0].lower()
+                            not in {
+                                "anthropic-version",
+                                "anthropic-beta",
+                                "content-type",
+                                "retry-after",
+                                "x-should-retry",
+                            }
+                            and not pair[0].lower().startswith("anthropic-ratelimit-unified-")
+                        )
+                        or len(pair[1]) > 512
+                        or not pair[1].isascii()
+                        or any(ord(char) < 32 or ord(char) > 126 for char in pair[1])
+                        for pair in observation.headers
+                    )
+                ):
+                    raise ValueError("Anthropic Messages observation has an unapproved source, header, or query.")
+                message_stop = observation.kind is GatewayFrameKind.RESPONSE_EVENT and observation.frame.replace(
+                    b"\r\n", b"\n"
+                ).startswith(b"event: message_stop\n")
+                terminal = (
+                    observation.kind in {GatewayFrameKind.RESPONSE, GatewayFrameKind.GATEWAY_ERROR} or message_stop
+                )
+                await self._record_model_frame_async(
+                    request_id=observation.request_id,
+                    kind=observation.kind,
+                    frame=observation.frame,
+                    coverage=sorted(flag.value for flag in observation.coverage),
+                    event_namespace="messages_gateway",
+                    wire_protocol="anthropic_messages",
+                    terminal=terminal,
+                    completed=MessagesCoverage.COMPLETED in observation.coverage
+                    and MessagesCoverage.FAILED not in observation.coverage
+                    and (observation.kind is not GatewayFrameKind.RESPONSE or observation.status_code == 200),
+                    error_code=observation.error_code,
+                    status_code=observation.status_code,
+                    metadata={
+                        "headers": [[name, value] for name, value in observation.headers],
+                        "query_string": observation.query_string,
+                    },
+                )
+            except (Exception, asyncio.CancelledError):
+                self._failed = True
+                raise
+
+    async def _record_model_frame_async(
+        self,
+        *,
+        request_id: str,
+        kind: GatewayFrameKind,
+        frame: bytes,
+        coverage: list[str],
+        event_namespace: str,
+        wire_protocol: str,
+        terminal: bool,
+        completed: bool,
+        error_code: str | None,
+        status_code: int | None,
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> None:
+        if (
+            not isinstance(request_id, str)
+            or not 0 < len(request_id) <= 128
+            or not isinstance(kind, GatewayFrameKind)
+            or not isinstance(frame, bytes)
+            or not frame
+            or (error_code is not None and (not isinstance(error_code, str) or len(error_code) > 128))
+            or (status_code is not None and (type(status_code) is not int or not 100 <= status_code <= 599))
+        ):
+            raise ValueError("Model gateway observation requires a bounded source frame and request identity.")
+        if self._gateway_observation_count >= self.MAX_GATEWAY_OBSERVATIONS:
+            raise ValueError("Native CLI model gateway observation limit exceeded.")
+        if kind is GatewayFrameKind.REQUEST:
+            if request_id in self._gateway_requests:
+                raise ValueError("A model gateway request identity was repeated.")
+            self._gateway_requests[request_id] = False
+        elif request_id not in self._gateway_requests or request_id in self._gateway_terminal_requests:
+            raise ValueError("Model gateway output has no open observed model request.")
+        name = (
+            "request"
+            if kind is GatewayFrameKind.REQUEST
+            else "error"
+            if kind is GatewayFrameKind.GATEWAY_ERROR
+            else "response"
+        )
+        raw_stream = self._gateway_streams[name]
+        offset = self._gateway_received[name]
+        for start in range(0, len(frame), self._store.MAX_APPEND_BYTES):
+            data = frame[start : start + self._store.MAX_APPEND_BYTES]
+            await asyncio.to_thread(
+                self._store.append_raw, run_id=self._run_id, stream_id=raw_stream.stream_id, data=data
+            )
+            self._gateway_hashes[name].update(data)
+            self._gateway_received[name] += len(data)
+        await self._append_event_async(
+            source=NativeCyberEvidenceSource.HARNESS
+            if kind is GatewayFrameKind.GATEWAY_ERROR
+            else NativeCyberEvidenceSource.MODEL,
+            event_type=f"{event_namespace}.{kind.value}",
+            payload={
+                "gateway_request_id": request_id,
+                "frame_sha256": hashlib.sha256(frame).hexdigest(),
+                "frame_size_bytes": len(frame),
+                "coverage": coverage,
+                "wire_protocol": wire_protocol,
+                "error_code": error_code,
+                "status_code": status_code,
+                **(metadata or {}),
+            },
+            observed_stream_id=str(raw_stream.stream_id),
+            stream_offset=offset,
+        )
+        self._gateway_observation_count += 1
+        if kind is GatewayFrameKind.GATEWAY_ERROR:
+            self._gateway_terminal_requests.add(request_id)
+            self._gateway_failed = True
+            await asyncio.to_thread(
+                self._store.mark_capture_gap,
+                run_id=self._run_id,
+                reason="Model gateway produced a host-generated failure.",
+            )
+        elif terminal:
+            self._gateway_terminal_requests.add(request_id)
+            self._gateway_requests[request_id] = completed
 
     async def record_raw_async(self, *, chunk: NativeCliRawChunk) -> None:
         """
@@ -437,7 +542,7 @@ class NativeCliDatabaseEvidenceSink:
                     cursor = event.sequence
                     if event.event_type == "native_cli.raw_chunk":
                         continue
-                    if event.event_type.startswith("gateway."):
+                    if event.event_type.startswith(("gateway.", "messages_gateway.")):
                         continue
                     if not event.event_type.startswith("native_cli."):
                         raise ValueError("Foreign events cannot be projected into a native CLI report.")

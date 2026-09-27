@@ -21,7 +21,9 @@ from pyrit.models.native_cli_report import NativeCliReportCleanup, NativeCliRepo
 from pyrit.models.native_cyber_evidence import NativeCyberEpisodeStart
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import NativeCliTarget
+from pyrit.prompt_target.gateway.claude_messages import create_claude_messages_app
 from pyrit.prompt_target.gateway.codex_responses import create_codex_responses_app
+from pyrit.prompt_target.gateway.messages_contract import MessagesCoverage, MessagesObservation, MessagesResponse
 from pyrit.prompt_target.gateway.responses_contract import (
     GatewayCoverage,
     GatewayFrameKind,
@@ -39,8 +41,9 @@ from pyrit.prompt_target.native_cli_models import (
     NativeCliStream,
 )
 from pyrit.score.float_scale.native_cli_report_scorer import build_native_cli_report_score
+from tests.unit.prompt_target.gateway.messages_mocks import LIMITS, FakeMessagesBackend, request_body, text_frames
 from tests.unit.prompt_target.gateway.test_codex_responses import FakeModelOnlyBackend
-from tests.unit.prompt_target.target.test_native_cli_target import _codex, _config, _frame, _Launcher, _Sandbox
+from tests.unit.prompt_target.target.test_native_cli_target import _claude, _codex, _config, _frame, _Launcher, _Sandbox
 
 if TYPE_CHECKING:
     from pyrit.memory import SQLiteMemory
@@ -241,6 +244,236 @@ async def test_cli_sink_records_model_gateway_request_and_response_wire_in_same_
     report_events = await sink.read_report_events_async()
     assert report_events[-1].kind is NativeCliReportEventKind.EOF
     assert len(report_events) == target.last_run.outcome.frame_count + 1
+
+
+async def test_claude_messages_gateway_wire_retained_without_responses_translation_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    route = GatewayRoute(run_id=sink.run_id, model="claude-offline-model", guest_token="c" * 40)
+    backend = FakeMessagesBackend()
+    app = create_claude_messages_app(
+        route=route,
+        limits=LIMITS,
+        backend=backend,
+        observation_callback=sink.record_messages_observation_async,
+    )
+    headers = {
+        "Authorization": "Bearer " + route.guest_token,
+        "X-PyRIT-Run-ID": sink.run_id,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "verified-tool-beta-2026-09-01",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        reply = await client.post("/v1/messages?beta=true", json=request_body(), headers=headers)
+    assert reply.status_code == 200 and backend.requests[0].run_id == sink.run_id
+
+    stdout = _claude(assistant_text="Working.", result_text="Done.")
+    target = NativeCliTarget(
+        run_config=_config(protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE),
+        launcher=_Launcher(
+            sandbox=_Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=stdout)])
+        ),
+        evidence_sink=sink,
+    )
+    request = Message.from_prompt(prompt="Inert instruction", role="user")
+    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert target.last_run and target.last_run.outcome.coverage_complete
+    await sink.finish_async(
+        outcome=target.last_run.outcome,
+        request_piece_ids=(request.get_piece().id,),
+        response_piece_ids=(response.get_piece().id,),
+    )
+    store = sqlite_instance.native_cyber_evidence
+    episode = await asyncio.to_thread(store.get_episode, run_id=sink.run_id)
+    assert episode.turns[0].source_complete and len(episode.raw_streams) == 5
+    assert all(raw.source_complete for raw in episode.raw_streams)
+    streams = {raw.key.observed_source_id: raw for raw in episode.raw_streams}
+    for name, expected in (
+        ("claude_print_stream_json_verbose.gateway.requests", backend.requests[0].body_bytes),
+        ("claude_print_stream_json_verbose.gateway.responses", reply.content),
+    ):
+        chunks = await asyncio.to_thread(
+            store.read_raw_chunks, run_id=sink.run_id, stream_id=streams[name].stream_id, allow_sensitive=True
+        )
+        assert b"".join(chunk.data for chunk in chunks) == expected
+    events = await asyncio.to_thread(store.read_event_payloads, run_id=sink.run_id, allow_sensitive=True)
+    gateway = [item for item in events if item.event.event_type.startswith("messages_gateway.")]
+    assert [item.event.event_type for item in gateway] == ["messages_gateway.request", "messages_gateway.response"]
+    assert (
+        gateway[0].event.payload["wire_protocol"] == gateway[1].event.payload["wire_protocol"] == "anthropic_messages"
+    )
+    assert gateway[0].event.payload["query_string"] == "beta=true"
+    assert ["anthropic-version", "2023-06-01"] in gateway[0].event.payload["headers"]
+    assert ["anthropic-beta", "verified-tool-beta-2026-09-01"] in gateway[0].event.payload["headers"]
+    report_events = await sink.read_report_events_async()
+    assert report_events[-1].kind is NativeCliReportEventKind.EOF
+    assert len(report_events) == target.last_run.outcome.frame_count + 1
+
+
+async def test_claude_messages_sse_uses_observed_message_stop_not_responses_done_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    route = GatewayRoute(run_id=sink.run_id, model="claude-offline-model", guest_token="c" * 40)
+    frames = text_frames()
+    app = create_claude_messages_app(
+        route=route,
+        limits=LIMITS,
+        backend=FakeMessagesBackend(streams=[frames]),
+        observation_callback=sink.record_messages_observation_async,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        reply = await client.post(
+            "/v1/messages",
+            json=request_body(streaming=True),
+            headers={
+                "Authorization": "Bearer " + route.guest_token,
+                "X-PyRIT-Run-ID": sink.run_id,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    assert reply.status_code == 200 and reply.content == b"".join(frames)
+    assert b"data: [DONE]" not in reply.content
+    await sink.finish_async(outcome=None)
+    store = sqlite_instance.native_cyber_evidence
+    episode = await asyncio.to_thread(store.get_episode, run_id=sink.run_id)
+    assert not any("Model gateway request/response coverage" in gap for gap in episode.turns[0].gaps)
+    response_stream = next(
+        raw for raw in episode.raw_streams if raw.key.observed_source_id.endswith(".gateway.responses")
+    )
+    chunks = await asyncio.to_thread(
+        store.read_raw_chunks, run_id=sink.run_id, stream_id=response_stream.stream_id, allow_sensitive=True
+    )
+    assert b"".join(chunk.data for chunk in chunks) == reply.content
+    events = await asyncio.to_thread(store.read_event_payloads, run_id=sink.run_id, allow_sensitive=True)
+    last = [item for item in events if item.event.event_type == "messages_gateway.response_event"][-1]
+    assert MessagesCoverage.COMPLETED.value in last.event.payload["coverage"]
+    assert last.event.payload["wire_protocol"] == "anthropic_messages"
+
+
+async def test_claude_provider_error_remains_provider_response_not_host_error_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    route = GatewayRoute(run_id=sink.run_id, model="claude-offline-model", guest_token="c" * 40)
+    provider_body = b'{"type":"error","error":{"type":"rate_limit_error","message":"offline rate limit"}}'
+    backend = FakeMessagesBackend(
+        responses=[
+            MessagesResponse(
+                status_code=429,
+                body=provider_body,
+                headers=(("content-type", "application/json"), ("retry-after", "1")),
+            )
+        ]
+    )
+    app = create_claude_messages_app(
+        route=route,
+        limits=LIMITS,
+        backend=backend,
+        observation_callback=sink.record_messages_observation_async,
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid") as client:
+        reply = await client.post(
+            "/v1/messages",
+            json=request_body(),
+            headers={
+                "Authorization": "Bearer " + route.guest_token,
+                "X-PyRIT-Run-ID": sink.run_id,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    assert reply.status_code == 429 and reply.content == provider_body
+    await sink.finish_async(outcome=None)
+    store = sqlite_instance.native_cyber_evidence
+    episode = await asyncio.to_thread(store.get_episode, run_id=sink.run_id)
+    assert not episode.turns[0].source_complete
+    assert any("Model gateway request/response coverage" in gap for gap in episode.turns[0].gaps)
+    assert not any("host-generated failure" in gap for gap in episode.gaps)
+    events = await asyncio.to_thread(store.read_event_payloads, run_id=sink.run_id, allow_sensitive=True)
+    provider = [item for item in events if item.event.event_type.startswith("messages_gateway.")]
+    assert [item.event.event_type for item in provider] == ["messages_gateway.request", "messages_gateway.response"]
+    assert provider[-1].event.payload["status_code"] == 429
+    assert MessagesCoverage.FAILED.value in provider[-1].event.payload["coverage"]
+
+
+async def test_claude_host_error_uses_separate_required_gap_and_never_forges_provider_response_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    await sink.record_messages_observation_async(
+        MessagesObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=GatewayFrameKind.REQUEST,
+            frame=b'{"model":"claude-offline-model","max_tokens":16,"messages":[]}',
+            coverage=frozenset(),
+            headers=(("anthropic-version", "2023-06-01"),),
+            query_string="beta=true",
+        )
+    )
+    await sink.record_messages_observation_async(
+        MessagesObservation(
+            run_id=sink.run_id,
+            request_id="model-1",
+            kind=GatewayFrameKind.GATEWAY_ERROR,
+            frame=b'{"type":"error","error":{"message":"offline host failure"}}',
+            coverage=frozenset({MessagesCoverage.FAILED}),
+            error_code="backend_failed",
+            status_code=502,
+        )
+    )
+    await sink.finish_async(outcome=None)
+    store = sqlite_instance.native_cyber_evidence
+    episode = await asyncio.to_thread(store.get_episode, run_id=sink.run_id)
+    assert any("host-generated failure" in gap for gap in episode.gaps)
+    assert not episode.turns[0].source_complete
+    events = await asyncio.to_thread(store.read_event_payloads, run_id=sink.run_id, allow_sensitive=True)
+    gateway = [event for event in events if event.event.event_type.startswith("messages_gateway.")]
+    assert [event.event.event_type for event in gateway] == [
+        "messages_gateway.request",
+        "messages_gateway.gateway_error",
+    ]
+    assert gateway[0].source.value == "model" and gateway[1].source.value == "harness"
+    assert gateway[1].event.payload["wire_protocol"] == "anthropic_messages"
+
+
+async def test_claude_sink_rejects_codex_responses_observer_shape_async(*, sqlite_instance: SQLiteMemory) -> None:
+    sink = await _start_sink_async(
+        memory=sqlite_instance,
+        protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+        include_model_gateway=True,
+    )
+    with pytest.raises(ValueError, match="approved Codex gateway"):
+        await sink.record_gateway_observation_async(
+            GatewayObservation(
+                run_id=sink.run_id,
+                request_id="model-1",
+                kind=GatewayFrameKind.REQUEST,
+                frame=b'{"model":"codex-fixture","input":"inert"}',
+                coverage=frozenset(),
+            )
+        )
+    await sink.finish_async(outcome=None)
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert not episode.turns[0].source_complete
+    assert not any(event.event_type.startswith("gateway.") for event in episode.events)
 
 
 async def test_cli_sink_missing_model_gateway_or_host_generated_error_is_required_gap_async(
