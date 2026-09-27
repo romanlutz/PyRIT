@@ -344,6 +344,7 @@ class NativeCliRunReport(BaseModel):
 
     schema_version: Literal[1]
     task_id: str = Field(min_length=1)
+    task_version: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
     turn_id: str = Field(min_length=1)
     turn_index: int = Field(strict=True, ge=1)
@@ -370,12 +371,12 @@ class NativeCliRunReport(BaseModel):
 
     @model_validator(mode="after")
     def _validate_status(self) -> NativeCliRunReport:
-        if any(not item.strip() for item in (self.task_id, self.run_id, self.turn_id, *self.errors)):
-            raise ValueError("CLI task/run/turn IDs and errors must not be blank.")
+        if any(not item.strip() for item in (self.task_id, self.task_version, self.run_id, self.turn_id, *self.errors)):
+            raise ValueError("CLI task version, task/run/turn IDs, and errors must not be blank.")
         if any(item is not None and not item.strip() for item in (self.parent_run_id, self.conversation_id)):
             raise ValueError("CLI parent run and conversation IDs must not be blank.")
-        if self.parent_run_id == self.run_id or (self.turn_index > 1 and not self.parent_run_id):
-            raise ValueError("A subsequent CLI turn requires a distinct parent run ID.")
+        if self.parent_run_id == self.run_id:
+            raise ValueError("A CLI parent run ID must differ from the current run ID.")
         if self.evidence.observed_steps is not None and self.evidence.observed_steps > self.max_steps:
             raise ValueError("Observed CLI steps cannot exceed the configured step budget.")
         if self.evidence.coverage_complete:
