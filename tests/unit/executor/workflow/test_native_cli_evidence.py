@@ -275,6 +275,72 @@ async def test_cli_sink_missing_model_gateway_or_host_generated_error_is_require
     assert any(event.event_type == "gateway.gateway_error" for event in episode.events)
 
 
+async def test_cli_sink_streaming_model_frames_require_observed_done_async(*, sqlite_instance: SQLiteMemory) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    request = GatewayObservation(
+        run_id=sink.run_id,
+        request_id="model-1",
+        kind=GatewayFrameKind.REQUEST,
+        frame=b'{"model":"codex-fixture","input":"inert","stream":true}',
+        coverage=frozenset({GatewayCoverage.STREAMING}),
+    )
+    response = GatewayObservation(
+        run_id=sink.run_id,
+        request_id="model-1",
+        kind=GatewayFrameKind.RESPONSE_EVENT,
+        frame=b'event: response.created\ndata: {"type":"response.created"}\n\n',
+        coverage=frozenset({GatewayCoverage.STREAMING}),
+    )
+    await sink.record_gateway_observation_async(request)
+    await sink.record_gateway_observation_async(response)
+    await sink.finish_async(outcome=None)
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert any("Model gateway request/response coverage" in gap for gap in episode.turns[0].gaps)
+
+    complete_sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    await complete_sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=complete_sink.run_id,
+            request_id=request.request_id,
+            kind=request.kind,
+            frame=request.frame,
+            coverage=request.coverage,
+        )
+    )
+    await complete_sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=complete_sink.run_id,
+            request_id=response.request_id,
+            kind=response.kind,
+            frame=response.frame,
+            coverage=response.coverage,
+        )
+    )
+    done = b"data: [DONE]\r\n\r\n"
+    await complete_sink.record_gateway_observation_async(
+        GatewayObservation(
+            run_id=complete_sink.run_id,
+            request_id="model-1",
+            kind=GatewayFrameKind.RESPONSE_EVENT,
+            frame=done,
+            coverage=frozenset({GatewayCoverage.COMPLETED, GatewayCoverage.STREAMING}),
+        )
+    )
+    await complete_sink.finish_async(outcome=None)
+    stored = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=complete_sink.run_id)
+    assert not any("Model gateway request/response coverage" in gap for gap in stored.turns[0].gaps)
+    response_stream = next(
+        raw for raw in stored.raw_streams if raw.key.observed_source_id.endswith(".gateway.responses")
+    )
+    chunks = await asyncio.to_thread(
+        sqlite_instance.native_cyber_evidence.read_raw_chunks,
+        run_id=complete_sink.run_id,
+        stream_id=response_stream.stream_id,
+        allow_sensitive=True,
+    )
+    assert b"".join(chunk.data for chunk in chunks) == response.frame + done
+
+
 async def test_cli_sink_clean_cli_without_observed_model_request_stays_incomplete_async(
     *, sqlite_instance: SQLiteMemory
 ) -> None:
