@@ -137,6 +137,8 @@ class _NativeCliEvidenceValidator:
             self._required.append("CLI task ID and version were not declared before capture.")
         elif (episode.task_id, episode.task_version) != (report.task_id, report.task_version):
             self._required.append("CLI report task identity differs from the episode's pinned task.")
+        if report.evidence.raw_evidence_ref != f"db-episode:{report.run_id}":
+            self._required.append("CLI raw evidence reference does not identify the retained database episode.")
         if self._expected_turns != 1 or report.turn_index != 1:
             self._required.append("The CLI v1 report cannot prove a complete multi-turn episode.")
         if episode.conversation_id is None or episode.conversation_id != report.conversation_id:

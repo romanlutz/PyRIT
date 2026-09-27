@@ -171,7 +171,7 @@ async def test_cli_sink_records_exact_pipes_tool_phases_and_delayed_real_request
         cleanup=NativeCliReportCleanup.CLOSED,
         simulated=True,
         conversation_id=target.last_run.conversation_id,
-        raw_evidence_ref=f"native-cyber-episode:{sink.run_id}",
+        raw_evidence_ref=f"db-episode:{sink.run_id}",
         errors=("Original grader and model gateway are not yet qualified.",),
     )
     assert report.evidence.events == report_events

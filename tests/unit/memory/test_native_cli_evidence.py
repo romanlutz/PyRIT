@@ -565,6 +565,23 @@ async def test_cli_missing_gateway_even_if_undeclared_is_undetermined_async(*, s
     assert len(sqlite_instance._query_entries(ScorableContentEntry)) == 1
 
 
+async def test_cli_raw_evidence_reference_must_name_the_persisted_episode_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
+    report = case.report.model_copy(
+        update={"evidence": case.report.evidence.model_copy(update={"raw_evidence_ref": "db-episode:another-run"})}
+    )
+    score = build_native_cli_report_score(report=report)
+
+    snapshot = case.store.finalize_cli_episode_atomic(report=report, score=score, expected_turns=1)
+
+    assert snapshot.score_id == score.id and snapshot.score_status is ScoreStatus.UNDETERMINED
+    assert not snapshot.coverage_complete
+    assert any("raw evidence reference" in gap for gap in snapshot.gaps)
+    assert sqlite_instance.get_scores(score_ids=[str(score.id)])[0].is_undetermined
+
+
 @pytest.mark.parametrize(
     ("link_request", "link_response", "expected_gap"),
     [

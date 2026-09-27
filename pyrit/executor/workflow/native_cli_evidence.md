@@ -51,6 +51,8 @@ not claim an original grade from this recorder. Once sealed,
 `read_report_events_async` pages DB-verified event rows into bounded,
 payload-free `NativeCliReportEvent` summaries for the pure CLI report
 adapter; neither raw frames nor model/tool text are copied into that report.
+Set the report's `raw_evidence_ref` to `db-episode:<run_id>`; the atomic
+finalizer rejects a pointer to another run as complete evidence.
 Capture rejects more than 10,000 parser observations, cross-pipe chunks or
 model gateway frames
 instead of allowing an unbounded in-memory projection. A future CLI-specific DB
