@@ -15,8 +15,9 @@ import httpx
 import pytest
 
 from pyrit.executor.workflow.native_cli_evidence import NativeCliDatabaseEvidenceSink
+from pyrit.executor.workflow.native_cli_report_adapter import build_native_cli_run_report
 from pyrit.models import Message
-from pyrit.models.native_cli_report import NativeCliReportEventKind
+from pyrit.models.native_cli_report import NativeCliReportCleanup, NativeCliReportEventKind, NativeCliReportStatus
 from pyrit.models.native_cyber_evidence import NativeCyberEpisodeStart
 from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target import NativeCliTarget
@@ -37,6 +38,7 @@ from pyrit.prompt_target.native_cli_models import (
     NativeCliRawChunk,
     NativeCliStream,
 )
+from pyrit.score.float_scale.native_cli_report_scorer import build_native_cli_report_score
 from tests.unit.prompt_target.gateway.test_codex_responses import FakeModelOnlyBackend
 from tests.unit.prompt_target.target.test_native_cli_target import _codex, _config, _frame, _Launcher, _Sandbox
 
@@ -154,6 +156,26 @@ async def test_cli_sink_records_exact_pipes_tool_phases_and_delayed_real_request
     assert report_events[-1].kind is NativeCliReportEventKind.EOF
     assert len([event for event in report_events if event.source_event_id == "cmd-1"]) == 3
     assert all(not hasattr(event, "raw_frame") for event in report_events)
+    report = build_native_cli_run_report(
+        config=_config(),
+        outcome=target.last_run.outcome,
+        events=report_events,
+        task_id="inert_cli",
+        task_version="1",
+        run_id=sink.run_id,
+        turn_id=sink.turn_id,
+        status=NativeCliReportStatus.INCOMPLETE,
+        cleanup=NativeCliReportCleanup.CLOSED,
+        simulated=True,
+        conversation_id=target.last_run.conversation_id,
+        raw_evidence_ref=f"native-cyber-episode:{sink.run_id}",
+        errors=("Original grader and model gateway are not yet qualified.",),
+    )
+    assert report.evidence.events == report_events
+    assert build_native_cli_report_score(report=report).is_undetermined
+    assert not await asyncio.to_thread(sqlite_instance.get_scores, score_type="float_scale")
+    with pytest.raises(ValueError, match="not finalized"):
+        await asyncio.to_thread(store.get_finalized_episode, run_id=sink.run_id)
 
 
 async def test_cli_sink_records_model_gateway_request_and_response_wire_in_same_episode_async(
@@ -251,6 +273,31 @@ async def test_cli_sink_missing_model_gateway_or_host_generated_error_is_require
     assert any("host-generated failure" in gap for gap in episode.gaps)
     assert all(not stream.source_complete for stream in episode.raw_streams)
     assert any(event.event_type == "gateway.gateway_error" for event in episode.events)
+
+
+async def test_cli_sink_clean_cli_without_observed_model_request_stays_incomplete_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    target = NativeCliTarget(
+        run_config=_config(),
+        launcher=_Launcher(
+            sandbox=_Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_codex())])
+        ),
+        evidence_sink=sink,
+    )
+    request = Message.from_prompt(prompt="Inert instruction", role="user")
+    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert target.last_run and target.last_run.outcome.coverage_complete
+    await sink.finish_async(
+        outcome=target.last_run.outcome,
+        request_piece_ids=(request.get_piece().id,),
+        response_piece_ids=(response.get_piece().id,),
+    )
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert not episode.turns[0].source_complete
+    assert any("Model gateway request/response coverage" in gap for gap in episode.turns[0].gaps)
+    assert all(not stream.source_complete for stream in episode.raw_streams)
 
 
 async def test_cli_sink_preserves_repeated_claude_message_id_and_distinct_tool_result_async(
