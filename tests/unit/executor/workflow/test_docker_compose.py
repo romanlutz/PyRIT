@@ -14,6 +14,7 @@ from pyrit.executor.workflow.docker_command import DockerCommandResult
 from pyrit.executor.workflow.docker_compose import (
     ComposeEnvironmentSpec,
     ComposeServiceSpec,
+    ComposeTmpfsSpec,
     DockerComposeEnvironmentLease,
     DockerComposeError,
 )
@@ -170,7 +171,7 @@ class FakeDockerRunner:
                     "IpcMode": spec["ipc"],
                     "CapDrop": spec["cap_drop"],
                     "SecurityOpt": spec["security_opt"],
-                    "Tmpfs": {"/tmp": spec["tmpfs"][0].split(":", 1)[1]},
+                    "Tmpfs": dict(mount.split(":", 1) for mount in spec["tmpfs"]),
                     "RestartPolicy": {"Name": "no"},
                 },
                 "Mounts": [],
@@ -397,9 +398,14 @@ async def test_incomplete_or_unhealthy_effective_topology_never_becomes_ready_as
     runner.mutate_up = mutate
     with pytest.raises(DockerComposeError):
         await lease.acquire_async()
-    assert lease.snapshot().state == "closed"
-    assert not runner.containers and not runner.networks
-    assert sum("down" in arguments for arguments in runner.calls) == 1
+    if defect == "extra":
+        assert lease.snapshot().state == "cleanup_failed"
+        assert runner.containers and runner.networks
+        assert all("down" not in arguments for arguments in runner.calls)
+    else:
+        assert lease.snapshot().state == "closed"
+        assert not runner.containers and not runner.networks
+        assert sum("down" in arguments for arguments in runner.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -428,7 +434,11 @@ async def test_effective_container_mismatch_blocks_readiness_async(*, section: s
     runner.mutate_up = lambda fake: next(iter(fake.containers.values()))[section].update({field: value})
     with pytest.raises(DockerComposeError):
         await lease.acquire_async()
-    assert lease.snapshot().state == "closed" and not runner.containers
+    if field in {"Privileged", "CapAdd", "Binds", "ReadonlyRootfs", "SecurityOpt", "User", "Image"}:
+        assert lease.snapshot().state == "cleanup_failed" and runner.containers
+        assert all("down" not in arguments for arguments in runner.calls)
+    else:
+        assert lease.snapshot().state == "closed" and not runner.containers
 
 
 @pytest.mark.parametrize("defect", ["mount", "image-id", "network-attachment", "published-port", "health-command"])
@@ -451,7 +461,11 @@ async def test_effective_mount_image_network_and_health_are_audited_async(defect
     runner.mutate_up = mutate
     with pytest.raises(DockerComposeError):
         await lease.acquire_async()
-    assert not runner.containers
+    if defect in {"mount", "image-id"}:
+        assert lease.snapshot().state == "cleanup_failed" and runner.containers
+        assert all("down" not in arguments for arguments in runner.calls)
+    else:
+        assert not runner.containers
 
 
 async def test_partial_up_failure_still_cleans_owned_project_once_async() -> None:
@@ -572,3 +586,413 @@ async def test_malformed_or_mismatched_inspection_is_rejected_async(payload: str
     runner.bad_result = DockerCommandResult(stdout=payload, stderr="", returncode=0)
     with pytest.raises(DockerComposeError):
         await lease._inspect_async("container", ("a" * 64,))
+
+
+def state_service(name: str = "cli") -> ComposeServiceSpec:
+    return ComposeServiceSpec.model_validate(
+        {
+            **service_spec(name, role="agent").model_dump(),
+            "tmpfs_bytes": 67_108_864,
+            "runtime_state": (
+                ComposeTmpfsSpec(path="/tmp", size_bytes=16_777_216),
+                ComposeTmpfsSpec(path="/workspace", size_bytes=33_554_432, executable=True),
+                ComposeTmpfsSpec(path="/home/runner", size_bytes=16_777_216),
+            ),
+        }
+    )
+
+
+def report_tmpfs_mounts(runner: FakeDockerRunner) -> None:
+    for container in runner.containers.values():
+        container["Mounts"] = [
+            {
+                "Type": "tmpfs",
+                "Source": "",
+                "Destination": path,
+                "Mode": options,
+                "RW": True,
+                "Propagation": "",
+            }
+            for path, options in container["HostConfig"]["Tmpfs"].items()
+        ]
+
+
+async def test_absent_runtime_policy_keeps_the_exact_strict_default_async() -> None:
+    lease, runner = make_lease(1)
+    await lease.acquire_async()
+    service = runner.documents[0]["services"]["service-0"]
+    assert service["tmpfs"] == ["/tmp:rw,noexec,nosuid,nodev,size=16777216,uid=1000,gid=1000,mode=0700"]
+    assert service["read_only"] is True and service["privileged"] is False
+    assert service["cap_drop"] == ["ALL"] and service["security_opt"] == ["no-new-privileges:true"]
+    assert service["networks"] == ["challenge"] and runner.documents[0]["networks"]["challenge"]["internal"] is True
+    assert not set(service) & {"volumes", "environment", "ports", "cap_add", "devices"}
+    assert service_spec("default").runtime_state is None
+    await lease.close_async()
+
+
+@pytest.mark.parametrize("include_mount_records", [False, True])
+async def test_opt_in_cli_and_grafana_state_are_bounded_per_service_async(include_mount_records: bool) -> None:
+    cli = state_service()
+    target = ComposeServiceSpec.model_validate(
+        {
+            **service_spec("grafana-state-model").model_dump(),
+            "tmpfs_bytes": 67_108_864,
+            "runtime_state": (
+                ComposeTmpfsSpec(path="/tmp", size_bytes=16_777_216),
+                ComposeTmpfsSpec(path="/var/lib/grafana", size_bytes=33_554_432),
+                ComposeTmpfsSpec(path="/var/log/grafana", size_bytes=16_777_216),
+            ),
+        }
+    )
+    runner = FakeDockerRunner()
+    if include_mount_records:
+        runner.mutate_up = report_tmpfs_mounts
+    lease = DockerComposeEnvironmentLease(
+        run_id="state-profile", spec=ComposeEnvironmentSpec(services=(cli, target)), runner=runner
+    )
+    allocation = await lease.acquire_async()
+    assert len(allocation.containers) == 2 and lease.snapshot().state == "ready"
+    specifications = runner.documents[0]["services"]
+    assert specifications["cli"]["tmpfs"] == [
+        "/tmp:rw,noexec,nosuid,nodev,size=16777216,uid=1000,gid=1000,mode=0700",
+        "/workspace:rw,exec,nosuid,nodev,size=33554432,uid=1000,gid=1000,mode=0700",
+        "/home/runner:rw,noexec,nosuid,nodev,size=16777216,uid=1000,gid=1000,mode=0700",
+    ]
+    assert all("rw,noexec,nosuid,nodev" in options for options in specifications[target.name]["tmpfs"])
+    assert set(
+        next(
+            value
+            for value in runner.containers.values()
+            if value["Config"]["Labels"]["com.docker.compose.service"] == target.name
+        )["HostConfig"]["Tmpfs"]
+    ) == {"/tmp", "/var/lib/grafana", "/var/log/grafana"}
+    for service in specifications.values():
+        assert service["mem_limit"] == service["memswap_limit"] == 134_217_728
+        assert service["cpus"] == 0.5 and service["pids_limit"] == 64
+        assert service["read_only"] and not service["privileged"]
+        assert not set(service) & {"volumes", "ports", "environment", "cap_add"}
+    await lease.close_async()
+    assert runner.documents[0] == runner.documents[1]
+    assert not runner.containers and not runner.networks and not runner.volumes
+    assert lease.capabilities == frozenset({EnvironmentCapability.HEALTH_CHECK})
+
+
+async def test_tmp_executable_requires_explicit_path_level_opt_in_async() -> None:
+    service = ComposeServiceSpec.model_validate(
+        {
+            **service_spec("cli").model_dump(),
+            "runtime_state": (ComposeTmpfsSpec(path="/tmp", size_bytes=16_777_216, executable=True),),
+        }
+    )
+    runner = FakeDockerRunner()
+    lease = DockerComposeEnvironmentLease(
+        run_id="exec-tmp", spec=ComposeEnvironmentSpec(services=(service,)), runner=runner
+    )
+    await lease.acquire_async()
+    assert runner.documents[0]["services"]["cli"]["tmpfs"] == [
+        "/tmp:rw,exec,nosuid,nodev,size=16777216,uid=1000,gid=1000,mode=0700"
+    ]
+    await lease.close_async()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "relative",
+        r"C:\workspace",
+        "//workspace",
+        "/workspace/",
+        "/workspace/../cache",
+        "/workspace/./cache",
+        "/tmp/$HOME",
+        "/tmp/${HOME}",
+        "/tmp/a,b",
+        "/tmp/a:b",
+        "/tmp/a b",
+        "/tmp/x\x00y",
+        "/tmp/x\ny",
+        "/tmp/" + "x" * 256,
+        "/dev",
+        "/dev/shm",
+        "/proc/self",
+        "/sys",
+        "/etc/hosts",
+        "/usr/local",
+        "/var",
+        "/var/run/task",
+        "/run",
+    ],
+)
+def test_unsafe_or_aliased_runtime_state_paths_are_rejected(path: str) -> None:
+    with pytest.raises(ValueError):
+        ComposeTmpfsSpec(path=path, size_bytes=1024)
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("/tmp", "/tmp"),
+        ("/tmp", "/tmp/cache"),
+        ("/tmp/cache", "/tmp"),
+        ("/tmp", "/workspace", "/workspace/cache"),
+        ("/workspace/cache", "/workspace", "/tmp"),
+        ("/workspace",),
+        ("/tmp", "/app"),
+        (),
+    ],
+)
+def test_runtime_state_requires_nonoverlapping_paths_and_preserves_executables(paths: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError):
+        ComposeServiceSpec.model_validate(
+            {
+                **service_spec("task").model_dump(),
+                "runtime_state": tuple(ComposeTmpfsSpec(path=path, size_bytes=1024) for path in paths),
+            }
+        )
+
+
+def test_similar_path_prefixes_are_not_mistaken_for_nested_mounts() -> None:
+    service = ComposeServiceSpec.model_validate(
+        {
+            **service_spec("task").model_dump(),
+            "runtime_state": (
+                ComposeTmpfsSpec(path="/tmp", size_bytes=1024),
+                ComposeTmpfsSpec(path="/workspace", size_bytes=1024),
+                ComposeTmpfsSpec(path="/workspace-cache", size_bytes=1024),
+            ),
+        }
+    )
+    assert len(service.tmpfs_mounts) == 3
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("size_bytes", 0),
+        ("size_bytes", 1_073_741_825),
+        ("size_bytes", True),
+        ("executable", "true"),
+        ("mode", "0777"),
+        ("uid", 0),
+        ("gid", 0),
+        ("source", "/host"),
+        ("type", "volume"),
+        ("options", "suid,dev"),
+        ("propagation", "rshared"),
+    ],
+)
+def test_tmpfs_policy_does_not_accept_unsafe_permissions_or_arbitrary_options(*, field: str, value: Any) -> None:
+    with pytest.raises(ValueError):
+        ComposeTmpfsSpec.model_validate({"path": "/tmp", "size_bytes": 1024, field: value})
+
+
+def test_total_runtime_state_size_cannot_exceed_service_budget_or_memory() -> None:
+    values = state_service().model_dump()
+    with pytest.raises(ValueError, match="Combined runtime-state"):
+        ComposeServiceSpec.model_validate({**values, "tmpfs_bytes": 16_777_216})
+    with pytest.raises(ValueError, match="memory limit"):
+        ComposeServiceSpec.model_validate({**values, "tmpfs_bytes": 268_435_456})
+
+
+@pytest.mark.parametrize("mount_count", [8, 9])
+def test_runtime_state_mount_count_has_an_explicit_upper_bound(mount_count: int) -> None:
+    mounts = (
+        ComposeTmpfsSpec(path="/tmp", size_bytes=1024),
+        *(ComposeTmpfsSpec(path=f"/state-{index}", size_bytes=1024) for index in range(mount_count - 1)),
+    )
+    values = {**service_spec("task").model_dump(), "runtime_state": mounts}
+    if mount_count == 8:
+        assert len(ComposeServiceSpec.model_validate(values).tmpfs_mounts) == 8
+    else:
+        with pytest.raises(ValueError):
+            ComposeServiceSpec.model_validate(values)
+
+
+@pytest.mark.parametrize("value", [{"/workspace": {}}, {"/unmatched-volume": {}}])
+async def test_opt_in_tmpfs_never_authorizes_an_image_volume_async(value: dict[str, Any]) -> None:
+    runner = FakeDockerRunner()
+    runner.mutate_image = lambda image: image["Config"].update({"Volumes": value})
+    lease = DockerComposeEnvironmentLease(
+        run_id="volume-blocked", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=runner
+    )
+    with pytest.raises(DockerComposeError, match="Local pinned"):
+        await lease.acquire_async()
+    assert not runner.documents and not runner.containers and not runner.volumes
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "extra-path",
+        "missing-path",
+        "alias-path",
+        "unbounded",
+        "exec",
+        "mode",
+        "uid",
+        "gid",
+        "suid",
+        "dev",
+        "bind",
+        "long-mount",
+        "volumes-from",
+        "image-volume",
+        "privileged",
+        "cap-add",
+        "no-security",
+    ],
+)
+async def test_opt_in_state_drift_blocks_readiness_and_cleanup_async(drift: str) -> None:
+    runner = FakeDockerRunner()
+    lease = DockerComposeEnvironmentLease(
+        run_id="drift", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=runner
+    )
+
+    def mutate(fake: FakeDockerRunner) -> None:
+        container = next(iter(fake.containers.values()))
+        host = container["HostConfig"]
+        options = host["Tmpfs"]
+        if drift == "extra-path":
+            options["/extra"] = options["/tmp"]
+        elif drift == "missing-path":
+            options.pop("/workspace")
+        elif drift == "alias-path":
+            options["/workspace/../workspace"] = options.pop("/workspace")
+        elif drift in {"unbounded", "exec", "mode", "uid", "gid", "suid", "dev"}:
+            old, new = {
+                "unbounded": ("size=16777216", "size=0"),
+                "exec": ("noexec", "exec"),
+                "mode": ("mode=0700", "mode=0777"),
+                "uid": ("uid=1000", "uid=0"),
+                "gid": ("gid=1000", "gid=0"),
+                "suid": ("nosuid", "suid"),
+                "dev": ("nodev", "dev"),
+            }[drift]
+            options["/tmp"] = options["/tmp"].replace(old, new)
+        elif drift == "bind":
+            host["Binds"] = ["/host:/workspace"]
+        elif drift == "long-mount":
+            host["Mounts"] = [{"Type": "volume", "Target": "/workspace"}]
+        elif drift == "volumes-from":
+            host["VolumesFrom"] = ["another-container"]
+        elif drift == "image-volume":
+            container["Config"]["Volumes"] = {"/workspace": {}}
+        elif drift == "privileged":
+            host["Privileged"] = True
+        elif drift == "cap-add":
+            host["CapAdd"] = ["SYS_ADMIN"]
+        else:
+            host["SecurityOpt"] = []
+
+    runner.mutate_up = mutate
+    with pytest.raises(DockerComposeError) as caught:
+        await lease.acquire_async()
+    assert isinstance(caught.value.__cause__, EnvironmentCleanupError)
+    assert lease.snapshot().state == "cleanup_failed"
+    assert all("down" not in arguments for arguments in runner.calls)
+    assert runner.containers and runner.networks
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "type",
+        "destination",
+        "duplicate",
+        "partial",
+        "source",
+        "volume-name",
+        "driver",
+        "readonly",
+        "exec",
+        "mode",
+        "propagation",
+        "unknown-option",
+        "malformed",
+        "unknown-list",
+    ],
+)
+async def test_reported_effective_mount_records_cannot_override_tmpfs_policy_async(drift: str) -> None:
+    runner = FakeDockerRunner()
+    lease = DockerComposeEnvironmentLease(
+        run_id="mount-drift", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=runner
+    )
+
+    def mutate(fake: FakeDockerRunner) -> None:
+        report_tmpfs_mounts(fake)
+        container = next(iter(fake.containers.values()))
+        mount = container["Mounts"][0]
+        changes: dict[str, tuple[str, Any]] = {
+            "type": ("Type", "volume"),
+            "destination": ("Destination", "/tmp/../tmp"),
+            "source": ("Source", "/var/run/docker.sock"),
+            "volume-name": ("Name", "anonymous-volume"),
+            "driver": ("Driver", "local"),
+            "readonly": ("RW", False),
+            "exec": ("Mode", "rw,exec"),
+            "mode": ("Mode", "rw,mode=0777"),
+            "propagation": ("Propagation", "shared"),
+            "unknown-option": ("Options", ["suid"]),
+        }
+        if drift in changes:
+            field, value = changes[drift]
+            mount[field] = value
+        elif drift == "duplicate":
+            container["Mounts"].append(copy.deepcopy(mount))
+        elif drift == "partial":
+            container["Mounts"].pop()
+        elif drift == "malformed":
+            container["Mounts"].append(None)
+        else:
+            container["Mounts"] = None
+
+    runner.mutate_up = mutate
+    with pytest.raises(DockerComposeError):
+        await lease.acquire_async()
+    assert lease.snapshot().state == "cleanup_failed"
+    assert all("down" not in arguments for arguments in runner.calls)
+
+
+async def test_runtime_state_is_rechecked_before_teardown_without_requiring_healthy_services_async() -> None:
+    runner = FakeDockerRunner()
+    lease = DockerComposeEnvironmentLease(
+        run_id="stopped", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=runner
+    )
+    await lease.acquire_async()
+    container = next(iter(runner.containers.values()))
+    container["State"] = {"Running": False, "Status": "exited"}
+    await lease.close_async()
+    assert lease.snapshot().state == "closed" and not runner.containers
+
+    changed_runner = FakeDockerRunner()
+    changed = DockerComposeEnvironmentLease(
+        run_id="changed", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=changed_runner
+    )
+    await changed.acquire_async()
+    next(iter(changed_runner.containers.values()))["HostConfig"]["Tmpfs"]["/tmp"] += ",mode=0777"
+    with pytest.raises(EnvironmentCleanupError):
+        await changed.close_async()
+    assert all("down" not in arguments for arguments in changed_runner.calls)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_opt_in_policy_partial_start_preserves_owned_rollback_async(cancel: bool) -> None:
+    runner = FakeDockerRunner()
+    runner.up_returncode = 1 if not cancel else 0
+    runner.wait_in_up = cancel
+    lease = DockerComposeEnvironmentLease(
+        run_id="partial-state", spec=ComposeEnvironmentSpec(services=(state_service(),)), runner=runner
+    )
+    task = asyncio.create_task(lease.acquire_async())
+    await asyncio.wait_for(runner.up_entered.wait(), timeout=2)
+    if cancel:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(DockerComposeError, match="exit=1"):
+            await task
+    assert lease.snapshot().state == "closed"
+    assert not runner.containers and not runner.networks and not runner.volumes
+    assert runner.documents[0] == runner.documents[1]
