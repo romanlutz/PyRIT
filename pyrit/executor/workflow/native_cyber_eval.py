@@ -585,7 +585,7 @@ class NativeCyberEvaluation:
                 self._judgment = await self._runtime.grade_async(evidence=evidence)
         elif not cancelled:
             self._errors.extend(evidence.gaps)
-        await self._settle_async(self._close_async())
+        await self._settle_async(self._close_async(), timeout_seconds=self._cleanup_budget_seconds() + 5)
         self.status = (
             NativeCyberStatus.CANCELLED
             if cancelled
@@ -601,7 +601,7 @@ class NativeCyberEvaluation:
         self._closed = True
         assert self._context is not None
         try:
-            async with asyncio.timeout(self._CLEANUP_SECONDS):
+            async with asyncio.timeout(self._cleanup_budget_seconds() + 1):
                 await self._context.close_async()
             self._cleanup = NativeCyberCleanup.CLOSED
         except (Exception, asyncio.CancelledError) as error:
@@ -621,7 +621,10 @@ class NativeCyberEvaluation:
 
     async def _fail_async(self, error: BaseException) -> None:
         try:
-            await self._settle_async(self._record_failure_async(error))
+            wait_seconds = self._CLEANUP_SECONDS + 5
+            if self._context is not None:
+                wait_seconds += self._cleanup_budget_seconds()
+            await self._settle_async(self._record_failure_async(error), timeout_seconds=wait_seconds)
         except (Exception, asyncio.CancelledError) as retention_error:
             if isinstance(error, asyncio.CancelledError) and retention_error is not error:
                 raise error from retention_error
@@ -655,9 +658,22 @@ class NativeCyberEvaluation:
                     logger.exception("Native report directory cleanup was not confirmed.")
             await self._publish_async(judgment=self._judgment)
 
-    async def _settle_async(self, operation: Coroutine[Any, Any, None]) -> None:
+    def _cleanup_budget_seconds(self) -> float:
+        """
+        Honor a lease's bounded release time without shortening the host storage guard.
+
+        Returns:
+            float: At least the default grace, extended to cover all reserved resources.
+        """
+        return max(self._CLEANUP_SECONDS, self._context.cleanup_budget_seconds if self._context is not None else 0)
+
+    async def _settle_async(
+        self, operation: Coroutine[Any, Any, None], *, timeout_seconds: float | None = None
+    ) -> None:
         task = asyncio.create_task(operation)
-        deadline = asyncio.get_running_loop().time() + self._CLEANUP_SECONDS + 5
+        deadline = asyncio.get_running_loop().time() + (
+            timeout_seconds if timeout_seconds is not None else self._CLEANUP_SECONDS + 5
+        )
         cancellation: asyncio.CancelledError | None = None
         while not task.done():
             remaining = deadline - asyncio.get_running_loop().time()

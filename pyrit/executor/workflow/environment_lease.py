@@ -109,6 +109,11 @@ class EnvironmentLease(ABC, Generic[RuntimeT]):
         """The provider's declared and implemented optional operations."""
         return self._capabilities
 
+    @property
+    def cleanup_budget_seconds(self) -> float:
+        """The cooperative release deadline for every reserved resource."""
+        return max(1, len(self._resources)) * self._cleanup_timeout_seconds
+
     async def acquire_async(self) -> RuntimeT:
         """
         Acquire, optionally set up, and health-check before exposing the runtime.

@@ -134,6 +134,11 @@ after release settles. Providers must honor cancellation; this abstraction canno
 terminate an uncooperative external process or recover an unknown allocation ID.
 Reserved IDs must therefore be chosen before acquisition, or the provider must
 own and confirm its own compensating rollback.
+The workflow's cleanup grace follows the lease's per-resource deadline and
+reservation count instead of always cutting off after ten seconds. Host storage
+creation retains its original ten-second grace plus five-second settling
+allowance. This does not relax failure reporting: expired or unconfirmed
+release is never recorded as clean cleanup.
 
 Explicit `SETUP` and `HEALTH_CHECK` capabilities are optional; calling an
 unsupported operation raises rather than silently succeeding. A health check

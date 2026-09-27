@@ -21,6 +21,7 @@ from pyrit.models import ContentEntryScorable, SeedPrompt
 from pyrit.models.native_cyber import (
     NativeAgentEvidence,
     NativeCyberArtifact,
+    NativeCyberCleanup,
     NativeCyberJudgment,
     NativeCyberReadiness,
     NativeCyberReport,
@@ -732,15 +733,23 @@ class LeasedFixtureBinding(FixtureBinding):
         *,
         services: tuple[tuple[str, str, str | None], ...] = TWO_SERVICES,
         steps: bool = False,
+        cleanup_timeout_seconds: float = 1,
     ) -> None:
         super().__init__(steps=steps)
         self.services = services
+        self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self.lease: InertLease[NativeCyberRuntime] | None = None
 
     def create_environment_lease(
         self, *, run_id: str, request: NativeCyberRequest
     ) -> EnvironmentLease[NativeCyberRuntime]:
-        self.lease = InertLease(run_id=run_id, runtime=self.runtime, services=self.services, order=self.order)
+        self.lease = InertLease(
+            run_id=run_id,
+            runtime=self.runtime,
+            services=self.services,
+            order=self.order,
+            cleanup_timeout_seconds=self.cleanup_timeout_seconds,
+        )
         return self.lease
 
 
@@ -834,6 +843,34 @@ async def test_native_lease_cleanup_failure_retains_judgment_without_numeric_sco
     assert run.environment_lease.state == "cleanup_failed"
     assert binding.runtime.grade_count == 1
     assert sum(item.startswith("release:") for item in binding.order) == 2
+
+
+async def test_native_workflow_waits_for_provider_cleanup_budget_async(tmp_path: Path) -> None:
+    binding = LeasedFixtureBinding(services=ONE_SERVICE, cleanup_timeout_seconds=0.25)
+    original_factory = binding.create_environment_lease
+
+    def create_lease(*, run_id: str, request: NativeCyberRequest) -> EnvironmentLease[NativeCyberRuntime]:
+        lease = original_factory(run_id=run_id, request=request)
+        assert binding.lease is not None
+        release = binding.lease._release_async
+
+        async def delayed_release_async(handle: EnvironmentResourceHandle) -> None:
+            await asyncio.sleep(0.05)
+            await release(handle)
+
+        binding.lease._release_async = delayed_release_async
+        return lease
+
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with (
+        patch.object(binding, "create_environment_lease", side_effect=create_lease),
+        patch.object(run, "_CLEANUP_SECONDS", 0.01),
+    ):
+        result = await run.start_async()
+    assert result.status == "completed"
+    assert run.report.cleanup is NativeCyberCleanup.CLOSED
+    assert run.environment_lease.state == "closed"
+    assert binding.runtime.grade_count == 1
 
 
 async def test_native_cancellation_during_lease_acquisition_retains_partial_failure_async(tmp_path: Path) -> None:

@@ -109,6 +109,7 @@ async def test_named_topologies_setup_health_and_reverse_owned_cleanup_async(
 ) -> None:
     lease = InertLease(run_id="run-1", runtime="inert runtime", services=services)
     assert await lease.acquire_async() == "inert runtime"
+    assert lease.cleanup_budget_seconds == len(services)
     snapshot = lease.snapshot()
     assert snapshot.state == "ready" and snapshot.setup_completed
     assert len(snapshot.health) == len(snapshot.services) == len(snapshot.resources) == len(services)
