@@ -155,6 +155,39 @@ class ModelOnlyResponsesBackend(Protocol):
         ...
 
 
+class ModelBackendErrorCode(str, Enum):
+    """Sanitized upstream failures the gateway may expose to a guest."""
+
+    UPSTREAM_HTTP_ERROR = "upstream_http_error"
+    UPSTREAM_NETWORK_ERROR = "upstream_network_error"
+    UPSTREAM_STREAM_ERROR = "upstream_stream_error"
+    UPSTREAM_TIMEOUT = "upstream_timeout"
+
+
+class ModelBackendError(Exception):
+    """A typed backend failure that cannot include a URL, token, or provider body."""
+
+    _MESSAGES = {
+        ModelBackendErrorCode.UPSTREAM_HTTP_ERROR: "Upstream model returned an HTTP error",
+        ModelBackendErrorCode.UPSTREAM_NETWORK_ERROR: "Unable to reach the upstream model",
+        ModelBackendErrorCode.UPSTREAM_STREAM_ERROR: "Upstream Responses payload or stream is invalid",
+        ModelBackendErrorCode.UPSTREAM_TIMEOUT: "Upstream model request timed out",
+    }
+
+    def __init__(self, *, code: ModelBackendErrorCode) -> None:
+        """
+        Build an error from a fixed, guest-safe code and message.
+
+        Raises:
+            ValueError: If the backend supplied an unrecognized code.
+        """
+        if not isinstance(code, ModelBackendErrorCode):
+            raise ValueError("Unsupported model backend error code")
+        self.code = code
+        self.status_code = 504 if code is ModelBackendErrorCode.UPSTREAM_TIMEOUT else 502
+        super().__init__(self._MESSAGES[code])
+
+
 class GatewayError(Exception):
     """A safe, explicit wire error without provider or guest credentials."""
 

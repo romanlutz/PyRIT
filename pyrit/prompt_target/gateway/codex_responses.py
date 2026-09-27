@@ -24,6 +24,8 @@ from pyrit.prompt_target.gateway.responses_contract import (
     GatewayLimits,
     GatewayObservation,
     GatewayRoute,
+    ModelBackendError,
+    ModelBackendErrorCode,
     ModelOnlyResponsesBackend,
     ModelRequest,
     ObservationCallback,
@@ -68,8 +70,14 @@ def _sse_error(*, error: GatewayError) -> bytes:
     return f"event: error\ndata: {data}\n\n".encode()
 
 
+def _backend_gateway_error(*, error: ModelBackendError) -> GatewayError:
+    return GatewayError(status_code=error.status_code, code=error.code.value, message=str(error))
+
+
 class _CodexResponsesGateway:
     """Own a single run's authorization, model route, and conservative budgets."""
+
+    _BACKEND_ERROR_CODES = frozenset(code.value for code in ModelBackendErrorCode)
 
     def __init__(
         self,
@@ -95,6 +103,8 @@ class _CodexResponsesGateway:
 
     async def _handle_async(self, request: Request) -> Response:
         deadline = asyncio.get_running_loop().time() + self._limits.timeout_seconds
+        model_request: ModelRequest | None = None
+        streaming = False
         try:
             self._authenticate(request=request)
             if request.scope.get("query_string"):
@@ -104,6 +114,7 @@ class _CodexResponsesGateway:
             raw_request = await self._read_body_async(request=request, deadline=deadline)
             body = self._decode_body(raw=raw_request)
             validated = self._validator.validate_request(body=body)
+            streaming = validated.streaming
             if self._backend is None:
                 raise GatewayError(
                     status_code=501,
@@ -131,7 +142,12 @@ class _CodexResponsesGateway:
                 return await self._start_stream_async(request=model_request, deadline=deadline)
             return await self._complete_async(request=model_request, deadline=deadline)
         except GatewayError as error:
-            return _json_error(error=error)
+            reply = _json_error(error=error)
+            if model_request is not None and error.code in self._BACKEND_ERROR_CODES:
+                await self._observe_gateway_error_async(
+                    request=model_request, error=error, frame=bytes(reply.body), streaming=streaming
+                )
+            return reply
 
     def _authenticate(self, *, request: Request) -> None:
         credentials = request.headers.getlist("authorization")
@@ -233,14 +249,18 @@ class _CodexResponsesGateway:
                 status_code=500, code="observation_failed", message="Host observation callback failed"
             ) from exc
 
-    async def _report_stream_error_async(self, *, request: ModelRequest, error: GatewayError) -> bytes:
-        frame = _sse_error(error=error)
+    async def _observe_gateway_error_async(
+        self, *, request: ModelRequest, error: GatewayError, frame: bytes, streaming: bool
+    ) -> None:
+        coverage = {GatewayCoverage.FAILED}
+        if streaming:
+            coverage.add(GatewayCoverage.STREAMING)
         try:
             await self._observe_async(
                 request=request,
                 kind=GatewayFrameKind.GATEWAY_ERROR,
                 frame=frame,
-                coverage=frozenset({GatewayCoverage.STREAMING, GatewayCoverage.FAILED}),
+                coverage=frozenset(coverage),
                 deadline=asyncio.get_running_loop().time() + min(1.0, self._limits.timeout_seconds),
                 error=error,
             )
@@ -250,6 +270,10 @@ class _CodexResponsesGateway:
                 error.code,
                 observation_error.code,
             )
+
+    async def _report_stream_error_async(self, *, request: ModelRequest, error: GatewayError) -> bytes:
+        frame = _sse_error(error=error)
+        await self._observe_gateway_error_async(request=request, error=error, frame=frame, streaming=True)
         return frame
 
     async def _complete_async(self, *, request: ModelRequest, deadline: float) -> Response:
@@ -260,6 +284,8 @@ class _CodexResponsesGateway:
                 raw_response = await self._backend.create_response_async(request=request)
         except TimeoutError as exc:
             raise GatewayError(status_code=504, code="gateway_timeout", message="Model response timed out") from exc
+        except ModelBackendError as exc:
+            raise _backend_gateway_error(error=exc) from exc
         except NotImplementedError as exc:
             raise GatewayError(
                 status_code=501, code="backend_unsupported", message="Model backend cannot create Responses"
@@ -292,6 +318,8 @@ class _CodexResponsesGateway:
             raise GatewayError(status_code=501, code="model_backend_required", message="Model backend is unavailable")
         try:
             stream = self._backend.stream_response_async(request=request)
+        except ModelBackendError as exc:
+            raise _backend_gateway_error(error=exc) from exc
         except NotImplementedError as exc:
             raise GatewayError(
                 status_code=501, code="backend_unsupported", message="Model backend cannot stream Responses SSE"
@@ -338,6 +366,8 @@ class _CodexResponsesGateway:
             ) from exc
         except TimeoutError as exc:
             raise GatewayError(status_code=504, code="gateway_timeout", message="Responses stream timed out") from exc
+        except ModelBackendError as exc:
+            raise _backend_gateway_error(error=exc) from exc
         except NotImplementedError as exc:
             raise GatewayError(
                 status_code=501, code="backend_unsupported", message="Model backend cannot stream Responses SSE"
