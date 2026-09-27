@@ -34,6 +34,7 @@ def build_native_cli_run_report(
     outcome: NativeCliRunOutcome | None,
     events: Iterable[NativeCliEvent | NativeCliReportEvent],
     task_id: str,
+    task_version: str,
     run_id: str,
     turn_id: str,
     status: NativeCliReportStatus,
@@ -56,6 +57,7 @@ def build_native_cli_run_report(
         events (Iterable[NativeCliEvent | NativeCliReportEvent]): Recorded raw events or persisted
             summaries with actual frame ordinals, digests, sizes, and stdout offsets.
         task_id (str): Caller-assigned task identity.
+        task_version (str): Caller-owned version of the original task definition.
         run_id (str): Caller-assigned run identity.
         turn_id (str): Caller-assigned turn identity, not a provider event ID.
         status (NativeCliReportStatus): Caller-owned finalization status.
@@ -79,6 +81,7 @@ def build_native_cli_run_report(
     return NativeCliRunReport(
         schema_version=1,
         task_id=task_id,
+        task_version=task_version,
         run_id=run_id,
         turn_id=turn_id,
         turn_index=turn_index,

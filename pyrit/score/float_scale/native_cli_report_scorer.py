@@ -54,6 +54,7 @@ class NativeCliReportScoreBuilder:
                 "contract_version": "native-cli-run-v1",
                 "report_sha256": digest,
                 "task_id": validated.task_id,
+                "task_version": validated.task_version,
                 "run_id": validated.run_id,
                 "turn_id": validated.turn_id,
                 "turn_index": validated.turn_index,

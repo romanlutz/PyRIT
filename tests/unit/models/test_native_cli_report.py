@@ -76,6 +76,7 @@ def _complete_report() -> NativeCliRunReport:
     return NativeCliRunReport(
         schema_version=1,
         task_id="fixture-task",
+        task_version="benchmark-v1",
         run_id="fixture-run",
         turn_id="fixture-turn",
         turn_index=1,
@@ -131,6 +132,33 @@ def test_canonical_json_and_sha256_are_deterministic_on_real_model_round_trip() 
     changed = report.model_dump(mode="json")
     changed["judgment"]["rationale"] = "Different original feedback"
     assert NativeCliRunReport.model_validate(changed).sha256() != report.sha256()
+
+
+@pytest.mark.parametrize("version", [None, "", "  ", 123, True])
+def test_task_version_is_required_for_every_report_status(version: object) -> None:
+    for status in (NativeCliReportStatus.COMPLETED, NativeCliReportStatus.ERROR):
+        data = _complete_report().model_dump(mode="json")
+        data["status"] = status.value
+        if status is NativeCliReportStatus.ERROR:
+            data["errors"] = ["Original grader error."]
+        if version is None:
+            del data["task_version"]
+        else:
+            data["task_version"] = version
+        with pytest.raises(ValueError):
+            NativeCliRunReport.model_validate(data)
+
+
+def test_task_revision_alone_changes_canonical_identity_not_cli_version() -> None:
+    report = _complete_report()
+    data = report.model_dump(mode="json")
+    data["task_version"] = "benchmark-v2"
+    revised = NativeCliRunReport.model_validate(data)
+    assert revised.task_id == report.task_id == "fixture-task"
+    assert revised.cli_version == report.cli_version == "0.115.0"
+    assert revised.task_version == "benchmark-v2"
+    assert revised.sha256() != report.sha256()
+    assert '"task_version":"benchmark-v2"' in revised.canonical_json()
 
 
 @pytest.mark.parametrize("version", [None, True, 0, 2, "1", 1.0])

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import replace
 from pathlib import PurePosixPath
@@ -231,6 +232,7 @@ async def test_real_target_outcome_maps_to_cli_only_report_with_exact_source_ids
         outcome=target.last_run.outcome,
         events=sink.events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         conversation_id=target.last_run.conversation_id,
@@ -242,6 +244,7 @@ async def test_real_target_outcome_maps_to_cli_only_report_with_exact_source_ids
         raw_evidence_ref="OFFLINE raw chunks",
     )
     assert report.protocol is NativeCliReportProtocol.CODEX_EXEC_JSON
+    assert report.task_version == "benchmark-v1"
     assert report.cli_version == "0.115.0" and report.cli_profile == "sandbox-locked"
     assert report.evidence.source_session_id == "thread-real-observed"
     assert report.evidence.exit_code == 0 and report.evidence.observed_steps == 1
@@ -265,6 +268,25 @@ async def test_real_target_outcome_maps_to_cli_only_report_with_exact_source_ids
     assert b"".join(chunk.data for chunk in sink.raw if chunk.stream is NativeCliStream.STDOUT) == stdout
 
 
+def test_adapter_requires_caller_owned_task_version_without_a_fallback() -> None:
+    parameter = inspect.signature(build_native_cli_run_report).parameters["task_version"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(ValueError, match="task version"):
+        build_native_cli_run_report(
+            config=_config(),
+            outcome=None,
+            events=(),
+            task_id="task-fixture",
+            task_version=" ",
+            run_id="run-fixture",
+            turn_id="turn-fixture",
+            status=NativeCliReportStatus.ERROR,
+            cleanup=NativeCliReportCleanup.NOT_OPENED,
+            errors=("No CLI process launched.",),
+        )
+
+
 def test_report_protocol_and_observation_vocabularies_match_parser_exactly() -> None:
     assert {item.value for item in NativeCliReportProtocol} == {item.value for item in NativeCliProtocol}
     assert {item.value for item in NativeCliReportEventKind} == {item.value for item in NativeCliEventKind}
@@ -285,6 +307,7 @@ async def test_persisted_summary_iterator_builds_same_report_without_raw_frames_
         "config": config,
         "outcome": outcome,
         "task_id": "task-fixture",
+        "task_version": "benchmark-v1",
         "run_id": "run-fixture",
         "turn_id": "turn-fixture",
         "status": NativeCliReportStatus.COMPLETED,
@@ -323,6 +346,7 @@ def test_persisted_frame_missing_digest_length_or_offset_is_rejected(field: str)
         outcome=_outcome(parser=parser, size_bytes=len(_codex())),
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -339,6 +363,7 @@ def test_persisted_frame_missing_digest_length_or_offset_is_rejected(field: str)
             outcome=_outcome(parser=parser, size_bytes=len(_codex())),
             events=(summary for summary in summaries),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -358,6 +383,7 @@ def test_persisted_model_message_without_source_id_is_not_normalized() -> None:
         outcome=outcome,
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -377,6 +403,7 @@ def test_persisted_model_message_without_source_id_is_not_normalized() -> None:
             outcome=outcome,
             events=(summary for summary in summaries),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -396,6 +423,7 @@ def test_persisted_codex_tool_status_cannot_be_backfilled_from_completion_kind()
         outcome=outcome,
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -413,6 +441,7 @@ def test_persisted_codex_tool_status_cannot_be_backfilled_from_completion_kind()
             outcome=outcome,
             events=(summary for summary in summaries),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -434,6 +463,7 @@ def test_persisted_same_frame_tool_request_cannot_drop_all_digest_and_offset_fie
         outcome=outcome,
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -460,6 +490,7 @@ def test_persisted_same_frame_tool_request_cannot_drop_all_digest_and_offset_fie
             outcome=outcome,
             events=(summary for summary in summaries),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -480,6 +511,7 @@ def test_native_events_without_prior_frame_or_ordinal_cannot_infer_missing_offse
             outcome=None,
             events=[second],
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.INCOMPLETE,
@@ -491,6 +523,7 @@ def test_native_events_without_prior_frame_or_ordinal_cannot_infer_missing_offse
             outcome=None,
             events=[replace(events[0], sequence=2)],
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.INCOMPLETE,
@@ -507,6 +540,7 @@ def test_persisted_stdout_offset_or_byte_count_cannot_forge_complete_coverage() 
         outcome=outcome,
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -523,6 +557,7 @@ def test_persisted_stdout_offset_or_byte_count_cannot_forge_complete_coverage() 
             outcome=outcome,
             events=(summary for summary in summaries),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -537,6 +572,7 @@ def test_persisted_stdout_offset_or_byte_count_cannot_forge_complete_coverage() 
             outcome=replace(outcome, raw_stdout_bytes=outcome.raw_stdout_bytes + 1),
             events=(summary for summary in first.evidence.events),
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -563,6 +599,7 @@ def test_persisted_frame_gap_can_be_retained_only_with_explicitly_incomplete_cov
         outcome=None,
         events=(event for event in (observed,)),
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.INCOMPLETE,
@@ -589,6 +626,7 @@ async def test_claude_process_and_tool_requests_map_without_ghcp_execution_event
         outcome=outcome,
         events=sink.events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.COMPLETED,
@@ -646,6 +684,7 @@ async def test_claude_without_init_retains_observed_session_id_but_no_complete_c
         outcome=outcome,
         events=sink.events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.INCOMPLETE,
@@ -674,6 +713,7 @@ async def test_nonzero_process_exit_with_actual_partial_gaps_cannot_build_comple
             outcome=outcome,
             events=sink.events,
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -687,6 +727,7 @@ async def test_nonzero_process_exit_with_actual_partial_gaps_cannot_build_comple
         outcome=outcome,
         events=sink.events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.ERROR,
@@ -709,6 +750,7 @@ def test_cancelled_report_without_outcome_keeps_actual_session_and_frame_digests
         outcome=None,
         events=events,
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.CANCELLED,
@@ -740,6 +782,7 @@ def test_prelaunch_failure_preserves_error_without_synthesizing_process_outcome(
         outcome=None,
         events=[actual_error],
         task_id="task-fixture",
+        task_version="benchmark-v1",
         run_id="run-fixture",
         turn_id="turn-fixture",
         status=NativeCliReportStatus.ERROR,
@@ -763,6 +806,7 @@ def test_missing_recorder_event_or_foreign_session_is_rejected_not_backfilled() 
             outcome=outcome,
             events=events[:-1],
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,
@@ -778,6 +822,7 @@ def test_missing_recorder_event_or_foreign_session_is_rejected_not_backfilled() 
             outcome=replace(outcome, source_session_id="fabricated"),
             events=events,
             task_id="task-fixture",
+            task_version="benchmark-v1",
             run_id="run-fixture",
             turn_id="turn-fixture",
             status=NativeCliReportStatus.COMPLETED,

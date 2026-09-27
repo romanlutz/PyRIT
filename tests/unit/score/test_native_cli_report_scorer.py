@@ -39,6 +39,7 @@ def _report(*, value: float = 0.75) -> NativeCliRunReport:
     return NativeCliRunReport(
         schema_version=1,
         task_id="OFFLINE-task",
+        task_version="benchmark-v1",
         run_id="OFFLINE-run",
         turn_id="OFFLINE-turn",
         turn_index=1,
@@ -129,6 +130,7 @@ def test_complete_report_produces_unpersisted_content_score_from_original_grader
     assert score.score_metadata["report_sha256"] == report.sha256()
     assert score.score_metadata["publication_state"] == "unpersisted_candidate"
     assert score.score_metadata["run_id"] == "OFFLINE-run"
+    assert score.score_metadata["task_version"] == "benchmark-v1"
     assert score.score_metadata["turn_id"] == "OFFLINE-turn"
     assert score.score_metadata["cli_protocol"] == "codex_exec_json"
     assert score.scorer_class_identifier is not None
@@ -211,3 +213,18 @@ def test_canonical_snapshot_and_identifier_are_stable_without_persisting() -> No
     assert first.scorer_class_identifier == second.scorer_class_identifier
     assert first.score_metadata["report_sha256"] == second.score_metadata["report_sha256"]
     assert first.score_metadata["report_sha256"] == hashlib.sha256(report.canonical_json().encode()).hexdigest()
+
+
+def test_score_identity_and_metadata_track_original_task_revision() -> None:
+    original = _report()
+    revised_payload = original.model_dump(mode="json")
+    revised_payload["task_version"] = "benchmark-v2"
+    revised = NativeCliRunReport.model_validate(revised_payload)
+    old_score = build_native_cli_report_score(report=original)
+    new_score = build_native_cli_report_score(report=revised)
+    assert old_score.get_value() == new_score.get_value() == 0.75
+    assert old_score.score_metadata["task_version"] == "benchmark-v1"
+    assert new_score.score_metadata["task_version"] == "benchmark-v2"
+    assert old_score.score_metadata["report_sha256"] != new_score.score_metadata["report_sha256"]
+    assert old_score.scorable != new_score.scorable
+    assert old_score.scorer_class_identifier != new_score.scorer_class_identifier
