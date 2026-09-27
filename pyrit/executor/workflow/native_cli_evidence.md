@@ -5,7 +5,8 @@
 process, the controller must create that episode with
 `required_raw_streams=NativeCliDatabaseEvidenceSink.required_raw_streams(protocol=...)`
 and any additional **task-required model gateway streams**, then call
-`start_async`. The recorder opens an outer turn and both process pipes before
+`start_async` with a controller-assigned `turn_id`. The recorder opens that
+outer turn and both process pipes before
 the target runs. It does not start a CLI, create a sandbox, hold credentials,
 grade, or finalize a report.
 
@@ -19,13 +20,30 @@ invented from a CLI tool start. Normalized event payloads have the memory
 layer's size limit; oversized observations fail capture instead of silently
 truncating a complete run.
 
+For a qualified model-only route, declare
+`required_raw_streams(protocol=..., include_model_gateway=True)`, construct
+the sink with `include_model_gateway=True`, and pass its
+`record_gateway_observation_async` as the gateway's host observation callback.
+Request bodies and original response/SSE frames go into separate required DB
+streams, correlated by actual gateway request ID; host-generated failures
+are marked as required gaps, never presented as provider bytes. The third
+optional error stream preserves the generated error frame. The fake ASGI
+test proves this callback contract, **not** that a real CLI reached the
+gateway. The caller must provision a run-isolated listener and model-only
+provider separately; Claude's Anthropic Messages route is not qualified here.
+
 `PromptNormalizer` persists the user MessagePiece only *after* the target
 returns (including its error path). The controller therefore calls
 `finish_async` after that boundary with IDs of already-persisted request and
 response pieces, plus the observed `NativeCliRunOutcome`. Missing pieces,
 incomplete process coverage, a recorder failure, unsealed pipes, missing raw
 bytes or quota omission remain required capture gaps. The controller must
-not claim an original grade from this recorder: a future CLI-specific DB
+not claim an original grade from this recorder. Once sealed,
+`read_report_events_async` pages DB-verified event rows into bounded,
+payload-free `NativeCliReportEvent` summaries for the pure CLI report
+adapter; neither raw frames nor model/tool text are copied into that report.
+Capture rejects more than 10,000 parser observations or cross-pipe chunks
+instead of allowing an unbounded in-memory projection. A future CLI-specific DB
 finalizer must compare the canonical CLI report to the persisted events,
 raw streams and any host-side model observations, then atomically publish
 or downgrade a single PyRIT Score. Existing GHCP-specific finalization

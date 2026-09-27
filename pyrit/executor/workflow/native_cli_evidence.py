@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 from typing import TYPE_CHECKING
 
+from pyrit.models.native_cli_report import NativeCliReportEvent
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
     NativeCyberEvidenceSource,
@@ -21,6 +22,7 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
 )
+from pyrit.prompt_target.gateway.responses_contract import GatewayCoverage, GatewayFrameKind, GatewayObservation
 from pyrit.prompt_target.native_cli_models import NativeCliEventKind, NativeCliProtocol, NativeCliStream
 
 if TYPE_CHECKING:
@@ -36,6 +38,9 @@ if TYPE_CHECKING:
 class NativeCliDatabaseEvidenceSink:
     """Record exact stdout/stderr and ordered CLI observations in an existing DB episode."""
 
+    MAX_OBSERVATIONS = 10_000
+    MAX_RAW_CHUNKS = 10_000
+
     _TOOL_PHASES = {
         NativeCliEventKind.TOOL_REQUESTED: NativeCyberToolPhase.REQUEST,
         NativeCliEventKind.TOOL_STARTED: NativeCyberToolPhase.START,
@@ -48,8 +53,10 @@ class NativeCliDatabaseEvidenceSink:
         *,
         store: NativeCyberEvidenceStore,
         run_id: str,
+        turn_id: str,
         turn_index: int,
         protocol: NativeCliProtocol,
+        include_model_gateway: bool = False,
     ) -> None:
         """
         Bind a sink to one caller-created episode and one outer turn.
@@ -57,19 +64,42 @@ class NativeCliDatabaseEvidenceSink:
         Raises:
             ValueError: If the protocol, run ID or outer-turn index is invalid.
         """
-        if not isinstance(protocol, NativeCliProtocol):
-            raise ValueError("A documented native coding CLI protocol is required.")
-        if not isinstance(run_id, str) or not 0 < len(run_id) <= 128 or type(turn_index) is not int or turn_index < 1:
-            raise ValueError("Native CLI capture needs an existing run and positive turn index.")
+        if not isinstance(protocol, NativeCliProtocol) or type(include_model_gateway) is not bool:
+            raise ValueError("A documented CLI protocol and explicit model-gateway selection are required.")
+        if (
+            not isinstance(run_id, str)
+            or not 0 < len(run_id) <= 128
+            or not isinstance(turn_id, str)
+            or not 0 < len(turn_id) <= 128
+            or type(turn_index) is not int
+            or turn_index < 1
+        ):
+            raise ValueError("Native CLI capture needs existing run/turn identities and a positive turn index.")
         self._store = store
         self._run_id = run_id
+        self._turn_id = turn_id
         self._turn_index = turn_index
         self._streams = {
             stream: NativeCyberRawStreamStart(run_id=run_id, turn_index=turn_index, key=key)
-            for stream, key in zip(NativeCliStream, self.required_raw_streams(protocol=protocol), strict=True)
+            for stream, key in zip(
+                NativeCliStream, self.required_raw_streams(protocol=protocol)[: len(NativeCliStream)], strict=True
+            )
         }
+        self._include_model_gateway = include_model_gateway
+        self._gateway_streams = (
+            {
+                name: NativeCyberRawStreamStart(run_id=run_id, turn_index=turn_index, key=key)
+                for name, key in self._gateway_keys(protocol=protocol).items()
+            }
+            if include_model_gateway
+            else {}
+        )
         self._received = dict.fromkeys(NativeCliStream, 0)
         self._hashes = {stream: hashlib.sha256() for stream in NativeCliStream}
+        self._gateway_received = dict.fromkeys(self._gateway_streams, 0)
+        self._gateway_hashes = {name: hashlib.sha256() for name in self._gateway_streams}
+        self._gateway_requests: dict[str, bool] = {}
+        self._gateway_failed = False
         self._raw_chunk_sequence = 0
         self._parser_event_sequence = 0
         self._controller_sequence = 0
@@ -88,8 +118,15 @@ class NativeCliDatabaseEvidenceSink:
         """The existing episode receiving this CLI evidence."""
         return self._run_id
 
+    @property
+    def turn_id(self) -> str:
+        """The controller-assigned outer turn, never a provider event ID."""
+        return self._turn_id
+
     @staticmethod
-    def required_raw_streams(*, protocol: NativeCliProtocol) -> tuple[NativeCyberRawStreamKey, ...]:
+    def required_raw_streams(
+        *, protocol: NativeCliProtocol, include_model_gateway: bool = False
+    ) -> tuple[NativeCyberRawStreamKey, ...]:
         """
         Declare both CLI pipes in the episode manifest before the process starts.
 
@@ -99,9 +136,9 @@ class NativeCliDatabaseEvidenceSink:
         Raises:
             ValueError: If the CLI protocol is not supported.
         """
-        if not isinstance(protocol, NativeCliProtocol):
-            raise ValueError("A documented native coding CLI protocol is required.")
-        return tuple(
+        if not isinstance(protocol, NativeCliProtocol) or type(include_model_gateway) is not bool:
+            raise ValueError("A documented CLI protocol and explicit model-gateway selection are required.")
+        pipes = tuple(
             NativeCyberRawStreamKey(
                 source=NativeCyberEvidenceSource.HARNESS,
                 kind=NativeCyberRawKind.STDOUT if stream is NativeCliStream.STDOUT else NativeCyberRawKind.STDERR,
@@ -109,6 +146,30 @@ class NativeCliDatabaseEvidenceSink:
             )
             for stream in NativeCliStream
         )
+        if not include_model_gateway:
+            return pipes
+        gateway = NativeCliDatabaseEvidenceSink._gateway_keys(protocol=protocol)
+        return (*pipes, gateway["request"], gateway["response"])
+
+    @staticmethod
+    def _gateway_keys(*, protocol: NativeCliProtocol) -> dict[str, NativeCyberRawStreamKey]:
+        return {
+            "request": NativeCyberRawStreamKey(
+                source=NativeCyberEvidenceSource.MODEL,
+                kind=NativeCyberRawKind.MODEL,
+                observed_source_id=f"{protocol.value}.gateway.requests",
+            ),
+            "response": NativeCyberRawStreamKey(
+                source=NativeCyberEvidenceSource.MODEL,
+                kind=NativeCyberRawKind.MODEL,
+                observed_source_id=f"{protocol.value}.gateway.responses",
+            ),
+            "error": NativeCyberRawStreamKey(
+                source=NativeCyberEvidenceSource.HARNESS,
+                kind=NativeCyberRawKind.MODEL,
+                observed_source_id=f"{protocol.value}.gateway.errors",
+            ),
+        }
 
     async def start_async(
         self, *, started_at: datetime, response_mode: NativeCyberResponseMode = NativeCyberResponseMode.MESSAGE_REQUIRED
@@ -130,12 +191,95 @@ class NativeCliDatabaseEvidenceSink:
                     turn=NativeCyberTurnStart(
                         run_id=self._run_id,
                         turn_index=self._turn_index,
+                        source_turn_id=self._turn_id,
                         started_at=started_at,
                         response_mode=response_mode,
                     ),
                 )
                 for stream in NativeCliStream:
                     await asyncio.to_thread(self._store.open_raw_stream, stream=self._streams[stream])
+                for stream in self._gateway_streams.values():
+                    await asyncio.to_thread(self._store.open_raw_stream, stream=stream)
+            except (Exception, asyncio.CancelledError):
+                self._failed = True
+                raise
+
+    async def record_gateway_observation_async(self, observation: GatewayObservation) -> None:
+        """
+        Retain genuine model wire bytes and their host-generated failure boundaries.
+
+        Raises:
+            ValueError: If the frame has no matching run, request, or supported source kind.
+            asyncio.CancelledError: If model capture is interrupted.
+        """
+        async with self._lock:
+            self._require_capture()
+            try:
+                if (
+                    not self._include_model_gateway
+                    or not isinstance(observation, GatewayObservation)
+                    or observation.run_id != self._run_id
+                    or not isinstance(observation.request_id, str)
+                    or not 0 < len(observation.request_id) <= 128
+                    or not isinstance(observation.kind, GatewayFrameKind)
+                    or not isinstance(observation.frame, bytes)
+                    or not observation.frame
+                    or not isinstance(observation.coverage, frozenset)
+                    or not all(isinstance(flag, GatewayCoverage) for flag in observation.coverage)
+                ):
+                    raise ValueError("Native CLI model gateway observation has an unapproved source or frame.")
+                kind = observation.kind
+                request_id = observation.request_id
+                if kind is GatewayFrameKind.REQUEST:
+                    if request_id in self._gateway_requests:
+                        raise ValueError("A model gateway request identity was repeated.")
+                    self._gateway_requests[request_id] = False
+                elif request_id not in self._gateway_requests or self._gateway_requests[request_id]:
+                    raise ValueError("Model gateway output has no open observed model request.")
+                name = (
+                    "request"
+                    if kind is GatewayFrameKind.REQUEST
+                    else "error"
+                    if kind is GatewayFrameKind.GATEWAY_ERROR
+                    else "response"
+                )
+                raw_stream = self._gateway_streams[name]
+                offset = self._gateway_received[name]
+                for start in range(0, len(observation.frame), self._store.MAX_APPEND_BYTES):
+                    data = observation.frame[start : start + self._store.MAX_APPEND_BYTES]
+                    await asyncio.to_thread(
+                        self._store.append_raw, run_id=self._run_id, stream_id=raw_stream.stream_id, data=data
+                    )
+                    self._gateway_hashes[name].update(data)
+                    self._gateway_received[name] += len(data)
+                await self._append_event_async(
+                    source=NativeCyberEvidenceSource.HARNESS
+                    if kind is GatewayFrameKind.GATEWAY_ERROR
+                    else NativeCyberEvidenceSource.MODEL,
+                    event_type=f"gateway.{kind.value}",
+                    payload={
+                        "gateway_request_id": request_id,
+                        "frame_sha256": hashlib.sha256(observation.frame).hexdigest(),
+                        "frame_size_bytes": len(observation.frame),
+                        "coverage": sorted(flag.value for flag in observation.coverage),
+                        "error_code": observation.error_code,
+                        "status_code": observation.status_code,
+                    },
+                    observed_stream_id=str(raw_stream.stream_id),
+                    stream_offset=offset,
+                )
+                if kind is GatewayFrameKind.GATEWAY_ERROR:
+                    self._gateway_failed = True
+                    await asyncio.to_thread(
+                        self._store.mark_capture_gap,
+                        run_id=self._run_id,
+                        reason="Model gateway produced a host-generated failure.",
+                    )
+                elif kind is GatewayFrameKind.RESPONSE or (
+                    kind is GatewayFrameKind.RESPONSE_EVENT
+                    and observation.frame.replace(b"\r\n", b"\n") == b"data: [DONE]\n\n"
+                ):
+                    self._gateway_requests[request_id] = True
             except (Exception, asyncio.CancelledError):
                 self._failed = True
                 raise
@@ -157,6 +301,8 @@ class NativeCliDatabaseEvidenceSink:
                     raise TypeError("Native CLI raw chunks require a real pipe and bytes.")
                 if chunk.sequence != self._raw_chunk_sequence + 1:
                     raise ValueError("Native CLI raw chunk sequence must be consecutive across both pipes.")
+                if chunk.sequence > self.MAX_RAW_CHUNKS:
+                    raise ValueError("Native CLI cross-pipe raw chunk limit exceeded.")
                 raw_stream = self._streams[stream]
                 offset = self._received[stream]
                 for start in range(0, len(chunk.data), self._store.MAX_APPEND_BYTES):
@@ -196,6 +342,8 @@ class NativeCliDatabaseEvidenceSink:
             try:
                 if event.sequence != self._parser_event_sequence + 1:
                     raise ValueError("Native CLI parser event sequence must be consecutive.")
+                if event.sequence > self.MAX_OBSERVATIONS:
+                    raise ValueError("Native CLI parser observation limit exceeded.")
                 observation = event.observation
                 frame_offset = self._frame_offset(event=event)
                 source = (
@@ -243,6 +391,81 @@ class NativeCliDatabaseEvidenceSink:
                 self._failed = True
                 raise
 
+    async def read_report_events_async(self) -> tuple[NativeCliReportEvent, ...]:
+        """
+        Read verified stored observation summaries without reloading raw process frames.
+
+        Returns:
+            tuple[NativeCliReportEvent, ...]: Source-ordered metadata for the CLI report adapter.
+
+        Raises:
+            ValueError: If stored event order, source or digest metadata was modified.
+            RuntimeError: If the turn has not been sealed or a page of DB events is missing.
+        """
+        async with self._lock:
+            if not self._finished:
+                raise RuntimeError("CLI observations are not available before the turn is sealed.")
+            cursor = 0
+            summaries: list[NativeCliReportEvent] = []
+            stdout_id = str(self._streams[NativeCliStream.STDOUT].stream_id)
+            while cursor < self._controller_sequence:
+                page = await asyncio.to_thread(
+                    self._store.read_event_payloads,
+                    run_id=self._run_id,
+                    allow_sensitive=True,
+                    after_sequence=cursor,
+                    limit=self._store.MAX_EVENT_BATCH,
+                )
+                if not page:
+                    raise RuntimeError("A persisted native CLI event page is missing.")
+                for captured in page:
+                    event = captured.event
+                    if event.sequence != cursor + 1:
+                        raise ValueError("Persisted native CLI controller events are not consecutive.")
+                    cursor = event.sequence
+                    if event.event_type == "native_cli.raw_chunk":
+                        continue
+                    if event.event_type.startswith("gateway."):
+                        continue
+                    if not event.event_type.startswith("native_cli."):
+                        raise ValueError("Foreign events cannot be projected into a native CLI report.")
+                    payload = event.payload
+                    if (
+                        type(payload.get("parser_sequence")) is not int
+                        or payload["parser_sequence"] != len(summaries) + 1
+                    ):
+                        raise ValueError("Persisted native CLI parser event ordinals are not consecutive.")
+                    has_frame = payload.get("frame_number") is not None
+                    if (has_frame and (event.observed_stream_id != stdout_id or event.stream_offset is None)) or (
+                        not has_frame and (event.observed_stream_id is not None or event.stream_offset is not None)
+                    ):
+                        raise ValueError("CLI frame metadata does not refer to its recorded stdout stream.")
+                    summaries.append(
+                        NativeCliReportEvent.model_validate(
+                            {
+                                "sequence": len(summaries) + 1,
+                                "frame_number": payload.get("frame_number"),
+                                "kind": event.event_type.removeprefix("native_cli."),
+                                "status": payload["status"],
+                                "source_event_id": event.source_event_id,
+                                "source_message_id": payload.get("source_message_id"),
+                                "source_session_id": event.source_session_id,
+                                "source_tool_id": event.tool_call_id,
+                                "parent_tool_use_id": payload.get("parent_tool_use_id"),
+                                "source_status": payload.get("source_status"),
+                                "name": payload.get("name"),
+                                "exit_code": payload.get("exit_code"),
+                                "detail": payload.get("detail"),
+                                "raw_frame_sha256": payload.get("raw_frame_sha256"),
+                                "raw_frame_size_bytes": payload.get("raw_frame_size_bytes"),
+                                "stdout_offset_bytes": event.stream_offset,
+                            }
+                        )
+                    )
+            if len(summaries) != self._parser_event_sequence:
+                raise ValueError("Persisted native CLI observations differ from the recorder's count.")
+            return tuple(summaries)
+
     async def finish_async(
         self,
         *,
@@ -278,17 +501,27 @@ class NativeCliDatabaseEvidenceSink:
                 gaps.extend(outcome.gaps)
             if self._failed:
                 gaps.append("Native CLI evidence recording failed.")
+            if self._include_model_gateway and (
+                not self._gateway_requests or not all(self._gateway_requests.values()) or self._gateway_failed
+            ):
+                gaps.append("Model gateway request/response coverage is incomplete.")
             source_complete = bool(outcome and outcome.coverage_complete and not gaps)
             try:
-                for stream in NativeCliStream:
-                    raw_stream = self._streams[stream]
+                sources = (
+                    (self._streams[stream], self._received[stream], self._hashes[stream]) for stream in NativeCliStream
+                )
+                gateway_sources = (
+                    (raw_stream, self._gateway_received[name], self._gateway_hashes[name])
+                    for name, raw_stream in self._gateway_streams.items()
+                )
+                for raw_stream, count, digest in (*sources, *gateway_sources):
                     await asyncio.to_thread(
                         self._store.close_raw_stream,
                         run_id=self._run_id,
                         stream_id=raw_stream.stream_id,
                         source_complete=source_complete,
-                        expected_bytes=self._received[stream],
-                        observed_sha256=self._hashes[stream].hexdigest(),
+                        expected_bytes=count,
+                        observed_sha256=digest.hexdigest(),
                     )
                 await asyncio.to_thread(
                     self._store.finish_turn,
