@@ -155,22 +155,27 @@ def _prepare_case(
     raw_byte_limit: int = 268_435_456,
     require_stream: bool = True,
     require_separate_tool_results: bool = False,
+    defer_piece_persistence: bool = False,
 ) -> _Case:
     started_at = datetime.now(UTC)
     report = _report(run_id=str(uuid4()), started_at=started_at)
-    request = MessagePiece(
-        role="user",
-        original_value="synthetic instruction",
-        conversation_id=report.conversation_id,
-        sequence=0,
-    )
-    response = MessagePiece(
-        role="assistant",
-        original_value="synthetic model answer",
-        conversation_id=report.conversation_id,
-        sequence=1,
-    )
-    memory.add_message_pieces_to_memory(message_pieces=[request, response])
+    if defer_piece_persistence:
+        request_id, response_id = uuid4(), uuid4()
+    else:
+        request = MessagePiece(
+            role="user",
+            original_value="synthetic instruction",
+            conversation_id=report.conversation_id,
+            sequence=0,
+        )
+        response = MessagePiece(
+            role="assistant",
+            original_value="synthetic model answer",
+            conversation_id=report.conversation_id,
+            sequence=1,
+        )
+        memory.add_message_pieces_to_memory(message_pieces=[request, response])
+        request_id, response_id = request.id, response.id
     required_stream = NativeCyberRawStreamKey(
         source=NativeCyberEvidenceSource.HARNESS,
         kind=NativeCyberRawKind.JSONL,
@@ -196,7 +201,7 @@ def _prepare_case(
             run_id=report.run_id,
             turn_index=1,
             started_at=started_at,
-            request_piece_ids=(request.id,),
+            request_piece_ids=() if defer_piece_persistence else (request_id,),
         )
     )
     return _Case(
@@ -204,8 +209,8 @@ def _prepare_case(
         store=store,
         report=report,
         required_stream=required_stream,
-        request_piece_id=request.id,
-        response_piece_id=response.id,
+        request_piece_id=request_id,
+        response_piece_id=response_id,
     )
 
 
@@ -471,6 +476,200 @@ class TestNativeCyberEvidence:
         with pytest.raises(ValueError, match="without an acquired original judgment"):
             case.store.assess_pregrading_coverage(report=case.report, expected_turns=1)
         assert case.store.assess_required_coverage(report=case.report, expected_turns=1).required_complete
+
+    def test_raw_capture_precedes_deferred_real_request_persistence(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance, defer_piece_persistence=True)
+        assert sqlite_instance.get_message_pieces(conversation_id=case.report.conversation_id) == []
+        raw = b'{"type":"session.idle"}\n'
+        stream_id = _close_stream(case=case, key=case.required_stream, data=raw, turn_index=1)
+        _append_events(case=case)
+        assert sqlite_instance.get_message_pieces(conversation_id=case.report.conversation_id) == []
+
+        request = MessagePiece(
+            id=case.request_piece_id,
+            role="user",
+            original_value=case.report.request.instruction,
+            conversation_id=case.report.conversation_id,
+            sequence=0,
+        )
+        response = MessagePiece(
+            id=case.response_piece_id,
+            role="assistant",
+            original_value="synthetic model answer",
+            conversation_id=case.report.conversation_id,
+            sequence=1,
+        )
+        sqlite_instance.add_message_pieces_to_memory(message_pieces=[request, response])
+        case.store.finish_turn(
+            finish=NativeCyberTurnFinish(
+                run_id=case.report.run_id,
+                turn_index=1,
+                finished_at=case.report.ended_at,
+                request_piece_ids=(request.id,),
+                response_piece_ids=(response.id,),
+                observed_event_count=4,
+                source_complete=True,
+            )
+        )
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert pregrading.required_complete
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+
+        assert snapshot.score_status is ScoreStatus.COMPLETE
+        assert snapshot.turns[0].request_piece_ids == (case.request_piece_id,)
+        assert snapshot.turns[0].response_piece_ids == (case.response_piece_id,)
+        assert (
+            b"".join(
+                chunk.data
+                for chunk in case.store.read_raw_chunks(
+                    run_id=case.report.run_id,
+                    stream_id=stream_id,
+                    allow_sensitive=True,
+                )
+            )
+            == raw
+        )
+
+    def test_deferred_turn_without_persisted_request_cannot_claim_completion(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance, defer_piece_persistence=True)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        response = MessagePiece(
+            id=case.response_piece_id,
+            role="assistant",
+            original_value="synthetic model answer",
+            conversation_id=case.report.conversation_id,
+            sequence=1,
+        )
+        sqlite_instance.add_message_pieces_to_memory(message_pieces=[response])
+        case.store.finish_turn(
+            finish=NativeCyberTurnFinish(
+                run_id=case.report.run_id,
+                turn_index=1,
+                finished_at=case.report.ended_at,
+                response_piece_ids=(response.id,),
+                observed_event_count=4,
+                source_complete=True,
+            )
+        )
+
+        pregrading = case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        )
+        assert not pregrading.required_complete
+        assert any("stored request" in gap for gap in pregrading.required_gaps)
+        snapshot = case.store.finalize_episode_atomic(
+            report=case.report,
+            score=_unpersisted_score(report=case.report),
+            expected_turns=1,
+        )
+        assert snapshot.score_status is ScoreStatus.UNDETERMINED
+        assert snapshot.turns[0].request_piece_ids == ()
+
+    def test_deferred_request_rejects_a_second_begin_link(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        with pytest.raises(ValueError, match="already linked at begin_turn"):
+            case.store.finish_turn(
+                finish=NativeCyberTurnFinish(
+                    run_id=case.report.run_id,
+                    turn_index=1,
+                    finished_at=case.report.ended_at,
+                    request_piece_ids=(case.request_piece_id,),
+                    response_piece_ids=(case.response_piece_id,),
+                    observed_event_count=4,
+                    source_complete=True,
+                )
+            )
+        pending = case.store.get_episode(run_id=case.report.run_id).turns[0]
+        assert pending.request_piece_ids == (case.request_piece_id,)
+        assert pending.response_piece_ids == ()
+        assert pending.finished_at is None
+
+        _finish_turn(case=case)
+        assert case.store.assess_pregrading_coverage(
+            report=_pregrading_report(report=case.report),
+            expected_turns=1,
+        ).required_complete
+
+    @pytest.mark.parametrize(
+        ("invalid_case", "error_text"),
+        [
+            ("missing", "absent"),
+            ("wrong_role", "wrong role"),
+            ("foreign", "one persisted conversation"),
+            ("duplicate", "cannot reference a MessagePiece twice"),
+        ],
+    )
+    def test_deferred_request_rejects_missing_foreign_or_malformed_piece(
+        self,
+        *,
+        sqlite_instance: MemoryInterface,
+        invalid_case: str,
+        error_text: str,
+    ) -> None:
+        case = _prepare_case(memory=sqlite_instance, defer_piece_persistence=True)
+        _append_events(case=case)
+        _close_stream(case=case, key=case.required_stream, data=b"", turn_index=1)
+        response = MessagePiece(
+            id=case.response_piece_id,
+            role="assistant",
+            original_value="synthetic model answer",
+            conversation_id=case.report.conversation_id,
+            sequence=1,
+        )
+        pieces = [response]
+        request_ids: tuple[UUID, ...] = (uuid4(),)
+        if invalid_case != "missing":
+            suspect = MessagePiece(
+                id=case.request_piece_id,
+                role="assistant" if invalid_case == "wrong_role" else "user",
+                original_value="synthetic incorrect request",
+                conversation_id="foreign-conversation" if invalid_case == "foreign" else case.report.conversation_id,
+                sequence=0,
+            )
+            pieces.append(suspect)
+            request_ids = (suspect.id, suspect.id) if invalid_case == "duplicate" else (suspect.id,)
+        sqlite_instance.add_message_pieces_to_memory(message_pieces=pieces)
+
+        with pytest.raises(ValueError, match=error_text):
+            case.store.finish_turn(
+                finish=NativeCyberTurnFinish(
+                    run_id=case.report.run_id,
+                    turn_index=1,
+                    finished_at=case.report.ended_at,
+                    request_piece_ids=request_ids,
+                    response_piece_ids=(response.id,),
+                    observed_event_count=4,
+                    source_complete=True,
+                )
+            )
+
+        pending = case.store.get_episode(run_id=case.report.run_id).turns[0]
+        assert pending.finished_at is None
+        assert pending.request_piece_ids == ()
+        assert pending.response_piece_ids == ()
 
     def test_artifact_only_turn_with_no_assistant_message_can_complete(
         self,
