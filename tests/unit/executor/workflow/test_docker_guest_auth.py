@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import tomllib
 from dataclasses import asdict, replace
@@ -15,7 +16,11 @@ from pydantic import SecretStr
 
 from pyrit.executor.workflow.docker_agent import DockerSandboxLauncher, DockerStopOnlyAgentLease
 from pyrit.executor.workflow.docker_engine import DockerEngineError
-from pyrit.executor.workflow.docker_guest_auth import DockerGuestAuth, codex_gateway_config
+from pyrit.executor.workflow.docker_guest_auth import (
+    DockerGuestAuth,
+    codex_gateway_config,
+    codex_gateway_template_sha256,
+)
 from pyrit.models import Message
 from pyrit.models.native_cyber_evidence import NativeCyberEvidenceSource
 from pyrit.prompt_normalizer import PromptNormalizer
@@ -24,10 +29,11 @@ from pyrit.prompt_target.gateway.claude_messages import create_claude_messages_a
 from pyrit.prompt_target.gateway.codex_responses import create_codex_responses_app
 from pyrit.prompt_target.gateway.httpx_messages_backend import HttpxMessagesBackend
 from pyrit.prompt_target.gateway.httpx_responses_backend import HttpxResponsesBackend
-from pyrit.prompt_target.gateway.messages_contract import MessagesCapabilities
+from pyrit.prompt_target.gateway.messages_contract import MessagesCapabilities, MessagesResponse
 from pyrit.prompt_target.gateway.responses_contract import BackendCapabilities, GatewayLimits, GatewayRoute
 from pyrit.prompt_target.native_cli_models import NativeCliProtocol
-from tests.unit.executor.workflow.test_docker_agent import config, make_agent
+from pyrit.prompt_target.native_cli_transport import NativeCliRunner
+from tests.unit.executor.workflow.test_docker_agent import Recorder, config, make_agent
 from tests.unit.executor.workflow.test_docker_engine import CONTAINER_ID, FakeEngine, wire_frame
 from tests.unit.executor.workflow.test_native_cli_evidence import _start_sink_async
 from tests.unit.prompt_target.gateway.messages_mocks import FakeMessagesBackend, request_body
@@ -53,7 +59,7 @@ async def test_exec_receives_only_protocol_guest_token_and_run_env_without_retai
     protocol: NativeCliProtocol,
 ) -> None:
     route = guest_route(protocol=protocol)
-    auth = DockerGuestAuth.from_route(route=route, protocol=protocol)
+    auth = DockerGuestAuth.from_route(route=route, protocol=protocol, gateway_endpoint="http://gateway.sandbox/v1")
     fake = FakeEngine()
     engine = fake.client()
     handle = await engine.create_exec_async(
@@ -66,7 +72,12 @@ async def test_exec_receives_only_protocol_guest_token_and_run_env_without_retai
     expected = (
         [f"PYRIT_GUEST_MODEL_TOKEN={route.guest_token}", f"PYRIT_RUN_ID={route.run_id}"]
         if protocol is NativeCliProtocol.CODEX_EXEC_JSON
-        else [f"ANTHROPIC_AUTH_TOKEN={route.guest_token}", f"ANTHROPIC_CUSTOM_HEADERS=X-PyRIT-Run-ID: {route.run_id}"]
+        else [
+            f"ANTHROPIC_AUTH_TOKEN={route.guest_token}",
+            f"ANTHROPIC_CUSTOM_HEADERS=X-PyRIT-Run-ID: {route.run_id}",
+            "ANTHROPIC_BASE_URL=http://gateway.sandbox/v1",
+            f"ANTHROPIC_MODEL={route.model}",
+        ]
     )
     assert fake.created["Env"] == expected
     assert route.guest_token not in repr(auth) and route.guest_token not in repr(asdict(auth))
@@ -81,7 +92,13 @@ async def test_exec_receives_only_protocol_guest_token_and_run_env_without_retai
 @pytest.mark.parametrize("token", ["", "short", "a" * 32 + "\r\nInjected: header", "a" * 257])
 def test_invalid_guest_token_fails_without_including_it_in_errors(token: str) -> None:
     with pytest.raises(ValueError) as error:
-        DockerGuestAuth(run_id="run", model="model", protocol=NativeCliProtocol.CODEX_EXEC_JSON, token=SecretStr(token))
+        DockerGuestAuth(
+            run_id="run",
+            model="model",
+            protocol=NativeCliProtocol.CODEX_EXEC_JSON,
+            gateway_endpoint="http://gateway.sandbox/v1",
+            token=SecretStr(token),
+        )
     if token:
         assert token not in str(error.value)
 
@@ -93,6 +110,7 @@ def test_guest_run_header_cannot_be_missing_or_injected(run_id: str) -> None:
             run_id=run_id,
             model="model",
             protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE,
+            gateway_endpoint="http://gateway.sandbox",
             token=SecretStr("a" * 40),
         )
 
@@ -112,7 +130,7 @@ def test_codex_user_config_uses_only_dedicated_guest_env_auth() -> None:
     assert "OPENAI_API_KEY" not in document and "Authorization" not in document
 
 
-@pytest.mark.parametrize("mismatch", ["run", "protocol", "missing"])
+@pytest.mark.parametrize("mismatch", ["run", "protocol", "url", "missing"])
 async def test_guest_credentials_cannot_be_attached_to_another_run_or_profile_async(mismatch: str) -> None:
     lease, command, fake, engine, _ = make_agent()
     auth = lease._guest_auth
@@ -120,6 +138,8 @@ async def test_guest_credentials_cannot_be_attached_to_another_run_or_profile_as
         auth = replace(auth, run_id="another-run")
     elif mismatch == "protocol":
         auth = replace(auth, protocol=NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE)
+    elif mismatch == "url":
+        auth = replace(auth, gateway_endpoint="http://different.sandbox/v1")
     else:
         auth = None
     with pytest.raises(ValueError, match="exact run"):
@@ -164,14 +184,14 @@ async def test_unqualified_codex_user_config_blocks_before_exec_async(missing: s
             assert image_change is not None
             image_change(image)
             if missing == "image-pin":
-                image["Config"]["Labels"].pop("org.pyrit.native.codex-user-config-sha256")
+                image["Config"]["Labels"].pop("org.pyrit.native.codex-config-template-sha256")
 
         def mutate_container(runner: Any) -> None:
             assert populate is not None
             populate(runner)
             for container in runner.containers.values():
                 if missing == "container-pin":
-                    container["Config"]["Labels"].pop("org.pyrit.native.codex-user-config-sha256")
+                    container["Config"]["Labels"].pop("org.pyrit.native.codex-config-template-sha256")
                 if missing == "path":
                     container["Config"]["Labels"]["org.pyrit.native.codex-user-config-path"] = (
                         "/workspace/.codex/config.toml"
@@ -319,3 +339,195 @@ async def test_primary_credential_inequality_stays_at_host_backend_boundary_asyn
                     capabilities=MessagesCapabilities(),
                 )
     assert "host" not in " ".join(DockerGuestAuth.__dataclass_fields__)
+
+
+@pytest.mark.parametrize("protocol", list(NativeCliProtocol))
+async def test_same_prebuilt_image_serves_two_fresh_run_urls_models_and_tokens_async(
+    protocol: NativeCliProtocol,
+) -> None:
+    urls = ["http://172.28.0.1:31001", "http://172.29.0.1:31002"]
+    routes = [
+        GatewayRoute(run_id=f"run-{index}", model=f"model-{index}", guest_token=f"guest-{index}-" + str(index) * 40)
+        for index in (1, 2)
+    ]
+    apps = []
+    backends = []
+    for route in routes:
+        if protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+            response = {
+                "id": "response-" + route.run_id,
+                "object": "response",
+                "model": route.model,
+                "status": "completed",
+                "output": [
+                    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "inert"}]}
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+            backend = FakeModelOnlyBackend(responses=[json.dumps(response).encode()])
+            app = create_codex_responses_app(route=route, limits=GatewayLimits(), backend=backend)
+        else:
+            response = {
+                "id": "message-" + route.run_id,
+                "type": "message",
+                "role": "assistant",
+                "model": route.model,
+                "content": [{"type": "text", "text": "inert"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+            backend = FakeMessagesBackend(
+                responses=[
+                    MessagesResponse(
+                        status_code=200,
+                        body=json.dumps(response).encode(),
+                        headers=(("content-type", "application/json"),),
+                    )
+                ]
+            )
+            app = create_claude_messages_app(route=route, limits=GatewayLimits(), backend=backend)
+        apps.append(app)
+        backends.append(backend)
+    transports = {url: httpx.ASGITransport(app=app) for url, app in zip(urls, apps, strict=True)}
+
+    async def dispatch_async(request: httpx.Request) -> httpx.Response:
+        origin = f"{request.url.scheme}://{request.url.host}:{request.url.port}"
+        assert origin in transports
+        return await transports[origin].handle_async_request(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(dispatch_async)) as guest_client:
+
+        async def execute_async(index: int) -> dict[str, Any]:
+            route = routes[index]
+            endpoint = urls[index] + ("/v1" if protocol is NativeCliProtocol.CODEX_EXEC_JSON else "")
+            approved = replace(config(protocol=protocol), model_gateway_endpoint=endpoint)
+            lease, command, fake, engine, _ = make_agent(run_config=approved, route=route)
+            populate = command.mutate_up
+
+            def unique_resources(runner: Any) -> None:
+                assert populate is not None
+                populate(runner)
+                containers = list(runner.containers.values())
+                runner.containers.clear()
+                network = next(iter(runner.networks.values()))
+                runner.networks.clear()
+                network["Id"] = f"{index + 10:064x}"
+                network["Containers"] = {}
+                for ordinal, container in enumerate(containers, 1):
+                    container["Id"] = f"{(index + 1) * 100 + ordinal:064x}"
+                    runner.containers[container["Id"]] = container
+                    next(iter(container["NetworkSettings"]["Networks"].values()))["NetworkID"] = network["Id"]
+                    network["Containers"][container["Id"]] = {"Name": container["Name"]}
+                runner.networks[network["Id"]] = network
+
+            command.mutate_up = unique_resources
+            observed: dict[str, Any] = {}
+            if protocol is NativeCliProtocol.CLAUDE_PRINT_STREAM_JSON_VERBOSE:
+                fake.wire = (wire_frame(1, _claude(assistant_text="inert", result_text="inert")),)
+
+            async def request_from_profile_async() -> None:
+                env = dict(item.split("=", 1) for item in fake.created["Env"])
+                if protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+                    staged = tomllib.loads(lease.staged_codex_config.content.decode())
+                    provider = staged["model_providers"][staged["model_provider"]]
+                    request_url = provider["base_url"] + "/responses"
+                    headers = {"Authorization": "Bearer " + env[provider["env_key"]]}
+                    headers.update({name: env[key] for name, key in provider["env_http_headers"].items()})
+                    body = {"model": staged["model"], "input": "inert", "store": False}
+                else:
+                    request_url = env["ANTHROPIC_BASE_URL"] + "/v1/messages"
+                    name, value = env["ANTHROPIC_CUSTOM_HEADERS"].split(": ", 1)
+                    headers = {
+                        "Authorization": "Bearer " + env["ANTHROPIC_AUTH_TOKEN"],
+                        name: value,
+                        "anthropic-version": "2023-06-01",
+                    }
+                    body = {
+                        "model": env["ANTHROPIC_MODEL"],
+                        "max_tokens": 16,
+                        "messages": [{"role": "user", "content": "inert"}],
+                    }
+                reply = await guest_client.post(request_url, json=body, headers=headers)
+                assert reply.status_code == 200
+                foreign_url = request_url.replace(urls[index], urls[1 - index])
+                rejected = await guest_client.post(foreign_url, json=body, headers=headers)
+                assert rejected.status_code == 401
+                rejected_model = await guest_client.post(
+                    request_url, json={**body, "model": "wrong-model"}, headers=headers
+                )
+                assert rejected_model.status_code == 400
+                observed.update(url=request_url, body=body, headers=headers, env=env)
+
+            fake.on_start = request_from_profile_async
+            allocation = await lease.acquire_async()
+            image = lease._images["agent"]
+            outcome = await NativeCliRunner(launcher=DockerSandboxLauncher(lease=lease), sink=Recorder()).run_async(
+                config=approved, prompt="inert task"
+            )
+            assert outcome.exit_code == 0 and outcome.coverage_complete and lease.agent_stop.stopped
+            assert route.run_id == observed["headers"]["X-PyRIT-Run-ID"]
+            assert observed["body"]["model"] == route.model
+            assert endpoint in observed["url"]
+            serialized_image = json.dumps(image)
+            assert (
+                endpoint not in serialized_image
+                and route.model not in serialized_image
+                and route.guest_token not in serialized_image
+            )
+            assert image["Config"]["Env"] == ["PATH=/usr/bin", "HOME=/tmp/home", "TMPDIR=/tmp"]
+            assert all("environment" not in service for service in command.documents[0]["services"].values())
+            assert route.guest_token not in json.dumps(command.documents)
+            result = {
+                "image": image,
+                "digest": lease._agent.image,
+                "allocation": allocation,
+                "config_sha": lease.staged_codex_config.sha256 if lease.staged_codex_config else None,
+                "request_url": observed["url"],
+            }
+            await lease.close_async()
+            await engine.close_async()
+            return result
+
+        results = await asyncio.gather(execute_async(0), execute_async(1))
+    assert results[0]["image"] == results[1]["image"]
+    assert results[0]["digest"] == results[1]["digest"]
+    assert results[0]["allocation"].project_name != results[1]["allocation"].project_name
+    assert results[0]["allocation"].container_id("agent") != results[1]["allocation"].container_id("agent")
+    assert results[0]["request_url"] != results[1]["request_url"]
+    if protocol is NativeCliProtocol.CODEX_EXEC_JSON:
+        assert results[0]["config_sha"] != results[1]["config_sha"]
+    assert [backend.requests[0].run_id for backend in backends] == [route.run_id for route in routes]
+    assert all(len(backend.requests) == 1 for backend in backends)
+
+
+def test_template_pin_is_independent_of_rendered_run_config() -> None:
+    first = codex_gateway_config(model="one", base_url="http://172.28.0.1:31001/v1")
+    second = codex_gateway_config(model="two", base_url="http://172.29.0.1:31002/v1")
+    assert first != second
+    template = codex_gateway_config(model="<model>", base_url="<gateway-url>").encode()
+    assert codex_gateway_template_sha256() == hashlib.sha256(template).hexdigest()
+    assert codex_gateway_template_sha256() not in {
+        hashlib.sha256(value.encode()).hexdigest() for value in (first, second)
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "file:///tmp/gateway",
+        "http://user:secret@gateway.sandbox",
+        "http://gateway.sandbox?token=value",
+        "http://gateway.sandbox#fragment",
+        "http://gateway.sandbox/\r\n",
+        "http://gateway.sandbox:invalid",
+    ],
+)
+def test_per_run_gateway_url_is_explicit_nonsecret_routing_not_candidate_env(endpoint: str) -> None:
+    with pytest.raises(ValueError):
+        DockerGuestAuth.from_route(
+            route=guest_route(protocol=NativeCliProtocol.CODEX_EXEC_JSON),
+            protocol=NativeCliProtocol.CODEX_EXEC_JSON,
+            gateway_endpoint=endpoint,
+        )
