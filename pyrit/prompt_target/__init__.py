@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from pyrit.prompt_target.hugging_face.hugging_face_chat_target import HuggingFaceChatTarget
     from pyrit.prompt_target.litellm_chat_target import LiteLLMChatTarget
     from pyrit.prompt_target.native_agent_target import NativeAgentTarget
+    from pyrit.prompt_target.native_cli_target import NativeCliTarget
     from pyrit.prompt_target.openai.openai_chat_audio_config import OpenAIChatAudioConfig
     from pyrit.prompt_target.openai.openai_chat_target import OpenAIChatTarget
     from pyrit.prompt_target.openai.openai_completion_target import OpenAICompletionTarget
@@ -77,6 +78,7 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "limit_requests_per_minute": "pyrit.prompt_target.common.utils",
     "LiteLLMChatTarget": "pyrit.prompt_target.litellm_chat_target",
     "NativeAgentTarget": "pyrit.prompt_target.native_agent_target",
+    "NativeCliTarget": "pyrit.prompt_target.native_cli_target",
     "OpenAICompletionTarget": "pyrit.prompt_target.openai.openai_completion_target",
     "OpenAIChatAudioConfig": "pyrit.prompt_target.openai.openai_chat_audio_config",
     "OpenAIChatTarget": "pyrit.prompt_target.openai.openai_chat_target",
