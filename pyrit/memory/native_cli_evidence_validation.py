@@ -12,7 +12,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pyrit.memory.memory_models import (
     NativeCyberEventEntry,
@@ -29,7 +29,7 @@ from pyrit.models.native_cli_report import (
     NativeCliReportProtocol,
     NativeCliReportStatus,
 )
-from pyrit.models.native_cyber_evidence import NativeCyberResponseMode
+from pyrit.models.native_cyber_evidence import NativeCyberCoveragePhase, NativeCyberResponseMode
 
 if TYPE_CHECKING:
     import uuid
@@ -88,18 +88,22 @@ class _NativeCliEvidenceValidator:
         episode: NativeCyberEpisodeEntry,
         report: NativeCliRunReport,
         expected_turns: int,
+        phase: NativeCyberCoveragePhase,
         digest_stream: Callable[[NativeCyberRawStreamEntry], str],
         digest_event: Callable[[Mapping[str, object]], str],
         verify_pieces: Callable[[Sequence[NativeCyberTurnMessagePieceEntry]], bool],
+        is_terminal_event: Callable[[NativeCyberEventEntry], bool],
     ) -> None:
         """Bind one transaction to the caller-supplied report and integrity helpers."""
         self._session = session
         self._episode = episode
         self._report = report
         self._expected_turns = expected_turns
+        self._phase = phase
         self._digest_stream = digest_stream
         self._digest_event = digest_event
         self._verify_pieces = verify_pieces
+        self._is_terminal_event = is_terminal_event
         self._required: list[str] = list(episode.capture_gaps)
         self._optional: list[str] = list(episode.optional_gaps)
         if any("native evidence database write failed" in gap.lower() for gap in episode.optional_gaps):
@@ -149,9 +153,11 @@ class _NativeCliEvidenceValidator:
             or episode.source_session_id != report.evidence.source_session_id
         ):
             self._required.append("CLI report source session does not match the observed episode.")
-        if report.status is not NativeCliReportStatus.COMPLETED or not report.evidence.coverage_complete:
+        if (
+            self._phase is NativeCyberCoveragePhase.FINAL and report.status is not NativeCliReportStatus.COMPLETED
+        ) or not report.evidence.coverage_complete:
             self._required.append("CLI process or report did not declare complete source coverage.")
-        if report.judgment is None or not report.judgment.complete:
+        if self._phase is NativeCyberCoveragePhase.FINAL and (report.judgment is None or not report.judgment.complete):
             self._required.append("The original CLI grader judgment was not completely acquired.")
         if report.evidence.gaps:
             self._required.append(f"CLI parser reported {len(report.evidence.gaps)} source coverage gap(s).")
@@ -193,9 +199,33 @@ class _NativeCliEvidenceValidator:
             elif item.response_mode == NativeCyberResponseMode.ARTIFACT_ONLY.value:
                 if self._episode.response_policy_version != 1 or not self._episode.artifact_only_allowed:
                     self._required.append("CLI artifact-only turn lacks task-approved response policy.")
-                if not report.evidence.terminal_observed:
-                    self._required.append("CLI artifact-only turn lacks a terminal source event.")
-                if not report.artifacts or report.judgment is None or not report.judgment.complete:
+                terminal = self._session.scalar(
+                    select(NativeCyberEventEntry)
+                    .where(
+                        NativeCyberEventEntry.run_id == report.run_id,
+                        NativeCyberEventEntry.turn_index == item.turn_index,
+                        NativeCyberEventEntry.event_type.in_(("native_cli.turn_completed", "native_cli.run_finished")),
+                    )
+                    .order_by(NativeCyberEventEntry.sequence.desc())
+                    .limit(1)
+                )
+                latest_action = self._session.scalar(
+                    select(func.max(NativeCyberEventEntry.sequence)).where(
+                        NativeCyberEventEntry.run_id == report.run_id,
+                        NativeCyberEventEntry.turn_index == item.turn_index,
+                        NativeCyberEventEntry.source.in_(("model", "tool")),
+                    )
+                )
+                if (
+                    not report.evidence.terminal_observed
+                    or terminal is None
+                    or not self._is_terminal_event(terminal)
+                    or terminal.sequence < (latest_action or 0)
+                ):
+                    self._required.append("CLI artifact-only turn lacks an observed root terminal source event.")
+                if self._phase is NativeCyberCoveragePhase.FINAL and (
+                    not report.artifacts or report.judgment is None or not report.judgment.complete
+                ):
                     self._required.append("CLI artifact-only turn lacks original grading and retained artifact.")
             else:
                 self._required.append("CLI outer turn has an unsupported response mode.")
