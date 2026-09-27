@@ -43,11 +43,13 @@ class WireStream(httpx.AsyncByteStream):
         self,
         chunks: tuple[bytes, ...],
         *,
+        before_first_async: Callable[[], Awaitable[None]] | None = None,
         on_eof: Callable[[], None] | None = None,
         pause: bool = False,
         failure: Exception | None = None,
     ) -> None:
         self.chunks = chunks
+        self.before_first_async = before_first_async
         self.on_eof = on_eof
         self.pause = pause
         self.failure = failure
@@ -55,6 +57,8 @@ class WireStream(httpx.AsyncByteStream):
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.before_first_async is not None:
+            await self.before_first_async()
         for chunk in self.chunks:
             await asyncio.sleep(0)
             yield chunk
@@ -147,12 +151,14 @@ class FakeEngine:
             assert json.loads(request.content) == {"Detach": False, "Tty": False}
             self.started = self.running = True
             self.start_entered.set()
-            if self.on_start is not None:
-                await self.on_start()
             if self.start_gate is not None:
                 await self.start_gate.wait()
             self.last_stream = WireStream(
-                self.wire, on_eof=self._exited, pause=self.pause_stream, failure=self.stream_failure
+                self.wire,
+                before_first_async=self.on_start,
+                on_eof=self._exited,
+                pause=self.pause_stream,
+                failure=self.stream_failure,
             )
             headers = {"content-type": self.content_type}
             if self.content_encoding:
