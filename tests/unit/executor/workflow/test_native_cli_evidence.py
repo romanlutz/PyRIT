@@ -366,6 +366,41 @@ async def test_cli_sink_clean_cli_without_observed_model_request_stays_incomplet
     assert all(not stream.source_complete for stream in episode.raw_streams)
 
 
+async def test_cli_sink_model_gateway_frame_limit_prevents_complete_capture_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    sink = await _start_sink_async(memory=sqlite_instance, include_model_gateway=True)
+    with patch.object(sink, "MAX_GATEWAY_OBSERVATIONS", 1):
+        await sink.record_gateway_observation_async(
+            GatewayObservation(
+                run_id=sink.run_id,
+                request_id="model-1",
+                kind=GatewayFrameKind.REQUEST,
+                frame=b'{"model":"codex-fixture","input":"inert"}',
+                coverage=frozenset(),
+            )
+        )
+        with pytest.raises(ValueError, match="observation limit exceeded"):
+            await sink.record_gateway_observation_async(
+                GatewayObservation(
+                    run_id=sink.run_id,
+                    request_id="model-1",
+                    kind=GatewayFrameKind.RESPONSE,
+                    frame=b'{"status":"completed"}',
+                    coverage=frozenset({GatewayCoverage.COMPLETED}),
+                )
+            )
+    await sink.finish_async(outcome=None)
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
+    assert not episode.turns[0].source_complete
+    assert any("recording failed" in gap for gap in episode.turns[0].gaps)
+    assert len([event for event in episode.events if event.event_type.startswith("gateway.")]) == 1
+    response = next(
+        stream for stream in episode.raw_streams if stream.key.observed_source_id.endswith(".gateway.responses")
+    )
+    assert response.stored_bytes == 0 and not response.source_complete
+
+
 async def test_cli_sink_preserves_repeated_claude_message_id_and_distinct_tool_result_async(
     *, sqlite_instance: SQLiteMemory
 ) -> None:

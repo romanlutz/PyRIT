@@ -42,7 +42,8 @@ not claim an original grade from this recorder. Once sealed,
 `read_report_events_async` pages DB-verified event rows into bounded,
 payload-free `NativeCliReportEvent` summaries for the pure CLI report
 adapter; neither raw frames nor model/tool text are copied into that report.
-Capture rejects more than 10,000 parser observations or cross-pipe chunks
+Capture rejects more than 10,000 parser observations, cross-pipe chunks or
+model gateway frames
 instead of allowing an unbounded in-memory projection. A future CLI-specific DB
 finalizer must compare the canonical CLI report to the persisted events,
 raw streams and any host-side model observations, then atomically publish

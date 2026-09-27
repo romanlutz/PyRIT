@@ -40,6 +40,7 @@ class NativeCliDatabaseEvidenceSink:
 
     MAX_OBSERVATIONS = 10_000
     MAX_RAW_CHUNKS = 10_000
+    MAX_GATEWAY_OBSERVATIONS = 10_000
 
     _TOOL_PHASES = {
         NativeCliEventKind.TOOL_REQUESTED: NativeCyberToolPhase.REQUEST,
@@ -100,6 +101,7 @@ class NativeCliDatabaseEvidenceSink:
         self._gateway_hashes = {name: hashlib.sha256() for name in self._gateway_streams}
         self._gateway_requests: dict[str, bool] = {}
         self._gateway_failed = False
+        self._gateway_observation_count = 0
         self._raw_chunk_sequence = 0
         self._parser_event_sequence = 0
         self._controller_sequence = 0
@@ -228,6 +230,8 @@ class NativeCliDatabaseEvidenceSink:
                     or not all(isinstance(flag, GatewayCoverage) for flag in observation.coverage)
                 ):
                     raise ValueError("Native CLI model gateway observation has an unapproved source or frame.")
+                if self._gateway_observation_count >= self.MAX_GATEWAY_OBSERVATIONS:
+                    raise ValueError("Native CLI model gateway observation limit exceeded.")
                 kind = observation.kind
                 request_id = observation.request_id
                 if kind is GatewayFrameKind.REQUEST:
@@ -268,6 +272,7 @@ class NativeCliDatabaseEvidenceSink:
                     observed_stream_id=str(raw_stream.stream_id),
                     stream_offset=offset,
                 )
+                self._gateway_observation_count += 1
                 if kind is GatewayFrameKind.GATEWAY_ERROR:
                     self._gateway_failed = True
                     await asyncio.to_thread(
