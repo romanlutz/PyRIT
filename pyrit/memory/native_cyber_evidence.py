@@ -353,13 +353,32 @@ class NativeCyberEvidenceStore:
         Seal one outer turn; missing pieces or events remain visible as gaps.
 
         Raises:
-            ValueError: If the turn is sealed or a referenced response piece is invalid.
+            ValueError: If the turn is sealed, a request was already linked, or a piece is invalid.
         """
         with self._write_session(run_id=finish.run_id) as session:
             episode = self._lock_episode(session=session, run_id=finish.run_id)
             turn = self._open_turn(session=session, episode=episode, turn_index=finish.turn_index)
             if finish.finished_at < turn.started_at:
                 raise ValueError("A native outer turn cannot finish before it starts.")
+            if finish.request_piece_ids:
+                existing_request = session.scalar(
+                    select(NativeCyberTurnMessagePieceEntry.message_piece_id)
+                    .where(
+                        NativeCyberTurnMessagePieceEntry.run_id == finish.run_id,
+                        NativeCyberTurnMessagePieceEntry.turn_index == finish.turn_index,
+                        NativeCyberTurnMessagePieceEntry.direction == "request",
+                    )
+                    .limit(1)
+                )
+                if existing_request is not None:
+                    raise ValueError("Native request pieces were already linked at begin_turn.")
+                self._link_pieces(
+                    session=session,
+                    episode=episode,
+                    turn_index=finish.turn_index,
+                    direction="request",
+                    piece_ids=finish.request_piece_ids,
+                )
             self._link_pieces(
                 session=session,
                 episode=episode,

@@ -115,13 +115,14 @@ class NativeCyberTurnStart(BaseModel):
 
 
 class NativeCyberTurnFinish(BaseModel):
-    """The source's event count and coverage claim for a completed outer turn."""
+    """Outer-turn coverage and optional now-persisted request references."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     run_id: str = Field(min_length=1, max_length=128)
     turn_index: int = Field(ge=1)
     finished_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    request_piece_ids: tuple[uuid.UUID, ...] = ()
     response_piece_ids: tuple[uuid.UUID, ...] = ()
     tool_request_piece_ids: tuple[uuid.UUID, ...] = ()
     tool_result_piece_ids: tuple[uuid.UUID, ...] = ()
