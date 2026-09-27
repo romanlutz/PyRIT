@@ -163,6 +163,8 @@ def test_gateway_listener_requires_real_finite_deadlines(startup: float, cleanup
         {"port": True},
         {"address": IPv4Address("127.0.0.1")},
         {"address": IPv4Address("0.0.0.0")},
+        {"address": IPv4Address("172.30.0.0")},
+        {"address": IPv4Address("172.30.255.255")},
         {"address": IPv4Address("8.8.8.8"), "subnet": IPv4Network("8.8.8.0/24")},
         {"address": IPv4Address("172.31.0.1")},
         {"subnet": IPv4Network("172.0.0.0/8")},

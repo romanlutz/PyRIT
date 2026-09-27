@@ -51,6 +51,7 @@ class GatewayBridgeBinding:
             or not isinstance(self.address, IPv4Address)
             or not isinstance(self.subnet, IPv4Network)
             or self.address not in self.subnet
+            or self.address in {self.subnet.network_address, self.subnet.broadcast_address}
             or not any(self.subnet.subnet_of(private) for private in private_ranges)
             or self.address.is_loopback
             or self.address.is_link_local

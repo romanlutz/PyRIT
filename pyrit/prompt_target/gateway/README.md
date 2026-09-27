@@ -48,7 +48,7 @@ trusted provider. Pass a
 `GatewayBridgeBinding(run_id, network_id, address, subnet, port)` matching that
 socket and the app's `GatewayRoute`; the listener refuses an ASGI app bound to
 a different run, model or guest token. It rejects wildcard, loopback, public,
-unbound and mismatched socket identities. It starts once, waits for
+network/broadcast, unbound and mismatched socket identities. It starts once, waits for
 Uvicorn's local listening boundary, disables access logs, proxy headers and
 websockets, and latches a failed or timed-out shutdown instead of claiming
 clean cleanup. `base_url` is a candidate guest URL with no credentials:
