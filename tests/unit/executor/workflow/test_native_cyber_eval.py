@@ -17,6 +17,7 @@ import pytest
 
 from pyrit.converter import Base64Converter
 from pyrit.executor.workflow.native_cyber_eval import NativeCyberEvaluation, NativeCyberTaskBinding
+from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
 from pyrit.models import ContentEntryScorable, SeedPrompt
 from pyrit.models.native_cyber import (
     NativeAgentEvidence,
@@ -31,7 +32,12 @@ from pyrit.prompt_target import NativeAgentTarget
 from pyrit.registry import ConverterRegistry
 from pyrit.score.float_scale.native_cyber_scorer import NativeCyberReportScorer
 from tests.unit.executor.workflow.test_environment_lease import FOUR_SERVICES, ONE_SERVICE, TWO_SERVICES, InertLease
-from tests.unit.prompt_target.target.test_native_agent_target import SdkSessionFixture, agent_session, tool_turn
+from tests.unit.prompt_target.target.test_native_agent_target import (
+    EventFixture,
+    SdkSessionFixture,
+    agent_session,
+    tool_turn,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -126,17 +132,42 @@ async def test_native_literal_attack_scores_before_single_cleanup_async(
     assert isinstance(run.score.scorable, ContentEntryScorable) and run.score.get_value() == 0.75
     assert run.score.message_piece_id is None
     assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
+    evidence_store = sqlite_instance.native_cyber_evidence
+    episode = await asyncio.to_thread(evidence_store.get_finalized_episode, run_id=run.run_id)
+    assert episode.coverage_complete and episode.score_id == run.score.id
+    assert episode.report_sha256 == run.report.sha256()
+    assert len(episode.turns) == 1
+    assert episode.turns[0].request_piece_ids and episode.turns[0].response_piece_ids
+    assert [event.sequence for event in episode.events] == list(range(1, len(run.report.agent.events) + 1))
+    assert episode.tools[0].request_sequence < episode.tools[0].start_sequence < episode.tools[0].completion_sequence
+    assert len(episode.raw_streams) == 1 and episode.raw_streams[0].source_complete
+    with pytest.raises(PermissionError, match="explicitly authorized"):
+        await asyncio.to_thread(
+            evidence_store.read_raw_chunks, run_id=run.run_id, stream_id=episode.raw_streams[0].stream_id
+        )
+    chunks = await asyncio.to_thread(
+        evidence_store.read_raw_chunks,
+        run_id=run.run_id,
+        stream_id=episode.raw_streams[0].stream_id,
+        allow_sensitive=True,
+    )
+    assert b"".join(chunk.data for chunk in chunks) == await asyncio.to_thread(
+        (run.directory / "native-events.jsonl").read_bytes
+    )
     await run.finish_async()
     assert binding.runtime.grade_count == 1
 
 
-async def test_blocked_preflight_does_not_open_or_grade_async(tmp_path: Path) -> None:
+async def test_blocked_preflight_does_not_open_or_grade_async(*, tmp_path: Path, sqlite_instance: SQLiteMemory) -> None:
     binding = FixtureBinding(blocked=True)
     run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
     view = await run.start_async()
     assert view.status == "blocked" and view.blockers
     assert binding.open_count == binding.runtime.grade_count == 0
     assert run.score.is_undetermined and run.report.agent is None
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert not episode.coverage_complete and not episode.turns and not episode.raw_streams
+    assert episode.score_id == run.score.id and episode.report_content_id == run.score.scorable.content_id
 
 
 @pytest.mark.parametrize(
@@ -196,13 +227,84 @@ async def test_unavailable_directory_and_memory_propagates_retention_failure_asy
     await asyncio.to_thread(occupied.write_text, "fixture", encoding="utf-8")
     binding = FixtureBinding()
     run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=occupied)
-    with patch.object(
-        NativeCyberReportScorer, "score_async", new_callable=AsyncMock, side_effect=OSError("memory unavailable")
-    ):
+    with patch.object(NativeCyberEvidenceStore, "finalize_episode_atomic", side_effect=OSError("memory unavailable")):
         with pytest.raises(OSError, match="memory unavailable"):
             await run.start_async()
     assert run.status == "error" and run.report is None and run.score is None
     assert binding.open_count == binding.close_count == 0
+
+
+async def test_episode_creation_failure_prevents_environment_acquisition_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(run._evidence_store, "create_episode", side_effect=OSError("episode unavailable")):
+        with pytest.raises(OSError, match="episode unavailable"):
+            await run.start_async()
+    assert run.status == "error" and run.report is None and run.score is None
+    assert not await asyncio.to_thread(run.directory.exists) and binding.open_count == 0
+    assert len(sqlite_instance.get_scores(score_type="float_scale")) == 0
+    with pytest.raises(KeyError, match="does not exist"):
+        await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=run.run_id)
+    with pytest.raises(ValueError, match="only once"):
+        await run.start_async()
+
+
+async def test_native_score_insert_failure_rolls_back_report_and_never_retries_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(
+        run._evidence_store, "_insert_atomic_score", side_effect=OSError("atomic insert failed")
+    ) as insert:
+        with pytest.raises(OSError, match="atomic insert failed"):
+            await run.start_async()
+    insert.assert_called_once()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=run.run_id)
+    assert episode.finalized_at is None and episode.score_id is None and episode.report_content_id is None
+    assert episode.events and episode.raw_streams[0].source_complete
+    assert run.report is None and run.score is None and run.status == "error"
+    assert len(sqlite_instance.get_scores(score_type="float_scale")) == 0
+    assert binding.runtime.grade_count == binding.close_count == 1
+
+
+async def test_native_raw_write_failure_blocks_original_grade_and_numeric_score_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(run._evidence_store, "append_raw", side_effect=OSError("raw write failed")):
+        view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert view.status == "error" and run.score.is_undetermined
+    assert not episode.coverage_complete and episode.gaps
+    assert episode.events and not episode.raw_streams[0].source_complete
+    assert binding.runtime.grade_count == 0 and binding.close_count == 1
+    assert len(sqlite_instance.get_scores(score_type="float_scale")) == 1
+
+
+async def test_failed_agent_send_retains_partial_events_in_database_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    binding = FixtureBinding()
+    sdk = binding.runtime.sdk
+
+    async def interrupted_send_async(prompt: str, *, timeout: float) -> None:
+        sdk.prompts.append(prompt)
+        assert sdk.handler is not None
+        sdk.handler(EventFixture(sdk.turns[0][0]))
+        raise OSError("inert send failed")
+
+    run = NativeCyberEvaluation(binding=binding, request=NativeCyberRequest(instruction="fixture"), directory=tmp_path)
+    with patch.object(sdk, "send_and_wait", side_effect=interrupted_send_async):
+        view = await run.start_async()
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert view.status == "error" and run.score.is_undetermined and binding.runtime.grade_count == 0
+    assert len(episode.events) == 1 and episode.events[0].observed_event_id == sdk.turns[0][0]["id"]
+    assert len(episode.turns) == 1 and not episode.turns[0].source_complete
+    assert episode.raw_streams[0].stored_bytes > 0 and not episode.coverage_complete
 
 
 async def test_report_file_failure_retains_an_explicit_memory_error_async(
@@ -463,7 +565,9 @@ async def test_default_posix_storage_policy_checks_owner_permissions_and_directo
                 await NativeCyberTaskBinding.validate_host_storage_async(FixtureBinding(), directory=directory)
 
 
-async def test_retained_step_uses_same_session_and_scores_only_at_finish_async(tmp_path: Path) -> None:
+async def test_retained_step_uses_same_session_and_scores_only_at_finish_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
     binding = FixtureBinding(steps=True)
     run = NativeCyberEvaluation(
         binding=binding, request=NativeCyberRequest(instruction="First", operator_steps=True), directory=tmp_path
@@ -477,6 +581,11 @@ async def test_retained_step_uses_same_session_and_scores_only_at_finish_async(t
     result = await run.finish_async()
     assert result.status == "completed" and not result.can_step
     assert binding.order == ["open", "grade", "close"]
+    episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_finalized_episode, run_id=run.run_id)
+    assert episode.coverage_complete and len(episode.turns) == 2
+    assert all(turn.source_complete and turn.request_piece_ids and turn.response_piece_ids for turn in episode.turns)
+    assert episode.turns[0].request_piece_ids != episode.turns[1].request_piece_ids
+    assert sum(turn.stored_event_count for turn in episode.turns) == len(run.report.agent.events)
     with pytest.raises(ValueError, match="unexpired"):
         await run.step_async("Not a clone")
 

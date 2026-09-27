@@ -24,10 +24,10 @@ execution before advertising readiness.
 
 The literal baseline has no objective or auxiliary scorer inside the attack.
 The original grader is invoked once after the agent is quiescent and before
-environment cleanup. The resulting report is persisted as `ContentScorable`,
-and its one numeric `Score` is linked to `ContentEntryScorable`, not the final
-assistant sentence. The normal attack result and conversation remain in memory
-and are referenced by the report. Cleanup failure prevents clean success while
+environment cleanup. The report, its one `ContentEntryScorable`-linked `Score`, and the episode link
+are committed together in PyRIT memory, not scored from the final assistant
+sentence. The normal attack result and conversation remain in memory and are
+referenced by the report. Cleanup failure prevents clean success while
 retaining an already-acquired judgment.
 
 Bindings are trusted code registered via `get_native_cyber_bindings().register`.
@@ -159,9 +159,8 @@ New multi-resource bindings should use the reservation helper for observable
 rollback.
 
 `evaluation.environment_lease` exposes an immutable in-memory lifecycle snapshot.
-It does not change the existing canonical task report, score, event persistence
-or rerun lineage contract, and it is not a durable raw-log or resource schema.
-Raw-log chunk persistence belongs to a separate memory slice. Tests here use
+It is not a durable raw-log or resource schema. The workflow records native
+events separately through `memory.native_cyber_evidence`. Tests here use
 only fake one-, two- and four-service allocations and an inert external
 controller. No Docker/VM provider, live harness, network transition or model
 transport is implemented or qualified by these tests.
@@ -267,6 +266,25 @@ additional source-specific coverage.
 The target returns authentic assistant/tool messages only. A tool-only result
 does not get a fabricated assistant receipt. Events from a failed turn stay in
 the session evidence and are retained before owned cleanup.
+
+The controller declares a required, bounded
+`harness/jsonl/controller-serialized-sdk-events` stream before sending the
+first instruction. Each completed outer turn links real request/response
+MessagePieces and appends the observed SDK events and their serialized JSONL
+bytes to PyRIT memory. This is a **controller serialization of SDK events**,
+not the original SDK wire stream or a claim to have observed every guest
+process. Sensitive payload/byte reads require an explicit opt-in. The file
+`native-events.jsonl` remains a private supplementary copy, not the source
+of the database Score.
+
+The stream is sealed and task-required DB coverage is assessed before the
+original grader runs. Missing event/tool phases, unsealed turns, omitted raw
+bytes or mismatched digests block a clean grade. The scorer only constructs
+an unpersisted verdict; memory atomically stores the canonical report, one
+Score and episode link, downgrading that Score to undetermined on required
+capture gaps. If memory finalization fails, the caller receives the error
+and must explicitly recover the unfinished episode; the workflow does not
+retry grading or publish a score-shaped fallback.
 
 ## GHCP container transport: source-supported path, unqualified authentication
 

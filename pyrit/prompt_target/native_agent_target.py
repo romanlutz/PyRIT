@@ -331,6 +331,11 @@ class NativeAgentTarget(PromptTarget):
         self._turn_timeout_seconds = turn_timeout_seconds
         self._conversation_id: str | None = None
 
+    @property
+    def conversation_id(self) -> str | None:
+        """The actual conversation accepted for a send, if one was started."""
+        return self._conversation_id
+
     def _build_identifier(self) -> ComponentIdentifier:
         return self._create_identifier(
             params={

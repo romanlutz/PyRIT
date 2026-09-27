@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import TYPE_CHECKING, Any, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiofiles
 
@@ -20,7 +20,7 @@ from pyrit.executor.attack import PromptSendingAttack
 from pyrit.executor.attack.core import AttackConverterConfig, AttackScoringConfig
 from pyrit.executor.workflow.environment_lease import EnvironmentLease
 from pyrit.memory import CentralMemory
-from pyrit.models import ComponentIdentifier, ContentEntryScorable, ContentScorable, Identifiable, Message, SeedPrompt
+from pyrit.models import ComponentIdentifier, ContentEntryScorable, Identifiable, Message, SeedPrompt
 from pyrit.models.environment_lease import EnvironmentLeaseSnapshot, EnvironmentResourceHandle, EnvironmentServiceHandle
 from pyrit.models.native_cyber import (
     NativeAgentEvidence,
@@ -31,6 +31,16 @@ from pyrit.models.native_cyber import (
     NativeCyberRequest,
     NativeCyberRunView,
     NativeCyberStatus,
+)
+from pyrit.models.native_cyber_evidence import (
+    NativeCyberCapturedEvent,
+    NativeCyberEpisodeStart,
+    NativeCyberEvidenceSource,
+    NativeCyberRawKind,
+    NativeCyberRawStreamKey,
+    NativeCyberRawStreamStart,
+    NativeCyberTurnFinish,
+    NativeCyberTurnStart,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.registry import ConverterRegistry
@@ -47,6 +57,12 @@ if TYPE_CHECKING:
     from pyrit.prompt_target import NativeAgentTarget
 
 logger = logging.getLogger(__name__)
+
+_SDK_EVENT_RAW_KEY = NativeCyberRawStreamKey(
+    source=NativeCyberEvidenceSource.HARNESS,
+    kind=NativeCyberRawKind.JSONL,
+    observed_source_id="controller-serialized-sdk-events",
+)
 
 
 class NativeCyberRuntime(Protocol):
@@ -297,8 +313,18 @@ class NativeCyberEvaluation:
         self._conversation_id: str | None = None
         self._normalizer = PromptNormalizer()
         self._memory = CentralMemory.get_memory_instance()
+        self._evidence_store = self._memory.native_cyber_evidence
         self._errors: list[str] = []
         self._events_written = 0
+        self._db_events_written = 0
+        self._linked_piece_ids: set[UUID] = set()
+        self._raw_stream: NativeCyberRawStreamStart | None = None
+        self._raw_sha256 = hashlib.sha256()
+        self._raw_bytes = 0
+        self._raw_sealed = False
+        self._capture_failed = False
+        self._pending_turn_started_at: datetime | None = None
+        self._publication_in_progress = False
         self._lock = asyncio.Lock()
         self._expiry: asyncio.Task[None] | None = None
         self._start_called = False
@@ -334,6 +360,24 @@ class NativeCyberEvaluation:
                 raise ValueError("Each native run starts only once; reruns require a new evaluation.")
             self._start_called = True
             try:
+                await asyncio.to_thread(
+                    self._evidence_store.create_episode,
+                    start=NativeCyberEpisodeStart(
+                        run_id=self.run_id,
+                        binding_name=self.binding.name,
+                        binding_version=self.binding.version,
+                        started_at=self.started_at,
+                        required_raw_streams=(_SDK_EVENT_RAW_KEY,),
+                    ),
+                )
+            except (Exception, asyncio.CancelledError) as error:
+                self.status = (
+                    NativeCyberStatus.CANCELLED
+                    if isinstance(error, asyncio.CancelledError)
+                    else NativeCyberStatus.ERROR
+                )
+                raise
+            try:
                 await self._settle_async(self._create_host_storage_async())
                 async with asyncio.timeout(self._remaining_seconds()):
                     await self.binding.validate_host_storage_async(directory=self.directory)
@@ -365,6 +409,8 @@ class NativeCyberEvaluation:
                     raise ValueError("A fresh rerun cannot reuse a previous task environment.")
                 if self._runtime.target.session.session_id in self._seen_sessions:
                     raise ValueError("A fresh rerun cannot reuse a previous native session.")
+                self._raw_stream = NativeCyberRawStreamStart(run_id=self.run_id, key=_SDK_EVENT_RAW_KEY)
+                await asyncio.to_thread(self._evidence_store.open_raw_stream, stream=self._raw_stream)
                 self.status = NativeCyberStatus.RUNNING
                 factory = self.binding.techniques.get(self.request.technique) or AttackTechniqueFactory(
                     name="literal",
@@ -385,6 +431,7 @@ class NativeCyberEvaluation:
                 seed = self.binding.seed(self.request)
                 self._seed = seed
                 await self._memory.add_seeds_to_memory_async(seeds=[seed], added_by="native_cyber")
+                self._pending_turn_started_at = datetime.now(UTC)
                 async with asyncio.timeout(self._remaining_seconds()):
                     self._attack_result = await technique.attack.execute_async(
                         objective=seed.value,
@@ -393,6 +440,8 @@ class NativeCyberEvaluation:
                     )
                 self._conversation_id = self._attack_result.conversation_id
                 self.turn_count = 1
+                await self._capture_turn_async(started_at=self._pending_turn_started_at)
+                self._pending_turn_started_at = None
                 await self._retain_events_async()
                 if self.request.operator_steps and not self.cancel_requested:
                     if not self._runtime.target.session.evidence().coverage_complete:
@@ -402,6 +451,9 @@ class NativeCyberEvaluation:
                 else:
                     await self._finalize_async(cancelled=self.cancel_requested)
             except (Exception, asyncio.CancelledError) as error:
+                if self._publication_in_progress:
+                    self.status = NativeCyberStatus.ERROR
+                    raise
                 await self._fail_async(error)
                 if isinstance(error, asyncio.CancelledError):
                     raise
@@ -425,6 +477,7 @@ class NativeCyberEvaluation:
             assert self._runtime is not None and self._conversation_id is not None
             self.status = NativeCyberStatus.RUNNING
             try:
+                self._pending_turn_started_at = datetime.now(UTC)
                 async with asyncio.timeout(min(self.request.turn_timeout_seconds, self._remaining_seconds())):
                     await self._normalizer.send_prompt_async(
                         message=Message.from_prompt(prompt=instruction, role="user"),
@@ -433,6 +486,8 @@ class NativeCyberEvaluation:
                         request_converter_configurations=self._converters(),
                     )
                 self.turn_count += 1
+                await self._capture_turn_async(started_at=self._pending_turn_started_at)
+                self._pending_turn_started_at = None
                 await self._retain_events_async()
                 self.status = NativeCyberStatus.AWAITING_INSTRUCTION
                 if not self._runtime.target.session.evidence().coverage_complete:
@@ -440,6 +495,9 @@ class NativeCyberEvaluation:
                 if self.cancel_requested:
                     await self._finalize_async(cancelled=True)
             except (Exception, asyncio.CancelledError) as error:
+                if self._publication_in_progress:
+                    self.status = NativeCyberStatus.ERROR
+                    raise
                 await self._fail_async(error)
                 if isinstance(error, asyncio.CancelledError):
                     raise
@@ -464,6 +522,9 @@ class NativeCyberEvaluation:
             try:
                 await self._finalize_async(cancelled=self.cancel_requested)
             except (Exception, asyncio.CancelledError) as error:
+                if self._publication_in_progress:
+                    self.status = NativeCyberStatus.ERROR
+                    raise
                 await self._fail_async(error)
                 if isinstance(error, asyncio.CancelledError):
                     raise
@@ -576,15 +637,21 @@ class NativeCyberEvaluation:
         assert self._runtime is not None
         await self._runtime.target.session.quiesce_async()
         await self._retain_events_async()
+        await self._seal_raw_stream_async()
         evidence = self._runtime.target.session.evidence()
-        if not cancelled and evidence.coverage_complete and evidence.idle:
+        coverage = await asyncio.to_thread(
+            self._evidence_store.assess_required_coverage,
+            report=self._build_report(None),
+            expected_turns=self.turn_count,
+        )
+        if not cancelled and evidence.coverage_complete and evidence.idle and coverage.required_complete:
             if self._grading_started:
                 raise RuntimeError("Original grading was already attempted; it cannot be retried implicitly.")
             self._grading_started = True
             async with asyncio.timeout(self._remaining_seconds()):
                 self._judgment = await self._runtime.grade_async(evidence=evidence)
         elif not cancelled:
-            self._errors.extend(evidence.gaps)
+            self._errors.extend((*evidence.gaps, *coverage.required_gaps))
         await self._settle_async(self._close_async(), timeout_seconds=self._cleanup_budget_seconds() + 5)
         self.status = (
             NativeCyberStatus.CANCELLED
@@ -619,6 +686,103 @@ class NativeCyberEvaluation:
             await stream.flush()
         self._events_written = len(events)
 
+    async def _capture_turn_async(self, *, started_at: datetime) -> None:
+        assert self._runtime is not None and self._raw_stream is not None
+        try:
+            messages = (
+                await asyncio.to_thread(self._memory.get_conversation_messages, conversation_id=self._conversation_id)
+                if self._conversation_id is not None
+                else ()
+            )
+            pieces = [
+                piece
+                for message in messages
+                for piece in message.message_pieces
+                if piece.id not in self._linked_piece_ids
+            ]
+            requests = tuple(piece.id for piece in pieces if piece.role == "user")
+            responses = tuple(piece.id for piece in pieces if piece.role in {"assistant", "simulated_assistant"})
+            await asyncio.to_thread(
+                self._evidence_store.begin_turn,
+                turn=NativeCyberTurnStart(
+                    run_id=self.run_id,
+                    turn_index=self.turn_count,
+                    started_at=started_at,
+                    request_piece_ids=requests,
+                ),
+            )
+            evidence = self._runtime.target.session.evidence()
+            new_events = evidence.events[self._db_events_written :]
+            for offset in range(0, len(new_events), self._evidence_store.MAX_EVENT_BATCH):
+                batch = new_events[offset : offset + self._evidence_store.MAX_EVENT_BATCH]
+                captured = tuple(
+                    NativeCyberCapturedEvent.from_native_agent_event(
+                        source=(
+                            NativeCyberEvidenceSource.MODEL
+                            if event.event_type.startswith("assistant.")
+                            else NativeCyberEvidenceSource.TOOL
+                            if event.event_type.startswith("tool.")
+                            else NativeCyberEvidenceSource.HARNESS
+                        ),
+                        event=event,
+                    )
+                    for event in batch
+                )
+                await asyncio.to_thread(
+                    self._evidence_store.append_events,
+                    run_id=self.run_id,
+                    turn_index=self.turn_count,
+                    events=captured,
+                )
+                self._db_events_written += len(batch)
+                for event in batch:
+                    data = (event.model_dump_json() + "\n").encode("utf-8")
+                    for start in range(0, len(data), self._evidence_store.MAX_APPEND_BYTES):
+                        chunk = data[start : start + self._evidence_store.MAX_APPEND_BYTES]
+                        await asyncio.to_thread(
+                            self._evidence_store.append_raw,
+                            run_id=self.run_id,
+                            stream_id=self._raw_stream.stream_id,
+                            data=chunk,
+                        )
+                        self._raw_sha256.update(chunk)
+                        self._raw_bytes += len(chunk)
+            await asyncio.to_thread(
+                self._evidence_store.finish_turn,
+                finish=NativeCyberTurnFinish(
+                    run_id=self.run_id,
+                    turn_index=self.turn_count,
+                    response_piece_ids=responses,
+                    observed_event_count=len(new_events),
+                    source_complete=evidence.coverage_complete and evidence.idle,
+                    gaps=evidence.gaps,
+                ),
+            )
+            self._linked_piece_ids.update(piece.id for piece in pieces)
+        except (Exception, asyncio.CancelledError):
+            self._capture_failed = True
+            raise
+
+    async def _seal_raw_stream_async(self) -> None:
+        if self._raw_stream is None or self._raw_sealed:
+            return
+        assert self._runtime is not None
+        evidence = self._runtime.target.session.evidence()
+        await asyncio.to_thread(
+            self._evidence_store.close_raw_stream,
+            run_id=self.run_id,
+            stream_id=self._raw_stream.stream_id,
+            source_complete=(
+                evidence.coverage_complete
+                and evidence.idle
+                and not self._capture_failed
+                and self._db_events_written == len(evidence.events)
+            ),
+            expected_bytes=self._raw_bytes,
+            observed_sha256=self._raw_sha256.hexdigest(),
+        )
+        self._raw_sealed = True
+
     async def _fail_async(self, error: BaseException) -> None:
         try:
             wait_seconds = self._CLEANUP_SECONDS + 5
@@ -640,6 +804,16 @@ class NativeCyberEvaluation:
             else NativeCyberStatus.ERROR
         )
         try:
+            if self._pending_turn_started_at is not None and not self._capture_failed and self._runtime is not None:
+                self._conversation_id = self._conversation_id or self._runtime.target.conversation_id
+                if self._conversation_id is not None or self._runtime.target.session.evidence().events:
+                    self.turn_count += 1
+                    try:
+                        await self._capture_turn_async(started_at=self._pending_turn_started_at)
+                    except (Exception, asyncio.CancelledError) as capture_error:
+                        self._errors.append(f"Native turn capture failed: {type(capture_error).__name__}")
+                        logger.exception("Native turn capture could not be completed after a failed agent send.")
+                self._pending_turn_started_at = None
             await self._retain_events_async()
         finally:
             try:
@@ -708,7 +882,16 @@ class NativeCyberEvaluation:
             return
         if self._lease_started and not self._agent_storage_verified and self._cleanup is not NativeCyberCleanup.CLOSED:
             raise PermissionError("Cannot retain raw evidence while an unverified agent storage boundary remains open.")
+        self._publication_in_progress = True
+        await self._seal_raw_stream_async()
         report = self._build_report(judgment)
+        coverage = await asyncio.to_thread(
+            self._evidence_store.assess_required_coverage, report=report, expected_turns=self.turn_count
+        )
+        if self.status is NativeCyberStatus.COMPLETED and not coverage.required_complete:
+            self.status = NativeCyberStatus.ERROR
+            self._errors.extend(coverage.required_gaps)
+            report = self._build_report(judgment)
         if self._can_write_report_file():
             try:
                 async with aiofiles.open(
@@ -721,11 +904,21 @@ class NativeCyberEvaluation:
                 self._errors.append(f"Report file retention failed: {type(error).__name__}: {error}")
                 logger.exception("Native report file retention failed; attempting undetermined memory retention.")
                 report = self._build_report(judgment)
-        scores = await NativeCyberReportScorer(report_sha256=report.sha256()).score_async(
-            scorable=ContentScorable(value=report.canonical_json())
+        score = NativeCyberReportScorer(report_sha256=report.sha256()).prepare_unpersisted_score(report=report)
+        snapshot = await asyncio.to_thread(
+            self._evidence_store.finalize_episode_atomic,
+            report=report,
+            score=score,
+            expected_turns=self.turn_count,
         )
+        if snapshot.score_id is None or snapshot.report_content_id is None:
+            raise RuntimeError("Native evidence finalization did not persist the report and its Score.")
+        scores = await asyncio.to_thread(self._memory.get_scores, score_ids=[str(snapshot.score_id)])
+        if len(scores) != 1:
+            raise RuntimeError("Finalized native evidence Score cannot be read from PyRIT memory.")
         self.score = scores[0]
         self.report = report
+        self._publication_in_progress = False
         if self._expiry is not None and self._expiry is not asyncio.current_task():
             self._expiry.cancel()
 
