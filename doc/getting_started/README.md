@@ -27,5 +27,6 @@ Common issues, model deployment guides, and advanced setup.
 Once you're set up:
 
 - 🔌 [Targets](../code/targets/0_prompt_targets.md) — Connect to different AI systems
+- [Adversarial models](./adversarial_models.md) — Find and configure a separate model to generate attack prompts
 - 📦 [Scenarios](../code/scenarios/0_scenarios.ipynb) — Run standardized evaluation scenarios
 - 🖥️ [Scanner](../scanner/0_scanner.md) — Use `pyrit_scan` for automated assessments

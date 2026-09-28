@@ -52,6 +52,7 @@ project:
           children:
             - file: getting_started/populating_secrets.md
             - file: getting_started/pyrit_conf.md
+            - file: getting_started/adversarial_models.md
         - file: getting_started/troubleshooting/README.md
           children:
             - file: getting_started/troubleshooting/installation.md
