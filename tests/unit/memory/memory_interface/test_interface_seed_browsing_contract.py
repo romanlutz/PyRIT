@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy import event
 
-from pyrit.models import SeedObjective, SeedPrompt
+from pyrit.models import SeedObjective, SeedPrompt, SeedSimulatedConversation
 
 if TYPE_CHECKING:
     from pyrit.memory import MemoryInterface
@@ -33,7 +33,7 @@ def _page(memory: MemoryInterface, **kwargs: Any) -> Any:
     return helper(**kwargs)
 
 
-async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective) -> None:
+async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective | SeedSimulatedConversation) -> None:
     await memory.add_seeds_to_memory_async(seeds=list(seeds), added_by="2748-memory-test")
 
 
@@ -88,26 +88,63 @@ class TestSeedBrowsingMemoryContract:
         assert [str(value) for value in ids] == [str(higher), str(lower)]
 
     async def test_cursor_continuation_pages_logical_examples_not_seed_rows(self, sqlite_instance: MemoryInterface):
-        group_id = uuid4()
+        group_id = UUID("00000000-0000-0000-0000-000000000003")
+        second_group_id = UUID("00000000-0000-0000-0000-000000000002")
+        first_group_id = UUID("00000000-0000-0000-0000-000000000001")
+        ungrouped_id = UUID("00000000-0000-0000-0000-000000000004")
+        first_timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        tied_timestamp = datetime(2024, 1, 2, tzinfo=UTC)
+        group_three_first = SeedPrompt(
+            value="group three first", dataset_name=DATASET, prompt_group_id=group_id, date_added=tied_timestamp
+        )
+        group_three_second = SeedPrompt(
+            value="group three second", dataset_name=DATASET, prompt_group_id=group_id, date_added=tied_timestamp
+        )
+        group_two = SeedPrompt(
+            value="group two", dataset_name=DATASET, prompt_group_id=second_group_id, date_added=tied_timestamp
+        )
+        group_one_early = SeedPrompt(
+            value="group one early", dataset_name=DATASET, prompt_group_id=first_group_id, date_added=first_timestamp
+        )
+        group_one_late = SeedPrompt(
+            value="group one late",
+            dataset_name=DATASET,
+            prompt_group_id=first_group_id,
+            date_added=datetime(2024, 1, 3, tzinfo=UTC),
+        )
+        ungrouped = SeedPrompt(value="ungrouped", dataset_name=DATASET, id=ungrouped_id, date_added=first_timestamp)
         await _add(
             sqlite_instance,
-            SeedPrompt(value="first member", dataset_name=DATASET, prompt_group_id=group_id),
-            SeedPrompt(value="second member", dataset_name=DATASET, prompt_group_id=group_id),
-            *(SeedPrompt(value=f"single-{index}", dataset_name=DATASET) for index in range(3)),
+            group_three_first,
+            group_three_second,
+            group_two,
+            group_one_early,
+            group_one_late,
+            ungrouped,
         )
-        first = _page(sqlite_instance, dataset_name=DATASET, limit=1)
-        second = _page(sqlite_instance, dataset_name=DATASET, limit=1, cursor=_field(first, "next_cursor"))
-        assert len(_field(first, "items")) == len(_field(second, "items")) == 1
-        assert _field(first, "items")[0] != _field(second, "items")[0]
-        assert len(_field(_field(first, "items")[0], "members")) == 2
-
-        seen = _field(first, "items") + _field(second, "items")
-        cursor = _field(second, "next_cursor")
-        while cursor:
+        pages: list[Any] = []
+        cursor = None
+        while True:
             page = _page(sqlite_instance, dataset_name=DATASET, limit=1, cursor=cursor)
-            seen += _field(page, "items")
+            pages.extend(_field(page, "items"))
             cursor = _field(page, "next_cursor")
-        assert len({_field(item, "example_id") for item in seen}) == 4
+            if cursor is None:
+                break
+
+        assert [str(_field(item, "example_id")) for item in pages] == [
+            str(group_id),
+            str(second_group_id),
+            str(ungrouped_id),
+            str(first_group_id),
+        ]
+        assert [len(_field(item, "members")) for item in pages] == [2, 1, 1, 2]
+        assert [{str(seed_id) for seed_id in _field(item, "seed_ids")} for item in pages] == [
+            {str(group_three_first.id), str(group_three_second.id)},
+            {str(group_two.id)},
+            {str(ungrouped.id)},
+            {str(group_one_early.id), str(group_one_late.id)},
+        ]
+        assert len({_field(item, "example_id") for item in pages}) == len(pages) == 4
 
     async def test_filters_are_member_or_and_example_and(self, sqlite_instance: MemoryInterface):
         group_id = uuid4()
@@ -130,22 +167,106 @@ class TestSeedBrowsingMemoryContract:
         assert expected_ids == {str(seed_id) for seed_id in _field(item, "seed_ids")}
         assert len(_field(item, "members")) == 2
 
-    async def test_modality_harm_and_seed_type_values_are_or(self, sqlite_instance: MemoryInterface):
+    async def test_modality_harm_and_seed_type_values_are_or(self, sqlite_instance: MemoryInterface, tmp_path):
+        modality_only = SeedPrompt(value="https://example.com/modality-only", dataset_name=DATASET, data_type="url")
+        modality_only_second = SeedPrompt(
+            value=str(tmp_path / "modality-only.png"), dataset_name=DATASET, data_type="image_path"
+        )
+        (tmp_path / "modality-only.png").write_bytes(b"image")
+        harm_only = SeedPrompt(value="harm only", dataset_name=DATASET, data_type="reasoning", harm_categories=["hate"])
+        seed_type_only = SeedSimulatedConversation(
+            dataset_name=DATASET,
+            adversarial_chat_system_prompt=SeedPrompt(value="adversarial"),
+            simulated_target_system_prompt=SeedPrompt(value="target"),
+        )
+        all_filters_group = uuid4()
+        all_filters_prompt = SeedPrompt(
+            value="https://example.com/all-filters",
+            dataset_name=DATASET,
+            prompt_group_id=all_filters_group,
+            data_type="url",
+            harm_categories=["violence"],
+        )
+        all_filters_objective = SeedObjective(
+            value="all filters objective", dataset_name=DATASET, prompt_group_id=all_filters_group
+        )
+        no_filters = SeedPrompt(
+            value="no filters", dataset_name=DATASET, data_type="reasoning", harm_categories=["other"]
+        )
         await _add(
             sqlite_instance,
-            SeedPrompt(value="one", dataset_name=DATASET, data_type="text", harm_categories=["hate"]),
-            SeedPrompt(value="two", dataset_name=DATASET, data_type="url", harm_categories=["violence"]),
-            SeedObjective(value="three", dataset_name=DATASET),
+            modality_only,
+            modality_only_second,
+            harm_only,
+            seed_type_only,
+            all_filters_prompt,
+            all_filters_objective,
+            no_filters,
         )
-        page = _page(
+        modality_page = _page(sqlite_instance, dataset_name=DATASET, data_types=["url", "image_path"], limit=10)
+        harm_page = _page(sqlite_instance, dataset_name=DATASET, harm_categories=["hate", "violence"], limit=10)
+        seed_type_page = _page(
             sqlite_instance,
             dataset_name=DATASET,
-            data_types=["text", "url"],
-            harm_categories=["hate", "violence"],
-            seed_types=["prompt", "objective"],
+            seed_types=["objective", "simulated_conversation"],
             limit=10,
         )
-        assert len(_field(page, "items")) == 3
+        combined_page = _page(
+            sqlite_instance,
+            dataset_name=DATASET,
+            data_types=["url", "image_path"],
+            harm_categories=["hate", "violence"],
+            seed_types=["objective", "simulated_conversation"],
+            limit=10,
+        )
+
+        assert {str(_field(item, "example_id")) for item in _field(modality_page, "items")} == {
+            str(modality_only.id),
+            str(modality_only_second.id),
+            str(all_filters_group),
+        }
+        assert {str(_field(item, "example_id")) for item in _field(harm_page, "items")} == {
+            str(harm_only.id),
+            str(all_filters_group),
+        }
+        assert {str(_field(item, "example_id")) for item in _field(seed_type_page, "items")} == {
+            str(seed_type_only.id),
+            str(all_filters_group),
+        }
+        assert [str(_field(item, "example_id")) for item in _field(combined_page, "items")] == [str(all_filters_group)]
+        assert _field(combined_page, "total") == 1
+
+    async def test_filtered_order_uses_earliest_member_not_earliest_matching_member(
+        self, sqlite_instance: MemoryInterface
+    ):
+        group_a = uuid4()
+        group_b = uuid4()
+        t1 = datetime(2024, 1, 1, tzinfo=UTC)
+        t2 = datetime(2024, 1, 2, tzinfo=UTC)
+        t3 = datetime(2024, 1, 3, tzinfo=UTC)
+        await _add(
+            sqlite_instance,
+            SeedPrompt(value="a earliest", dataset_name=DATASET, prompt_group_id=group_a, date_added=t1),
+            SeedPrompt(
+                value="https://example.com/a-matching-later",
+                dataset_name=DATASET,
+                prompt_group_id=group_a,
+                date_added=t3,
+                data_type="url",
+            ),
+            SeedPrompt(
+                value="https://example.com/b-matching",
+                dataset_name=DATASET,
+                prompt_group_id=group_b,
+                date_added=t2,
+                data_type="url",
+            ),
+        )
+        page = _page(sqlite_instance, dataset_name=DATASET, data_types=["url"], limit=10)
+        assert [str(_field(item, "example_id")) for item in _field(page, "items")] == [
+            str(group_b),
+            str(group_a),
+        ]
 
     async def test_harm_matching_is_case_insensitive_whole_value_and_missing_is_unlabeled(
         self, sqlite_instance: MemoryInterface
@@ -186,6 +307,20 @@ class TestSeedBrowsingMemoryContract:
             len(_field(_page(sqlite_instance, dataset_name=DATASET, value_search="media-path", limit=10), "items")) == 0
         )
 
+    async def test_percent_search_is_literal(self, sqlite_instance: MemoryInterface):
+        literal_match = SeedPrompt(value="contains 100%", dataset_name=DATASET)
+        wildcard_only = SeedPrompt(value="contains 1000", dataset_name=DATASET)
+        await _add(sqlite_instance, literal_match, wildcard_only)
+        page = _page(sqlite_instance, dataset_name=DATASET, value_search="100%", limit=10)
+        assert [str(_field(item, "seed_ids")[0]) for item in _field(page, "items")] == [str(literal_match.id)]
+
+    async def test_underscore_search_is_literal(self, sqlite_instance: MemoryInterface):
+        literal_match = SeedPrompt(value="contains a_b", dataset_name=DATASET)
+        wildcard_only = SeedPrompt(value="contains acb", dataset_name=DATASET)
+        await _add(sqlite_instance, literal_match, wildcard_only)
+        page = _page(sqlite_instance, dataset_name=DATASET, value_search="a_b", limit=10)
+        assert [str(_field(item, "seed_ids")[0]) for item in _field(page, "items")] == [str(literal_match.id)]
+
     async def test_count_uses_same_logical_predicates_as_page(self, sqlite_instance: MemoryInterface):
         group_id = uuid4()
         await _add(
@@ -213,7 +348,15 @@ class TestSeedBrowsingMemoryContract:
         assert len(_field(_field(page, "items")[0], "members")) == 2
 
     async def test_query_is_database_bounded_and_not_n_plus_one(self, sqlite_instance: MemoryInterface):
-        await _add(sqlite_instance, *(SeedPrompt(value=f"seed-{index}", dataset_name=DATASET) for index in range(250)))
+        groups = [uuid4() for _ in range(20)]
+        await _add(
+            sqlite_instance,
+            *(
+                SeedPrompt(value=f"seed-{index}", dataset_name=DATASET, prompt_group_id=group_id)
+                for index, group_id in enumerate(groups)
+            ),
+            *(SeedPrompt(value=f"extra-{index}", dataset_name=DATASET) for index in range(250)),
+        )
         statements: list[str] = []
 
         def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
@@ -221,12 +364,17 @@ class TestSeedBrowsingMemoryContract:
 
         event.listen(sqlite_instance.engine, "before_cursor_execute", capture)
         try:
-            page = _page(sqlite_instance, dataset_name=DATASET, limit=2)
+            page = _page(sqlite_instance, dataset_name=DATASET, limit=20)
         finally:
             event.remove(sqlite_instance.engine, "before_cursor_execute", capture)
-        assert len(_field(page, "items")) == 2
-        assert len(statements) < 12
-        assert any(" limit " in f" {statement} " for statement in statements)
+        assert len(_field(page, "items")) == 20
+        select_statements = [statement for statement in statements if statement.lstrip().startswith("select")]
+        grouped_page_queries = [
+            statement for statement in select_statements if "group by" in statement and "order by" in statement
+        ]
+        assert grouped_page_queries
+        assert all(" limit " in f" {statement} " for statement in grouped_page_queries)
+        assert len(select_statements) <= 5
 
     async def test_malformed_cursor_and_filter_mismatch_are_rejected(self, sqlite_instance: MemoryInterface):
         await _add(
@@ -244,6 +392,39 @@ class TestSeedBrowsingMemoryContract:
                 harm_categories=["violence"],
                 limit=1,
                 cursor=_field(first, "next_cursor"),
+            )
+
+    @pytest.mark.parametrize(
+        ("changed_filters", "changed_dataset"),
+        [
+            ({"value_search": "changed"}, None),
+            ({"data_types": ["url"]}, None),
+            ({"harm_categories": ["violence"]}, None),
+            ({"seed_types": ["objective"]}, None),
+            ({}, "another-memory-dataset"),
+        ],
+    )
+    async def test_cursor_is_bound_to_every_effective_filter(
+        self,
+        sqlite_instance: MemoryInterface,
+        changed_filters: dict[str, object],
+        changed_dataset: str | None,
+    ):
+        await _add(
+            sqlite_instance,
+            SeedPrompt(value="one", dataset_name=DATASET),
+            SeedPrompt(
+                value="https://example.com/two", dataset_name=DATASET, data_type="url", harm_categories=["violence"]
+            ),
+        )
+        first = _page(sqlite_instance, dataset_name=DATASET, limit=1)
+        with pytest.raises(ValueError):
+            _page(
+                sqlite_instance,
+                dataset_name=changed_dataset or DATASET,
+                limit=1,
+                cursor=_field(first, "next_cursor"),
+                **changed_filters,
             )
 
     async def test_existing_get_seeds_harm_semantics_remain_all_categories(self, sqlite_instance: MemoryInterface):

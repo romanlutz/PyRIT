@@ -37,7 +37,7 @@ def client(patch_central_database) -> TestClient:
     return TestClient(app)
 
 
-async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective) -> None:
+async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective | SeedSimulatedConversation) -> None:
     await memory.add_seeds_to_memory_async(seeds=list(seeds), added_by="2748-test")
 
 
@@ -72,12 +72,12 @@ class TestEmptyAndDatasetSelection:
     async def test_named_selection_key_is_not_display_name(self, client, sqlite_instance: MemoryInterface):
         await _add(sqlite_instance, SeedPrompt(value="named", dataset_name=DATASET))
         assert len(_items(_list(client, NAMED_KEY))) == 1
-        assert _list(client, DATASET).status_code in {400, 404, 422}
+        assert _list(client, DATASET).status_code == 404
 
     async def test_unnamed_selection_and_invalid_selection(self, client, sqlite_instance: MemoryInterface):
         await _add(sqlite_instance, SeedPrompt(value="unnamed"))
         assert len(_items(_list(client, UNNAMED_KEY))) == 1
-        assert _list(client, "dataset:named:not-loaded").status_code in {400, 404, 422}
+        assert _list(client, "dataset:named:not-loaded").status_code == 404
 
     async def test_named_unnamed_namespace_is_distinct(self, client, sqlite_instance: MemoryInterface):
         await _add(sqlite_instance, SeedPrompt(value="literal", dataset_name="__unnamed__"), SeedPrompt(value="none"))
@@ -107,7 +107,7 @@ class TestPaginationAndIdentity:
 
     @pytest.mark.parametrize("limit", [0, -1, 101])
     async def test_page_size_is_validated(self, client, sqlite_instance: MemoryInterface, limit: int):
-        assert _list(client, limit=limit).status_code in {400, 422}
+        assert _list(client, limit=limit).status_code == 422
 
     async def test_group_identity_preserves_ids_and_does_not_hash_merge(self, client, sqlite_instance: MemoryInterface):
         group_id = uuid4()
@@ -269,13 +269,37 @@ class TestTextSearchAndSafety:
         await _add(sqlite_instance, *(SeedPrompt(value=str(i), dataset_name=DATASET) for i in range(3)))
         cursor = _list(client, limit=1).json()["pagination"]["next_cursor"]
         assert cursor and not cursor.startswith("1")
-        assert _list(client, limit=1, cursor="not-a-cursor").status_code in {400, 422}
-        assert _list(client, UNNAMED_KEY, limit=1, cursor=cursor).status_code in {400, 422}
-        assert _list(client, limit=1, search="different", cursor=cursor).status_code in {400, 422}
+        assert _list(client, limit=1, cursor="not-a-cursor").status_code == 400
+        assert _list(client, UNNAMED_KEY, limit=1, cursor=cursor).status_code == 400
+        assert _list(client, limit=1, search="different", cursor=cursor).status_code == 400
+
+    @pytest.mark.parametrize(
+        "changed_filters",
+        [
+            {"search": "different"},
+            {"modality": "url"},
+            {"harm_category": "violence"},
+            {"seed_type": "objective"},
+        ],
+    )
+    async def test_cursor_rejects_each_changed_effective_filter(self, client, sqlite_instance, changed_filters):
+        await _add(
+            sqlite_instance,
+            SeedPrompt(value="one", dataset_name=DATASET),
+            SeedPrompt(
+                value="https://example.com/two", dataset_name=DATASET, data_type="url", harm_categories=["violence"]
+            ),
+        )
+        first = _list(client, limit=1)
+        cursor = first.json()["pagination"]["next_cursor"]
+        response = _list(client, limit=1, cursor=cursor, **changed_filters)
+        assert response.status_code == 400
+        assert response.json()["detail"]
 
     async def test_missing_detail_example_is_not_silently_empty(self, client, sqlite_instance):
         response = _detail(client, str(uuid4()))
-        assert response.status_code in {404, 422}
+        assert response.status_code == 404
+        assert response.json()["detail"]
 
     async def test_template_is_not_rendered_or_loaded(self, client, sqlite_instance):
         template = SeedPrompt(
@@ -307,6 +331,10 @@ class TestTextSearchAndSafety:
         assert generate.call_count == 0
         assert response.json()["items"][0]["seed_types"] == ["simulated_conversation"]
 
+        detail = _detail(client, response.json()["items"][0]["example_id"])
+        assert detail.status_code == 200
+        assert detail.json()["members"][0]["value"] == config.value
+
 
 class TestPreviewDetailAndCounts:
     async def test_preview_uses_100_character_convention_and_hides_full_content(self, client, sqlite_instance):
@@ -318,8 +346,21 @@ class TestPreviewDetailAndCounts:
         items = _items(_list(client))
         assert any(item["preview"] == short and item["preview_truncated"] is False for item in items)
         long_item = next(item for item in items if item["preview"].startswith("y"))
-        assert len(long_item["preview"]) <= 103 and long_item["preview_truncated"] is True
+        assert long_item["preview"] == ("y" * 100) + "..."
+        assert long_item["preview_truncated"] is True
         assert long not in long_item["preview"]
+
+    async def test_detail_returns_full_content_after_list_preview_truncation(self, client, sqlite_instance):
+        long_value = "long-value-" + ("x" * 150)
+        seed = SeedPrompt(value=long_value, dataset_name=DATASET)
+        await _add(sqlite_instance, seed)
+        item = _items(_list(client))[0]
+        assert item["preview_truncated"] is True
+        detail = _detail(client, item["example_id"])
+        assert detail.status_code == 200
+        member = detail.json()["members"][0]
+        assert member["value"] == long_value
+        assert member["prompt_group_id"] is None
 
     async def test_media_preview_is_label_only_and_never_bytes_path_or_credentials(
         self, client, sqlite_instance, tmp_path
@@ -354,6 +395,12 @@ class TestPreviewDetailAndCounts:
         assert member["id"] == str(seed_id)
         assert member["prompt_group_id"] == str(group_id)
         assert member["value"] == "full text"
+        assert member["role"] == "user"
+        assert member["sequence"] == 4
+        assert member["source"] == "source"
+        assert member["authors"] == ["author"]
+        assert member["groups"] == ["group"]
+        assert member["metadata"] == {"persisted": "yes"}
         for field in (
             "role",
             "sequence",
@@ -409,7 +456,7 @@ class TestDatabaseBoundsAndSideEffects:
     async def test_browsing_is_read_only_and_does_not_fetch_provider_or_write(self, client, sqlite_instance):
         with (
             patch(
-                "pyrit.datasets.SeedDatasetProvider.get_all_dataset_names_async",
+                "pyrit.datasets.SeedDatasetProvider.fetch_datasets_async",
                 side_effect=AssertionError("provider fetch"),
             ),
             patch.object(sqlite_instance, "add_seeds_to_memory_async", side_effect=AssertionError("write")) as write,

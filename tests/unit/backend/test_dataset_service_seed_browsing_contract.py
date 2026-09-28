@@ -83,6 +83,32 @@ class TestDatasetServiceSeedBrowsingContract:
                 selection_key=SELECTION_KEY, limit=1, cursor=cursor, search="changed"
             )
 
+    @pytest.mark.parametrize(
+        "changed_filters",
+        [
+            {"search": "changed"},
+            {"data_types": ["url"]},
+            {"harm_categories": ["violence"]},
+            {"seed_types": ["objective"]},
+        ],
+    )
+    async def test_cursor_is_bound_to_each_effective_filter(
+        self, dataset_service: DatasetService, sqlite_instance: MemoryInterface, changed_filters: dict[str, object]
+    ):
+        await _add(
+            sqlite_instance,
+            SeedPrompt(value="one", dataset_name=DATASET),
+            SeedPrompt(
+                value="https://example.com/two", dataset_name=DATASET, data_type="url", harm_categories=["violence"]
+            ),
+        )
+        first = await _service_method(dataset_service, "list_seed_examples_async")(selection_key=SELECTION_KEY, limit=1)
+        cursor = _field(_field(first, "pagination"), "next_cursor")
+        with pytest.raises(ValueError):
+            await _service_method(dataset_service, "list_seed_examples_async")(
+                selection_key=SELECTION_KEY, limit=1, cursor=cursor, **changed_filters
+            )
+
     async def test_malformed_cursor_and_invalid_selection_are_rejected(self, dataset_service: DatasetService):
         with pytest.raises(ValueError):
             await _service_method(dataset_service, "list_seed_examples_async")(
@@ -114,7 +140,7 @@ class TestDatasetServiceSeedBrowsingContract:
         )
         item = _field(response, "items")[0]
         assert _field(item, "preview_truncated") is True
-        assert len(_field(item, "preview")) <= 103
+        assert _field(item, "preview") == ("x" * 100) + "..."
         assert _field(item, "piece_count") == 3
         assert _field(item, "objective_count") == 1
         assert "text" in _field(item, "modalities")
@@ -138,7 +164,14 @@ class TestDatasetServiceSeedBrowsingContract:
             parameters=["name"],
         )
         await _add(
-            sqlite_instance, seed, SeedObjective(value="condition", dataset_name=DATASET, prompt_group_id=group_id)
+            sqlite_instance,
+            seed,
+            SeedObjective(
+                value="condition",
+                dataset_name=DATASET,
+                prompt_group_id=group_id,
+                metadata={"conditions": "must hold"},
+            ),
         )
         detail = await _service_method(dataset_service, "get_seed_example_async")(
             selection_key=SELECTION_KEY, example_id=str(group_id)
@@ -146,22 +179,26 @@ class TestDatasetServiceSeedBrowsingContract:
         members = _field(detail, "members")
         assert len(members) == 2
         prompt = next(member for member in members if _field(member, "id") == seed.id)
+        objective = next(member for member in members if _field(member, "seed_type") == "objective")
         assert _field(prompt, "prompt_group_id") == group_id
-        assert _field(prompt, "value") == "full text"
+        assert _field(prompt, "name") == seed.name
+        assert _field(prompt, "value") == seed.value
         assert _field(prompt, "role") == "user"
         assert _field(prompt, "sequence") == 4
-        for field in (
-            "value_sha256",
-            "dataset_name",
-            "source",
-            "authors",
-            "groups",
-            "date_added",
-            "added_by",
-            "metadata",
-            "data_type",
-        ):
-            assert field in (prompt if isinstance(prompt, dict) else prompt.model_fields_set | set(prompt.model_fields))
+        stored_prompt = next(
+            stored for stored in sqlite_instance.get_seeds(prompt_group_ids=[group_id]) if stored.id == seed.id
+        )
+        assert _field(prompt, "value_sha256") == stored_prompt.value_sha256
+        assert _field(prompt, "dataset_name") == DATASET
+        assert _field(prompt, "source") == "source"
+        assert _field(prompt, "authors") == ["author"]
+        assert _field(prompt, "groups") == ["group"]
+        assert _field(prompt, "date_added") == stored_prompt.date_added
+        assert _field(prompt, "added_by") == "2748-service-test"
+        assert _field(prompt, "metadata") == {"persisted": True}
+        assert _field(prompt, "data_type") == "text"
+        assert _field(objective, "value") == "condition"
+        assert _field(objective, "metadata") == {"conditions": "must hold"}
 
     async def test_detail_preserves_template_parameters_and_objective_conditions(
         self, dataset_service: DatasetService, sqlite_instance: MemoryInterface
@@ -182,7 +219,10 @@ class TestDatasetServiceSeedBrowsingContract:
             selection_key=SELECTION_KEY, example_id=str(group_id)
         )
         assert _field(detail, "members")
-        assert any(_field(member, "parameters") == ["name"] for member in _field(detail, "members"))
+        template = next(member for member in _field(detail, "members") if _field(member, "seed_type") == "prompt")
+        assert _field(template, "value") == "{{ name }}"
+        assert _field(template, "is_jinja_template") is True
+        assert _field(template, "parameters") == ["name"]
         assert any(_field(member, "seed_type") == "objective" for member in _field(detail, "members"))
 
     async def test_invalid_detail_does_not_generate_group_identity(self, dataset_service: DatasetService):
