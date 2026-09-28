@@ -40,7 +40,6 @@ import TargetBadge from './TargetBadge'
 import ChatTargetPicker from './ChatTargetPicker'
 import { sameTarget } from '@/utils/targetIdentity'
 import ObjectiveHeader from './ObjectiveHeader'
-import type { PieceConversion } from './converterTypes'
 import { useChatConverters } from '@/hooks/useChatConverters'
 import { useRuntime } from '@/hooks/useRuntime'
 import { useUserPreferences } from '@/hooks/useUserPreferences'
@@ -59,7 +58,6 @@ import { attacksApi, scoresApi } from '../../services/api'
 import { toApiError } from '../../services/errors'
 import {
   buildMessagePieces,
-  backendMessageToOriginalDraft,
   backendMessagesToFrontend,
 } from '../../utils/messageMapper'
 import { exportConversation } from '../../utils/conversationExport'
@@ -69,10 +67,8 @@ import type {
   AttackOutcome,
   AttackSummary,
   AttackTargetResolutionStatus,
-  BackendMessage,
   BackendScore,
   ChatSendOutcome,
-  ConversationMessagesResponse,
   CreateAttackRequest,
   CreateConversationRequest,
   Message,
@@ -84,107 +80,22 @@ import { isTargetResolutionBlocking, targetInfoMatchesTarget } from '../../utils
 import { scenarioRunRoutePath } from '../../utils/routeParams'
 import type { ViewName } from '../Sidebar/Navigation'
 import { useChatWindowStyles } from './ChatWindow.styles'
+import {
+  buildRecoveryConversationRequest,
+  getChatSendStatus,
+  getPersistedProcessingRecovery,
+  getProcessingResponseMessageIndex,
+  getRecoveryDescription,
+  getRecoveryHistoryCutoff,
+  RETRYABLE_TARGET_RESPONSE_ERROR,
+} from './chatRecovery'
+import type { RecoverableSendDraft } from './chatRecovery'
 
 const NARROW_SCREEN_QUERY = '(max-width: 600px)'
-const RETRYABLE_TARGET_RESPONSE_ERROR = 'processing'
-const CLEAN_CONVERSATION_MESSAGE =
-  'Continue in a clean conversation so the stored error is not sent back to the target.'
-
-interface RecoverableSendDraft {
-  conversationId: string
-  failedRequestTurnNumber: number
-  failedResponseTurnNumber: number
-  historyCutoffIndex: number
-  errorMessageIndex: number
-  originalValue: string
-  attachments: MessageAttachment[]
-  conversions: Record<string, PieceConversion>
-  source: 'live' | 'persisted'
-  missingConverterSelections: boolean
-}
 
 interface ConversationLoadRequest {
   conversationId: string
   requestId: number
-}
-
-function getRecoveryDescription(draft: RecoverableSendDraft): string {
-  const historyNotice = draft.historyCutoffIndex < draft.failedRequestTurnNumber - 1
-    ? ' History from the first failed prompt onward will be left out.'
-    : ''
-  const recoveryMessage = `${CLEAN_CONVERSATION_MESSAGE}${historyNotice}`
-  if (draft.source === 'live') {
-    return `${recoveryMessage} Your prompt, attachments, and converter choices are preserved for editing.`
-  }
-
-  const restored = 'Your prompt and attachments were restored from conversation history.'
-
-  if (draft.missingConverterSelections) {
-    return `${recoveryMessage} ${restored} Converter choices could not be restored, so review them before sending.`
-  }
-
-  return `${recoveryMessage} ${restored} Review them before sending.`
-}
-
-function getRecoveryHistoryCutoff(messages: BackendMessage[], failedRequestTurnNumber: number): number {
-  let precedingUserTurnNumber: number | undefined
-  for (const message of messages) {
-    if (message.turn_number >= failedRequestTurnNumber) {
-      break
-    }
-    if (message.role === 'user') {
-      precedingUserTurnNumber = message.turn_number
-    }
-    for (const piece of message.message_pieces) {
-      if (piece.response_error === RETRYABLE_TARGET_RESPONSE_ERROR) {
-        // Later replies can depend on the failed turn, so retain only its preceding history.
-        return (precedingUserTurnNumber ?? message.turn_number) - 1
-      }
-    }
-  }
-  return failedRequestTurnNumber - 1
-}
-
-function getPersistedProcessingRecovery(
-  conversationId: string,
-  response: ConversationMessagesResponse,
-): RecoverableSendDraft | undefined {
-  const responseStatus = response.target_response_status
-  if (responseStatus?.response_error !== RETRYABLE_TARGET_RESPONSE_ERROR) {
-    return undefined
-  }
-
-  const failedRequest = response.messages.find(
-    (message) => (
-      message.role === 'user'
-      && message.turn_number === responseStatus.request_turn_number
-    ),
-  )
-  const errorMessageIndex = response.messages.findIndex(
-    (message) => (
-      message.role === 'assistant'
-      && message.turn_number === responseStatus.response_turn_number
-    ),
-  )
-  if (!failedRequest || errorMessageIndex < 0) {
-    return undefined
-  }
-
-  const originalDraft = backendMessageToOriginalDraft(failedRequest)
-  return {
-    conversationId,
-    failedRequestTurnNumber: responseStatus.request_turn_number,
-    failedResponseTurnNumber: responseStatus.response_turn_number,
-    historyCutoffIndex: getRecoveryHistoryCutoff(response.messages, responseStatus.request_turn_number),
-    errorMessageIndex,
-    originalValue: originalDraft.content,
-    attachments: (originalDraft.attachments ?? []).map((attachment) => ({ ...attachment })),
-    conversions: {},
-    source: 'persisted',
-    missingConverterSelections: failedRequest.message_pieces.some(
-      (piece) => Boolean(piece.converter_identifiers?.length),
-    ),
-  }
 }
 
 function matchesNarrowScreen(): boolean {
@@ -712,21 +623,15 @@ export default function ChatWindow({
       onAttackChange?.(response.attack)
 
       const targetResponseStatus = response.messages.target_response_status
-      const status: ChatSendOutcome['status'] = targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR
-        ? 'retryable_failure'
-        : targetResponseStatus?.response_error && targetResponseStatus.response_error !== 'none'
-          ? 'non_retryable_failure'
-          : 'sent'
+      const status = getChatSendStatus(targetResponseStatus)
       const backendMessages = backendMessagesToFrontend(response.messages.messages)
 
       if (targetResponseStatus?.response_error === RETRYABLE_TARGET_RESPONSE_ERROR) {
-        const errorMessageIndex = response.messages.messages.findIndex(
-          (message) => (
-            message.role === 'assistant'
-            && message.turn_number === targetResponseStatus.response_turn_number
-          ),
+        const errorMessageIndex = getProcessingResponseMessageIndex(
+          response.messages.messages,
+          targetResponseStatus,
         )
-        if (errorMessageIndex < 0) {
+        if (errorMessageIndex === undefined) {
           throw new Error('Target response status did not match an assistant message.')
         }
         setRecoverableSends((currentRecoveries) => ({
@@ -894,13 +799,7 @@ export default function ChatWindow({
     const supportsMultiTurn = Boolean(
       activeTarget && activeTarget.capabilities?.supports_multi_turn !== false,
     )
-    const cutoffIndex = recoverableSend.historyCutoffIndex
-    const recoveryRequest: CreateConversationRequest = supportsMultiTurn && cutoffIndex >= 0
-      ? {
-          source_conversation_id: recoverableSend.conversationId,
-          cutoff_index: cutoffIndex,
-        }
-      : {}
+    const recoveryRequest = buildRecoveryConversationRequest(recoverableSend, supportsMultiTurn)
     const sourceConversationId = recoverableSend.conversationId
     const draftRevision = inputBoxRef.current?.getDraftRevision()
 
