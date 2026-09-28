@@ -9,7 +9,13 @@ Datasets are seed prompt/objective collections provided by
 listing available datasets.
 """
 
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
 from pydantic import BaseModel, Field
+
+from pyrit.backend.models.common import PaginationInfo
 
 
 class DatasetInfo(BaseModel):
@@ -41,3 +47,67 @@ class DatasetListResponse(BaseModel):
     """Response for listing available datasets."""
 
     items: list[DatasetInfo] = Field(..., description="List of available datasets")
+
+
+class SeedExampleMemberView(BaseModel):
+    """Persisted member of a logical seed example."""
+
+    id: UUID
+    prompt_group_id: UUID | None = None
+    seed_type: str
+    data_type: str
+    value: str
+    value_sha256: str | None = None
+    role: str | None = None
+    sequence: int | None = None
+    name: str | None = None
+    dataset_name: str | None = None
+    harm_categories: list[str] | None = None
+    description: str | None = None
+    source: str | None = None
+    authors: list[str] | None = None
+    groups: list[str] | None = None
+    date_added: datetime
+    added_by: str
+    metadata: dict[str, Any] | None = None
+    parameters: list[str] | None = None
+    is_jinja_template: bool | None = None
+
+
+class SeedExampleSummary(BaseModel):
+    """List representation of one complete logical seed example."""
+
+    example_id: UUID
+    dataset_name: str | None = None
+    name: str | None = None
+    preview: str
+    preview_truncated: bool
+    seed_ids: list[UUID]
+    modalities: list[str]
+    seed_types: list[str]
+    piece_count: int
+    objective_count: int
+    harm_categories: list[str]
+    has_unlabeled_harm: bool
+
+
+class SeedExampleListResponse(BaseModel):
+    """Paginated logical seed examples."""
+
+    items: list[SeedExampleSummary]
+    pagination: PaginationInfo
+
+
+class SeedExampleDetailResponse(BaseModel):
+    """Complete persisted logical seed example."""
+
+    example_id: UUID
+    dataset_name: str | None = None
+    seed_ids: list[UUID]
+    piece_count: int
+    objective_count: int
+    modalities: list[str]
+    seed_types: list[str]
+    harm_categories: list[str]
+    has_unlabeled_harm: bool
+    members: list[SeedExampleMemberView]

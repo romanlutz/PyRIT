@@ -10,13 +10,20 @@ Wraps ``SeedDatasetProvider`` discovery and memory to list available datasets.
 import logging
 from collections.abc import Sequence
 from functools import lru_cache
+from re import match
+from urllib.parse import urlparse
 
+from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.datasets import (
     DatasetInfo,
     DatasetListResponse,
+    SeedExampleDetailResponse,
+    SeedExampleListResponse,
+    SeedExampleMemberView,
+    SeedExampleSummary,
 )
 from pyrit.datasets import SeedDatasetProvider
-from pyrit.memory import CentralMemory
+from pyrit.memory import CentralMemory, SeedExampleDatasetScope
 from pyrit.models import SeedDatasetSummary
 
 logger = logging.getLogger(__name__)
@@ -93,6 +100,138 @@ class DatasetService:
             )
 
         return DatasetListResponse(items=items)
+
+    async def list_seed_examples_async(
+        self,
+        *,
+        selection_key: str,
+        limit: int = 20,
+        cursor: str | None = None,
+        search: str | None = None,
+        data_types: Sequence[str] | None = None,
+        harm_categories: Sequence[str] | None = None,
+        seed_types: Sequence[str] | None = None,
+    ) -> SeedExampleListResponse:
+        """
+        List logical seed examples using Memory's database-backed page query.
+
+        Returns:
+            SeedExampleListResponse: The selected logical examples and pagination metadata.
+        """
+        scope = self._selection_scope(selection_key)
+        page = self._memory.get_seed_example_page(
+            dataset_scope=scope,
+            limit=limit,
+            cursor=cursor,
+            data_types=data_types,
+            harm_categories=harm_categories,
+            seed_types=seed_types,
+            value_search=search,
+        )
+        items = [self._summary(item) for item in page.items]
+        return SeedExampleListResponse(
+            items=items,
+            pagination=PaginationInfo(
+                limit=limit,
+                has_more=page.next_cursor is not None,
+                next_cursor=page.next_cursor,
+                prev_cursor=cursor,
+            ),
+        )
+
+    async def get_seed_example_async(self, *, selection_key: str, example_id: str) -> SeedExampleDetailResponse:
+        """Return one complete logical seed example without materializing seed models."""
+        scope = self._selection_scope(selection_key)
+        page = self._memory.get_seed_example_page(dataset_scope=scope, limit=100)
+        item = next((candidate for candidate in page.items if str(candidate.example_id) == example_id), None)
+        if item is None:
+            raise ValueError(f"Seed example not found: {example_id}")
+        return SeedExampleDetailResponse(
+            example_id=item.example_id,
+            dataset_name=item.dataset_name,
+            seed_ids=item.seed_ids,
+            piece_count=item.piece_count,
+            objective_count=item.objective_count,
+            modalities=item.modalities,
+            seed_types=item.seed_types,
+            harm_categories=item.harm_categories,
+            has_unlabeled_harm=item.has_unlabeled_harm,
+            members=[self._member(member) for member in item.members],
+        )
+
+    @staticmethod
+    def _selection_scope(selection_key: str) -> SeedExampleDatasetScope:
+        """
+        Resolve the stable dataset selection namespace.
+
+        Returns:
+            SeedExampleDatasetScope: The named or unnamed memory query scope.
+        """
+        if selection_key == "dataset:unnamed":
+            return SeedExampleDatasetScope.unnamed()
+        prefix = "dataset:named:"
+        if selection_key.startswith(prefix) and selection_key[len(prefix) :]:
+            return SeedExampleDatasetScope.named(selection_key[len(prefix) :])
+        raise ValueError(f"Invalid dataset selection key: {selection_key}")
+
+    @classmethod
+    def _summary(cls, item: object) -> SeedExampleSummary:
+        members = item.members  # type: ignore[attr-defined]
+        preview, truncated = cls._preview(members)
+        return SeedExampleSummary(
+            example_id=item.example_id,  # type: ignore[attr-defined]
+            dataset_name=item.dataset_name,  # type: ignore[attr-defined]
+            name=next((member.name for member in members if member.name), None),
+            preview=preview,
+            preview_truncated=truncated,
+            seed_ids=item.seed_ids,  # type: ignore[attr-defined]
+            modalities=item.modalities,  # type: ignore[attr-defined]
+            seed_types=item.seed_types,  # type: ignore[attr-defined]
+            piece_count=item.piece_count,  # type: ignore[attr-defined]
+            objective_count=item.objective_count,  # type: ignore[attr-defined]
+            harm_categories=item.harm_categories,  # type: ignore[attr-defined]
+            has_unlabeled_harm=item.has_unlabeled_harm,  # type: ignore[attr-defined]
+        )
+
+    @staticmethod
+    def _preview(members: Sequence[object]) -> tuple[str, bool]:
+        safe_text = [
+            member.value
+            for member in members
+            if member.data_type == "text"
+            and not urlparse(member.value).scheme
+            and not match(r"^(?:[A-Za-z]:[\\/]|/)", member.value)
+        ]
+        if safe_text:
+            value = max(safe_text, key=len)
+            return (value[:100] + "...", len(value) > 100) if len(value) > 100 else (value, False)
+        data_type = members[0].data_type if members else "seed"
+        return f"{data_type} seed", False
+
+    @staticmethod
+    def _member(member: object) -> SeedExampleMemberView:
+        return SeedExampleMemberView(
+            id=member.id,
+            prompt_group_id=member.prompt_group_id,
+            seed_type=member.seed_type,
+            data_type=member.data_type,
+            value=member.value,
+            value_sha256=member.value_sha256,
+            role=member.role,
+            sequence=member.sequence,
+            name=member.name,
+            dataset_name=member.dataset_name,
+            harm_categories=member.harm_categories,
+            description=member.description,
+            source=member.source,
+            authors=member.authors,
+            groups=member.groups,
+            date_added=member.date_added,
+            added_by=member.added_by,
+            metadata=member.metadata,
+            parameters=member.parameters,
+            is_jinja_template=member.is_jinja_template,
+        )
 
     @staticmethod
     def _merge_unnamed_summaries(summaries: Sequence[SeedDatasetSummary]) -> SeedDatasetSummary | None:
