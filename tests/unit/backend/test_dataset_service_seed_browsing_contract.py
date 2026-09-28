@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 from uuid import uuid4
@@ -231,6 +232,27 @@ class TestDatasetServiceSeedBrowsingContract:
                 selection_key=SELECTION_KEY, example_id=str(uuid4())
             )
 
+    async def test_detail_retrieves_logical_example_beyond_first_list_page(
+        self, dataset_service: DatasetService, sqlite_instance: MemoryInterface
+    ):
+        group_id = uuid4()
+        target = SeedPrompt(
+            value="target",
+            dataset_name=DATASET,
+            prompt_group_id=group_id,
+            date_added=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        await _add(sqlite_instance, target)
+        await _add(
+            sqlite_instance,
+            *(SeedPrompt(value=f"later-{index}", dataset_name=DATASET) for index in range(100)),
+        )
+
+        detail = await _service_method(dataset_service, "get_seed_example_async")(
+            selection_key=SELECTION_KEY, example_id=str(group_id)
+        )
+        assert [member.id for member in _field(detail, "members")] == [target.id]
+
     async def test_browsing_has_no_template_or_generation_side_effects(
         self, dataset_service: DatasetService, sqlite_instance: MemoryInterface
     ):
@@ -255,3 +277,21 @@ class TestDatasetServiceSeedBrowsingContract:
         assert "image" in _field(item, "preview").lower()
         assert str(tmp_path) not in _field(item, "preview")
         assert "bytes" not in (item if isinstance(item, dict) else item.model_dump())
+
+    @pytest.mark.parametrize(
+        ("value", "expected_preview"),
+        [
+            ("/private/secret.txt", "text seed"),
+            (r"C:\\private\\secret.txt", "text seed"),
+            (r"\\\\server\\share\\secret.txt", "text seed"),
+            ("ordinary safe text", "ordinary safe text"),
+        ],
+    )
+    async def test_text_preview_rejects_absolute_paths_including_unc(
+        self, dataset_service: DatasetService, sqlite_instance: MemoryInterface, value: str, expected_preview: str
+    ):
+        await _add(sqlite_instance, SeedPrompt(value=value, dataset_name=DATASET, data_type="text"))
+        response = await _service_method(dataset_service, "list_seed_examples_async")(
+            selection_key=SELECTION_KEY, limit=10
+        )
+        assert _field(_field(response, "items")[0], "preview") == expected_preview

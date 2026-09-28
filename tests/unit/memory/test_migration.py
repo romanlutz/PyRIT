@@ -174,6 +174,32 @@ def test_run_schema_migrations_applies_head_revision():
             engine.dispose()
 
 
+def test_seed_template_flag_migration_lifecycle():
+    """The seed template marker is added and removed through the normal Alembic lifecycle."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = os.path.join(temp_dir, "seed-template-flag.db")
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            with engine.begin() as connection:
+                config = _config_for(connection)
+                command.upgrade(config, "7a9c1e3f5b2d")
+                assert "is_jinja_template" not in {
+                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
+                }
+
+                command.upgrade(config, "head")
+                assert "is_jinja_template" in {
+                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
+                }
+
+                command.downgrade(config, "7a9c1e3f5b2d")
+                assert "is_jinja_template" not in {
+                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
+                }
+        finally:
+            engine.dispose()
+
+
 def test_scenario_progress_migration_adds_composite_index():
     """The migration head contains the parent/timestamp/id keyset index."""
     with tempfile.TemporaryDirectory() as temp_dir:

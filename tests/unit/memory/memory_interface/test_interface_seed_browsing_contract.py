@@ -14,7 +14,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 
 from pyrit.memory import SeedExampleDatasetScope
 from pyrit.memory.memory_models import SeedEntry
@@ -36,6 +36,17 @@ def _page(memory: MemoryInterface, **kwargs: Any) -> Any:
     """Call the proposed narrow, database-backed logical-example page helper."""
     helper = getattr(memory, "get_seed_example_page", None)
     assert helper is not None, "RED: MemoryInterface.get_seed_example_page is not implemented"
+    dataset_name = kwargs.pop("dataset_name", None)
+    kwargs["dataset_scope"] = (
+        SeedExampleDatasetScope.named(dataset_name) if dataset_name is not None else SeedExampleDatasetScope.unnamed()
+    )
+    return helper(**kwargs)
+
+
+def _example(memory: MemoryInterface, **kwargs: Any) -> Any:
+    """Call the proposed bounded logical-example point lookup helper."""
+    helper = getattr(memory, "get_seed_example", None)
+    assert helper is not None, "RED: MemoryInterface.get_seed_example is not implemented"
     dataset_name = kwargs.pop("dataset_name", None)
     kwargs["dataset_scope"] = (
         SeedExampleDatasetScope.named(dataset_name) if dataset_name is not None else SeedExampleDatasetScope.unnamed()
@@ -132,6 +143,82 @@ class TestSeedBrowsingMemoryContract:
         assert member.value == "{{ name }}"
         assert member.parameters == ["name"]
         assert member.is_jinja_template is True
+
+    @pytest.mark.parametrize(
+        ("is_template", "parameters"),
+        [(True, []), (False, ["name"]), (False, [])],
+    )
+    async def test_template_flag_is_persisted_independently_of_parameters(
+        self, sqlite_instance: MemoryInterface, is_template: bool, parameters: list[str]
+    ):
+        seed = SeedPrompt(
+            value="{{ name }}" if is_template else "ordinary",
+            dataset_name=DATASET,
+            is_jinja_template=is_template,
+            parameters=parameters,
+        )
+        await _add(sqlite_instance, seed)
+
+        member = _field(_page(sqlite_instance, dataset_name=DATASET, limit=10), "items")[0].members[0]
+        assert member.is_jinja_template is is_template
+
+    async def test_historical_null_template_flag_stays_null_in_browsing_projection(
+        self, sqlite_instance: MemoryInterface
+    ):
+        entry = SeedEntry(
+            entry=SeedPrompt(value="historical", dataset_name=DATASET, parameters=["name"], added_by="legacy-test")
+        )
+        entry.is_jinja_template = None
+        with sqlite_instance.get_session() as session:
+            session.add(entry)
+            session.commit()
+
+        member = _field(_page(sqlite_instance, dataset_name=DATASET, limit=10), "items")[0].members[0]
+        assert member.parameters == ["name"]
+        assert member.is_jinja_template is None
+
+    async def test_point_lookup_is_bounded_and_scope_isolated(self, sqlite_instance: MemoryInterface):
+        target_group = uuid4()
+        target = SeedPrompt(
+            value="target",
+            dataset_name=DATASET,
+            prompt_group_id=target_group,
+            date_added=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        other_dataset_member = SeedPrompt(
+            value="wrong dataset",
+            dataset_name="another-dataset",
+            prompt_group_id=target_group,
+        )
+        unnamed_member = SeedPrompt(value="unnamed", prompt_group_id=target_group)
+        await _add(sqlite_instance, target, other_dataset_member, unnamed_member)
+        await _add(
+            sqlite_instance,
+            *(SeedPrompt(value=f"later-{index}", dataset_name=DATASET) for index in range(100)),
+        )
+
+        result = _example(sqlite_instance, dataset_name=DATASET, example_id=target_group)
+        assert result is not None
+        assert {member.id for member in result.members} == {target.id}
+
+        assert _example(sqlite_instance, example_id=target_group) is not None
+        assert _example(sqlite_instance, dataset_name="another-dataset", example_id=target_group) is not None
+        assert _example(sqlite_instance, example_id=uuid4()) is None
+
+    async def test_sqlite_harm_json_invalid_and_non_arrays_are_unlabeled(self, sqlite_instance: MemoryInterface):
+        values = [None, "null", "[]", '"violence"', '{"category":"violence"}', "not-json", '["violence"]']
+        seeds = [SeedPrompt(value=f"harm-{index}", dataset_name=DATASET) for index in range(len(values))]
+        await _add(sqlite_instance, *seeds)
+        with sqlite_instance.get_session() as session:
+            for seed, value in zip(seeds, values, strict=True):
+                session.execute(
+                    text('UPDATE "SeedPromptEntries" SET harm_categories = :value WHERE id = :id'),
+                    {"value": value, "id": str(seed.id)},
+                )
+            session.commit()
+
+        page = _page(sqlite_instance, dataset_name=DATASET, harm_categories=["violence"], limit=10)
+        assert [member.id for member in _field(page, "items")[0].members] == [seeds[-1].id]
 
     async def test_logical_identity_uses_group_id_else_seed_id(self, sqlite_instance: MemoryInterface):
         group_id = uuid4()

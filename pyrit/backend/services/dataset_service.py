@@ -8,10 +8,12 @@ Wraps ``SeedDatasetProvider`` discovery and memory to list available datasets.
 """
 
 import logging
+import ntpath
+import posixpath
 from collections.abc import Sequence
 from functools import lru_cache
-from re import match
 from urllib.parse import urlparse
+from uuid import UUID
 
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.datasets import (
@@ -142,8 +144,11 @@ class DatasetService:
     async def get_seed_example_async(self, *, selection_key: str, example_id: str) -> SeedExampleDetailResponse:
         """Return one complete logical seed example without materializing seed models."""
         scope = self._selection_scope(selection_key)
-        page = self._memory.get_seed_example_page(dataset_scope=scope, limit=100)
-        item = next((candidate for candidate in page.items if str(candidate.example_id) == example_id), None)
+        try:
+            logical_id = UUID(example_id)
+        except ValueError as exc:
+            raise ValueError(f"Seed example not found: {example_id}") from exc
+        item = self._memory.get_seed_example(dataset_scope=scope, example_id=logical_id)
         if item is None:
             raise ValueError(f"Seed example not found: {example_id}")
         return SeedExampleDetailResponse(
@@ -200,7 +205,7 @@ class DatasetService:
             for member in members
             if member.data_type == "text"
             and not urlparse(member.value).scheme
-            and not match(r"^(?:[A-Za-z]:[\\/]|/)", member.value)
+            and not (ntpath.isabs(member.value) or posixpath.isabs(member.value))
         ]
         if safe_text:
             value = max(safe_text, key=len)

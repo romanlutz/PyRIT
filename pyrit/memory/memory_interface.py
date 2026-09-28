@@ -581,7 +581,7 @@ def _build_seed_examples(*, rows: Sequence[Any], members: Sequence[SeedEntry]) -
                         added_by=entry.added_by,
                         prompt_metadata=dict(entry.prompt_metadata) if entry.prompt_metadata is not None else None,
                         parameters=list(entry.parameters) if entry.parameters is not None else None,
-                        is_jinja_template=True if entry.parameters else None,
+                        is_jinja_template=entry.is_jinja_template,
                     )
                     for entry in entries
                 ],
@@ -1200,6 +1200,46 @@ class MemoryInterface(abc.ABC):
             total=total,
             next_cursor=_build_seed_example_next_cursor(rows=page_rows, query=query),
         )
+
+    def get_seed_example(
+        self, *, dataset_scope: SeedExampleDatasetScope, example_id: uuid.UUID
+    ) -> SeedExample | None:
+        """
+        Read one logical seed example by its persisted identity.
+
+        Returns:
+            SeedExample | None: The complete logical example, or None when it is absent
+                from the requested dataset scope.
+        """
+        logical_id = _seed_example_logical_id(SeedEntry)
+        dataset_name = dataset_scope.name if dataset_scope.kind == "named" else None
+        with closing(self.get_session()) as session:
+            row = session.execute(
+                select(
+                    logical_id.label("example_id"),
+                    literal(dataset_name).label("dataset_name"),
+                )
+                .where(
+                    _seed_example_dataset_condition(SeedEntry, dataset_name=dataset_name),
+                    logical_id == example_id,
+                )
+                .group_by(logical_id)
+            ).first()
+            if row is None:
+                return None
+
+            members = list(
+                session.execute(
+                    select(SeedEntry)
+                    .where(
+                        _seed_example_dataset_condition(SeedEntry, dataset_name=dataset_name),
+                        logical_id == row.example_id,
+                    )
+                    .order_by(*_seed_example_order_by(logical_id))
+                ).scalars()
+            )
+
+        return _build_seed_examples(rows=[row], members=members)[0]
 
     def _seed_example_harm_condition(self, column: Any, categories: Sequence[str]) -> Any:
         """
