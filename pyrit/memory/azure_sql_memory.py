@@ -14,11 +14,14 @@ from sqlalchemy import (
     Unicode,
     and_,
     bindparam,
+    case,
     create_engine,
     event,
     exists,
     func,
+    literal,
     literal_column,
+    select,
     text,
 )
 from sqlalchemy.engine.base import Engine
@@ -458,6 +461,29 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         joiner = " OR " if match_mode == "any" else " AND "
         combined = joiner.join(conditions)
         return text(f"""ISJSON("{table_name}".{column_name}) = 1 AND ({combined})""").bindparams(**bindparams_dict)
+
+    def _get_seed_harm_category_condition(
+        self, *, json_column: InstrumentedAttribute[Any], categories: Sequence[str]
+    ) -> Any:
+        """
+        Build an aliased-column-safe Azure SQL harm-category membership predicate.
+
+        Returns:
+            Any: A SQLAlchemy predicate matching any requested category.
+        """
+        values = [category.lower() for category in categories]
+        safe_array = case(
+            (
+                and_(
+                    func.ISJSON(json_column) == literal(1),
+                    func.LEFT(func.LTRIM(json_column), literal(1)) == literal("["),
+                ),
+                json_column,
+            ),
+            else_=literal("[]"),
+        )
+        elements = func.OPENJSON(safe_array).table_valued("value")
+        return exists(select(1).select_from(elements).where(func.lower(elements.c.value).in_(values)))
 
     def _get_attack_result_label_condition(self, *, labels: dict[str, str | Sequence[str]]) -> Any:
         """

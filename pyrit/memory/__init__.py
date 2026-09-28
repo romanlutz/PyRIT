@@ -23,6 +23,10 @@ if TYPE_CHECKING:
         ScenarioHistoryKeysetCursor,
         ScenarioHistoryRunRecord,
         ScenarioRunStateRecord,
+        SeedExample,
+        SeedExampleDatasetScope,
+        SeedExampleMember,
+        SeedExamplePage,
     )
     from pyrit.memory.memory_models import AttackResultEntry, EmbeddingDataEntry, PromptMemoryEntry, SeedEntry
     from pyrit.memory.sqlite_memory import SQLiteMemory
@@ -61,6 +65,10 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "ErrorDataTypeSerializer": "pyrit.memory.storage",
     "ImagePathDataTypeSerializer": "pyrit.memory.storage",
     "MemoryInterface": "pyrit.memory.memory_interface",
+    "SeedExample": "pyrit.memory.memory_interface",
+    "SeedExampleDatasetScope": "pyrit.memory.memory_interface",
+    "SeedExampleMember": "pyrit.memory.memory_interface",
+    "SeedExamplePage": "pyrit.memory.memory_interface",
     "MemoryEmbedding": "pyrit.memory.memory_embedding",
     "ScenarioHistoryKeysetCursor": "pyrit.memory.memory_interface",
     "ScenarioHistoryRunRecord": "pyrit.memory.memory_interface",

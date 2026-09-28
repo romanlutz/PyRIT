@@ -5,13 +5,19 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event
 
+from pyrit.memory import SeedExampleDatasetScope
+from pyrit.memory.memory_models import SeedEntry
 from pyrit.models import SeedObjective, SeedPrompt, SeedSimulatedConversation
 
 if TYPE_CHECKING:
@@ -30,6 +36,10 @@ def _page(memory: MemoryInterface, **kwargs: Any) -> Any:
     """Call the proposed narrow, database-backed logical-example page helper."""
     helper = getattr(memory, "get_seed_example_page", None)
     assert helper is not None, "RED: MemoryInterface.get_seed_example_page is not implemented"
+    dataset_name = kwargs.pop("dataset_name", None)
+    kwargs["dataset_scope"] = (
+        SeedExampleDatasetScope.named(dataset_name) if dataset_name is not None else SeedExampleDatasetScope.unnamed()
+    )
     return helper(**kwargs)
 
 
@@ -38,6 +48,91 @@ async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective | See
 
 
 class TestSeedBrowsingMemoryContract:
+    def test_scope_and_page_limits_are_explicit(self):
+        with pytest.raises(ValueError):
+            SeedExampleDatasetScope(kind="invalid")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError):
+            SeedExampleDatasetScope.named("")
+
+    async def test_named_and_unnamed_scopes_are_distinct(self, sqlite_instance: MemoryInterface):
+        shared_group = uuid4()
+        unnamed_null = SeedPrompt(value="unnamed-null", prompt_group_id=shared_group)
+        unnamed_empty = SeedPrompt(value="unnamed-empty", dataset_name="", prompt_group_id=shared_group)
+        named_seed = SeedPrompt(value="named", dataset_name=DATASET, prompt_group_id=shared_group)
+        await _add(
+            sqlite_instance,
+            unnamed_null,
+            unnamed_empty,
+            named_seed,
+        )
+
+        unnamed = _page(sqlite_instance, limit=10)
+        named = _page(sqlite_instance, dataset_name=DATASET, limit=10)
+        assert len(_field(unnamed, "items")) == 1
+        assert {str(member.id) for member in _field(unnamed, "items")[0].members} == {
+            str(unnamed_null.id),
+            str(unnamed_empty.id),
+        }
+        assert len(_field(named, "items")) == 1
+        assert {str(member.id) for member in _field(named, "items")[0].members} == {
+            str(named_seed.id),
+        }
+
+        with pytest.raises(ValueError):
+            _page(sqlite_instance, dataset_name=DATASET, limit=101)
+
+    async def test_browsing_uses_persisted_rows_without_get_seed_or_filesystem_access(
+        self, sqlite_instance: MemoryInterface
+    ):
+        legacy_path = "C:/not-present/legacy-prompt.yaml"
+        legacy_value = json.dumps(
+            {
+                "num_turns": 2,
+                "sequence": 0,
+                "adversarial_chat_system_prompt_path": legacy_path,
+                "simulated_target_system_prompt_path": legacy_path,
+            }
+        )
+        entry = SeedEntry(entry=SeedPrompt(value="stored", dataset_name=DATASET))
+        entry.value = legacy_value
+        entry.value_sha256 = "legacy-hash"
+        entry.prompt_metadata = {"persisted": "yes"}
+        entry.seed_type = "simulated_conversation"
+        entry.date_added = datetime(2024, 1, 1, tzinfo=UTC)
+        entry.added_by = "legacy-test"
+        entry_id = entry.id
+        with sqlite_instance.get_session() as session:
+            session.add(entry)
+            session.commit()
+
+        with (
+            patch.object(SeedEntry, "get_seed", side_effect=AssertionError("get_seed called")),
+            patch.object(Path, "is_file", side_effect=AssertionError("filesystem touched")),
+        ):
+            page = _page(sqlite_instance, dataset_name=DATASET, limit=10)
+
+        member = _field(page, "items")[0].members[0]
+        assert member.id == entry_id
+        assert member.value == legacy_value
+        assert member.value_sha256 == "legacy-hash"
+        assert member.metadata == {"persisted": "yes"}
+        assert member.seed_type == "simulated_conversation"
+
+    async def test_template_persisted_value_and_parameters_are_not_rendered(self, sqlite_instance: MemoryInterface):
+        template = SeedPrompt(
+            value="{{ name }}",
+            dataset_name=DATASET,
+            parameters=["name"],
+            is_jinja_template=True,
+        )
+        await _add(sqlite_instance, template)
+        with patch.object(SeedEntry, "get_seed", side_effect=AssertionError("get_seed called")):
+            member = _field(_page(sqlite_instance, dataset_name=DATASET, limit=10), "items")[0].members[0]
+        assert member.value == "{{ name }}"
+        assert member.parameters == ["name"]
+        assert member.is_jinja_template is True
+
     async def test_logical_identity_uses_group_id_else_seed_id(self, sqlite_instance: MemoryInterface):
         group_id = uuid4()
         grouped = SeedPrompt(value="grouped", dataset_name=DATASET, prompt_group_id=group_id)
@@ -272,12 +367,41 @@ class TestSeedBrowsingMemoryContract:
         self, sqlite_instance: MemoryInterface
     ):
         labeled = SeedPrompt(value="labeled", dataset_name=DATASET, harm_categories=["VIOLENCE"])
+        multi_labeled = SeedPrompt(
+            value="multi-labeled", dataset_name=DATASET, harm_categories=["hate", 'special_%_"_é']
+        )
+        substring_only = SeedPrompt(value="substring-only", dataset_name=DATASET, harm_categories=["nonviolence"])
+        suffix_only = SeedPrompt(value="suffix-only", dataset_name=DATASET, harm_categories=["violence-extra"])
         unlabeled = SeedPrompt(value="unlabeled", dataset_name=DATASET, harm_categories=[])
-        await _add(sqlite_instance, labeled, unlabeled)
+        null_labeled = SeedPrompt(value="null-labeled", dataset_name=DATASET, harm_categories=None)
+        grouped = uuid4()
+        grouped_unmatched_member = SeedPrompt(
+            value="grouped-unmatched", dataset_name=DATASET, prompt_group_id=grouped, harm_categories=[]
+        )
+        grouped_matching_member = SeedPrompt(
+            value="grouped-matching", dataset_name=DATASET, prompt_group_id=grouped, harm_categories=["violence"]
+        )
+        await _add(
+            sqlite_instance,
+            labeled,
+            multi_labeled,
+            substring_only,
+            suffix_only,
+            unlabeled,
+            null_labeled,
+            grouped_unmatched_member,
+            grouped_matching_member,
+        )
         exact = _page(sqlite_instance, dataset_name=DATASET, harm_categories=["violence"], limit=10)
         substring = _page(sqlite_instance, dataset_name=DATASET, harm_categories=["vio"], limit=10)
-        assert len(_field(exact, "items")) == 1
-        assert str(_field(exact, "items")[0]["seed_ids"][0]) == str(labeled.id)
+        assert {str(item.example_id) for item in _field(exact, "items")} == {
+            str(labeled.id),
+            str(grouped),
+        }
+        multi = _page(sqlite_instance, dataset_name=DATASET, harm_categories=["missing", "HATE"], limit=10)
+        assert {str(item.example_id) for item in _field(multi, "items")} == {str(multi_labeled.id)}
+        special = _page(sqlite_instance, dataset_name=DATASET, harm_categories=['special_%_"_É'], limit=10)
+        assert {str(item.example_id) for item in _field(special, "items")} == {str(multi_labeled.id)}
         assert len(_field(substring, "items")) == 0
         all_items = _field(_page(sqlite_instance, dataset_name=DATASET, limit=10), "items")
         unlabeled_item = next(
@@ -393,6 +517,13 @@ class TestSeedBrowsingMemoryContract:
                 limit=1,
                 cursor=_field(first, "next_cursor"),
             )
+        payload = json.loads(
+            base64.urlsafe_b64decode(_field(first, "next_cursor") + "=" * (-len(_field(first, "next_cursor")) % 4))
+        )
+        payload["i"] = "not-a-uuid"
+        malformed_identifier = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        with pytest.raises(ValueError):
+            _page(sqlite_instance, dataset_name=DATASET, limit=1, cursor=malformed_identifier)
 
     @pytest.mark.parametrize(
         ("changed_filters", "changed_dataset"),

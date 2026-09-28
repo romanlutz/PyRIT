@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from sqlalchemy import and_, case, create_engine, exists, func, or_, select, text
+from sqlalchemy import and_, case, create_engine, exists, func, literal, or_, select, text
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import InstrumentedAttribute, sessionmaker
@@ -279,6 +279,20 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         joiner = " OR " if match_mode == "any" else " AND "
         combined = joiner.join(conditions)
         return text(f"({combined})").bindparams(**bindparams_dict)
+
+    def _get_seed_harm_category_condition(
+        self, *, json_column: InstrumentedAttribute[Any], categories: Sequence[str]
+    ) -> Any:
+        """
+        Build an aliased-column-safe SQLite harm-category membership predicate.
+
+        Returns:
+            Any: A SQLAlchemy predicate matching any requested category.
+        """
+        values = [category.lower() for category in categories]
+        array = func.json_extract(json_column, literal("$"))
+        elements = func.json_each(array).table_valued("value")
+        return exists(select(1).select_from(elements).where(func.lower(elements.c.value).in_(values)))
 
     def get_all_table_models(self) -> list[type[Base]]:
         """
