@@ -116,6 +116,7 @@ async def test_payload_split_preserves_complete_prompt_population_async(
     with patch.object(config, "_collect_named_seeds_async", return_value=ingredient_seeds):
         groups = await config.get_attack_seed_groups_async()
     assert len(groups) == 4266
+    assert all(group.objective.value and group.prompts[0].value for group in groups)
     # These fingerprints include the objectives, prompts, and logical IDs before the payload split.
     expected = {
         "fact_eiffel": "ef849eeea99d49777c19b74eaf321f072b9c310bcc9c37b3d1cb431f59319786",

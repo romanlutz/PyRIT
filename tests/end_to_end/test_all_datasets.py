@@ -10,6 +10,10 @@ not on every PR.
 
 Resiliency: each fetch is retried up to 3 times with exponential backoff to
 handle transient HuggingFace / GitHub rate-limiting and network errors.
+
+Three pinned Garak task ingredients intentionally omit the instruction prefix.
+Only those exact ingredients may be empty; composed prompts are checked in
+test_garak_latent_injection_dataset.py.
 """
 
 import asyncio
@@ -37,7 +41,7 @@ from pyrit.datasets.seed_datasets.remote import (
     _VLSUMultimodalDataset,
     _WildGuardMixDataset,
 )
-from pyrit.models import SeedDataset
+from pyrit.models import Seed, SeedDataset, SeedPrompt
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,22 @@ _HF_GATED_PROVIDERS: set[type] = {
     _VLGuardDataset,
     _WildGuardMixDataset,
 }
+
+
+def _is_intentional_empty_garak_task(*, seed: Seed) -> bool:
+    return (
+        isinstance(seed, SeedPrompt)
+        and seed.value == ""
+        and seed.dataset_name == "garak_latent_injection_tasks"
+        and seed.source
+        == "https://github.com/NVIDIA/garak/blob/2212c73e4886c9c9fe78768e82a543a47284addf/garak/probes/latentinjection.py"
+        and seed.metadata
+        in (
+            {"family": "report", "language": "en", "garak_class": "LatentInjectionReport"},
+            {"family": "resume", "language": "en", "garak_class": "LatentInjectionResume"},
+            {"family": "latent_jailbreak", "language": "en", "garak_class": "LatentJailbreak"},
+        )
+    )
 
 
 def get_dataset_providers():
@@ -153,7 +173,7 @@ class TestAllDatasets:
         assert len(dataset.seeds) > 0, f"{name} returned an empty dataset"
 
         for seed in dataset.seeds:
-            assert seed.value, f"Seed in {name} has no value"
+            assert seed.value or _is_intentional_empty_garak_task(seed=seed), f"Seed in {name} has no value"
             assert seed.dataset_name == dataset.dataset_name, (
                 f"Seed dataset_name mismatch in {name}: {seed.dataset_name} != {dataset.dataset_name}"
             )
