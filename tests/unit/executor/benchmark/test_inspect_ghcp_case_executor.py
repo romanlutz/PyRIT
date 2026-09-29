@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -32,9 +33,12 @@ from pyrit.models import (
 from pyrit.models.inspect_ghcp import InspectGhcpJudgment, InspectGhcpReport, InspectGhcpStatus, InspectGhcpTaskKind
 from pyrit.prompt_target.inspect_ghcp_target import InspectGhcpTurn
 from pyrit.score.float_scale.inspect_ghcp_report_scorer import InspectGhcpReportScorer
+from tests.unit.executor.benchmark.test_inspect_eval_source import _multi_manifest
 from tests.unit.memory.test_inspect_ghcp_evidence import _adversarial_model, _control_receipts, _gateway_record
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pyrit.memory import SQLiteMemory
 
 
@@ -63,6 +67,42 @@ def _selected_case() -> tuple[InspectGhcpCaseExecutor, EvalRunRef]:
     return InspectGhcpCaseExecutor(selected=selected, environment=environment), EvalRunRef(
         spec=spec, run_instance_id=uuid.uuid4()
     )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_multi_case_source_cannot_launch_unqualified_ghcp_runtime(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    original, _ = await asyncio.to_thread(_selected_case)
+    environment = original._environment
+    revision = await asyncio.to_thread(_multi_manifest, root=tmp_path)
+    cases = await asyncio.to_thread(
+        EvalSourceFactory.resolve_cases,
+        family=None,
+        trusted_dir=tmp_path,
+        trusted_local=True,
+        revision_sha256=revision,
+        input_override=None,
+        agent_image=environment.agent_image,
+        target_image=environment.target_image,
+        approved_image_ids=environment.image_ids,
+    )
+    selected = cases[2]
+    executor = InspectGhcpCaseExecutor(selected=selected, environment=environment)
+    run = EvalRunRef(
+        spec=EvalSpecRef(
+            package=selected.case.package,
+            harness=environment.harness_ref(sandbox_sha256=selected.sandbox_sha256),
+            model_route=environment.model_route_ref(),
+        ),
+        run_instance_id=uuid.uuid4(),
+    )
+    with patch.object(InspectGhcpPilotEnvironment, "verify_host_async", new_callable=AsyncMock) as verify:
+        with pytest.raises(ValueError, match="inert until its Task profile is qualified"):
+            await executor.execute_case_async(case=selected.case, run=run)
+        verify.assert_not_awaited()
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
 
 
 def _source_turn(

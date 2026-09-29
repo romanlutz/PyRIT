@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from inspect_ai import Task, eval_async
-from inspect_ai.dataset import Sample
+from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.log import read_eval_log
 from inspect_ai.model import ChatMessageUser, Model, ModelOutput
 from inspect_ai.scorer import Target, includes
@@ -158,6 +158,42 @@ def test_original_task_keeps_scorer_and_rejects_egress_or_host_mounts() -> None:
         replace(binding, provider_endpoint="http://0.0.0.0:11435").validate()
     with pytest.raises(ValueError, match="separate"):
         replace(binding, target_service="agent").validate()
+
+
+def test_pinned_multi_sample_binding_selects_exact_id_from_original_dataset() -> None:
+    task = _task()
+    task.dataset = MemoryDataset(
+        samples=[
+            Sample(input="identical benign prompt", target="answer", id="sample-one"),
+            Sample(input="identical benign prompt", target="answer", id="sample-two"),
+        ]
+    )
+    original_dataset = task.dataset
+    binding = InspectGhcpTaskBinding(
+        task=task,
+        sample_id="sample-two",
+        scorer_name="includes",
+        approved_sample_ids=("sample-one", "sample-two"),
+        provider_endpoint="http://127.0.0.1:11435",
+        verify_provider_async=AsyncMock(return_value=True),
+    )
+    assert binding.validate() is task.sandbox.config
+    assert binding.selected_sample() is original_dataset[1]
+    assert task.dataset is original_dataset
+    with pytest.raises(ValueError, match="exactly one selected original Inspect sample"):
+        replace(binding, approved_sample_ids=None).validate()
+    with pytest.raises(ValueError, match="pinned original dataset inventory"):
+        replace(binding, approved_sample_ids=("sample-one", "unknown")).validate()
+    with pytest.raises(ValueError, match="pinned original dataset inventory"):
+        replace(binding, sample_id="unknown").validate()
+    task.dataset = MemoryDataset(
+        samples=[
+            original_dataset[0],
+            original_dataset[1].model_copy(update={"sandbox": _sandbox()}),
+        ]
+    )
+    with pytest.raises(ValueError, match="Per-sample sandbox overrides"):
+        binding.validate()
 
 
 def test_unqualified_benign_task_cannot_claim_a_cyber_benchmark_score() -> None:

@@ -171,6 +171,8 @@ class InspectGhcpCaseExecutor:
             ValueError: If source, profile, original scorer, or linked Score evidence differs.
             RuntimeError: If the case was already attempted or trusted preflight fails.
         """
+        if self._selected.strict_inventory:
+            raise ValueError("Trusted-local multi-case Eval execution is inert until its Task profile is qualified.")
         if self._attempted:
             raise RuntimeError("An Inspect GHCP Eval case may be launched only once.")
         if (
@@ -193,10 +195,12 @@ class InspectGhcpCaseExecutor:
         )
 
         files = self._selected.source_files
+        pinned_ids = tuple(sample.sample_id for sample in self._selected.pinned_samples)
         binding = InspectGhcpTaskBinding(
             task=self._selected.task,
             sample_id=case.sample_id,
             scorer_name=self._selected.scorer_name,
+            approved_sample_ids=pinned_ids if len(pinned_ids) > 1 else None,
             target_service="target",
             health_command=self._selected.health_command,
             kind=InspectGhcpTaskKind.PROTOCOL_SMOKE,

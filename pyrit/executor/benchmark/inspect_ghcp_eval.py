@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from inspect_ai import Task
+    from inspect_ai.dataset import Sample
     from inspect_ai.model import Model
     from inspect_ai.solver import Generate, Solver, TaskState
 
@@ -66,6 +67,7 @@ class InspectGhcpTaskBinding:
     task: Task
     sample_id: str
     scorer_name: str
+    approved_sample_ids: tuple[str, ...] | None = None
     target_service: str = "target"
     health_command: tuple[str, ...] = ("/bin/true",)
     kind: InspectGhcpTaskKind = InspectGhcpTaskKind.PROTOCOL_SMOKE
@@ -90,10 +92,7 @@ class InspectGhcpTaskBinding:
         Raises:
             ValueError: If sample, scorer, image, network, or sandbox ownership is ambiguous.
         """
-        if len(self.task.dataset) != 1 or str(self.task.dataset[0].id) != self.sample_id:
-            raise ValueError("Inspect GHCP requires exactly one selected original Inspect sample.")
-        if self.task.dataset[0].sandbox is not None:
-            raise ValueError("Per-sample sandbox overrides require separate qualification.")
+        self.selected_sample()
         if len(self.task.scorer or []) != 1 or not self.scorer_name:
             raise ValueError("Inspect GHCP requires one identified original Inspect scorer.")
         if not self.health_command or any(not command for command in self.health_command):
@@ -137,6 +136,34 @@ class InspectGhcpTaskBinding:
             raise ValueError("The original Inspect Task must declare a reviewed Docker ComposeConfig.")
         self._validate_compose(config=spec.config)
         return spec.config
+
+    def selected_sample(self) -> Sample:
+        """
+        Resolve the exact authored Sample, retaining its Task's original dataset.
+
+        Returns:
+            Sample: The sole case selected by Inspect's sample_id filter.
+
+        Raises:
+            ValueError: If the dataset or a per-Sample override is unqualified.
+        """
+        samples = tuple(self.task.dataset)
+        ids = tuple(str(sample.id) for sample in samples)
+        if self.approved_sample_ids is None:
+            if len(ids) != 1 or ids[0] != self.sample_id:
+                raise ValueError("Inspect GHCP requires exactly one selected original Inspect sample.")
+        elif (
+            ids != self.approved_sample_ids
+            or len(set(ids)) != len(ids)
+            or self.sample_id not in self.approved_sample_ids
+        ):
+            raise ValueError("Inspect GHCP sample selection differs from its pinned original dataset inventory.")
+        for sample in samples:
+            if sample.sandbox is not None:
+                raise ValueError("Per-sample sandbox overrides require separate qualification.")
+            if self.approved_sample_ids is not None and (sample.files or sample.setup or sample.checkpoint is not None):
+                raise ValueError("Per-sample files, setup or checkpoint overrides require separate qualification.")
+        return next(sample for sample in samples if str(sample.id) == self.sample_id)
 
     def _validate_compose(self, *, config: ComposeConfig) -> None:
         services = config.services
@@ -262,7 +289,7 @@ class InspectGhcpEvaluation:
         if (case is None) != (run is None) or (case is None) != (original_input_sha256 is None):
             raise ValueError("A task-owned Inspect case requires source, run, and original input identities.")
         if case is not None and run is not None:
-            sample_input = binding.task.dataset[0].input
+            sample_input = binding.selected_sample().input
             expected_input_sha256 = (
                 run.spec.input_variant.content_sha256 if run.spec.input_variant else original_input_sha256
             )

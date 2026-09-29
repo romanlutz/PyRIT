@@ -5,23 +5,34 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from inspect_ai.dataset import MemoryDataset
 from sqlalchemy import func, select
 
 from examples.inspect_eval_scenario_smoke import _count_unlabeled_control_scores
 from examples.inspect_ghcp_protocol_smoke import SmokePins
 from pyrit.executor.benchmark.inspect_ghcp_case_executor import InspectGhcpCaseExecutor
 from pyrit.memory.memory_models import AttackResultEntry, ScoreEntry
-from pyrit.models import EvalScoreRole, EvalSourceKind, ScenarioRunPlan, Score
+from pyrit.models import (
+    CommittedCaseExecution,
+    EvalCaseRef,
+    EvalRunRef,
+    EvalScoreRole,
+    EvalSourceKind,
+    ScenarioRunPlan,
+    Score,
+)
 from pyrit.registry.components.scenario_registry import ScenarioRegistry
 from pyrit.scenario.scenarios.benchmark.inspect_eval import InspectEvalScenario
 from pyrit.score.true_false.substring_scorer import SubStringScorer
-from tests.unit.executor.benchmark.test_inspect_eval_source import _local_manifest
+from tests.unit.executor.benchmark.test_inspect_eval_source import _local_manifest, _multi_manifest
 from tests.unit.executor.benchmark.test_inspect_ghcp_case_executor import _persist_original_case
+from tests.unit.scenario.core.test_task_owned_scenario import _RecordingCaseExecutor
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -101,6 +112,101 @@ async def test_local_explicit_trust_and_input_variant_do_not_leak_directory_into
     assert str(tmp_path) not in stored.scenario_identifier.model_dump_json()
     assert stored.scenario_identifier.params["source_sha256"] == revision
     assert stored.scenario_identifier.params["input_variant_sha256"] == work.run.spec.input_variant.content_sha256
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_local_two_task_three_sample_sweep_links_independent_original_scores_for_identical_text(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    revision = await asyncio.to_thread(_multi_manifest, root=tmp_path)
+    scenario = InspectEvalScenario()
+    scenario.set_params_from_args(args={"trusted_eval_dir": tmp_path, "trust_local": True, "eval_revision": revision})
+    with patch.dict("os.environ", _PILOT_ENV):
+        await scenario.initialize_async()
+
+    assert scenario.atomic_attack_count == 3
+    assert scenario._max_concurrency == 1
+    work = scenario._atomic_attacks
+    assert [case.case.sample_id for case in work] == ["local-one", "local-two-a", "local-two-b"]
+    assert {case.objective for case in work} == {"local harmless goal"}
+    assert len({case.case.case_id for case in work}) == 3
+    assert len({case.case_run_id for case in work}) == 3
+    assert work[1]._case_executor._selected.task is work[2]._case_executor._selected.task
+    assert all(case.run.spec.package.source_sha256 == revision for case in work)
+    [stored] = sqlite_instance.get_scenario_results(scenario_result_ids=[scenario._scenario_result_id])
+    plan = ScenarioRunPlan.model_validate(stored.metadata["run_plan"])
+    assert [group.case_id for group in plan.seed_groups] == [case.case.case_id for case in work]
+    assert len({group.objective_sha256 for group in plan.seed_groups}) == 1
+    assert str(tmp_path) not in stored.scenario_identifier.model_dump_json()
+    assert stored.scenario_identifier.objective_target is None
+    assert stored.scenario_identifier.objective_scorer is None
+
+    # The unit-only executor supplies the already-committed Score contract; it does not run a Task or model.
+    recorder = _RecordingCaseExecutor(memory=sqlite_instance)
+
+    async def committed_case_async(
+        self: InspectGhcpCaseExecutor, *, case: EvalCaseRef, run: EvalRunRef
+    ) -> CommittedCaseExecution:
+        assert self._selected.case == case
+        return await recorder.execute_case_async(case=case, run=run)
+
+    with patch.object(InspectGhcpCaseExecutor, "execute_case_async", new=committed_case_async):
+        result = await scenario.run_async()
+        with pytest.raises(RuntimeError, match="replay is disabled"):
+            await scenario.run_async()
+        reused = await work[1].run_async()
+        assert reused.completed_results[0].automated_score.id == recorder.original_scores[1].id
+
+    rows = result.get_display_groups()[work[0].display_group]
+    assert len(rows) == len(recorder.calls) == 3
+    assert recorder.calls == [case.case_run_id for case in work]
+    assert len({row.attack_result_id for row in rows}) == 3
+    assert len({row.automated_score.id for row in rows}) == 3
+    assert {row.attribution_data["case_id"] for row in rows} == {case.case.case_id for case in work}
+    assert {row.attribution_data["seed_group_id"] for row in rows} == {case.case_run_id for case in work}
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 3
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 3
+        for row in rows:
+            stored_row = session.get(AttackResultEntry, row.attack_result_id)
+            assert stored_row is not None and stored_row.automated_score_id == row.automated_score.id
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("change", ["asset", "unselected_sample", "sample_sandbox"])
+async def test_multi_case_preflight_rejects_drift_before_any_original_score(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, change: str
+) -> None:
+    revision = await asyncio.to_thread(_multi_manifest, root=tmp_path)
+    scenario = InspectEvalScenario()
+    scenario.set_params_from_args(args={"trusted_eval_dir": tmp_path, "trust_local": True, "eval_revision": revision})
+    with patch.dict("os.environ", _PILOT_ENV):
+        await scenario.initialize_async()
+
+    selected = scenario._atomic_attacks[2]._case_executor._selected
+    if change == "asset":
+        await asyncio.to_thread((tmp_path / "public-asset.txt").write_text, "changed", encoding="utf-8")
+    elif change == "unselected_sample":
+        selected.task.dataset = MemoryDataset(
+            samples=[
+                selected.task.dataset[0].model_copy(update={"input": "different unselected prompt"}),
+                selected.task.dataset[1],
+            ]
+        )
+    else:
+        selected.task.dataset = MemoryDataset(
+            samples=[
+                selected.task.dataset[0],
+                selected.task.dataset[1].model_copy(update={"sandbox": selected.task.sandbox}),
+            ]
+        )
+    with patch.object(InspectGhcpCaseExecutor, "execute_case_async", new_callable=AsyncMock) as execute:
+        with pytest.raises(ValueError, match="source asset changed|identity or supported input|per-Sample sandbox"):
+            await scenario.run_async()
+        execute.assert_not_awaited()
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
 
 
 @pytest.mark.usefixtures("patch_central_database")
