@@ -11,10 +11,13 @@ from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 if TYPE_CHECKING:
     from pyrit.scenario.scenarios._dynamic_techniques import AdversarialBenchmarkTechnique
     from pyrit.scenario.scenarios.benchmark.adversarial import AdversarialBenchmark
+    from pyrit.scenario.scenarios.benchmark.inspect_eval import InspectEvalScenario, InspectEvalTechnique
 
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "AdversarialBenchmark": "pyrit.scenario.scenarios.benchmark.adversarial",
     "AdversarialBenchmarkTechnique": "pyrit.scenario.scenarios._dynamic_techniques",
+    "InspectEvalScenario": "pyrit.scenario.scenarios.benchmark.inspect_eval",
+    "InspectEvalTechnique": "pyrit.scenario.scenarios.benchmark.inspect_eval",
 }
 
 __all__ = list(_LAZY_EXPORTS)

@@ -18,6 +18,95 @@ general host shell. Inspect's sandbox proxy talks to the trusted controller;
 the separately named `target` service remains alive through original grading.
 The SDK worker stops and its process exits before the original scorer starts.
 
+## One-click benign Eval Scenario (V1)
+
+The registered `benchmark.inspect_eval` Scenario selects an authored Task,
+not a manually constructed `InspectGhcpTaskBinding` or a synthetic victim
+`PromptTarget`. After normal PyRIT initialization in an **approved isolated
+environment**, set its `eval_family` parameter to `benign_protocol` and run
+`initialize_async()` / `run_async()`. The same Scenario is available from the
+PyRIT scenario catalog. It derives the PyRIT objective from that Task's one
+nonempty text `Sample.input`, then delegates the original Task, setup, scorer
+and cleanup to Inspect. The original `Sample.target` remains original scorer
+data, never a second attack objective. The existing GHCP solver still runs
+PyRIT's retained-session `RedTeamingAttack` once across two user turns.
+
+No live Task, Docker or provider access occurs during scenario catalog
+discovery. Runtime selection requires the already-reviewed `DOCKER_HOST`
+child SSH alias and `PYRIT_INSPECT_AGENT_IMAGE` /
+`PYRIT_INSPECT_AGENT_IMAGE_ID` settings from the direct pilot. The scenario
+uses the fixed `ghcp_protocol_v1` harness profile and host-only
+`qwen3_loopback_v1` model route. Unknown profiles, routes, Eval families,
+multiple Tasks/Samples, invalid image IDs, edits to Sample files/setup/
+sandbox, and authored solver initialization are explicitly unsupported.
+These are V1 capability rejections, **not** a license to skip the original
+Task's scorer or its protections. The existing `PROTOCOL_SMOKE` binding gate
+still refuses a cyber benchmark Score.
+
+The approved single-case Scenario entry point is
+`examples.inspect_eval_scenario_smoke`; invoke it from the repository root
+with `uv run --project build_scripts\inspect_ghcp_controller python -m
+examples.inspect_eval_scenario_smoke` **only after** a new isolated
+Docker/model lease has been granted. Module invocation keeps the pinned
+authored Task import rooted in this checkout. It uses its own ignored
+`.venv\inspect-ghcp\oneclick-protocol.db` so historical pilot evidence is
+never rewritten. The existing token audit accepts `--database
+oneclick-protocol.db` for that run (the default remains
+`protocol-smoke.db`). Both the Scenario and audit print only safe
+identifiers/counts; the original `.eval`/SQLite source data remains private.
+
+An operator may instead select `trusted_eval_dir` with `trust_local=True`
+and `eval_revision` equal to the SHA256 of that directory's exact
+`inspect-eval.json` bytes. The local directory contains explicitly trusted
+Python code; validating a manifest does **not** make arbitrary Python safe
+to import. V1's manifest declares `schema_version: 1`, a public `name`,
+relative `task_file`, `factory`, `files_sha256` (including the factory),
+`task_name`, `task_version`, `sample_id`, `sample_input_sha256`,
+`sample_target_sha256`, `scorer_name` and its registry-parameter
+fingerprint, the ordered `setup_fingerprints`, `cleanup_name`, a bounded
+target-side `health_command`, and whether `allow_initial_input_override`
+is enabled. These setup/scorer/cleanup fingerprints are checked again
+against the materialized Task before a case starts; an authored solver
+with initialization or nondefault model/checkpoint configuration is
+outside V1. V1 rejects parameterized setup/scorer callbacks whose
+arguments could refer to further unpinned grading or preparation files.
+The factory is called with `agent_image` and `target_image` keyword
+arguments and must return one materialized Inspect `Task`. The resolver
+checks declared source file hashes **before** importing it; it rechecks
+source files and the effective Compose/task identity before any case
+starts. Symlinks, missing declared files and extra returned Tasks/Samples
+fail closed. This is *not* a sandbox for arbitrary Python imports: the
+operator must trust the local factory and any code it loads; no URL-based
+source loader or network fetch is provided by this Scenario.
+
+When that source allows it, `initial_user_input` replaces only the selected
+text `Sample.input` (max 32,768 UTF-8 bytes). The original input SHA and
+source package SHA remain unchanged; `InputVariantRef` records a separate
+overlay digest in the scenario/spec identity and the already-committed Score
+metadata. This is a labeled GHCP Task **variant**, not unchanged benchmark
+parity. Solver init, scorer, target image, Sample files and sandbox are
+never user-editable through this parameter. Scenario V1 runs one sample at
+a time, forbids baseline/retry/resume, and cannot start a second case from
+one Scenario instance.
+
+The original Inspect ScoreEvent is verified once against the selected
+Task/Sample/epoch/scorer and sealed raw EvalLog. The evaluator labels its
+single **pre-committed** PyRIT Score with the typed
+`EvalScoreProvenance(BENCHMARK_ORIGINAL, case_run_id, mapper_hash)` before
+the same atomic DB transaction that stores the report. Here
+`BENCHMARK_ORIGINAL` identifies the **source** of the benign lifecycle
+marker, not a qualified cyber achievement: the Score and TaskOwned
+`AttackResult` remain UND/NULL. `TaskOwnedAtomicAttack` re-reads that exact
+Score ID and links it via FK, without creating a second Score or calling
+the original scorer again. The provider/model and GHCP SDK/token safety
+limits below remain unchanged.
+The benign pilot's PyRIT `RedTeamingAttack` also persists its two
+`SubStringScorer` impossible-canary **false** control Scores, attached to
+the two MessagePieces. They have no `pyrit_eval_role` metadata and are
+neither benchmark verdicts nor typed progress achievements; the
+TaskOwned AttackResult links only the one original-report UND Score.
+No ManualScorer stop sentinel was observed in the accepted one-click run.
+
 ## Supported execution and qualification
 
 - One selected, original text `Sample`, one original scorer, one epoch, one
@@ -160,6 +249,14 @@ independently pinned original task/data/image/scorer assets, all required raw
 sources, a real model and PyRIT decision loop, agent stop before grading,
 target/gateway liveness across grading, original cleanup, and independent
 removal of all three exact containers plus the Compose project/network.
+The current schema 3 records the three exact full container IDs, but not
+Inspect's random Compose project name or full network ID. Cleanup is
+therefore proved as exact absence for each container **and separately**
+absence of child Compose projects/containers/networks by name/label;
+it is not an exact-network-ID deletion attestation. A future versioned
+profile must capture project/network IDs while live, bind them to every
+service, and verify exact absence after teardown if that stronger proof
+is required. Existing sealed runs cannot gain such evidence retroactively.
 Otherwise the Score has `status=undetermined` and no numeric value.
 The present `InspectGhcpTaskBinding` explicitly **rejects**
 `CYBER_BENCHMARK` even if a caller supplies toy asset hashes: no original

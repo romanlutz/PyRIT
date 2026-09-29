@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from build_scripts.inspect_ghcp_controller.audit_secret_retention import TokenAbsenceScanner, _fingerprint
+from build_scripts.inspect_ghcp_controller.audit_secret_retention import TokenAbsenceScanner, _audit, _fingerprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -63,3 +63,13 @@ def test_pre_delivery_fingerprint_is_run_bound_without_persisting_token(tmp_path
     assert token not in stage.read_bytes()
     with pytest.raises(ValueError, match="different|belong"):
         _fingerprint(run_dir=tmp_path, run_id="22222222-2222-2222-2222-222222222222")
+
+
+def test_private_token_audit_never_accepts_an_unlisted_database_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="approved private SQLite"):
+        _audit(
+            run_id="11111111-1111-1111-1111-111111111111",
+            stdout=tmp_path / "stdout",
+            stderr=tmp_path / "stderr",
+            database="../unreviewed.db",
+        )

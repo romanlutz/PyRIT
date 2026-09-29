@@ -232,6 +232,27 @@ class InspectGhcpEvidenceStore:
         recovered._recovery_only = True
         return recovered
 
+    @classmethod
+    def open_finalized_for_readback(cls, *, memory: MemoryInterface, run_id: str) -> InspectGhcpEvidenceStore:
+        """
+        Reassess sealed original sources without opening another evidence episode.
+
+        Returns:
+            InspectGhcpEvidenceStore: Read-only access to the finalized run.
+
+        Raises:
+            ValueError: If the episode is not a finalized Inspect run.
+        """
+        snapshot = memory.native_cyber_evidence.get_finalized_episode(run_id=run_id)
+        if snapshot.run.binding_name != "inspect-ghcp":
+            raise ValueError("This finalized episode does not belong to the original Inspect Task.")
+        recovered = object.__new__(cls)
+        recovered._memory = memory
+        recovered._capture = memory.native_cyber_evidence
+        recovered.run_id = run_id
+        recovered._recovery_only = True
+        return recovered
+
     def bind_agent(self, *, container_id: str, session_id: str) -> None:
         """
         Bind the actual Inspect container and GHCP session before the first turn.

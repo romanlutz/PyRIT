@@ -32,7 +32,10 @@ from examples.inspect_ghcp_protocol_smoke import (
     _require_protocol_proof,
     original_target_marker_scorer,
 )
+from pyrit.executor.benchmark._inspect_ghcp_runtime import InspectGhcpLimits
 from pyrit.executor.benchmark.inspect_ghcp_eval import InspectGhcpEvaluation, InspectGhcpOutcome, InspectGhcpTaskBinding
+from pyrit.executor.benchmark.inspect_ghcp_model import InspectLoopbackModelAPI
+from pyrit.memory.inspect_ghcp_evidence import InspectGhcpEvidenceStore
 from pyrit.models.inspect_ghcp import (
     InspectGhcpJudgment,
     InspectGhcpReport,
@@ -44,6 +47,8 @@ from pyrit.score.float_scale.inspect_ghcp_report_scorer import InspectGhcpReport
 
 if TYPE_CHECKING:
     from inspect_ai.solver import Generate, Solver
+
+    from pyrit.memory import SQLiteMemory
 
 
 def _sandbox() -> SandboxEnvironmentSpec:
@@ -172,6 +177,48 @@ def test_unqualified_benign_task_cannot_claim_a_cyber_benchmark_score() -> None:
     )
     with pytest.raises(ValueError, match="not qualified"):
         binding.validate()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_task_asset_report_uses_source_relative_labels_not_local_paths(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    task = _task()
+    source_path = tmp_path / "private_task.py"
+    binding = InspectGhcpTaskBinding(
+        task=task,
+        sample_id="sample-one",
+        scorer_name="includes",
+        approved_assets={source_path: "a" * 64},
+        approved_asset_labels={source_path: "task.py"},
+        provider_endpoint="http://127.0.0.1:11435/v1",
+        verify_provider_async=AsyncMock(return_value=True),
+    )
+    model = MagicMock(spec=Model)
+    model.api = InspectLoopbackModelAPI(model_name="qwen3:1.7b", base_url="http://127.0.0.1:11435/v1")
+    evaluation = InspectGhcpEvaluation(
+        binding=binding,
+        attack_factory=MagicMock(),
+        model=model,
+        model_id="qwen3-local",
+        wire_model="qwen3:1.7b",
+        cli_path="/opt/pyrit/copilot",
+        cli_sha256="b" * 64,
+        limits=InspectGhcpLimits(),
+    )
+    evaluation._store = InspectGhcpEvidenceStore(
+        memory=sqlite_instance,
+        run_id=evaluation.run_id,
+        task_name=task.name,
+        task_version=str(task.version),
+        started_at=evaluation._started_at,
+        raw_byte_limit=10_000,
+    )
+    report = await evaluation._build_report_async(log=None, log_bytes=None, error="test_error")
+    assert report.task_assets_sha256 == {"task.py": "a" * 64}
+    assert str(tmp_path) not in report.canonical_json()
+    with pytest.raises(ValueError, match="source-relative"):
+        replace(binding, approved_asset_labels={source_path: str(source_path)}).validate()
 
 
 async def test_inspect_original_scorer_and_cleanup_run_once_with_solver_override(tmp_path: Path) -> None:
@@ -375,7 +422,7 @@ async def test_benign_example_rejects_incomplete_evaluation_result() -> None:
         patch.object(smoke, "_docker_host", return_value="ssh://approved-child"),
         patch.object(smoke, "initialize_pyrit_async", new_callable=AsyncMock),
         patch.object(smoke, "original_benign_task", return_value=_task()),
-        patch.object(smoke, "get_model", return_value=MagicMock(spec=Model)),
+        patch.object(smoke, "create_benign_inspect_model", return_value=MagicMock(spec=Model)),
         patch.object(smoke, "_hash_file", return_value="a" * 64),
         patch.object(smoke, "InspectGhcpEvaluation", autospec=True) as evaluation_type,
     ):

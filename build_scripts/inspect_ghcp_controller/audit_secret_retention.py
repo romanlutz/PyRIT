@@ -226,12 +226,14 @@ def _verify_publication(
     }
 
 
-def _audit(*, run_id: str, stdout: Path, stderr: Path) -> dict[str, object]:
+def _audit(*, run_id: str, stdout: Path, stderr: Path, database: str = "protocol-smoke.db") -> dict[str, object]:
     from pyrit.memory import CentralMemory
     from pyrit.setup import SQLITE, initialize_pyrit_async
 
     if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", run_id):
         raise ValueError("Inspect source audit requires one canonical run UUID.")
+    if database not in {"protocol-smoke.db", "oneclick-protocol.db"}:
+        raise ValueError("Inspect source audit requires one approved private SQLite file name.")
     root = (Path.cwd() / ".venv" / "inspect-ghcp").resolve(strict=True)
     run_dir = root / run_id
     if not run_dir.is_dir() or run_dir.is_symlink() or run_dir.resolve() != root / run_id:
@@ -241,7 +243,9 @@ def _audit(*, run_id: str, stdout: Path, stderr: Path) -> dict[str, object]:
             raise ValueError("Controller stdout/stderr captures must be private files in this worktree.")
     fingerprint = _fingerprint(run_dir=run_dir, run_id=run_id)
     scanner = TokenAbsenceScanner(token_sha256=fingerprint)
-    db = root / "protocol-smoke.db"
+    db = root / database
+    if not db.is_file() or db.is_symlink():
+        raise ValueError("The private PyRIT source database is missing or not a regular file.")
     asyncio.run(
         initialize_pyrit_async(memory_db_type=SQLITE, db_path=db, env_files=[], load_defaults=False, silent=True)
     )
@@ -288,8 +292,11 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--stdout", type=Path, required=True)
     parser.add_argument("--stderr", type=Path, required=True)
+    parser.add_argument(
+        "--database", default="protocol-smoke.db", choices=["protocol-smoke.db", "oneclick-protocol.db"]
+    )
     args = parser.parse_args()
-    proof = _audit(run_id=args.run_id, stdout=args.stdout, stderr=args.stderr)
+    proof = _audit(run_id=args.run_id, stdout=args.stdout, stderr=args.stderr, database=args.database)
     output = Path.cwd() / ".venv" / "inspect-ghcp" / args.run_id / "token-absence-audit.json"
     with output.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps(proof, sort_keys=True, separators=(",", ":")) + "\n")

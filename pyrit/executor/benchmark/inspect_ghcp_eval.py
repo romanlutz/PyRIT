@@ -36,7 +36,8 @@ from pyrit.executor.benchmark._inspect_ghcp_runtime import InspectGhcpLimits, In
 from pyrit.executor.benchmark.inspect_ghcp_model import InspectLoopbackModelAPI
 from pyrit.memory import CentralMemory
 from pyrit.memory.inspect_ghcp_evidence import InspectGhcpEvidenceStore
-from pyrit.models import Message, Score
+from pyrit.models import Message, Score, ScoreStatus
+from pyrit.models.eval_case import EvalCaseRef, EvalRunRef, EvalScoreProvenance, EvalScoreRole
 from pyrit.models.inspect_ghcp import (
     InspectGhcpJudgment,
     InspectGhcpReport,
@@ -69,6 +70,7 @@ class InspectGhcpTaskBinding:
     health_command: tuple[str, ...] = ("/bin/true",)
     kind: InspectGhcpTaskKind = InspectGhcpTaskKind.PROTOCOL_SMOKE
     approved_assets: dict[Path, str] = field(default_factory=dict)
+    approved_asset_labels: dict[Path, str] = field(default_factory=dict)
     approved_image_ids: dict[str, str] = field(default_factory=dict)
     expected_target_image: str | None = None
     verify_image_async: Callable[[str, str], Awaitable[str | None]] | None = None
@@ -114,6 +116,18 @@ class InspectGhcpTaskBinding:
                 "Original cyber task/data/image/scorer parity is not qualified by this GHCP harness; "
                 "only a non-scored protocol smoke may run."
             )
+        if self.approved_asset_labels:
+            labels = list(self.approved_asset_labels.values())
+            if set(self.approved_asset_labels) != set(self.approved_assets) or len(labels) != len(set(labels)):
+                raise ValueError("Every approved asset requires a distinct source-relative public label.")
+            if any(
+                "\\" in label
+                or label.startswith("/")
+                or ":" in label
+                or any(part in {"", ".", ".."} for part in label.split("/"))
+                for label in labels
+            ):
+                raise ValueError("Approved asset labels must be source-relative and cannot expose host paths.")
         spec = self.task.sandbox
         if (
             not isinstance(spec, SandboxEnvironmentSpec)
@@ -230,6 +244,9 @@ class InspectGhcpEvaluation:
         cli_sha256: str,
         limits: InspectGhcpLimits,
         allowed_tools: tuple[str, ...] = ("bash",),
+        case: EvalCaseRef | None = None,
+        run: EvalRunRef | None = None,
+        original_input_sha256: str | None = None,
     ) -> None:
         """
         Bind the chosen PyRIT technique and original Inspect task without starting either.
@@ -242,7 +259,29 @@ class InspectGhcpEvaluation:
             raise ValueError("The approved GHCP CLI requires its exact SHA256.")
         if not isinstance(model.api, InspectLoopbackModelAPI):
             raise ValueError("GHCP Inspect provider must capture real host model HTTP bytes without OpenAI 3.")
+        if (case is None) != (run is None) or (case is None) != (original_input_sha256 is None):
+            raise ValueError("A task-owned Inspect case requires source, run, and original input identities.")
+        if case is not None and run is not None:
+            sample_input = binding.task.dataset[0].input
+            expected_input_sha256 = (
+                run.spec.input_variant.content_sha256 if run.spec.input_variant else original_input_sha256
+            )
+            if (
+                case.task_name != binding.task.name
+                or case.task_version != str(binding.task.version)
+                or case.sample_id != binding.sample_id
+                or case.epoch != 1
+                or original_input_sha256 is None
+                or re.fullmatch(r"[0-9a-f]{64}", original_input_sha256) is None
+                or not isinstance(sample_input, str)
+                or hashlib.sha256(sample_input.encode("utf-8")).hexdigest() != expected_input_sha256
+            ):
+                raise ValueError("Task-owned Inspect case differs from its selected Task/Sample/input identity.")
+            run.case_run_id(case=case)
         self.binding = binding
+        self._case = case
+        self._run = run
+        self._original_input_sha256 = original_input_sha256
         self._attack_factory = attack_factory
         self._model = model
         self._model_api = model.api
@@ -287,6 +326,11 @@ class InspectGhcpEvaluation:
         self._container_ids: dict[str, str] = {}
         self._provider_verified = False
         self._run_called = False
+
+    @property
+    def run_id(self) -> str:
+        """The scoped Inspect source episode created by this evaluator."""
+        return self._run_id
 
     async def run_async(self) -> InspectGhcpOutcome:
         """
@@ -401,6 +445,13 @@ class InspectGhcpEvaluation:
         report = InspectGhcpReport.model_validate(report.model_dump(mode="json"))
         scorer = InspectGhcpReportScorer(report_sha256=report.sha256())
         score = scorer.prepare_unpersisted_score(report=report)
+        if (
+            self._case is not None
+            and self._run is not None
+            and report.status is InspectGhcpStatus.INCOMPLETE
+            and report.required_gaps == ("Original cyber task/scorer/target image were not independently verified.",)
+        ):
+            self._attach_original_case_provenance(report=report, score=score)
         await self._checkpoint_async(stage="score_prepared")
         episode = await asyncio.to_thread(self._store.finalize_atomic, report=report, score=score)
         await self._checkpoint_async(stage="score_committed")
@@ -411,6 +462,49 @@ class InspectGhcpEvaluation:
             episode=episode,
             log_location=log.location if log is not None else None,
         )
+
+    def _attach_original_case_provenance(self, *, report: InspectGhcpReport, score: Score) -> None:
+        """
+        Label only a source-verified original Score before its atomic publication.
+
+        Raises:
+            ValueError: If the original Task/ScoreEvent or required capture differs.
+        """
+        assert self._case is not None and self._run is not None
+        judgment = report.judgment
+        scorer = score.scorer_class_identifier
+        if (
+            report.task_kind is not InspectGhcpTaskKind.PROTOCOL_SMOKE
+            or report.status is not InspectGhcpStatus.INCOMPLETE
+            or report.benchmark_verified
+            or report.required_gaps != ("Original cyber task/scorer/target image were not independently verified.",)
+            or report.task_name != self._case.task_name
+            or report.task_version != self._case.task_version
+            or report.sample_id != self._case.sample_id
+            or report.sample_epoch != self._case.epoch
+            or not report.inspect_log_sha256
+            or judgment is None
+            or not judgment.source_event_id
+            or judgment.scorer_name != self.binding.scorer_name
+            or judgment.numeric_value is None
+            or scorer is None
+            or score.status is not ScoreStatus.UNDETERMINED
+            or score.score_value is not None
+        ):
+            raise ValueError("The original Inspect Task/ScoreEvent is not qualified for case Score linkage.")
+        provenance = EvalScoreProvenance(
+            role=EvalScoreRole.BENCHMARK_ORIGINAL,
+            case_run_id=self._run.case_run_id(case=self._case),
+            pyrit_scorer_hash=scorer.hash,
+        )
+        assert self._original_input_sha256 is not None
+        source_metadata = {
+            "pyrit_eval_source_sha256": self._case.package.source_sha256,
+            "pyrit_eval_original_input_sha256": self._original_input_sha256,
+        }
+        if self._run.spec.input_variant is not None:
+            source_metadata["pyrit_eval_input_variant_sha256"] = self._run.spec.input_variant.content_sha256
+        score.score_metadata = {**(score.score_metadata or {}), **provenance.to_metadata(), **source_metadata}
 
     def _registered_solver(self) -> Solver:
         @solver
@@ -745,7 +839,10 @@ class InspectGhcpEvaluation:
             task_kind=self.binding.kind,
             benchmark_verified=False,
             provider_verified=self._provider_verified,
-            task_assets_sha256={str(path): value for path, value in self.binding.approved_assets.items()},
+            task_assets_sha256={
+                self.binding.approved_asset_labels.get(path, str(path)): value
+                for path, value in self.binding.approved_assets.items()
+            },
             image_ids=self.binding.approved_image_ids,
             target_image=self.binding.expected_target_image,
             cli_sha256=self._cli_sha256,
