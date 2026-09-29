@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
+
+from pydantic import model_validator
 
 from pyrit.common.apply_defaults import REQUIRED_VALUE, apply_defaults
 from pyrit.common.path import EXECUTOR_RED_TEAM_PATH
@@ -20,7 +23,10 @@ from pyrit.executor.attack.component import (
 )
 from pyrit.executor.attack.component.modality_router import _ModalityFeedbackRouter
 from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackConverterConfig, AttackScoringConfig
-from pyrit.executor.attack.core.attack_strategy import attack_outcome_from_score
+from pyrit.executor.attack.core.attack_strategy import (
+    _ObjectiveTargetConversationLifecycle,
+    attack_outcome_from_score,
+)
 from pyrit.executor.attack.multi_turn.multi_turn_attack_strategy import (
     ConversationSession,
     MultiTurnAttackContext,
@@ -31,6 +37,7 @@ from pyrit.models import (
     AtomicAttackIdentifier,
     AttackOutcome,
     AttackResult,
+    ComponentIdentifier,
     Conversation,
     ConversationReference,
     ConversationType,
@@ -45,6 +52,7 @@ from pyrit.score.score_utils import score_is_true
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import TracebackType
 
     from pyrit.prompt_target.common.prompt_target import PromptTarget
 
@@ -67,6 +75,30 @@ class RTASystemPromptPaths(enum.Enum):
     VIOLENT_DURIAN = Path(EXECUTOR_RED_TEAM_PATH, "violent_durian.yaml").resolve()
 
 
+class RedTeamingTerminalScoring(str, enum.Enum):
+    """Who owns the final verdict for a red teaming attack."""
+
+    INTERNAL = "internal"
+    EXTERNAL_FINAL = "external_final"
+
+
+class RedTeamingPendingExternalResult(AttackResult):
+    """Ungraded attack evidence awaiting the task's original final scorer."""
+
+    @model_validator(mode="after")
+    def _validate_pending_evidence(self) -> Self:
+        if (
+            self.outcome is not AttackOutcome.UNDETERMINED
+            or self.automated_score is not None
+            or self.human_score is not None
+            or self.last_response is None
+            or self.last_response.has_error()
+            or self.last_response.converted_value_data_type == "error"
+        ):
+            raise ValueError("Pending external attack evidence must have a non-error response and no final verdict.")
+        return self
+
+
 class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], AttackResult]):
     """
     Implementation of multi-turn red teaming attack strategy.
@@ -83,7 +115,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
     5. Continuing until the objective is achieved or maximum turns are reached.
 
     The strategy supports customization through system prompts, seed prompts, and converters,
-    allowing for various attack techniques and scenarios.
+    allowing for various attack techniques and scenarios. The opt-in external-final mode
+    leaves the final verdict to a task-owned scorer after the attack has stopped.
     """
 
     @apply_defaults
@@ -98,6 +131,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         prepended_conversation_config: PrependedConversationConfig | None = None,
         max_turns: int = 10,
         score_last_turn_only: bool = False,
+        terminal_scoring: RedTeamingTerminalScoring = RedTeamingTerminalScoring.INTERNAL,
     ) -> None:
         """
         Initialize the red teaming attack strategy.
@@ -115,9 +149,14 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 This reduces LLM calls when intermediate scores are not needed (e.g., for
                 generating simulated conversations). The attack will run for exactly max_turns
                 when this is enabled. Defaults to False.
+            terminal_scoring (RedTeamingTerminalScoring): INTERNAL preserves the usual
+                PyRIT objective scorer; EXTERNAL_FINAL returns ungraded evidence to a
+                task-owned scorer. Defaults to INTERNAL.
 
         Raises:
-            ValueError: If objective_scorer is not provided in attack_scoring_config.
+            ValueError: If the internal objective scorer is missing or an external-final
+                configuration includes a scorer or last-turn-only scoring.
+            TypeError: If terminal_scoring is not a RedTeamingTerminalScoring.
         """
         # Initialize base class
         super().__init__(
@@ -135,12 +174,24 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         # Initialize scoring configuration
         attack_scoring_config = attack_scoring_config or AttackScoringConfig()
-        if attack_scoring_config.objective_scorer is None:
+        if not isinstance(terminal_scoring, RedTeamingTerminalScoring):
+            raise TypeError("terminal_scoring must be a RedTeamingTerminalScoring.")
+        if terminal_scoring is RedTeamingTerminalScoring.INTERNAL and attack_scoring_config.objective_scorer is None:
             raise ValueError("Objective scorer must be provided in the attack scoring configuration.")
+        if terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            if (
+                attack_scoring_config.objective_scorer is not None
+                or attack_scoring_config.auxiliary_scorers
+                or attack_scoring_config.refusal_scorer is not None
+            ):
+                raise ValueError("External final scoring cannot use PyRIT objective, auxiliary, or progress scorers.")
+            if score_last_turn_only:
+                raise ValueError("score_last_turn_only is incompatible with external final scoring.")
 
         # Check for unused optional parameters and warn if they are set
         warn_if_set(config=attack_scoring_config, log=self._logger, unused_fields=["refusal_scorer"])
 
+        self._terminal_scoring = terminal_scoring
         self._objective_scorer = attack_scoring_config.objective_scorer
         self._auxiliary_scorers = attack_scoring_config.auxiliary_scorers
         self._use_score_as_feedback = attack_scoring_config.use_score_as_feedback
@@ -189,6 +240,39 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         self._max_turns = max_turns
         self._score_last_turn_only = score_last_turn_only
 
+    def external_final_scoring_session(self) -> RedTeamingExternalFinalSession:
+        """
+        Acquire an outer-owned target lifecycle before executing an external-final attack.
+
+        The caller must stop and independently observe the agent exit, call its original
+        scorer only on successful pending evidence, and quiesce the agent before leaving
+        the session. Target reset occurs on exit while the workspace is still available.
+
+        Returns:
+            RedTeamingExternalFinalSession: A one-shot async context manager.
+        """
+        return RedTeamingExternalFinalSession(attack=self)
+
+    async def execute_with_context_async(self, *, context: MultiTurnAttackContext[Any]) -> AttackResult:
+        """
+        Execute with internal scoring or a live outer-owned external scoring session.
+
+        Args:
+            context (MultiTurnAttackContext[Any]): Per-execution attack state.
+
+        Returns:
+            AttackResult: A scored legacy result or pending external evidence.
+
+        Raises:
+            RuntimeError: If external final scoring has no live owning session.
+        """
+        if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            lifecycle = context._objective_target_conversation_lifecycle
+            if lifecycle is None or not lifecycle.is_active_external_owner_for(objective_target=self._objective_target):
+                raise RuntimeError("External final scoring requires an active external_final_scoring_session.")
+            context._persist_attack_result = False
+        return await super().execute_with_context_async(context=context)
+
     def get_attack_scoring_config(self) -> AttackScoringConfig | None:
         """
         Get the attack scoring configuration used by this strategy.
@@ -202,6 +286,15 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             auxiliary_scorers=self._auxiliary_scorers,
             use_score_as_feedback=self._use_score_as_feedback,
         )
+
+    def _build_identifier(self) -> ComponentIdentifier:
+        if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            return self._create_identifier(params={"terminal_scoring": self._terminal_scoring.value})
+        return self._create_identifier()
+
+    def _validate_scoring_expectation(self, *, context: MultiTurnAttackContext[Any]) -> None:
+        if self._terminal_scoring is not RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            super()._validate_scoring_expectation(context=context)
 
     def get_attack_adversarial_config(self) -> AttackAdversarialConfig | None:
         """
@@ -284,6 +377,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             max_turns=self._max_turns,
             memory_labels=self._memory_labels,
         )
+        if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            context.last_score = None
 
         # The adversarial conversation manager owns rendering and setting the system prompt.
         # ``set_system_prompt`` rejects any conversation that already has messages, so this must run
@@ -318,6 +413,9 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         Returns:
             AttackResult: The result of the attack execution.
+
+        Raises:
+            RuntimeError: If external scoring reaches an errored response or lacks final evidence.
         """
         # Log the attack configuration
         logger.info(f"Starting red teaming attack with objective: {context.objective}")
@@ -352,11 +450,12 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
                 context=context, message=message_to_send
             )
 
-            # Determine if this is the last turn
-            is_last_turn = context.executed_turns + 1 >= self._max_turns
-
-            # Score the response (conditionally based on score_last_turn_only)
-            if not self._score_last_turn_only or is_last_turn:
+            if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+                if context.last_response.is_error():
+                    raise RuntimeError("External final scoring cannot grade an errored or blocked target response.")
+                context.last_score = None
+            elif not self._score_last_turn_only or context.executed_turns + 1 >= self._max_turns:
+                # Score the response (conditionally based on score_last_turn_only).
                 context.last_score = await self._score_response_async(context=context)
                 # Check if objective achieved
                 achieved_objective = score_is_true(context.last_score)
@@ -366,6 +465,21 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
             # Increment the executed turns
             context.executed_turns += 1
+
+        if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            if context.last_response is None:
+                raise RuntimeError("External final scoring requires a completed objective-target response.")
+            return RedTeamingPendingExternalResult(
+                atomic_attack_identifier=AtomicAttackIdentifier.build(attack_identifier=self.get_identifier()),
+                conversation_id=context.session.conversation_id,
+                objective=context.objective,
+                outcome=AttackOutcome.UNDETERMINED,
+                outcome_reason="Awaiting task-owned final scoring",
+                executed_turns=context.executed_turns,
+                last_response=context.last_response.get_piece(),
+                related_conversations=context.related_conversations,
+                labels=context.memory_labels,
+            )
 
         # Prepare the result
         return AttackResult(
@@ -528,7 +642,12 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         Returns:
             Score | None: The score of the response if available, otherwise None.
+
+        Raises:
+            RuntimeError: If this attack defers its final score to an external task.
         """
+        if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            raise RuntimeError("External final scoring cannot invoke a PyRIT scorer.")
         if not context.last_response:
             logger.warning("No response available in context to score")
             return None
@@ -549,3 +668,110 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         objective_scores = scoring_results["objective_scores"]
         return objective_scores[0] if objective_scores else None
+
+
+class RedTeamingExternalFinalSession:
+    """One-shot, outer-owned objective-target lifecycle for external final grading."""
+
+    def __init__(self, *, attack: RedTeamingAttack) -> None:
+        """
+        Prepare a session for one externally scored red teaming attack.
+
+        Args:
+            attack (RedTeamingAttack): Attack configured for external final scoring.
+
+        Raises:
+            ValueError: If the attack uses internal terminal scoring.
+        """
+        if attack._terminal_scoring is not RedTeamingTerminalScoring.EXTERNAL_FINAL:
+            raise ValueError("An external final scoring session requires EXTERNAL_FINAL terminal_scoring.")
+        self._attack = attack
+        self._lifecycle = _ObjectiveTargetConversationLifecycle(
+            objective_target=attack.get_objective_target(),
+            logger=logger,
+            externally_owned=True,
+        )
+        self._entered = False
+        self._closed = False
+        self._execution_started = False
+        self._running_task: asyncio.Task[Any] | None = None
+
+    async def __aenter__(self) -> Self:
+        """
+        Activate the target lease before the first attack turn.
+
+        Returns:
+            Self: The active one-shot session.
+
+        Raises:
+            RuntimeError: If the session was already entered or closed.
+        """
+        if self._entered or self._closed:
+            raise RuntimeError("An external final scoring session can only be entered once.")
+        await self._lifecycle.__aenter__()
+        self._entered = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """
+        Reset the target after the outer task has quiesced its agent.
+
+        Raises:
+            RuntimeError: If the session was not entered or the attack is still active.
+        """
+        if self._closed:
+            return
+        if not self._entered:
+            raise RuntimeError("An external final scoring session must be entered before it can be closed.")
+        running_task = self._running_task
+        if running_task is asyncio.current_task():
+            raise RuntimeError("Cannot close an external final scoring session during its own execution.")
+        self._closed = True
+        if running_task is not None and not running_task.done():
+            running_task.cancel()
+            try:
+                await running_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                await self._lifecycle.__aexit__(exc_type, exc_value, traceback)
+            raise RuntimeError("External final scoring session closed before its attack finished.")
+        await self._lifecycle.__aexit__(exc_type, exc_value, traceback)
+
+    async def execute_with_context_async(
+        self, *, context: MultiTurnAttackContext[Any]
+    ) -> RedTeamingPendingExternalResult:
+        """
+        Execute one attack while the outer task owns the open target lease.
+
+        Args:
+            context (MultiTurnAttackContext[Any]): Attack parameters and mutable state.
+
+        Returns:
+            RedTeamingPendingExternalResult: Ungraded, unpersisted final response evidence.
+
+        Raises:
+            RuntimeError: If the session is inactive, reused, or the context has another owner.
+        """
+        if not self._entered or self._closed or self._execution_started:
+            raise RuntimeError("External final scoring requires an active, unused session.")
+        if context._objective_target_conversation_lifecycle is not None:
+            raise RuntimeError("This attack context already has an objective-target lifecycle.")
+
+        self._execution_started = True
+        context._persist_attack_result = False
+        context._objective_target_conversation_lifecycle = self._lifecycle
+        self._running_task = asyncio.current_task()
+        try:
+            result = await self._attack.execute_with_context_async(context=context)
+            if not isinstance(result, RedTeamingPendingExternalResult):
+                raise RuntimeError("External final scoring did not return ungraded pending evidence.")
+            return result
+        finally:
+            self._running_task = None
+            context._objective_target_conversation_lifecycle = None
