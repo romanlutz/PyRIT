@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import mssql, sqlite
 from sqlalchemy.orm import MappedColumn, Session
 
 from pyrit.memory.memory_models import (
@@ -48,7 +49,9 @@ from pyrit.models import (
     ConversationReference,
     ConversationType,
     ConverterIdentifier,
+    EvalSourceKind,
     MessagePiece,
+    ScenarioExecutionOwner,
     ScenarioIdentifier,
     ScenarioResult,
     Score,
@@ -825,3 +828,32 @@ class TestScenarioResultEntry:
         sr = self._make_scenario_result(objective_target_identifier=None)
         with pytest.raises(ValueError, match="objective_target_identifier is required"):
             ScenarioResultEntry(entry=sr)
+
+    def test_task_owned_targetless_identifier_stores_json_null(self):
+        """An explicitly validated task-owned identity has no target or scorer."""
+        params = {
+            "execution_owner": ScenarioExecutionOwner.TASK_OWNED.value,
+            "eval_spec_sha256": "a" * 64,
+            "source_kind": EvalSourceKind.NAMED.value,
+            "source_sha256": "b" * 64,
+            "harness_sha256": "c" * 64,
+            "model_route_sha256": "d" * 64,
+            "case_set_sha256": "e" * 64,
+            "source_name": "suite",
+            "harness_name": "harness",
+            "model_route_name": "attacker",
+        }
+        sr = self._make_scenario_result(
+            objective_target_identifier=None,
+            objective_scorer_identifier=None,
+            params=params,
+        )
+        entry = ScenarioResultEntry(entry=sr)
+        assert entry.objective_target_identifier is None
+        assert entry.get_scenario_result().objective_target_identifier is None
+
+        column_type = ScenarioResultEntry.objective_target_identifier.type
+        for dialect in (sqlite.dialect(), mssql.dialect()):
+            processor = column_type.bind_processor(dialect)
+            assert processor is not None
+            assert processor(None) == "null"

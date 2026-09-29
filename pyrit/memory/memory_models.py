@@ -65,6 +65,7 @@ from pyrit.models import (
     Observation,
     PromptDataType,
     ScenarioEvaluationIdentifier,
+    ScenarioExecutionOwner,
     ScenarioIdentifier,
     ScenarioResult,
     ScenarioRunState,
@@ -2062,9 +2063,8 @@ class ScenarioResultEntry(Base):
         pyrit_version (str): Version of PyRIT framework used during scenario execution.
         scenario_identifier (dict): Canonical scenario identity (class name, version,
             techniques, datasets, resolved params, objective target / scorer children).
-        objective_target_identifier (dict): Identifier for the target being evaluated in the scenario.
-            Required: this is the denormalized filter key that target-based queries match on, so a
-            scenario result without one could never be retrieved by target.
+        objective_target_identifier (dict | None): Denormalized target filter key.
+            Absent only for an explicitly task-owned scenario with no external target.
         objective_scorer_identifier (dict): Optional identifier for the scorer used to evaluate results.
         scenario_run_state (str): Current execution state of the scenario
             (one of CREATED, IN_PROGRESS, COMPLETED, FAILED, CANCELLED).
@@ -2107,7 +2107,7 @@ class ScenarioResultEntry(Base):
         "ScenarioIdentifierEntry",
         foreign_keys=[scenario_identifier_hash],
     )
-    objective_target_identifier: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    objective_target_identifier: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=False), nullable=False)
     objective_scorer_identifier: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     scenario_run_state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     display_group_map_json: Mapped[str | None] = mapped_column(Unicode, nullable=True)
@@ -2133,9 +2133,8 @@ class ScenarioResultEntry(Base):
             entry (ScenarioResult): The scenario result object to convert into a database entry.
 
         Raises:
-            ValueError: If ``entry`` has no ``objective_target_identifier``. The denormalized target
-                column is the key that target-based queries filter on, so a result without one would
-                be persisted as a row those queries could never return.
+            ValueError: If a target-owned scenario has no objective target, or a
+                task-owned scenario incorrectly supplies an external target or scorer.
         """
         self.id = entry.id
         self.scenario_name = entry.scenario_name
@@ -2152,17 +2151,21 @@ class ScenarioResultEntry(Base):
         self.scenario_identifier = scenario_identifier.model_dump()
         self.scenario_identifier_hash = scenario_identifier.hash
 
-        # Convert ComponentIdentifier to dict for JSON storage. The target is required: it is the
-        # denormalized key that target-based queries filter on, so persisting a result without one
-        # would write a row that those queries can never return.
+        # Keep target-based legacy rows unchanged. A task-owned run deliberately has
+        # no target; the existing NOT NULL JSON column stores JSON null, not SQL NULL.
         target_identifier = entry.objective_target_identifier
-        if target_identifier is None:
+        is_task_owned = (
+            entry.scenario_identifier.params.get("execution_owner") == ScenarioExecutionOwner.TASK_OWNED.value
+        )
+        if target_identifier is None and not is_task_owned:
             raise ValueError(
                 "objective_target_identifier is required to persist a ScenarioResult. "
                 f"Scenario '{entry.scenario_name}' produced a result with no objective target; "
                 "a scenario must declare and resolve objective_target before its result is stored."
             )
-        self.objective_target_identifier = target_identifier.model_dump()
+        if is_task_owned and (target_identifier is not None or entry.objective_scorer_identifier is not None):
+            raise ValueError("Task-owned ScenarioResult cannot have an external objective target or scorer")
+        self.objective_target_identifier = target_identifier.model_dump() if target_identifier else None
         # Always recompute eval_hash before dumping so the stored JSON carries the
         # freshly computed value for DB-level filtering (never a value from storage).
         scorer_identifier = entry.objective_scorer_identifier

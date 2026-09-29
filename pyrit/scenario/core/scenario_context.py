@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from uuid import UUID
 
     from pyrit.models import AttackSeedGroup
     from pyrit.prompt_target import PromptTarget
@@ -58,5 +59,17 @@ class ScenarioContext:
     dataset_config: DatasetAttackConfiguration
     memory_labels: dict[str, str] = field(default_factory=dict)
     include_baseline: bool = False
+    seed_groups: Sequence[AttackSeedGroup] = field(default_factory=tuple)
+    seed_groups_by_dataset: Mapping[str, list[AttackSeedGroup]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TaskOwnedScenarioContext:
+    """Snapshot for task-owned work without an external objective target or scorer."""
+
+    run_instance_id: UUID
+    scenario_techniques: Sequence[ScenarioTechnique]
+    dataset_config: DatasetAttackConfiguration
+    memory_labels: dict[str, str] = field(default_factory=dict)
     seed_groups: Sequence[AttackSeedGroup] = field(default_factory=tuple)
     seed_groups_by_dataset: Mapping[str, list[AttackSeedGroup]] = field(default_factory=dict)

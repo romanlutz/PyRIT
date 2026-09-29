@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from pyrit.models.identifiers.identifier_filters import IdentifierFilter, IdentifierType
     from pyrit.models.identifiers.identifier_projection import project_behavioral_identity
     from pyrit.models.identifiers.param_markers import Param, ParamMarker
-    from pyrit.models.identifiers.scenario_identifier import ScenarioIdentifier
+    from pyrit.models.identifiers.scenario_identifier import ScenarioExecutionOwner, ScenarioIdentifier
     from pyrit.models.identifiers.scorer_identifier import ScorerIdentifier
     from pyrit.models.identifiers.seed_identifier import SeedIdentifier, compute_seed_group_hash
     from pyrit.models.identifiers.target_identifier import TargetIdentifier
@@ -71,6 +71,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Param": "pyrit.models.identifiers.param_markers",
     "ParamMarker": "pyrit.models.identifiers.param_markers",
     "ScenarioEvaluationIdentifier": "pyrit.models.identifiers.evaluation_identifier",
+    "ScenarioExecutionOwner": "pyrit.models.identifiers.scenario_identifier",
     "ScorerEvaluationIdentifier": "pyrit.models.identifiers.evaluation_identifier",
     "ScorerIdentifier": "pyrit.models.identifiers.scorer_identifier",
     "ScenarioIdentifier": "pyrit.models.identifiers.scenario_identifier",

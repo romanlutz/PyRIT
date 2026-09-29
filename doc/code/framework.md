@@ -168,6 +168,23 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - No result should depend on previous results (that is an attack's job)
 - **Does not own**: the per-objective conversation logic. Branching, turn-by-turn adaptation, and scoring-based decisions belong to the attack; a scenario selects and packages existing attack techniques rather than defining new attack algorithms or datasets.
 
+`TaskOwnedScenario` is an explicit opt-in for evaluation harnesses whose task creates its
+own target and commits its own grade. It schedules one `TaskOwnedAtomicAttack` per
+source Task/Sample, using a separate target-free context; ordinary `Scenario` runs
+still require a real external target and scorer. The injected case executor returns
+the ID and PyRIT provenance of the already committed original benchmark `Score`.
+The adapter must independently validate the original Task/Sample, scorer identity,
+and ScoreEvent ID/hash against the retained evaluation log and source manifest
+**before** stamping `benchmark_original` and committing the Score. Core verifies
+the stored role, case-run ID, and PyRIT Score creator hash; those checks cannot
+attest an external scorer or ScoreEvent. PyRIT links that existing score to one
+`AttackResult`; it does not rescore the case or create a fake terminal score.
+Source case IDs and stable public configuration fingerprints are separate from the
+fresh run-instance ID, so identical reruns remain distinct. V1 task-owned runs do
+not automatically retry or resume after an ambiguous post-score persistence failure.
+An optional initial-input override applies to exactly one case and input surface
+in a fresh run, not to every case in a sweep.
+
 **Framework Plans**:
 
 - Scenarios are new enough that we are still discovering patterns and limitations. So they will regularly be refactored
