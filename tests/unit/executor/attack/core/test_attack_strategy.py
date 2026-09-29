@@ -180,6 +180,102 @@ async def test_objective_target_cleanup_attempts_all_resets_under_cancellation()
     assert target.reset_conversation_async.await_count == 2
 
 
+@pytest.mark.usefixtures("patch_central_database")
+async def test_external_target_lifecycle_stays_open_until_owner_exit(mock_attack_strategy: AttackStrategy) -> None:
+    target = mock_attack_strategy.get_objective_target()
+    target.reset_conversation_async = AsyncMock()
+    lifecycle = _ObjectiveTargetConversationLifecycle(
+        objective_target=target,
+        logger=logging.getLogger(__name__),
+        externally_owned=True,
+    )
+    context = AttackContext(params=AttackParameters(objective="Test objective"))
+    context._persist_attack_result = False
+    context._objective_target_conversation_lifecycle = lifecycle
+
+    with patch.object(mock_attack_strategy._default_event_handler, "_persist_result") as persist:
+        async with lifecycle:
+            context._record_objective_target_invocation(conversation_id="conversation-id")
+            result = await mock_attack_strategy.execute_with_context_async(context=context)
+            assert result.outcome is AttackOutcome.SUCCESS
+            target.reset_conversation_async.assert_not_awaited()
+
+    target.reset_conversation_async.assert_awaited_once()
+    assert target.reset_conversation_async.await_args.kwargs["conversation_id"] == "conversation-id"
+    persist.assert_not_called()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_external_target_lifecycle_rejects_early_result_persistence(mock_attack_strategy: AttackStrategy) -> None:
+    target = mock_attack_strategy.get_objective_target()
+    target.reset_conversation_async = AsyncMock()
+    lifecycle = _ObjectiveTargetConversationLifecycle(
+        objective_target=target,
+        logger=logging.getLogger(__name__),
+        externally_owned=True,
+    )
+    context = AttackContext(params=AttackParameters(objective="Test objective"))
+    context._objective_target_conversation_lifecycle = lifecycle
+
+    async with lifecycle:
+        with pytest.raises(RuntimeError, match="cannot persist a result before target cleanup"):
+            await mock_attack_strategy.execute_with_context_async(context=context)
+
+    target.reset_conversation_async.assert_not_awaited()
+
+
+async def test_external_target_lifecycle_reset_failure_surfaces_once() -> None:
+    target = MagicMock(spec=PromptTarget)
+    target.reset_conversation_async = AsyncMock(side_effect=RuntimeError("reset failed"))
+    lifecycle = _ObjectiveTargetConversationLifecycle(
+        objective_target=target,
+        logger=logging.getLogger(__name__),
+        externally_owned=True,
+    )
+
+    with pytest.raises(ExceptionGroup, match="Objective-target conversation reset failed"):
+        async with lifecycle:
+            lifecycle.record_invocation(conversation_id="conversation-id")
+
+    await lifecycle.__aexit__(None, None, None)
+    target.reset_conversation_async.assert_awaited_once()
+
+
+async def test_external_target_lifecycle_preserves_task_and_reset_errors() -> None:
+    target = MagicMock(spec=PromptTarget)
+    target.reset_conversation_async = AsyncMock(side_effect=RuntimeError("reset failed"))
+    lifecycle = _ObjectiveTargetConversationLifecycle(
+        objective_target=target,
+        logger=logging.getLogger(__name__),
+        externally_owned=True,
+    )
+
+    with pytest.raises(BaseExceptionGroup, match="Attack or task and objective-target reset failed") as errors:
+        async with lifecycle:
+            lifecycle.record_invocation(conversation_id="conversation-id")
+            raise ValueError("task failed")
+
+    assert [type(error) for error in errors.value.exceptions] == [ValueError, RuntimeError]
+    target.reset_conversation_async.assert_awaited_once()
+
+
+async def test_external_target_lifecycle_attempts_all_resets_under_cancellation() -> None:
+    target = MagicMock(spec=PromptTarget)
+    target.reset_conversation_async = AsyncMock(side_effect=[asyncio.CancelledError(), RuntimeError("reset failed")])
+    lifecycle = _ObjectiveTargetConversationLifecycle(
+        objective_target=target,
+        logger=logging.getLogger(__name__),
+        externally_owned=True,
+    )
+
+    with pytest.raises(BaseExceptionGroup, match="reset failed and was cancelled"):
+        async with lifecycle:
+            lifecycle.record_invocation(conversation_id="conversation-1")
+            lifecycle.record_invocation(conversation_id="conversation-2")
+
+    assert target.reset_conversation_async.await_count == 2
+
+
 def test_next_message_override_can_clear_parameter_value_and_survive_copy():
     """An explicit None override must not fall back to the immutable parameter after copying."""
 

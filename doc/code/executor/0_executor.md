@@ -76,6 +76,57 @@ configs (prepended conversations, multimodal seeds, next-turn messages, memory l
 
 The category pages above each walk through their executors with short runnable examples.
 
+## When the task owns the final scorer
+
+`RedTeamingAttack` normally requires a PyRIT objective scorer and scores responses during
+its turn loop. A task with its own final scorer can opt into
+`terminal_scoring=RedTeamingTerminalScoring.EXTERNAL_FINAL` instead. This mode accepts **no**
+PyRIT objective or auxiliary scorer. It runs the bounded conversation without creating a
+synthetic score or an early attack result, then returns a
+`RedTeamingPendingExternalResult`: the final response and conversation are retained, but
+`automated_score` is `None` and the outcome is `UNDETERMINED`.
+
+The task must acquire `attack.external_final_scoring_session()` **before** the first turn and
+execute through `session.execute_with_context_async(context=...)`. Direct execution without
+the session is rejected. The session keeps target-side conversation state available until
+the task has stopped its agent, independently observed exit or CLI Stop completion, and
+run its **original scorer once** while the workspace is still alive. An accepted Stop
+request alone does not establish that the agent exited. The task should quiesce its agent
+in a bounded `finally` block, issuing at most one Stop request even when execution fails.
+An original task scorer may inspect the full execution state or live workspace; PyRIT
+does not import its executable definition or assume it is safe to call between turns.
+Exiting the session resets each invoked target conversation once. Do this while the
+workspace is still available: some targets may need it during reset. A separate outer
+`finally` then tears down the workspace, including after cancellation or reset failure.
+Only after grading, quiescence, reset, and teardown all succeed should the task persist
+its original score and one graded `AttackResult`. Neither an errored/blocked target
+response nor a failed cleanup is gradeable pending evidence.
+
+This is an ownership sketch; `owner` methods are supplied by the calling task, not PyRIT:
+
+```python
+try:
+    async with attack.external_final_scoring_session() as session:
+        try:
+            pending = await session.execute_with_context_async(context=context)
+            await owner.request_stop_once_async()
+            await owner.observe_agent_exit_async()
+            verdict = await owner.original_scorer_async(pending)
+        finally:
+            await owner.ensure_quiesced_async()
+finally:
+    await owner.teardown_workspace_async()
+
+# Persist the original score and graded result only if every step succeeded.
+```
+
+This mode intentionally has **no** per-turn progress scorer in its first version:
+`Scorer.score_async` persists scores before returning, so an adapter cannot safely
+label an arbitrary scorer's output as progress afterward. A future opt-in progress
+signal needs provenance applied before that write; whether a true progress signal
+stops the conversation should be configurable and off by default. The existing
+internal-scoring mode and other attacks keep their current behavior.
+
 ## When do you actually need a new executor class?
 
 Most of an executor's behavior comes from its *configuration and data*, not from new code. So before

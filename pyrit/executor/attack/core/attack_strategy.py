@@ -104,10 +104,14 @@ class _ObjectiveTargetConversationLifecycle:
         *,
         objective_target: PromptTarget,
         logger: logging.Logger | logging.LoggerAdapter[logging.Logger],
+        externally_owned: bool = False,
     ) -> None:
         self._objective_target = objective_target
         self._logger = logger
+        self._externally_owned = externally_owned
         self._conversation_ids: set[str] = set()
+        self._active = False
+        self._closed = False
 
     async def __aenter__(self) -> _ObjectiveTargetConversationLifecycle:
         """
@@ -115,7 +119,13 @@ class _ObjectiveTargetConversationLifecycle:
 
         Returns:
             _ObjectiveTargetConversationLifecycle: This lifecycle instance.
+
+        Raises:
+            RuntimeError: If this lifecycle is already active or closed.
         """
+        if self._active or self._closed:
+            raise RuntimeError("Objective-target conversation lifecycle cannot be entered more than once.")
+        self._active = True
         return self
 
     async def __aexit__(
@@ -124,22 +134,63 @@ class _ObjectiveTargetConversationLifecycle:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        """Release each conversation invoked during the attack."""
+        """
+        Release each conversation invoked during the attack.
+
+        Raises:
+            BaseExceptionGroup: If reset fails alongside a task failure or cancellation.
+            ExceptionGroup: If an externally owned reset fails on its own.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._active = False
+
         pending_cancellation: asyncio.CancelledError | None = None
+        reset_errors: list[Exception] = []
         for conversation_id in self._conversation_ids:
             try:
                 await self._objective_target.reset_conversation_async(conversation_id=conversation_id)
             except asyncio.CancelledError as cancellation:
                 # Attempt every reset, then honor the first cancellation after the loop.
                 pending_cancellation = pending_cancellation or cancellation
-            except Exception as error:  # noqa: BLE001 - cleanup must not replace the attack outcome
-                self._logger.warning(
-                    "Failed to reset objective-target conversation %s: %s",
-                    conversation_id,
-                    error,
-                )
+            except Exception as error:  # noqa: BLE001 - attempt every reset before reporting failures
+                if self._externally_owned:
+                    reset_errors.append(error)
+                else:
+                    self._logger.warning(
+                        "Failed to reset objective-target conversation %s: %s",
+                        conversation_id,
+                        error,
+                    )
         if pending_cancellation is not None:
+            failures: list[BaseException] = [pending_cancellation, *reset_errors]
+            if self._externally_owned and exc_value is not None and exc_value is not pending_cancellation:
+                failures.insert(0, exc_value)
+            if len(failures) > 1:
+                raise BaseExceptionGroup(
+                    "Objective-target conversation reset failed and was cancelled",
+                    failures,
+                )
             raise pending_cancellation
+        if reset_errors:
+            if exc_value is not None:
+                raise BaseExceptionGroup("Attack or task and objective-target reset failed", [exc_value, *reset_errors])
+            raise ExceptionGroup("Objective-target conversation reset failed", reset_errors)
+
+    def is_active_external_owner_for(self, *, objective_target: PromptTarget) -> bool:
+        """
+        Check whether this live external lease owns the given target.
+
+        Args:
+            objective_target (PromptTarget): Target expected to own the conversation.
+
+        Returns:
+            bool: True only for an active external lease on this target.
+        """
+        return (
+            self._externally_owned and self._active and not self._closed and self._objective_target is objective_target
+        )
 
     def record_invocation(self, *, conversation_id: str) -> None:
         """
@@ -147,7 +198,12 @@ class _ObjectiveTargetConversationLifecycle:
 
         Args:
             conversation_id (str): The conversation ID used by the target.
+
+        Raises:
+            RuntimeError: If cleanup has already started.
         """
+        if self._closed:
+            raise RuntimeError("Cannot record an objective-target invocation after lifecycle cleanup.")
         self._conversation_ids.add(conversation_id)
 
 
@@ -822,42 +878,56 @@ class AttackStrategy(Strategy[AttackStrategyContextT, AttackStrategyResultT], Id
 
     async def execute_with_context_async(self, *, context: AttackStrategyContextT) -> AttackStrategyResultT:
         """
-        Execute an attack and persist its completed result after teardown.
+        Execute an attack, persisting its result after owned target cleanup.
 
         Args:
             context (AttackStrategyContextT): The attack execution context.
 
         Returns:
-            AttackStrategyResultT: The completed and persisted attack result.
+            AttackStrategyResultT: The completed result, persisted unless the context disables it.
 
         Raises:
             ExceptionGroup: If attack execution and recording its error result both fail.
+            RuntimeError: If an external lease is inactive or requests early persistence.
         """
         self._validate_scoring_expectation(context=context)
         context._error_result_persistence_error = None
-        lifecycle = _ObjectiveTargetConversationLifecycle(
-            objective_target=self._objective_target,
-            logger=self._logger,
-        )
-        context._objective_target_conversation_lifecycle = lifecycle
-        try:
-            async with lifecycle:
-                try:
-                    result = await super().execute_with_context_async(context=context)
-                except Exception as attack_error:
-                    persistence_error = context._error_result_persistence_error
-                    if persistence_error is not None:
-                        raise ExceptionGroup(
-                            "Attack execution and error result persistence failed",
-                            [attack_error, persistence_error],
-                        ) from None
-                    raise
-        finally:
-            context._objective_target_conversation_lifecycle = None
+        borrowed_lifecycle = context._objective_target_conversation_lifecycle
+        if borrowed_lifecycle is not None:
+            if not borrowed_lifecycle.is_active_external_owner_for(objective_target=self._objective_target):
+                raise RuntimeError("Attack requires a live external objective-target lifecycle for this target.")
+            if context._persist_attack_result:
+                raise RuntimeError("An externally owned attack cannot persist a result before target cleanup.")
+            result = await self._execute_strategy_with_error_handling_async(context=context)
+        else:
+            lifecycle = _ObjectiveTargetConversationLifecycle(
+                objective_target=self._objective_target,
+                logger=self._logger,
+            )
+            context._objective_target_conversation_lifecycle = lifecycle
+            try:
+                async with lifecycle:
+                    result = await self._execute_strategy_with_error_handling_async(context=context)
+            finally:
+                context._objective_target_conversation_lifecycle = None
 
         if context._persist_attack_result:
             self._default_event_handler._persist_result(result=result)
         return result
+
+    async def _execute_strategy_with_error_handling_async(
+        self, *, context: AttackStrategyContextT
+    ) -> AttackStrategyResultT:
+        try:
+            return await super().execute_with_context_async(context=context)
+        except Exception as attack_error:
+            persistence_error = context._error_result_persistence_error
+            if persistence_error is not None:
+                raise ExceptionGroup(
+                    "Attack execution and error result persistence failed",
+                    [attack_error, persistence_error],
+                ) from None
+            raise
 
     def _validate_scoring_expectation(self, *, context: AttackStrategyContextT) -> None:
         """Check execution criteria before setup unless child attacks own scoring."""

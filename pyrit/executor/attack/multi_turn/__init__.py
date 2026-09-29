@@ -25,7 +25,13 @@ if TYPE_CHECKING:
         MultiTurnAttackStrategy,
     )
     from pyrit.executor.attack.multi_turn.pair import PAIRAttack
-    from pyrit.executor.attack.multi_turn.red_teaming import RedTeamingAttack, RTASystemPromptPaths
+    from pyrit.executor.attack.multi_turn.red_teaming import (
+        RedTeamingAttack,
+        RedTeamingExternalFinalSession,
+        RedTeamingPendingExternalResult,
+        RedTeamingTerminalScoring,
+        RTASystemPromptPaths,
+    )
     from pyrit.executor.attack.multi_turn.simulated_conversation import (
         SimulatedConversationResult,
         generate_simulated_conversation_async,
@@ -52,6 +58,9 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "PAIRAttack": "pyrit.executor.attack.multi_turn.pair",
     "RTASystemPromptPaths": "pyrit.executor.attack.multi_turn.red_teaming",
     "RedTeamingAttack": "pyrit.executor.attack.multi_turn.red_teaming",
+    "RedTeamingExternalFinalSession": "pyrit.executor.attack.multi_turn.red_teaming",
+    "RedTeamingPendingExternalResult": "pyrit.executor.attack.multi_turn.red_teaming",
+    "RedTeamingTerminalScoring": "pyrit.executor.attack.multi_turn.red_teaming",
     "SimulatedConversationResult": "pyrit.executor.attack.multi_turn.simulated_conversation",
     "TAPAttack": "pyrit.executor.attack.multi_turn.tree_of_attacks",
     "TAPAttackContext": "pyrit.executor.attack.multi_turn.tree_of_attacks",
