@@ -100,6 +100,11 @@ dev = [
 
 [project.optional-dependencies]
 # always make sure the individual ones are in sync with the all group
+inspect = [
+    "github-copilot-sdk==1.0.14",
+    "inspect-ai==0.3.272",
+    "psutil==7.2.1",
+]
 huggingface = [
     "sentencepiece>=0.2.0",
     "torch>=2.7.0",
@@ -141,6 +146,9 @@ all = [
     "azure-cognitiveservices-speech>=1.44.0",
     "flask>=3.1.3",
     "ipykernel>=6.29.5",
+    "github-copilot-sdk==1.0.14",
+    "inspect-ai==0.3.272",
+    "psutil==7.2.1",
     "jupyter>=1.1.1",
     "litellm>=1.84.0",
     "ollama>=0.5.1",

@@ -1,0 +1,17 @@
+[project]
+name = "pyrit-inspect-ghcp-controller"
+version = "0.1.0"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "github-copilot-sdk==1.0.14",
+    "inspect-ai==0.3.272",
+    "openai>=3.1.0,<4",
+    "psutil==7.2.1",
+    "pyrit",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pyrit = { path = "../..", editable = true }

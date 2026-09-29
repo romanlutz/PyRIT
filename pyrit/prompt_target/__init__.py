@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     )
     from pyrit.prompt_target.http_target.httpx_api_target import HTTPXAPITarget
     from pyrit.prompt_target.hugging_face.hugging_face_chat_target import HuggingFaceChatTarget
+    from pyrit.prompt_target.inspect_ghcp_target import InspectGhcpTarget
     from pyrit.prompt_target.litellm_chat_target import LiteLLMChatTarget
     from pyrit.prompt_target.native_agent_target import NativeAgentTarget
     from pyrit.prompt_target.native_cli_target import NativeCliTarget
@@ -75,6 +76,7 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "HTTPTarget": "pyrit.prompt_target.http_target.http_target",
     "HTTPXAPITarget": "pyrit.prompt_target.http_target.httpx_api_target",
     "HuggingFaceChatTarget": "pyrit.prompt_target.hugging_face.hugging_face_chat_target",
+    "InspectGhcpTarget": "pyrit.prompt_target.inspect_ghcp_target",
     "limit_requests_per_minute": "pyrit.prompt_target.common.utils",
     "LiteLLMChatTarget": "pyrit.prompt_target.litellm_chat_target",
     "NativeAgentTarget": "pyrit.prompt_target.native_agent_target",

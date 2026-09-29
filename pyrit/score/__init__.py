@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     )
     from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer, MessageFloatScaleScorer
     from pyrit.score.float_scale.insecure_code_scorer import InsecureCodeScorer, render_insecure_code_system_prompt
+    from pyrit.score.float_scale.inspect_ghcp_report_scorer import InspectGhcpReportScorer
     from pyrit.score.float_scale.likert_scale import LikertScale, LikertScaleEntry
     from pyrit.score.float_scale.numeric_scale import NumericRange, NumericRubric
     from pyrit.score.float_scale.plagiarism_scorer import PlagiarismMetric, PlagiarismScorer
@@ -168,6 +169,7 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "HumanLabeledDataset": "pyrit.score.scorer_evaluation.human_labeled_dataset",
     "HumanLabeledEntry": "pyrit.score.scorer_evaluation.human_labeled_dataset",
     "InsecureCodeScorer": "pyrit.score.float_scale.insecure_code_scorer",
+    "InspectGhcpReportScorer": "pyrit.score.float_scale.inspect_ghcp_report_scorer",
     "IncludesScorer": "pyrit.score.true_false.includes_scorer",
     "JsonSchemaResponseHandler": "pyrit.score.response_handler",
     "LDAPInjectionOutputScorer": "pyrit.score.true_false.regex.ldap_injection_output_scorer",

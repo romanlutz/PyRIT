@@ -108,6 +108,7 @@ project:
             - file: code/executor/4_compound.ipynb
             - file: code/executor/5_workflow.ipynb
             - file: code/executor/6_benchmark.ipynb
+            - file: code/executor/inspect_ghcp.md
             - file: code/executor/7_promptgen.ipynb
             - file: code/executor/8_modality_feedback.ipynb
             - file: code/executor/gcg/0_gcg.ipynb

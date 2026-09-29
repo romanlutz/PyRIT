@@ -1,0 +1,11 @@
+[project]
+name = "pyrit-inspect-ghcp-guest"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "github-copilot-sdk==1.0.14",
+    "httpx==0.28.1",
+]
+
+[tool.uv]
+package = false

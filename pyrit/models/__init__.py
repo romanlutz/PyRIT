@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         snake_case_to_class_name,
         validate_registry_name,
     )
+    from pyrit.models.inspect_ghcp import InspectGhcpJudgment, InspectGhcpReport, InspectGhcpStatus, InspectGhcpTaskKind
     from pyrit.models.literals import (
         MEDIA_PATH_DATA_TYPES,
         ChatMessageRole,
@@ -232,6 +233,10 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Identifiable": "pyrit.models.identifiers",
     "IdentifierFilter": "pyrit.models.identifiers",
     "IdentifierType": "pyrit.models.identifiers",
+    "InspectGhcpJudgment": "pyrit.models.inspect_ghcp",
+    "InspectGhcpReport": "pyrit.models.inspect_ghcp",
+    "InspectGhcpStatus": "pyrit.models.inspect_ghcp",
+    "InspectGhcpTaskKind": "pyrit.models.inspect_ghcp",
     "JSONValue": "pyrit.models.identifiers",
     "compute_seed_group_hash": "pyrit.models.identifiers",
     "COMMON_JSON_SCHEMAS": "pyrit.models.target",
