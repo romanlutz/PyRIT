@@ -11,6 +11,7 @@ from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 if TYPE_CHECKING:
     from pyrit.models.parameter import Parameter
     from pyrit.scenario.core.atomic_attack import AtomicAttack
+    from pyrit.scenario.core.atomic_work import AtomicWork
     from pyrit.scenario.core.attack_technique import AttackTechnique
     from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory, ScorerOverridePolicy
     from pyrit.scenario.core.dataset_configuration import (
@@ -24,14 +25,24 @@ if TYPE_CHECKING:
         require_nonempty,
     )
     from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
+    from pyrit.scenario.core.scenario_context import TaskOwnedScenarioContext
     from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target, get_default_scorer_target
     from pyrit.scenario.core.scenario_technique import ScenarioTechnique
+    from pyrit.scenario.core.task_owned_atomic_attack import (
+        CaseExecutor,
+        TaskOwnedAtomicAttack,
+        TaskOwnedCaseReplayBlockedError,
+        TaskOwnedResultPersistenceError,
+    )
+    from pyrit.scenario.core.task_owned_scenario import TaskOwnedScenario
 
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "AtomicAttack": "pyrit.scenario.core.atomic_attack",
+    "AtomicWork": "pyrit.scenario.core.atomic_work",
     "AttackTechnique": "pyrit.scenario.core.attack_technique",
     "AttackTechniqueFactory": "pyrit.scenario.core.attack_technique_factory",
     "BaselineAttackPolicy": "pyrit.scenario.core.scenario",
+    "CaseExecutor": "pyrit.scenario.core.task_owned_atomic_attack",
     "CompoundDatasetAttackConfiguration": "pyrit.scenario.core.dataset_configuration",
     "DatasetAttackConfiguration": "pyrit.scenario.core.dataset_configuration",
     "DatasetConfiguration": "pyrit.scenario.core.dataset_configuration",
@@ -44,6 +55,11 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "Scenario": "pyrit.scenario.core.scenario",
     "ScenarioTechnique": "pyrit.scenario.core.scenario_technique",
     "ScorerOverridePolicy": "pyrit.scenario.core.attack_technique_factory",
+    "TaskOwnedAtomicAttack": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedCaseReplayBlockedError": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedResultPersistenceError": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedScenario": "pyrit.scenario.core.task_owned_scenario",
+    "TaskOwnedScenarioContext": "pyrit.scenario.core.scenario_context",
     "get_default_scorer_target": "pyrit.scenario.core.scenario_target_defaults",
     "get_default_adversarial_target": "pyrit.scenario.core.scenario_target_defaults",
 }

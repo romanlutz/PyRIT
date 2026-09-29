@@ -5,6 +5,7 @@
 
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
@@ -27,6 +28,11 @@ class ScenarioRunPlanSeedGroup(BaseModel):
     objective_sha256: str
     objective: str
     prompts: list["ScenarioRunPlanSeedPrompt"] = Field(default_factory=list)
+    case_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None)
+    input_variant_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
 
 
 class ScenarioRunPlanSeedPrompt(BaseModel):
@@ -59,6 +65,10 @@ class ScenarioRunPlan(BaseModel):
     scenario_registry_name: str | None = None
     atomic_groups: list[ScenarioRunPlanAtomicGroup]
     seed_groups: list[ScenarioRunPlanSeedGroup]
+    run_instance_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    eval_spec_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_normalized_plan(self) -> "ScenarioRunPlan":

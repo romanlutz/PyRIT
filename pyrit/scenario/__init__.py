@@ -18,9 +18,11 @@ if TYPE_CHECKING:
     from pyrit.models.parameter import Parameter
     from pyrit.scenario.core import (
         AtomicAttack,
+        AtomicWork,
         AttackTechnique,
         AttackTechniqueFactory,
         BaselineAttackPolicy,
+        CaseExecutor,
         CompoundDatasetAttackConfiguration,
         DatasetAttackConfiguration,
         DatasetConfiguration,
@@ -28,6 +30,11 @@ if TYPE_CHECKING:
         ResolvedDataset,
         Scenario,
         ScenarioTechnique,
+        TaskOwnedAtomicAttack,
+        TaskOwnedCaseReplayBlockedError,
+        TaskOwnedResultPersistenceError,
+        TaskOwnedScenario,
+        TaskOwnedScenarioContext,
     )
     from pyrit.scenario.scenarios import adaptive, airt, benchmark, foundry, garak
 
@@ -83,9 +90,11 @@ if not any(getattr(finder, "_pyrit_scenario_alias_finder", False) for finder in 
 
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "AtomicAttack": "pyrit.scenario.core.atomic_attack",
+    "AtomicWork": "pyrit.scenario.core.atomic_work",
     "AttackTechnique": "pyrit.scenario.core.attack_technique",
     "AttackTechniqueFactory": "pyrit.scenario.core.attack_technique_factory",
     "BaselineAttackPolicy": "pyrit.scenario.core.scenario",
+    "CaseExecutor": "pyrit.scenario.core.task_owned_atomic_attack",
     "CompoundDatasetAttackConfiguration": "pyrit.scenario.core.dataset_configuration",
     "DatasetAttackConfiguration": "pyrit.scenario.core.dataset_configuration",
     "DatasetConfiguration": "pyrit.scenario.core.dataset_configuration",
@@ -94,6 +103,11 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "ResolvedDataset": "pyrit.scenario.core.dataset_configuration",
     "Scenario": "pyrit.scenario.core.scenario",
     "ScenarioTechnique": "pyrit.scenario.core.scenario_technique",
+    "TaskOwnedAtomicAttack": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedCaseReplayBlockedError": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedResultPersistenceError": "pyrit.scenario.core.task_owned_atomic_attack",
+    "TaskOwnedScenario": "pyrit.scenario.core.task_owned_scenario",
+    "TaskOwnedScenarioContext": "pyrit.scenario.core.scenario_context",
     "ScenarioIdentifier": "pyrit.models.identifiers.scenario_identifier",
     "ScenarioResult": "pyrit.models.results.scenario_result",
     "adaptive": ("pyrit.scenario.scenarios.adaptive", None),

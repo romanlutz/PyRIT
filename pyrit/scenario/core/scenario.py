@@ -50,8 +50,9 @@ from pyrit.prompt_target.common.target_requirements import TargetRequirements
 from pyrit.registry import ScorerRegistry
 from pyrit.registry.resolution import resolve_declared_params, resolve_reference_value
 from pyrit.scenario.core.atomic_attack import AtomicAttack
+from pyrit.scenario.core.atomic_work import AtomicWork
 from pyrit.scenario.core.dataset_configuration import DatasetAttackConfiguration
-from pyrit.scenario.core.scenario_context import ScenarioContext
+from pyrit.scenario.core.scenario_context import ScenarioContext, TaskOwnedScenarioContext
 from pyrit.scenario.core.scenario_target_defaults import get_default_scorer_target
 from pyrit.scenario.core.scenario_technique import ScenarioTechnique
 from pyrit.score import (
@@ -130,6 +131,10 @@ class Scenario(ABC):
     #: Whether the default estimator must mirror matrix-builder seed compatibility.
     RUN_SIZE_USES_FACTORY_COMPATIBILITY: ClassVar[bool] = False
 
+    #: An explicit alternative lifecycle for a harness that owns its target and score.
+    #: Only ``TaskOwnedScenario`` opts in; target-owned scenarios retain their contracts.
+    TASK_OWNED: ClassVar[bool] = False
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """
         Enforce the keyword-only constructor contract on subclasses.
@@ -161,7 +166,7 @@ class Scenario(ABC):
         version: int,
         technique_class: type[ScenarioTechnique],
         default_dataset_config: DatasetAttackConfiguration,
-        objective_scorer: Scorer,
+        objective_scorer: Scorer | None,
         scenario_result_id: uuid.UUID | str | None = None,
     ) -> None:
         """
@@ -176,7 +181,8 @@ class Scenario(ABC):
                 ``technique_class.default()``.
             default_dataset_config (DatasetAttackConfiguration): The default dataset configuration used
                 when no ``dataset_config`` is passed to ``initialize_async``.
-            objective_scorer (Scorer): The objective scorer used to evaluate attack results.
+            objective_scorer (Scorer | None): The objective scorer; ``None`` is accepted
+                only for a task-owned scenario whose harness owns the grade.
             scenario_result_id (uuid.UUID | str | None): Optional ID of an existing scenario result to resume.
                 Can be either a UUID object or a string representation of a UUID.
                 If provided and found in memory, the scenario will resume from prior progress.
@@ -188,8 +194,17 @@ class Scenario(ABC):
 
             The scenario description is automatically extracted from the class's docstring (__doc__)
             with whitespace normalized for display.
+
+        Raises:
+            ValueError: If a target-owned scenario omits its scorer or a task-owned
+                scenario supplies an external scorer.
         """
         from pyrit.registry.registry_metadata import RegistryMetadata
+
+        if self.TASK_OWNED and objective_scorer is not None:
+            raise ValueError("Task-owned scenarios must use the harness's own score, not an external scorer")
+        if not self.TASK_OWNED and objective_scorer is None:
+            raise ValueError("objective_scorer is required for target-owned scenarios")
 
         description = RegistryMetadata.description_from_docstring(self.__class__)
 
@@ -221,16 +236,19 @@ class Scenario(ABC):
         # attribute always exists for context construction.
         self._dataset_config: DatasetAttackConfiguration = default_dataset_config
 
-        self._objective_scorer = objective_scorer
-        self._objective_scorer_identifier = objective_scorer.get_identifier()
+        if objective_scorer is not None:
+            self._objective_scorer = objective_scorer
+        self._objective_scorer_identifier = objective_scorer.get_identifier() if objective_scorer else None
 
         self._name = name if name else type(self).__name__
         self._memory = CentralMemory.get_memory_instance()
-        self._atomic_attacks: list[AtomicAttack] = []
+        self._atomic_attacks: list[AtomicWork] = []
         self._scenario_result_id: str | None = str(scenario_result_id) if scenario_result_id else None
         self._scenario_registry_name: str | None = None
         self._initial_metadata: dict[str, Any] = {}
         self._active_atomic_groups: dict[str, str] = {}
+        self._task_owned_run_instance_id: uuid.UUID | None = None
+        self._task_owned_run_started = False
 
         # Store prepared techniques for use in _build_atomic_attacks_async
         self._scenario_techniques: list[ScenarioTechnique] = []
@@ -278,7 +296,18 @@ class Scenario(ABC):
         self._scenario_registry_name = scenario_registry_name
 
     def set_initial_metadata(self, *, metadata: Mapping[str, Any]) -> None:
-        """Set caller-owned metadata to persist when a new scenario result is created."""
+        """
+        Set caller-owned metadata to persist when a new scenario result is created.
+
+        Raises:
+            ValueError: If metadata overrides a task-owned run identity or plan.
+        """
+        if self.TASK_OWNED:
+            reserved = {"run_instance_id", "eval_spec_sha256", SCENARIO_RUN_PLAN_METADATA_KEY} & metadata.keys()
+            if reserved:
+                raise ValueError(
+                    f"Task-owned Scenario metadata cannot override core identity fields: {sorted(reserved)}"
+                )
         self._initial_metadata = dict(metadata)
 
     @classmethod
@@ -838,7 +867,12 @@ class Scenario(ABC):
         params = self.params
         declared_names = {parameter.name for parameter in self.supported_parameters()}
 
-        if "objective_target" in declared_names:
+        if self.TASK_OWNED:
+            if params.get("objective_target") is not None:
+                raise ValueError("Task-owned scenarios cannot use a global objective_target")
+            self._objective_target = None
+            self._objective_target_identifier = None
+        elif "objective_target" in declared_names:
             raw_objective_target = params.get("objective_target")
             if require_objective_target or raw_objective_target is not None:
                 objective_target = self._resolve_objective_target(value=raw_objective_target)
@@ -859,7 +893,11 @@ class Scenario(ABC):
         self._dataset_config_provided = dataset_config is not None
         self._dataset_config = dataset_config if dataset_config else self._default_dataset_config
         self._max_concurrency = params.get("max_concurrency", 4)
+        if self.TASK_OWNED and (self._max_concurrency is None or self._max_concurrency < 1):
+            raise ValueError("Task-owned max_concurrency must be a positive integer")
         self._max_retries = params.get("max_retries", 0)
+        if self.TASK_OWNED and self._max_retries != 0:
+            raise ValueError("Task-owned scenarios do not support automatic retries; max_retries must be 0")
         self._memory_labels = params.get("memory_labels") or {}
 
         include_baseline = params.get("include_baseline")
@@ -873,6 +911,8 @@ class Scenario(ABC):
         elif include_baseline is None:
             include_baseline = self.BASELINE_ATTACK_POLICY is BaselineAttackPolicy.Enabled
         self._include_baseline = include_baseline
+        if self.TASK_OWNED and self._include_baseline:
+            raise ValueError("Task-owned scenarios cannot include a target-owned baseline")
 
         self._scenario_techniques = self._resolve_scenario_techniques(
             scenario_techniques=params.get("scenario_techniques")
@@ -914,6 +954,8 @@ class Scenario(ABC):
                 ``TargetRegistry``, or if ``include_baseline=True`` is set for a scenario whose
                 ``BASELINE_ATTACK_POLICY`` is ``Forbidden``.
         """
+        if self.TASK_OWNED and self._scenario_result_id is not None:
+            raise ValueError("Task-owned Scenario resume is disabled until case-key idempotency is proven")
         self._resolve_runtime_configuration(require_objective_target=True)
 
         # Build atomic attacks: resolve the seed groups once, snapshot the resolved inputs
@@ -930,8 +972,21 @@ class Scenario(ABC):
         # diverge from the persisted hashes and abort resume whenever max_dataset_size is set.
         is_resume = self._scenario_result_id is not None
         seed_groups_by_dataset = await self._resolve_seed_groups_by_dataset_async(apply_sampling=not is_resume)
-        context = self._build_scenario_context(seed_groups_by_dataset=seed_groups_by_dataset)
-        self._atomic_attacks = await self._build_atomic_attacks_async(context=context)
+        if self.TASK_OWNED:
+            self._task_owned_run_instance_id = uuid.uuid4()
+            task_context = TaskOwnedScenarioContext(
+                run_instance_id=self._task_owned_run_instance_id,
+                scenario_techniques=tuple(self._scenario_techniques),
+                dataset_config=self._dataset_config,
+                memory_labels=dict(self._memory_labels),
+                seed_groups=tuple(group for groups in seed_groups_by_dataset.values() for group in groups),
+                seed_groups_by_dataset=seed_groups_by_dataset,
+            )
+            self._atomic_attacks = list(await self._build_task_owned_atomic_attacks_async(context=task_context))
+            self._validate_task_owned_work()
+        else:
+            context = self._build_scenario_context(seed_groups_by_dataset=seed_groups_by_dataset)
+            self._atomic_attacks = list(await self._build_atomic_attacks_async(context=context))
 
         # Build the canonical scenario identifier once params/techniques/datasets
         # are resolved, so both the resume check and the new-result branch share the
@@ -1009,12 +1064,17 @@ class Scenario(ABC):
 
         Returns:
             dict[str, Any]: Metadata payload for the new ScenarioResult.
+
+        Raises:
+            TypeError: If target-owned metadata receives task-owned work.
         """
         metadata: dict[str, Any] = {}
         if getattr(self._dataset_config, "max_dataset_size", None) is not None:
             hashes: list[str] = []
             seen: set[str] = set()
             for aa in self._atomic_attacks:
+                if not isinstance(aa, AtomicAttack):
+                    raise TypeError("Target-owned run plans require AtomicAttack work")
                 for sg in aa.seed_groups:
                     sha = to_sha256(sg.objective.value)
                     if sha not in seen:
@@ -1030,10 +1090,15 @@ class Scenario(ABC):
 
         Returns:
             ScenarioRunPlan: The versioned run plan.
+
+        Raises:
+            TypeError: If target-owned planning receives task-owned work.
         """
         seed_groups: dict[str, ScenarioRunPlanSeedGroup] = {}
         atomic_groups: list[ScenarioRunPlanAtomicGroup] = []
         for atomic_attack in self._atomic_attacks:
+            if not isinstance(atomic_attack, AtomicAttack):
+                raise TypeError("Target-owned run plans require AtomicAttack work")
             technique_name = atomic_attack.technique_name
             if not isinstance(technique_name, str):
                 technique_name = atomic_attack.display_group
@@ -1088,7 +1153,7 @@ class Scenario(ABC):
         )
 
     @staticmethod
-    def _get_atomic_group_id(*, atomic_attack: AtomicAttack) -> str:
+    def _get_atomic_group_id(*, atomic_attack: AtomicWork) -> str:
         """
         Compute the stable ID of an atomic group from its name and technique.
 
@@ -1121,11 +1186,13 @@ class Scenario(ABC):
 
         Raises:
             ValueError: If a planned atomic or seed group cannot be reconstructed.
+            TypeError: If task-owned work reaches the legacy resume path.
         """
-        current_by_id = {
-            self._get_atomic_group_id(atomic_attack=atomic_attack): atomic_attack
-            for atomic_attack in self._atomic_attacks
-        }
+        current_by_id: dict[str, AtomicAttack] = {}
+        for atomic_attack in self._atomic_attacks:
+            if not isinstance(atomic_attack, AtomicAttack):
+                raise TypeError("Only target-owned AtomicAttack work can replay a persisted run plan")
+            current_by_id[self._get_atomic_group_id(atomic_attack=atomic_attack)] = atomic_attack
         planned_ids = {group.id for group in stored_plan.atomic_groups}
         missing_groups = planned_ids - current_by_id.keys()
         if missing_groups:
@@ -1134,7 +1201,7 @@ class Scenario(ABC):
                 f"{len(missing_groups)} planned atomic group(s) are no longer reconstructable."
             )
 
-        retained_attacks: list[AtomicAttack] = []
+        retained_attacks: list[AtomicWork] = []
         for planned_group in stored_plan.atomic_groups:
             atomic_attack = current_by_id[planned_group.id]
             current_seed_groups = {seed_group.logical_id: seed_group for seed_group in atomic_attack.seed_groups}
@@ -1168,6 +1235,7 @@ class Scenario(ABC):
         Raises:
             ValueError: If any persisted objective hash is missing from the
                 currently-resolved dataset.
+            TypeError: If task-owned work reaches the legacy objective replay path.
         """
         metadata = stored_result.metadata or {}
         persisted = metadata.get("objective_hashes")
@@ -1176,8 +1244,10 @@ class Scenario(ABC):
 
         persisted_hashes: set[str] = set(persisted)
         retained: set[str] = set()
-        retained_attacks: list[AtomicAttack] = []
+        retained_attacks: list[AtomicWork] = []
         for aa in self._atomic_attacks:
+            if not isinstance(aa, AtomicAttack):
+                raise TypeError("Only target-owned AtomicAttack work can replay persisted objectives")
             retained |= aa.keep_seed_groups_with_hashes(hashes=persisted_hashes)
             if aa.seed_groups:
                 retained_attacks.append(aa)
@@ -1319,7 +1389,7 @@ class Scenario(ABC):
 
         return completed_hashes
 
-    async def _get_remaining_atomic_attacks_async(self) -> list[AtomicAttack]:
+    async def _get_remaining_atomic_attacks_async(self) -> list[AtomicWork]:
         """
         Get the list of atomic attacks that still have objectives to complete.
 
@@ -1330,15 +1400,20 @@ class Scenario(ABC):
         join is sufficient.
 
         Returns:
-            list[AtomicAttack]: List of atomic attacks with uncompleted objectives.
+            list[AtomicWork]: Atomic work with uncompleted objectives.
+
+        Raises:
+            TypeError: If task-owned work reaches target-owned objective-hash resume.
         """
         if not self._scenario_result_id:
             # No scenario result yet, return all atomic attacks
             return self._atomic_attacks
 
-        remaining_attacks: list[AtomicAttack] = []
+        remaining_attacks: list[AtomicWork] = []
 
         for atomic_attack in self._atomic_attacks:
+            if not isinstance(atomic_attack, AtomicAttack):
+                raise TypeError("Target-owned resume requires AtomicAttack work")
             completed_hashes = self._get_completed_objective_hashes_for_attack(atomic_attack=atomic_attack)
 
             if completed_hashes:
@@ -1446,6 +1521,26 @@ class Scenario(ABC):
             list[AtomicAttack]: The generated atomic attacks.
         """
         ...
+
+    async def _build_task_owned_atomic_attacks_async(
+        self, *, context: TaskOwnedScenarioContext
+    ) -> Sequence[AtomicWork]:
+        """
+        Reject task-owned work unless a TaskOwnedScenario implements the hook.
+
+        Raises:
+            TypeError: If a subclass opts in without implementing task-owned construction.
+        """
+        raise TypeError("Only TaskOwnedScenario may build task-owned cases")
+
+    def _validate_task_owned_work(self) -> None:
+        """
+        Require a TaskOwnedScenario to validate its selected cases.
+
+        Raises:
+            TypeError: If a subclass opts in without validating its work.
+        """
+        raise TypeError("Only TaskOwnedScenario may validate task-owned work")
 
     async def run_async(self) -> ScenarioResult:
         """
@@ -1640,7 +1735,7 @@ class Scenario(ABC):
     def _partial_result_to_exception(
         self,
         *,
-        atomic_attack: AtomicAttack,
+        atomic_attack: AtomicWork,
         atomic_results: AttackExecutorResult[AttackResult],
     ) -> ScenarioPartialFailureException | None:
         """
@@ -1688,7 +1783,7 @@ class Scenario(ABC):
     async def _execute_atomic_attacks_parallel_async(
         self,
         *,
-        remaining_attacks: list[AtomicAttack],
+        remaining_attacks: list[AtomicWork],
         scenario_result_id: str,
         completed_count: int,
     ) -> None:
@@ -1699,7 +1794,8 @@ class Scenario(ABC):
         of their per-objective tasks share a single ``AttackExecutor`` (and therefore a
         single internal ``Semaphore(max_concurrency)``) so the global concurrent-objective
         budget never exceeds ``max_concurrency`` regardless of how work is distributed
-        across atomic attacks.
+        across atomic attacks. Task-owned work instead runs one case per atomic group;
+        the worker count provides the same concurrency cap without an AttackExecutor.
 
         Failure semantics: when an in-flight atomic attack raises or returns
         ``has_incomplete``, the worker pool stops pulling new atomic attacks from the
@@ -1713,7 +1809,7 @@ class Scenario(ABC):
         assert self._max_concurrency is not None, "Scenario not initialized; call initialize_async first."
         max_concurrency: int = self._max_concurrency
 
-        shared_executor = AttackExecutor(max_concurrency=max_concurrency)
+        shared_executor = AttackExecutor(max_concurrency=max_concurrency) if not self.TASK_OWNED else None
         pbar = tqdm(
             desc=f"Executing {self._name}",
             unit="attack",
@@ -1729,12 +1825,12 @@ class Scenario(ABC):
             f"(shared max_concurrency={max_concurrency}) in scenario '{self._name}'"
         )
 
-        queue: asyncio.Queue[AtomicAttack] = asyncio.Queue()
+        queue: asyncio.Queue[AtomicWork] = asyncio.Queue()
         for atomic_attack in remaining_attacks:
             queue.put_nowait(atomic_attack)
 
         stop_event = asyncio.Event()
-        outcomes: list[tuple[AtomicAttack, AttackExecutorResult[AttackResult]] | Exception] = []
+        outcomes: list[tuple[AtomicWork, AttackExecutorResult[AttackResult]] | Exception] = []
 
         async def worker_async() -> None:
             while not stop_event.is_set():
@@ -1784,7 +1880,7 @@ class Scenario(ABC):
     def _collect_errors_from_outcomes(
         self,
         *,
-        outcomes: list[tuple[AtomicAttack, AttackExecutorResult[AttackResult]] | Exception],
+        outcomes: list[tuple[AtomicWork, AttackExecutorResult[AttackResult]] | Exception],
     ) -> list[Exception]:
         """
         Convert worker outcomes into a flat list of errors for the caller to raise.

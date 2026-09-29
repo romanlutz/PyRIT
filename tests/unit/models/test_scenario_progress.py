@@ -39,3 +39,24 @@ def test_run_plan_rejects_ambiguous_or_invalid_normalized_ids(
 ) -> None:
     with pytest.raises(ValidationError, match=match):
         ScenarioRunPlan(atomic_groups=atomic_groups, seed_groups=seed_groups)
+
+
+def test_legacy_run_plan_serializes_byte_identically_after_reload() -> None:
+    stored = (
+        '{"version":1,"scenario_registry_name":"legacy","atomic_groups":'
+        '[{"id":"group-1","atomic_attack_name":"group-1","display_group":"group-1",'
+        '"technique_eval_hash":"eval-group-1","seed_group_ids":["seed-1"],"tags":[]}],'
+        '"seed_groups":[{"id":"seed-1","objective_sha256":"sha-seed-1",'
+        '"objective":"seed-1","prompts":[]}]}'
+    )
+    plan = ScenarioRunPlan.model_validate_json(stored)
+
+    assert plan.model_dump_json(exclude_none=True) == stored
+    assert '"run_instance_id"' not in plan.model_dump_json()
+    assert '"case_id"' not in plan.model_dump_json()
+    assert (
+        ScenarioRunPlan.model_validate(plan.model_dump(mode="json", exclude_none=True)).model_dump_json(
+            exclude_none=True
+        )
+        == stored
+    )
