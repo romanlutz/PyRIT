@@ -30,6 +30,7 @@ class NativeCyberRawKind(str, Enum):
     STDOUT = "stdout"
     STDERR = "stderr"
     JSONL = "jsonl"
+    EVAL_LOG = "eval_log"
     MODEL = "model"
     TOOL = "tool"
 
@@ -48,6 +49,7 @@ class NativeCyberResponseMode(str, Enum):
 
     MESSAGE_REQUIRED = "message_required"
     ARTIFACT_ONLY = "artifact_only"
+    SAMPLE_CAPTURE = "sample_capture"
 
 
 class NativeCyberCoveragePhase(str, Enum):

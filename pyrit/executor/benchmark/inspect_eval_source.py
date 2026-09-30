@@ -20,10 +20,20 @@ from uuid import uuid4
 from inspect_ai import Task
 from inspect_ai._util.registry import is_registry_object, registry_info, registry_params, registry_unqualified_name
 from inspect_ai.dataset import MemoryDataset
+from inspect_ai.model import Model, get_model
 from inspect_ai.util import ComposeConfig, SandboxEnvironmentSpec
 from pydantic import BaseModel, ConfigDict, Field
 
-from pyrit.models import EvalCaseRef, EvalPackageRef, EvalSourceKind, SeedObjective, config_hash
+from pyrit.models import (
+    EvalCaseRef,
+    EvalPackageRef,
+    EvalSourceKind,
+    EvalSpecRef,
+    HarnessProfileRef,
+    ModelRouteRef,
+    SeedObjective,
+    config_hash,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -153,11 +163,44 @@ class ResolvedInspectEvalCase:
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class ResolvedOriginalInspectTask:
+    """An explicitly allowlisted, in-process original Task, not the GHCP pilot."""
+
+    task: Task
+    case: EvalCaseRef
+    spec: EvalSpecRef
+    source_file: Path
+    source_sha256: str
+
+    def verify_unchanged(self) -> None:
+        """
+        Recheck the authored code and Task object before an unchanged launch.
+
+        Raises:
+            ValueError: If the pinned source, solver, scorer, or no-sandbox profile drifted.
+        """
+        if _sha256_normalized_python(self.source_file) != self.source_sha256:
+            raise ValueError("The approved original Inspect Task source changed.")
+        _validate_original_inert_task(task=self.task, source_file=self.source_file)
+
+
 def _sha256_file(path: Path) -> str:
     if not path.is_file() or path.is_symlink():
         raise ValueError("A trusted Eval source file is missing or a symlink.")
     with path.open("rb") as contents:
         return hashlib.file_digest(contents, "sha256").hexdigest()
+
+
+def _sha256_normalized_python(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Approved original Inspect source is missing or a symlink.")
+    content = path.read_bytes()
+    # Git stores this Python source as LF, while Windows checkouts may materialize CRLF.
+    normalized = content.replace(b"\r\n", b"\n")
+    if b"\r" in normalized:
+        raise ValueError("Approved original Inspect source has unsupported line endings.")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def _relative_file(*, root: Path, name: str) -> Path:
@@ -366,6 +409,56 @@ def _validate_callback_sources(*, task: Task, source_files: tuple[tuple[Path, st
             raise ValueError("Original Inspect scorer, setup and cleanup must originate from pinned Eval source files.")
 
 
+def _validate_original_inert_task(*, task: Task, source_file: Path) -> None:
+    approved_model = get_model("mockllm/model")
+    if (
+        not isinstance(task, Task)
+        or task.name != "inspect_original_inert"
+        or str(task.version) != "1"
+        or task.sandbox is not None
+        or not isinstance(task.model, Model)
+        or task.model.name != approved_model.name
+        or type(task.model.api) is not type(approved_model.api)
+        or task.model.api.model_name != approved_model.api.model_name
+        or task.model.config.model_dump(exclude_defaults=True)
+        or task.model_roles is not None
+        or task.sample_source is not None
+        or len(task.dataset) != 1
+        or task.metadata is not None
+        or task.checkpoint is not None
+        or task.on_checkpoint is not None
+        or task.on_resume is not None
+        or task.epochs not in (None, 1)
+        or task.config.model_dump(exclude_defaults=True)
+    ):
+        raise ValueError("Only the approved original in-process Inspect Task can run without a guest.")
+    _validate_strict_task_inventory(task=task)
+    _validate_sample(
+        sample=task.dataset[0],
+        pinned=_PinnedSample(
+            sample_id="original-inert-1",
+            sample_input_sha256=hashlib.sha256(b"harmless fixture").hexdigest(),
+            sample_target_sha256=hashlib.sha256(b"inert response").hexdigest(),
+        ),
+    )
+    setup = task.setup if isinstance(task.setup, list) else [task.setup] if task.setup is not None else []
+    scorer = task.scorer or []
+    if (
+        len(setup) != 1
+        or len(scorer) != 1
+        or _registered_fingerprint(component=setup[0]) != config_hash({"name": "prepare_inert_sample", "params": {}})
+        or _registered_fingerprint(component=task.solver)
+        != config_hash({"name": "original_inert_solver", "params": {}})
+        or _registered_fingerprint(component=scorer[0]) != config_hash({"name": "original_inert_scorer", "params": {}})
+        or getattr(task.cleanup, "__qualname__", None) != "cleanup_async"
+    ):
+        raise ValueError("Original Inspect setup, solver, scorer, or cleanup differs from the approved source.")
+    _validate_callback_sources(
+        task=task,
+        source_files=((source_file, "examples/inspect_original_inert.py", _sha256_normalized_python(source_file)),),
+    )
+
+
 def _load_task_factory(*, name: str, path: Path, kind: EvalSourceKind) -> Callable[..., object]:
     if kind is EvalSourceKind.NAMED:
         module = importlib.import_module("examples.inspect_ghcp_protocol_smoke")
@@ -452,6 +545,56 @@ class EvalSourceFactory:
     NAMED_SOURCE_SHA256 = "0d7175315b4eca1ff3a2221b6d8e3a3c60b4a8ae48abcf96031847e73f3a44e7"
     NAMED_SAMPLE_SHA256 = "701f3fb4e19e8fa42ef2184c6ec33ac564b535283959e1db14760e3b5b2e7ccb"
     NAMED_TARGET_SHA256 = "da49b56729c23790a2b3c7c9b4a840112f819df24bad1ef93d0f52ac73b4497c"
+    ORIGINAL_INERT_SHA256 = "e218bc41006d7bd495650fc2fb04f911a3b8dedd1c789cd571c6f59c1bc714d0"
+
+    @classmethod
+    def resolve_original_inert(cls, *, family: str) -> ResolvedOriginalInspectTask:
+        """
+        Admit only the pinned public no-sandbox, no-model-call original Task.
+
+        Returns:
+            ResolvedOriginalInspectTask: Authored Task and its stable PyRIT case/spec identities.
+
+        Raises:
+            ValueError: If the family or trusted source bytes are not allowlisted.
+        """
+        if family != "inspect_original_inert":
+            raise ValueError("Original Inspect runner has no approved Task/profile for this family.")
+        root = Path(__file__).resolve().parents[3]
+        source = _relative_file(root=root, name="examples/inspect_original_inert.py")
+        if _sha256_normalized_python(source) != cls.ORIGINAL_INERT_SHA256:
+            raise ValueError("Approved original Inspect Task code differs from its pinned SHA256.")
+        module = importlib.import_module("examples.inspect_original_inert")
+        if _sha256_normalized_python(source) != cls.ORIGINAL_INERT_SHA256:
+            raise ValueError("Approved original Inspect Task code changed while importing.")
+        task = module.original_inert_task()
+        _validate_original_inert_task(task=task, source_file=source)
+        package = EvalPackageRef(kind=EvalSourceKind.NAMED, name=family, source_sha256=cls.ORIGINAL_INERT_SHA256)
+        case = EvalCaseRef(
+            package=package,
+            task_name=task.name,
+            task_version=str(task.version),
+            sample_id=str(task.dataset[0].id),
+            epoch=1,
+        )
+        spec = EvalSpecRef(
+            package=package,
+            harness=HarnessProfileRef(
+                name="inspect_original_inprocess",
+                config_sha256=config_hash({"sandbox": "none", "source_sha256": cls.ORIGINAL_INERT_SHA256}),
+            ),
+            model_route=ModelRouteRef(
+                name="inspect_no_model_calls",
+                config_sha256=config_hash({"model": "mockllm/model", "provider_calls": 0}),
+            ),
+        )
+        return ResolvedOriginalInspectTask(
+            task=task,
+            case=case,
+            spec=spec,
+            source_file=source,
+            source_sha256=cls.ORIGINAL_INERT_SHA256,
+        )
 
     @classmethod
     def resolve(

@@ -33,6 +33,7 @@ from inspect_ai.util import ComposeConfig, SandboxEnvironmentSpec, sandbox
 from pyrit.executor.attack.multi_turn.red_teaming import RedTeamingAttack
 from pyrit.executor.benchmark._inspect_ghcp_adversary_capture import InspectGhcpAdversarialCapture
 from pyrit.executor.benchmark._inspect_ghcp_runtime import InspectGhcpLimits, InspectGhcpSandboxRuntime
+from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event
 from pyrit.executor.benchmark.inspect_ghcp_model import InspectLoopbackModelAPI
 from pyrit.memory import CentralMemory
 from pyrit.memory.inspect_ghcp_evidence import InspectGhcpEvidenceStore
@@ -933,22 +934,16 @@ class InspectGhcpEvaluation:
         score = (sample.scores or {}).get(self.binding.scorer_name)
         if score is None:
             return None
-        events = [
-            event
-            for event in sample.events
-            if event.event == "score" and event.scorer == self.binding.scorer_name and event.intermediate is not True
-        ]
-        if len(events) != 1 or not isinstance(events[0].uuid, str) or not events[0].uuid:
+        event = final_original_score_event(sample=sample, scorer_name=self.binding.scorer_name)
+        if event is None:
             return None
         raw = score.model_dump(mode="json", exclude_none=True)
-        if events[0].score.model_dump(mode="json", exclude_none=True) != raw:
-            raise ValueError("Original Inspect ScoreEvent disagrees with its one sample Score.")
         encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         value = score.value
         numeric = float(value) if type(value) in (int, float) and 0 <= value <= 1 else None
         return InspectGhcpJudgment(
             scorer_name=self.binding.scorer_name,
-            source_event_id=events[0].uuid,
+            source_event_id=event.uuid,
             normalization_version=1,
             raw_value=value,
             numeric_value=numeric,

@@ -115,7 +115,7 @@ class NativeCyberEvidenceStore:
 
     def begin_turn(self, *, turn: NativeCyberTurnStart) -> None:
         """
-        Begin the next outer turn and link only already-persisted request pieces.
+        Begin the next outer turn or an explicitly ungraded Inspect sample capture.
 
         Raises:
             ValueError: If ordering, source identity or message-piece provenance disagrees.
@@ -123,6 +123,11 @@ class NativeCyberEvidenceStore:
         with self._write_session(run_id=turn.run_id) as session:
             episode = self._lock_episode(session=session, run_id=turn.run_id)
             self._require_open(episode)
+            if (
+                turn.response_mode is NativeCyberResponseMode.SAMPLE_CAPTURE
+                and episode.binding_name != "inspect-original"
+            ):
+                raise ValueError("Only an ungraded original Inspect import can store sample capture units.")
             last_index = session.scalar(
                 select(func.max(NativeCyberTurnEntry.turn_index)).where(NativeCyberTurnEntry.run_id == turn.run_id)
             )
@@ -427,7 +432,11 @@ class NativeCyberEvidenceStore:
                     )
                 )
             )
-            if finish.source_complete and "request" not in directions:
+            if (
+                finish.source_complete
+                and turn.response_mode != NativeCyberResponseMode.SAMPLE_CAPTURE.value
+                and "request" not in directions
+            ):
                 gaps.append("Native turn lacks a stored request MessagePiece.")
             if (
                 finish.source_complete
@@ -608,6 +617,140 @@ class NativeCyberEvidenceStore:
                 atomic=True,
             )
         return self.get_episode(run_id=report.run_id)
+
+    def finalize_unscored_inspect_capture(
+        self,
+        *,
+        run_id: str,
+        expected_samples: int,
+        required_gaps: Sequence[str] = (),
+        optional_gaps: Sequence[str] = (),
+    ) -> NativeCyberEpisodeSnapshot:
+        """
+        Seal original Inspect bytes and sample projections without inventing a Score.
+
+        Returns:
+            NativeCyberEpisodeSnapshot: Finalized capture; its Score and report links remain absent.
+
+        Raises:
+            ValueError: If a graded run, missing source, or damaged sample is supplied.
+        """
+        if expected_samples < 0 or any(not gap.strip() or len(gap) > 512 for gap in (*required_gaps, *optional_gaps)):
+            raise ValueError("Inspect capture needs a valid sample count and short redacted coverage reasons.")
+        with self._write_session(run_id=run_id) as session:
+            episode = self._lock_episode(session=session, run_id=run_id)
+            self._require_open(episode)
+            if episode.binding_name != "inspect-original" or episode.score_id is not None:
+                raise ValueError("Only an original unscored Inspect capture can be sealed without a Score.")
+            required, optional = self._unscored_inspect_gaps(
+                session=session, episode=episode, expected_samples=expected_samples
+            )
+            episode.capture_gaps = list(dict.fromkeys([*required, *required_gaps]))
+            episode.optional_gaps = list(dict.fromkeys([*optional, *optional_gaps]))
+            episode.coverage_complete = not episode.capture_gaps
+            episode.finalized_at = datetime.now(UTC)
+            session.flush()
+        return self.get_finalized_unscored_inspect_capture(run_id=run_id)
+
+    def get_finalized_unscored_inspect_capture(self, *, run_id: str) -> NativeCyberEpisodeSnapshot:
+        """
+        Read only a finalized original Inspect import, not a graded native run.
+
+        Returns:
+            NativeCyberEpisodeSnapshot: Metadata-only sample, event and stream evidence.
+
+        Raises:
+            ValueError: If the episode is pending, graded, or from another binding.
+        """
+        snapshot = self.get_episode(run_id=run_id)
+        if (
+            snapshot.run.binding_name != "inspect-original"
+            or snapshot.finalized_at is None
+            or snapshot.score_id is not None
+            or snapshot.report_content_id is not None
+        ):
+            raise ValueError("An original unscored Inspect capture is not finalized for readback.")
+        return snapshot
+
+    @classmethod
+    def _unscored_inspect_gaps(
+        cls, *, session: Session, episode: NativeCyberEpisodeEntry, expected_samples: int
+    ) -> tuple[list[str], list[str]]:
+        required = list(episode.capture_gaps)
+        optional = list(episode.optional_gaps)
+        streams = list(
+            session.scalars(select(NativeCyberRawStreamEntry).where(NativeCyberRawStreamEntry.run_id == episode.run_id))
+        )
+        if sum(stream.stored_bytes for stream in streams) != episode.stored_raw_bytes:
+            required.append("Original Inspect raw stream lengths differ from the episode byte total.")
+        for key in episode.required_raw_streams:
+            matching = [
+                stream
+                for stream in streams
+                if (stream.source, stream.kind, stream.observed_source_id)
+                == (key["source"], key["kind"], key["observed_source_id"])
+            ]
+            if len(matching) != 1:
+                required.append("An original Inspect raw source is missing or duplicated.")
+                continue
+            stream = matching[0]
+            if (
+                stream.closed_at is None
+                or stream.source_complete is not True
+                or stream.truncated
+                or stream.expected_bytes != stream.stored_bytes
+                or stream.observed_sha256 != stream.stored_sha256
+                or cls._hash_stream(session=session, stream=stream) != stream.stored_sha256
+            ):
+                required.extend(stream.capture_gaps or ["An original Inspect raw source is incomplete."])
+        turns = list(
+            session.scalars(
+                select(NativeCyberTurnEntry)
+                .where(NativeCyberTurnEntry.run_id == episode.run_id)
+                .order_by(NativeCyberTurnEntry.turn_index)
+            )
+        )
+        if len(turns) != expected_samples or [turn.turn_index for turn in turns] != list(
+            range(1, expected_samples + 1)
+        ):
+            required.append("Inspect sample capture count differs from the original EvalLog.")
+        for turn in turns:
+            event_count = session.scalar(
+                select(func.count(NativeCyberEventEntry.sequence)).where(
+                    NativeCyberEventEntry.run_id == episode.run_id,
+                    NativeCyberEventEntry.turn_index == turn.turn_index,
+                )
+            )
+            if (
+                turn.response_mode != NativeCyberResponseMode.SAMPLE_CAPTURE.value
+                or turn.source_complete is not True
+                or turn.finished_at is None
+                or turn.observed_event_count != event_count
+            ):
+                required.extend(turn.capture_gaps or ["An original Inspect sample projection is incomplete."])
+        links = list(
+            session.scalars(
+                select(NativeCyberTurnMessagePieceEntry).where(
+                    NativeCyberTurnMessagePieceEntry.run_id == episode.run_id
+                )
+            )
+        )
+        if not cls._piece_links_intact(session=session, links=links):
+            required.append("An original Inspect transcript MessagePiece is missing or modified.")
+        required_keys = {
+            (key["source"], key["kind"], key["observed_source_id"]) for key in episode.required_raw_streams
+        }
+        if required_keys != {
+            ("harness", "eval_log", "inspect-original-eval-archive"),
+            ("harness", "jsonl", "inspect-resolved-eval-log"),
+        }:
+            required.append("Original Inspect import lacks its exact archive and resolved-log source contract.")
+        for stream in streams:
+            if (stream.source, stream.kind, stream.observed_source_id) not in required_keys and (
+                stream.closed_at is None or stream.source_complete is not True
+            ):
+                optional.extend(stream.capture_gaps or ["Optional live Inspect hook coverage is incomplete."])
+        return list(dict.fromkeys(required)), list(dict.fromkeys(optional))
 
     def finalize_cli_episode_atomic(
         self,
@@ -1742,7 +1885,7 @@ class NativeCyberEvidenceStore:
         if len(piece_ids) != len(set(piece_ids)):
             raise ValueError("A native outer turn cannot reference a MessagePiece twice.")
         valid_roles = {
-            "request": {"user"},
+            "request": {"user", "system", "developer"} if episode.binding_name == "inspect-original" else {"user"},
             "response": {"assistant", "simulated_assistant"},
             "tool_request": {"assistant", "simulated_assistant"},
             "tool_result": {"tool"},
@@ -1763,10 +1906,11 @@ class NativeCyberEvidenceStore:
                 or (direction == "tool_result" and piece.original_value_data_type != "function_call_output")
             ):
                 raise ValueError(f"Native {direction} MessagePiece {piece_id} has the wrong data type.")
-            if episode.conversation_id is None:
-                episode.conversation_id = piece.conversation_id
-            elif episode.conversation_id != piece.conversation_id:
-                raise ValueError("Native message pieces must belong to one persisted conversation.")
+            if episode.binding_name != "inspect-original":
+                if episode.conversation_id is None:
+                    episode.conversation_id = piece.conversation_id
+                elif episode.conversation_id != piece.conversation_id:
+                    raise ValueError("Native message pieces must belong to one persisted conversation.")
             session.add(
                 NativeCyberTurnMessagePieceEntry(
                     run_id=episode.run_id,

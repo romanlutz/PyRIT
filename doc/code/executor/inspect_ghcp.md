@@ -135,6 +135,86 @@ neither benchmark verdicts nor typed progress achievements; the
 TaskOwned AttackResult links only the one original-report UND Score.
 No ManualScorer stop sentinel was observed in the accepted one-click run.
 
+## Mode 1: import an original Inspect run without PyRIT steering
+
+`InspectOriginalEvalImporter` reads a **preexisting `.eval`** directly, without
+loading its authored Task, solver, sandbox, model, or source factory. An
+initialized PyRIT memory backend is required:
+
+```python
+from pathlib import Path
+
+from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
+from pyrit.memory import CentralMemory
+
+imported = await InspectOriginalEvalImporter(memory=CentralMemory.get_memory_instance()).import_eval_log_async(
+    path=Path("approved-local-original.eval")
+)
+```
+
+The importer stores the **exact original `.eval` bytes and SHA256** plus a
+separately resolved typed `EvalLog` (including attachments) in owner-controlled,
+sensitive PyRIT raw streams. It projects original `EvalSample.messages` text to
+MessagePieces with a **distinct conversation per Sample/epoch**, and stores
+typed Inspect events in original retry-attempt and sample order with observed
+UUIDs when present. Original model/tool/score events, errors, intermediate
+scores and final `EvalSample.scores` remain source evidence, not synthetic
+PyRIT attack turns. ModelEvent output is not inserted a second time as an
+assistant message. Non-text messages stay in the resolved log and are reported
+as a projection gap. The original `.eval` is the only source of truth for
+offline imports; `EvalSourceFactory` and task materialization are **not**
+required. A caller can supply a matching `EvalCaseRef` inventory and
+`EvalRunRef` to label source case-run identities, but this does not qualify an
+external scorer.
+
+An ungraded `inspect-original` episode is sealed only after DB byte/digest,
+sample, event-order and MessagePiece-link checks. `coverage_complete` says
+the **Inspect-visible log** was retained and projected, not that an external
+CLI, OS action, provider request, or benchmark result was independently
+attested. An error, incomplete attempt, missing event ID, unmatched final
+ScoreEvent or truncated source remains explicitly incomplete. **No PyRIT
+Score or AttackResult is created on import**, even when the original Inspect
+scorer has a numeric result; the Score status remains UND. Re-import of the
+same bytes and case bindings reads back the original streams instead of
+rerunning Inspect or adding results.
+
+For an unchanged-runner proof, `run_original_inert_eval_async(memory=...,
+log_dir=...)` invokes only the separately SHA-pinned public
+`inspect_original_inert` Task. That Task's authored setup, solver, scorer and
+cleanup run in Inspect without a sandbox, without a model-generation call and
+without replacing a solver or running PyRIT attack turns. The `mockllm/model`
+identifier is Task metadata for this **inert** fixture, not a model answer.
+Import the runner with
+`from pyrit.executor.benchmark.inspect_original_runner import
+run_original_inert_eval_async`; provide an initialized PyRIT memory instance
+and an existing, private local `log_dir`. Inspect writes its original `.eval`
+there before PyRIT imports it. Local `file://` log URIs are accepted only
+after their resolved path is checked inside that directory; remote URIs and
+network shares are rejected.
+This entry point is **not an arbitrary-Task runner**: other Task profiles,
+Docker Compose guests, network models, credentials and private cyber Tasks
+remain unapproved. The existing GHCP benign case retains its separately
+reviewed execution path and protocol-only gate.
+Only this public runner's source pin uses Git's LF-normalized Python bytes
+so the same checked-in file remains approved in CRLF Windows worktrees;
+the original `.eval` archive is always hashed and stored **byte for byte**.
+
+The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
+into a bounded run-scoped stream before the final `.eval` is read. Inspect
+emits these callbacks only for completed events, and hook exceptions are
+warnings rather than evaluation failures. A process-wide hook instance stays
+default-off outside that run and checks Inspect run IDs. Hook event coverage
+is reconciled with the final typed log and differences are **optional gaps**,
+never evidence of complete external execution. Offline import never
+registers the live hook. The importer bounds each original archive to
+16 MiB, its resolved typed log to 32 MiB, optional live frames to 2 MiB,
+and one import to 32 Samples. The ZIP preflight also limits uncompressed
+archive members to 64 MiB across at most 256 members before Inspect parses
+them. Re-logged duplicate Sample ZIP members retain exact raw bytes but
+cannot claim complete projected event coverage. These are private memory
+bytes, not public output; do not publish raw `.eval` files or their
+sensitive transcript data.
+
 ## Supported execution and qualification
 
 - One selected, original text `Sample`, one original scorer, one epoch, one
