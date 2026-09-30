@@ -218,6 +218,11 @@ every original event's capture timestamp, typed event payloads, and
 persisted Score/AttackResult links without rerunning Inspect or creating
 duplicates. The synthetic per-Sample summary has no original event
 timestamp to check. Missing or tampered projection rows fail closed.
+An original run-level gap applies to every Sample: moving it into one
+turn's stored gaps cannot make another Sample's Score complete. Each
+stored turn gap must match that Sample's evidence or observed native
+tool-capture gap.
+
 Score and AttackResult rows are committed atomically; an interrupted
 import after the evidence episode is sealed but before projection
 publication requires explicit reconciliation rather than an automatic

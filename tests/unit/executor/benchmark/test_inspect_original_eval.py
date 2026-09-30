@@ -18,8 +18,19 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 from inspect_ai import eval_async
 from inspect_ai.event import ModelEvent, ScoreEvent, ToolEvent
-from inspect_ai.log import EvalError, EvalRetryError, read_eval_log, write_eval_log
-from inspect_ai.model import ContentImage, ContentText, GenerateConfig, ModelOutput
+from inspect_ai.log import (
+    EvalConfig,
+    EvalDataset,
+    EvalError,
+    EvalLog,
+    EvalRetryError,
+    EvalSample,
+    EvalSpec,
+    EvalStats,
+    read_eval_log,
+    write_eval_log,
+)
+from inspect_ai.model import ChatMessageUser, ContentImage, ContentText, GenerateConfig, ModelOutput
 from inspect_ai.scorer import Score
 from sqlalchemy import func, select
 
@@ -43,12 +54,21 @@ from pyrit.memory.memory_models import (
     NativeCyberTurnEntry,
     ScoreEntry,
 )
-from pyrit.models import AttackOutcome, EvalCaseRef, EvalRunRef, ScoreStatus
+from pyrit.models import (
+    AttackOutcome,
+    EvalCaseRef,
+    EvalPackageRef,
+    EvalRunRef,
+    EvalSourceKind,
+    EvalSpecRef,
+    HarnessProfileRef,
+    ModelRouteRef,
+    ScoreStatus,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from inspect_ai.log import EvalLog, EvalSample
     from sqlalchemy.orm import Session
 
     from pyrit.memory import SQLiteMemory
@@ -97,6 +117,73 @@ def _case_inventory(
         source.case.model_copy(update={"sample_id": str(sample.id), "epoch": sample.epoch}) for sample in samples
     )
     return cases, EvalRunRef(spec=source.spec, run_instance_id=uuid.uuid4())
+
+
+@pytest.fixture
+def cancelled_offline_eval() -> tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy]:
+    """Build a two-Sample original log from typed data without executing a Task."""
+    created = datetime.now(UTC).isoformat()
+    task_name = "inert_offline_import"
+    scorer_name = "recorded_scorer"
+    sample_ids = ("offline-one", "offline-two")
+    samples = [
+        EvalSample(
+            id=sample_id,
+            epoch=1,
+            input=f"inert input {sample_id}",
+            target="inert target",
+            uuid=f"sample-{uuid.uuid4().hex}",
+            started_at=created,
+            completed_at=created,
+            messages=[ChatMessageUser(content=f"inert input {sample_id}")],
+            events=[ScoreEvent(uuid=f"score-{uuid.uuid4().hex}", scorer=scorer_name, score=Score(value=1.0))],
+            scores={scorer_name: Score(value=1.0)},
+            model_usage={},
+        )
+        for sample_id in sample_ids
+    ]
+    log = EvalLog(
+        status="cancelled",
+        eval=EvalSpec(
+            eval_id=f"eval-{uuid.uuid4().hex}",
+            run_id=f"run-{uuid.uuid4().hex}",
+            created=created,
+            task=task_name,
+            task_version=1,
+            dataset=EvalDataset(samples=2, sample_ids=list(sample_ids)),
+            model="mockllm/model",
+            config=EvalConfig(),
+        ),
+        samples=samples,
+        stats=EvalStats(),
+    )
+    package = EvalPackageRef(kind=EvalSourceKind.NAMED, name="offline_fixture", source_sha256="a" * 64)
+    run = EvalRunRef(
+        spec=EvalSpecRef(
+            package=package,
+            harness=HarnessProfileRef(name="offline", config_sha256="b" * 64),
+            model_route=ModelRouteRef(name="none", config_sha256="c" * 64),
+        ),
+        run_instance_id=uuid.uuid4(),
+    )
+    cases = tuple(
+        EvalCaseRef(
+            package=package,
+            task_name=task_name,
+            task_version="1",
+            sample_id=str(sample.id),
+            epoch=sample.epoch,
+        )
+        for sample in samples
+    )
+    policy = InspectOriginalScorePolicy(
+        task_name=task_name,
+        task_version="1",
+        primary_scorer=scorer_name,
+        success_direction=InspectSuccessDirection.AT_LEAST,
+        success_threshold=0.5,
+    )
+    return log, cases, run, policy
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -787,6 +874,152 @@ async def test_reimport_rejects_forged_source_coverage_and_case_verdict(
         )
     with pytest.raises(ValueError, match="source coverage"):
         await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_cancelled_two_sample_reread_rejects_run_gap_laundered_into_first_turn(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    cancelled_offline_eval: tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy],
+) -> None:
+    log, cases, run, policy = cancelled_offline_eval
+    archive = tmp_path / "cancelled-two-samples.eval"
+    await asyncio.to_thread(write_eval_log, log, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    with patch.object(EvalSourceFactory, "resolve_original_inert", side_effect=AssertionError("no Task source")):
+        imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert imported.sample_count == 2
+    assert [case.score.status for case in imported.case_results] == [ScoreStatus.UNDETERMINED] * 2
+    assert [case.attack_result.outcome for case in imported.case_results] == [AttackOutcome.UNDETERMINED] * 2
+    assert all(turn.source_complete for turn in imported.episode.turns)
+    assert len(imported.episode.gaps) == 1
+    [run_gap] = imported.episode.gaps
+    with sqlite_instance.get_session() as session, session.begin():
+        turn = session.get(NativeCyberTurnEntry, (imported.episode.run.run_id, 1))
+        second = imported.case_results[1]
+        score = session.get(ScoreEntry, second.score.id)
+        result = session.get(AttackResultEntry, uuid.UUID(second.attack_result.attack_result_id))
+        assert turn is not None and score is not None and result is not None
+        turn.capture_gaps = [run_gap]
+        turn.source_complete = False
+        score.status = ScoreStatus.COMPLETE.value
+        score.score_value = "1.0"
+        score.score_value_description = None
+        result.outcome = AttackOutcome.SUCCESS.value
+        result.outcome_reason = (
+            "Original Inspect recorded_scorer compared using the explicit at_least 0.5 success criterion."
+        )
+    with (
+        patch.object(EvalSourceFactory, "resolve_original_inert", side_effect=AssertionError("no Task source")),
+        pytest.raises(ValueError, match="Sample coverage"),
+    ):
+        await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_cancelled_two_sample_reread_rejects_unattributed_turn_gap(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    cancelled_offline_eval: tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy],
+) -> None:
+    log, cases, run, policy = cancelled_offline_eval
+    archive = tmp_path / "cancelled-unattributed-gap.eval"
+    await asyncio.to_thread(write_eval_log, log, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    with sqlite_instance.get_session() as session, session.begin():
+        episode = session.get(NativeCyberEpisodeEntry, imported.episode.run.run_id)
+        turn = session.get(NativeCyberTurnEntry, (imported.episode.run.run_id, 1))
+        assert episode is not None and turn is not None
+        turn.capture_gaps = ["unattributed turn gap"]
+        turn.source_complete = False
+        episode.capture_gaps = [*episode.capture_gaps, "unattributed turn gap"]
+    with pytest.raises(ValueError, match="Sample coverage"):
+        await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("capture_kind", ["missing_completion", "duplicate_tool_phase"])
+async def test_cancelled_two_sample_reread_keeps_genuine_sample_and_capture_gaps(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    cancelled_offline_eval: tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy],
+    capture_kind: str,
+) -> None:
+    log, cases, run, policy = cancelled_offline_eval
+    assert log.samples
+    if capture_kind == "missing_completion":
+        samples = [log.samples[0].model_copy(update={"completed_at": None}), log.samples[1]]
+        affected_turn = 0
+        expected_gap = "Original Inspect Sample errored or lacks a completion timestamp."
+    else:
+        samples = [
+            sample.model_copy(
+                update={
+                    "events": [
+                        ToolEvent(
+                            uuid=f"tool-{uuid.uuid4().hex}",
+                            id="same-tool-call",
+                            function="inert_tool",
+                            arguments={"value": "fixture"},
+                            result="fixture",
+                            completed=datetime.now(UTC),
+                        ),
+                        *sample.events,
+                    ]
+                }
+            )
+            for sample in log.samples
+        ]
+        affected_turn = 1
+        expected_gap = "Native tool phase complete was observed more than once"
+    log = log.model_copy(update={"samples": samples})
+    archive = tmp_path / f"genuine-gap-{capture_kind}.eval"
+    await asyncio.to_thread(write_eval_log, log, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert expected_gap in " ".join(imported.episode.turns[affected_turn].gaps)
+    assert all(case.attack_result.outcome is AttackOutcome.UNDETERMINED for case in imported.case_results)
+    repeated = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert repeated.case_results == imported.case_results
+    assert repeated.episode.turns == imported.episode.turns
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_two_sample_offline_success_keeps_distinct_source_verdicts_without_task_execution(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    cancelled_offline_eval: tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy],
+) -> None:
+    log, cases, run, policy = cancelled_offline_eval
+    assert log.samples
+    second_score = Score(value=0.0)
+    second = log.samples[1].model_copy(
+        update={
+            "scores": {"recorded_scorer": second_score},
+            "events": [
+                event.model_copy(update={"score": second_score}) if isinstance(event, ScoreEvent) else event
+                for event in log.samples[1].events
+            ],
+        }
+    )
+    log = log.model_copy(update={"status": "success", "samples": [log.samples[0], second]})
+    archive = tmp_path / "two-sample-offline-success.eval"
+    await asyncio.to_thread(write_eval_log, log, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert imported.episode.coverage_complete
+    assert [case.score.score_value for case in imported.case_results] == ["1.0", "0.0"]
+    assert [case.attack_result.outcome for case in imported.case_results] == [
+        AttackOutcome.SUCCESS,
+        AttackOutcome.FAILURE,
+    ]
+    assert len({case.attack_result.conversation_id for case in imported.case_results}) == 2
+    reread = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert reread.case_results == imported.case_results
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 2
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 2
 
 
 @pytest.mark.usefixtures("patch_central_database")

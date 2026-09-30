@@ -390,6 +390,7 @@ class InspectOriginalEvalImporter:
                 archive_sha=archive_sha,
                 case_run_ids=case_run_ids,
                 score_policy=score_policy,
+                required_source_gaps=source_gaps,
                 persist=True,
             )
             if live_run_id is None
@@ -585,14 +586,15 @@ class InspectOriginalEvalImporter:
         ):
             raise ValueError("Existing Inspect import has incomplete or changed source bytes.")
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
+        source_gaps = self._source_log_gaps(
+            log=log, resolved=resolved, relogged_samples=relogged_samples, require_no_model_calls=False
+        )
         self._verify_event_readback(
             log=log,
             snapshot=snapshot,
             archive_sha=archive_sha,
             case_run_ids=case_run_ids,
-            required_source_gaps=self._source_log_gaps(
-                log=log, resolved=resolved, relogged_samples=relogged_samples, require_no_model_calls=False
-            ),
+            required_source_gaps=source_gaps,
         )
         case_results = self._ensure_case_results(
             log=log,
@@ -600,6 +602,7 @@ class InspectOriginalEvalImporter:
             archive_sha=archive_sha,
             case_run_ids=case_run_ids,
             score_policy=score_policy,
+            required_source_gaps=source_gaps,
             persist=False,
         )
         return self._result(
@@ -620,13 +623,16 @@ class InspectOriginalEvalImporter:
         archive_sha: str,
         case_run_ids: tuple[str, ...],
         score_policy: InspectOriginalScorePolicy | None,
+        required_source_gaps: list[str],
         persist: bool,
     ) -> tuple[InspectOriginalCaseResult, ...]:
         samples = log.samples or []
         if len(snapshot.turns) != len(samples):
             raise ValueError("Original Inspect case projection differs from the retained Sample count.")
         turn_gaps = {gap for turn in snapshot.turns for gap in turn.gaps}
-        global_issue = next((gap for gap in snapshot.gaps if gap not in turn_gaps), None)
+        global_issue = next(iter(required_source_gaps), None) or next(
+            (gap for gap in snapshot.gaps if gap not in turn_gaps), None
+        )
         expected = tuple(
             self._case_result(
                 log=log,
@@ -881,6 +887,7 @@ class InspectOriginalEvalImporter:
         expected: list[NativeCyberCapturedEvent] = []
         sequence = 1
         seen_sample_uuids: set[str] = set()
+        observed_tool_phases: set[tuple[str, str]] = set()
         for sample_index, sample in enumerate(log.samples or [], start=1):
             projection = project_inspect_sample(
                 sample=sample,
@@ -904,12 +911,19 @@ class InspectOriginalEvalImporter:
                 source_gaps.append("Original Inspect sample UUID is duplicated across epochs or samples.")
             if sample.uuid:
                 seen_sample_uuids.add(sample.uuid)
+            expected_turn_gaps = self._source_turn_gaps(
+                projection=projection, sample_gaps=source_gaps, observed_tool_phases=observed_tool_phases
+            )
             if (
                 turn.turn_index != sample_index
                 or turn.source_turn_id != source_id
+                or turn.response_mode is not NativeCyberResponseMode.SAMPLE_CAPTURE
+                or turn.finished_at is None
+                or turn.observed_event_count != len(projection.events)
+                or turn.stored_event_count != len(projection.events)
                 or turn.source_complete != (not turn.gaps)
                 or not set(turn.gaps).issubset(snapshot.gaps)
-                or not set(source_gaps).issubset(turn.gaps)
+                or turn.gaps != expected_turn_gaps
             ):
                 raise ValueError("Original Inspect stored Sample coverage differs from its source coverage.")
             expected.extend(projection.events)
@@ -940,6 +954,31 @@ class InspectOriginalEvalImporter:
                 break
         if cursor != len(snapshot.events) or cursor != len(expected):
             raise ValueError("Original Inspect projected event count changed in PyRIT memory.")
+
+    @staticmethod
+    def _source_turn_gaps(
+        *, projection: InspectSampleProjection, sample_gaps: list[str], observed_tool_phases: set[tuple[str, str]]
+    ) -> tuple[str, ...]:
+        """
+        Reconstruct native capture gaps from this Sample's typed events.
+
+        Returns:
+            tuple[str, ...]: The only turn gaps attributable to this source Sample and its captured tool phases.
+        """
+        gaps: list[str] = []
+        for captured in projection.events:
+            event = captured.event
+            if event.tool_call_id is None or event.tool_phase is None:
+                continue
+            phase = event.tool_phase.value
+            key = (event.tool_call_id, phase)
+            if key in observed_tool_phases:
+                gaps.append(f"Native tool phase {phase} was observed more than once at event {event.sequence}.")
+            observed_tool_phases.add(key)
+        gaps.extend(sample_gaps)
+        if sample_gaps:
+            gaps.append("Native turn source did not report complete event coverage.")
+        return tuple(dict.fromkeys(gaps))
 
     @classmethod
     def _result(
