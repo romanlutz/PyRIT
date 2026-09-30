@@ -236,6 +236,13 @@ a benchmark grade. Complete Inspect-visible coverage does not attest a
 remote provider, OS side effect or real cyber outcome. This limited fixture
 does not authorize arbitrary `react()` solvers or other Inspect Tasks.
 
+The Mode 2 import keeps its SQLite worker alive after caller cancellation;
+the finalization transaction checks whether cancellation was requested at
+its sealing decision point. Worker errors before finalization leave a
+required gap. If sealing wins the race, the caller gets an explicit
+already-sealed error, not a misleading pre-seal `CancelledError`. The public
+offline importer does not use this Mode 2 cancellation gate.
+
 The Mode 1 runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
 into a bounded run-scoped stream before the final `.eval` is read. Inspect
 emits these callbacks only for completed events, and hook exceptions are

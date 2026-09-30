@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from threading import Event
 from typing import TYPE_CHECKING
 
 from inspect_ai import eval_async
@@ -401,6 +402,83 @@ class InspectMode2Run:
     decisions: tuple[InspectContinueRecord, ...]
 
 
+async def _mark_import_failure_async(*, controller: InspectMode2Controller, error: Exception) -> str:
+    """
+    Mark an open variant incomplete after a failed import worker.
+
+    Returns:
+        str: Whether the failed import left a pending or already sealed capture.
+    """
+    snapshot = await asyncio.to_thread(controller._capture.get_episode, run_id=controller.episode_id)
+    if snapshot.finalized_at is not None:
+        return "sealed"
+    await controller.fail_async(reason=f"Mode 2 Inspect import failed ({type(error).__name__}).")
+    return "pending"
+
+
+async def _import_mode2_async(
+    *,
+    importer: InspectOriginalEvalImporter,
+    controller: InspectMode2Controller,
+    location: Path,
+    cases: tuple[EvalCaseRef, ...] | None,
+    run: EvalRunRef | None,
+) -> InspectOriginalImport:
+    """
+    Keep the SQLite worker alive until a cancelled import is safely sealed.
+
+    Returns:
+        InspectOriginalImport: The verified, ungraded original log and variant evidence.
+
+    Raises:
+        asyncio.CancelledError: If cancellation reached the worker before finalization.
+        RuntimeError: If cancellation arrived after sealing or the worker failed during cancellation.
+    """
+    cancellation = Event()
+    importing = asyncio.create_task(
+        importer._import_async(
+            path=location,
+            cases=cases,
+            run=run,
+            live_observer=controller,
+            binding_name=controller.BINDING,
+            mode2_control_ids=controller.control_message_ids,
+            mode2_cancellation=cancellation,
+        )
+    )
+    try:
+        return await asyncio.shield(importing)
+    except asyncio.CancelledError as cancellation_error:
+        cancellation.set()
+        while not importing.done():
+            try:
+                await asyncio.shield(importing)
+            except asyncio.CancelledError:
+                cancellation.set()
+            except Exception:
+                break
+        try:
+            imported = importing.result()
+        except Exception as error:
+            state = await _mark_import_failure_async(controller=controller, error=error)
+            raise RuntimeError(
+                f"Mode 2 import failed during cancellation; {state} capture {controller.episode_id} "
+                "needs reconciliation."
+            ) from error
+        if imported.episode.coverage_complete:
+            # A completed seal won the race; do not report a false pre-seal cancellation.
+            raise RuntimeError(
+                f"Mode 2 import {controller.episode_id} sealed despite cancellation; "
+                "complete evidence was already retained."
+            ) from cancellation_error
+        raise
+    except Exception as error:
+        state = await _mark_import_failure_async(controller=controller, error=error)
+        raise RuntimeError(
+            f"Mode 2 import failed; {state} capture {controller.episode_id} needs reconciliation."
+        ) from error
+
+
 async def run_mode2_inert_eval_async(*, memory: MemoryInterface, log_dir: Path) -> InspectMode2Run:
     """
     Run only the pinned public Inspect-authored ReAct Sample with a PyRIT continuation policy.
@@ -492,22 +570,20 @@ async def run_mode2_inert_eval_async(*, memory: MemoryInterface, log_dir: Path) 
         await asyncio.to_thread(source.verify_unchanged)
     except ValueError as error:
         await controller.fail_async(reason="Mode 2 Inspect source drifted after the run.")
-        await importer._import_async(
-            path=location,
+        await _import_mode2_async(
+            importer=importer,
+            controller=controller,
+            location=location,
             cases=None,
             run=None,
-            live_observer=controller,
-            binding_name=controller.BINDING,
-            mode2_control_ids=controller.control_message_ids,
         )
         raise RuntimeError(f"Mode 2 source drifted; ungraded variant {episode_id} was retained.") from error
-    imported = await importer._import_async(
-        path=location,
+    imported = await _import_mode2_async(
+        importer=importer,
+        controller=controller,
+        location=location,
         cases=(source.case,),
         run=run,
-        live_observer=controller,
-        binding_name=controller.BINDING,
-        mode2_control_ids=controller.control_message_ids,
     )
     if imported.inspect_run_id != logs[0].eval.run_id or not imported.episode.coverage_complete:
         raise RuntimeError(

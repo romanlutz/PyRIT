@@ -33,6 +33,7 @@ from pyrit.models.native_cyber_evidence import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from threading import Event
 
     from inspect_ai.log import EvalSample
 
@@ -122,11 +123,14 @@ class InspectOriginalEvalImporter:
         require_no_model_calls: bool = False,
         binding_name: str = "inspect-original",
         mode2_control_ids: frozenset[str] = frozenset(),
+        mode2_cancellation: Event | None = None,
     ) -> InspectOriginalImport:
         if binding_name not in {"inspect-original", "inspect-mode2"} or (
-            binding_name == "inspect-mode2" and live_observer is None
+            binding_name == "inspect-mode2" and (live_observer is None or mode2_cancellation is None)
         ):
             raise ValueError("Mode 2 import requires its active, separately labeled live capture.")
+        if binding_name == "inspect-original" and mode2_cancellation is not None:
+            raise ValueError("Offline original Inspect import cannot accept a Mode 2 cancellation signal.")
         archive, relogged_samples = await asyncio.to_thread(self._read_archive, path=path)
         log = await asyncio.to_thread(read_eval_log, io.BytesIO(archive), resolve_attachments="full", format="eval")
         resolved = log.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
@@ -153,6 +157,7 @@ class InspectOriginalEvalImporter:
             relogged_samples=relogged_samples,
             binding_name=binding_name,
             mode2_control_ids=mode2_control_ids,
+            mode2_cancellation=mode2_cancellation,
         )
 
     @classmethod
@@ -237,6 +242,7 @@ class InspectOriginalEvalImporter:
         relogged_samples: bool,
         binding_name: str,
         mode2_control_ids: frozenset[str],
+        mode2_cancellation: Event | None,
     ) -> InspectOriginalImport:
         try:
             existing = self._capture.get_episode(run_id=episode_id)
@@ -295,11 +301,16 @@ class InspectOriginalEvalImporter:
             event.event_type == "model" for event in self._capture.get_episode(run_id=episode_id).events
         ):
             gaps.append("The approved inert original Task unexpectedly invoked an Inspect model.")
+        if binding_name == "inspect-mode2":
+            pending = self._capture.get_episode(run_id=episode_id)
+            self._verify_source_readback(snapshot=pending, archive_sha=archive_sha, resolved=resolved)
+            self._verify_event_readback(snapshot=pending)
         snapshot = self._capture.finalize_unscored_inspect_capture(
             run_id=episode_id,
             expected_samples=len(log.samples or []),
             required_gaps=tuple(gaps),
             optional_gaps=(*optional, *live_gaps),
+            cancellation_event=mode2_cancellation,
         )
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
         self._verify_event_readback(snapshot=snapshot)

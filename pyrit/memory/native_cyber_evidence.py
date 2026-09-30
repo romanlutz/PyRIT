@@ -60,6 +60,7 @@ from pyrit.models.score.observation import _message_piece_digest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
+    from threading import Event
 
     from sqlalchemy.orm import Session
 
@@ -626,9 +627,12 @@ class NativeCyberEvidenceStore:
         expected_samples: int,
         required_gaps: Sequence[str] = (),
         optional_gaps: Sequence[str] = (),
+        cancellation_event: Event | None = None,
     ) -> NativeCyberEpisodeSnapshot:
         """
         Seal an approved original or Mode 2 Inspect sample capture without inventing a Score.
+
+        The optional Mode 2 cancellation signal is checked in the coverage transaction.
 
         Returns:
             NativeCyberEpisodeSnapshot: Finalized capture; its Score and report links remain absent.
@@ -643,9 +647,13 @@ class NativeCyberEvidenceStore:
             self._require_open(episode)
             if episode.binding_name not in self._UNSCORED_INSPECT_BINDINGS or episode.score_id is not None:
                 raise ValueError("Only an unscored Inspect capture can be sealed without a Score.")
+            if cancellation_event is not None and episode.binding_name != "inspect-mode2":
+                raise ValueError("Only a Mode 2 Inspect capture accepts an import cancellation signal.")
             required, optional = self._unscored_inspect_gaps(
                 session=session, episode=episode, expected_samples=expected_samples
             )
+            if cancellation_event is not None and cancellation_event.is_set():
+                required.append("Mode 2 Inspect import was cancelled before finalization.")
             episode.capture_gaps = list(dict.fromkeys([*required, *required_gaps]))
             episode.optional_gaps = list(dict.fromkeys([*optional, *optional_gaps]))
             episode.coverage_complete = not episode.capture_gaps

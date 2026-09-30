@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -26,15 +27,18 @@ from pyrit.executor.benchmark.inspect_mode2_runner import (
 )
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 from pyrit.memory.memory_models import AttackResultEntry, NativeCyberEpisodeEntry, ScoreEntry
+from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
 from pyrit.models import ScoreStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from inspect_ai.log import EvalLog
 
     from pyrit.executor.benchmark.inspect_mode2_runner import InspectContinueDecision
     from pyrit.memory import SQLiteMemory
+    from pyrit.models.native_cyber_evidence import NativeCyberEpisodeSnapshot
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -259,6 +263,111 @@ async def test_mode2_cancelled_while_waiting_for_pyrit_retains_an_incomplete_epi
         with pytest.raises((asyncio.CancelledError, RuntimeError)):
             await running
     _assert_mode2_ungraded_gap(memory=sqlite_instance, fragment="cancelled")
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_mode2_cancellation_during_sqlite_import_cannot_seal_complete_coverage(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    finalized = threading.Event()
+    original_finalize = NativeCyberEvidenceStore.finalize_unscored_inspect_capture
+
+    def gated_finalize(
+        self: NativeCyberEvidenceStore,
+        *,
+        run_id: str,
+        expected_samples: int,
+        required_gaps: Sequence[str] = (),
+        optional_gaps: Sequence[str] = (),
+        cancellation_event: threading.Event | None = None,
+    ) -> NativeCyberEpisodeSnapshot:
+        entered.set()
+        if not release.wait(timeout=30):
+            raise TimeoutError("The test did not release Inspect import persistence.")
+        try:
+            return original_finalize(
+                self,
+                run_id=run_id,
+                expected_samples=expected_samples,
+                required_gaps=required_gaps,
+                optional_gaps=optional_gaps,
+                cancellation_event=cancellation_event,
+            )
+        finally:
+            finalized.set()
+
+    with patch.object(NativeCyberEvidenceStore, "finalize_unscored_inspect_capture", gated_finalize):
+        running = asyncio.create_task(run_mode2_inert_eval_async(memory=sqlite_instance, log_dir=tmp_path))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 30), timeout=35)
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert await asyncio.wait_for(asyncio.to_thread(finalized.wait, 30), timeout=35)
+        with sqlite_instance.get_session() as session:
+            [episode] = session.scalars(select(NativeCyberEpisodeEntry)).all()
+            assert episode.finalized_at is not None
+            assert not episode.coverage_complete
+            assert "cancelled" in " ".join(episode.capture_gaps)
+            assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_mode2_cancellation_after_sqlite_seal_reports_the_committed_result(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    original_readback = InspectOriginalEvalImporter._verify_event_readback
+
+    def gated_readback(self: InspectOriginalEvalImporter, *, snapshot: NativeCyberEpisodeSnapshot) -> None:
+        if snapshot.finalized_at is not None and snapshot.run.binding_name == InspectMode2Controller.BINDING:
+            entered.set()
+            if not release.wait(timeout=30):
+                raise TimeoutError("The test did not release the committed Inspect import.")
+        original_readback(self, snapshot=snapshot)
+
+    with patch.object(InspectOriginalEvalImporter, "_verify_event_readback", gated_readback):
+        running = asyncio.create_task(run_mode2_inert_eval_async(memory=sqlite_instance, log_dir=tmp_path))
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 30), timeout=35)
+            with sqlite_instance.get_session() as session:
+                [episode] = session.scalars(select(NativeCyberEpisodeEntry)).all()
+                assert episode.finalized_at is not None and episode.coverage_complete
+            running.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="sealed despite cancellation; complete evidence"):
+            await running
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_mode2_import_worker_error_keeps_sqlite_capture_pending_and_ungraded(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    with (
+        patch.object(
+            NativeCyberEvidenceStore,
+            "finalize_unscored_inspect_capture",
+            side_effect=ValueError("fixture SQLite finalization error"),
+        ),
+        pytest.raises(RuntimeError, match="Mode 2 import failed; pending capture"),
+    ):
+        await run_mode2_inert_eval_async(memory=sqlite_instance, log_dir=tmp_path)
+    _assert_mode2_ungraded_gap(memory=sqlite_instance, fragment="Mode 2 Inspect import failed (ValueError)")
+    with sqlite_instance.get_session() as session:
+        [episode] = session.scalars(select(NativeCyberEpisodeEntry)).all()
+        assert episode.finalized_at is None
 
 
 @pytest.mark.usefixtures("patch_central_database")
