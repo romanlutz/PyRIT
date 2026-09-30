@@ -1855,6 +1855,33 @@ class MemoryInterface(abc.ABC):
             prepared_content_hashes={},
         )
 
+    def add_score_attack_result_pairs_to_memory(self, *, pairs: Sequence[tuple[Score, AttackResult]]) -> None:
+        """
+        Persist source-owned scores and their linked attack results in one transaction.
+
+        Raises:
+            ValueError: If a result does not link its unique automated Score.
+        """
+        scores = [score for score, _ in pairs]
+        results = [result for _, result in pairs]
+        if (
+            len({str(score.id) for score in scores}) != len(pairs)
+            or len({result.attack_result_id for result in results}) != len(pairs)
+            or any(
+                result.automated_score is None
+                or str(result.automated_score.id) != str(score.id)
+                or result.human_score is not None
+                for score, result in pairs
+            )
+        ):
+            raise ValueError("Each imported AttackResult must link one distinct automated Score.")
+        self._add_scores_to_memory(
+            scores=scores,
+            observations=(),
+            prepared_content_hashes={},
+            attack_results=results,
+        )
+
     async def add_scores_to_memory_async(
         self,
         *,
@@ -1947,6 +1974,7 @@ class MemoryInterface(abc.ABC):
         scores: Sequence[Score],
         observations: Sequence[Observation],
         prepared_content_hashes: Mapping[ContentScorable, str],
+        attack_results: Sequence[AttackResult] = (),
     ) -> None:
         """
         Insert a list of scores into the memory storage.
@@ -1986,6 +2014,8 @@ class MemoryInterface(abc.ABC):
                 session.flush()
                 self._validate_observation_evidence(session=session, observations=persisted_observations)
                 self._persist_score_rows(session=session, scores=persisted_scores, observations=persisted_observations)
+                if attack_results:
+                    self._persist_attack_result_rows(session=session, attack_results=attack_results)
                 session.commit()
             except SQLAlchemyError:
                 session.rollback()
@@ -3918,22 +3948,23 @@ class MemoryInterface(abc.ABC):
         Raises:
             SQLAlchemyError: If the database transaction fails.
         """
-        entries = [AttackResultEntry(entry=attack_result) for attack_result in attack_results]
         with closing(self.get_session()) as session:
             try:
-                for attack_result in attack_results:
-                    if attack_result.atomic_attack_identifier is not None:
-                        self._persist_identifier(
-                            session=session,
-                            identifier=AtomicAttackIdentifier.from_component_identifier(
-                                attack_result.atomic_attack_identifier
-                            ),
-                        )
-                session.add_all(entries)
+                self._persist_attack_result_rows(session=session, attack_results=attack_results)
                 session.commit()
             except SQLAlchemyError:
                 session.rollback()
                 raise
+
+    def _persist_attack_result_rows(self, *, session: Session, attack_results: Sequence[AttackResult]) -> None:
+        """Add linked attack results and their identifiers to the caller's transaction."""
+        for result in attack_results:
+            if result.atomic_attack_identifier is not None:
+                self._persist_identifier(
+                    session=session,
+                    identifier=AtomicAttackIdentifier.from_component_identifier(result.atomic_attack_identifier),
+                )
+        session.add_all(AttackResultEntry(entry=result) for result in attack_results)
 
     def update_attack_result(self, *, conversation_id: str, update_fields: dict[str, Any]) -> bool:
         """

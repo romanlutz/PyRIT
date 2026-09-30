@@ -18,7 +18,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pytest
 from inspect_ai import eval_async
 from inspect_ai.event import ModelEvent, ScoreEvent, ToolEvent
-from inspect_ai.log import EvalRetryError, read_eval_log, write_eval_log
+from inspect_ai.log import EvalError, EvalRetryError, read_eval_log, write_eval_log
 from inspect_ai.model import ContentImage, ContentText, GenerateConfig, ModelOutput
 from inspect_ai.scorer import Score
 from sqlalchemy import func, select
@@ -28,21 +28,30 @@ from pyrit.executor.benchmark.inspect_eval_source import (
     ResolvedOriginalInspectTask,
     _sha256_normalized_python,
 )
-from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
+from pyrit.executor.benchmark.inspect_original_eval import (
+    InspectOriginalEvalImporter,
+    InspectOriginalScorePolicy,
+    InspectSuccessDirection,
+)
 from pyrit.executor.benchmark.inspect_original_runner import _approved_log_location, run_original_inert_eval_async
 from pyrit.memory.memory_models import (
     AttackResultEntry,
+    ConversationEntry,
     NativeCyberEpisodeEntry,
     NativeCyberEventEntry,
     NativeCyberRawChunkEntry,
     ScoreEntry,
 )
-from pyrit.models import ScoreStatus
+from pyrit.models import AttackOutcome, EvalCaseRef, EvalRunRef, ScoreStatus
 
 if TYPE_CHECKING:
-    from inspect_ai.log import EvalLog
+    from collections.abc import Sequence
+
+    from inspect_ai.log import EvalLog, EvalSample
+    from sqlalchemy.orm import Session
 
     from pyrit.memory import SQLiteMemory
+    from pyrit.models import AttackResult
 
 
 def test_public_task_pin_matches_git_lf_and_windows_crlf_checkouts(tmp_path: Path) -> None:
@@ -80,8 +89,17 @@ async def original_log_async(tmp_path: Path) -> EvalLog:
     return await asyncio.to_thread(read_eval_log, logs[0].location, resolve_attachments="full")
 
 
+def _case_inventory(
+    *, source: ResolvedOriginalInspectTask, samples: list[EvalSample]
+) -> tuple[tuple[EvalCaseRef, ...], EvalRunRef]:
+    cases = tuple(
+        source.case.model_copy(update={"sample_id": str(sample.id), "epoch": sample.epoch}) for sample in samples
+    )
+    return cases, EvalRunRef(spec=source.spec, run_instance_id=uuid.uuid4())
+
+
 @pytest.mark.usefixtures("patch_central_database")
-async def test_unmodified_inert_inspect_task_imports_original_archive_without_pyrit_grade(
+async def test_unmodified_inert_inspect_task_projects_source_score_without_inferring_success(
     tmp_path: Path, sqlite_instance: SQLiteMemory
 ) -> None:
     source = EvalSourceFactory.resolve_original_inert(family="inspect_original_inert")
@@ -108,14 +126,31 @@ async def test_unmodified_inert_inspect_task_imports_original_archive_without_py
     assert imported.episode.score_status is ScoreStatus.UNDETERMINED
     assert imported.episode.finalized_at is not None
     assert imported.case_run_ids == ()
-    assert "no qualified PyRIT scorer" in imported.no_grade_reasons[0]
+    [case] = imported.case_results
+    assert case.sample_id == str(typed.samples[0].id) and case.epoch == typed.samples[0].epoch
+    assert case.score.score_type == "float_scale" and case.score.score_value == "1.0"
+    assert case.score.status is ScoreStatus.COMPLETE
+    assert case.score.score_metadata["inspect_archive_sha256"] == imported.archive_sha256
+    assert case.score.score_metadata["inspect_final_score_event_id"] == next(
+        event.uuid for event in typed.samples[0].events if isinstance(event, ScoreEvent)
+    )
+    assert case.attack_result.automated_score == case.score
+    assert case.attack_result.outcome is AttackOutcome.UNDETERMINED
+    assert "No task-specific success" in case.attack_result.outcome_reason
+    assert "no independent PyRIT grading" in imported.no_grade_reasons[0]
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
-        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
+        result = session.get(AttackResultEntry, uuid.UUID(case.attack_result.attack_result_id))
+        assert result is not None and result.automated_score_id == case.score.id
 
     repeated = await importer.import_eval_log_async(path=archive)
     assert repeated.episode.run.run_id == imported.episode.run.run_id
     assert repeated.episode.events == imported.episode.events
+    assert repeated.case_results == imported.case_results
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -257,20 +292,49 @@ async def test_offline_import_retains_retry_intermediate_score_and_tool_without_
     assert imported.episode.tools[0].completion_sequence == 3
     assert imported.episode.tools[0].start_sequence is None
     assert imported.episode.tools[0].result_sequence is None
+    [case] = imported.case_results
+    assert case.score.status is ScoreStatus.COMPLETE
+    assert case.attack_result.outcome is AttackOutcome.UNDETERMINED
+    assert case.score.score_metadata["inspect_final_score_event_id"] == next(
+        event.uuid for event in sample.events if isinstance(event, ScoreEvent) and not event.intermediate
+    )
+    retained = sqlite_instance.native_cyber_evidence.read_event_payloads(
+        run_id=imported.episode.run.run_id, allow_sensitive=True
+    )
+    assert retained[0].event.payload["original"]["intermediate"] is True
+    [final_capture] = [
+        item
+        for item in retained
+        if item.event.source_event_id == case.score.score_metadata["inspect_final_score_event_id"]
+    ]
+    assert final_capture.event.payload["original"]["score"] == original.scores["original_inert_scorer"].model_dump(
+        mode="json", exclude_none=True
+    )
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
-        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize("corruption", ["error_status", "mismatched_final_score"])
-async def test_offline_import_seals_original_error_or_score_disagreement_as_ungraded(
+@pytest.mark.parametrize("corruption", ["error_status", "sample_exception", "run_exception", "mismatched_final_score"])
+async def test_offline_import_seals_original_error_or_score_disagreement_without_false_failure(
     tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, corruption: str
 ) -> None:
     assert original_log_async.samples
     original = original_log_async.samples[0]
     if corruption == "error_status":
         typed = original_log_async.model_copy(update={"status": "error"})
+    elif corruption in {"sample_exception", "run_exception"}:
+        error = EvalError(message="fixture infrastructure exception", traceback="fixture", traceback_ansi="fixture")
+        typed = original_log_async.model_copy(
+            update={
+                "status": "error",
+                "samples": [original.model_copy(update={"error": error})]
+                if corruption == "sample_exception"
+                else [original],
+                "error": error if corruption == "run_exception" else None,
+            }
+        )
     else:
         final = next(event for event in original.events if isinstance(event, ScoreEvent))
         modified = final.model_copy(update={"score": Score(value=0.0)})
@@ -281,11 +345,38 @@ async def test_offline_import_seals_original_error_or_score_disagreement_as_ungr
     archive = tmp_path / f"{corruption}.eval"
     await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
     importer = InspectOriginalEvalImporter(memory=sqlite_instance)
-    imported = await importer.import_eval_log_async(path=archive)
+    if corruption in {"sample_exception", "run_exception"}:
+        source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+        cases, run = _case_inventory(source=source, samples=typed.samples or [])
+        imported = await importer.import_eval_log_async(
+            path=archive,
+            cases=cases,
+            run=run,
+            score_policy=InspectOriginalScorePolicy(
+                task_name=typed.eval.task,
+                task_version=str(typed.eval.task_version),
+                primary_scorer="original_inert_scorer",
+                success_direction=InspectSuccessDirection.AT_LEAST,
+                success_threshold=0.5,
+            ),
+        )
+    else:
+        imported = await importer.import_eval_log_async(path=archive)
     assert not imported.episode.coverage_complete
     assert imported.episode.gaps
     assert imported.episode.score_id is None
-    assert imported.original_final_score_events == (1 if corruption == "error_status" else 0)
+    assert imported.original_final_score_events == (0 if corruption == "mismatched_final_score" else 1)
+    [case] = imported.case_results
+    assert case.score.status is ScoreStatus.UNDETERMINED and case.score.score_value is None
+    assert case.attack_result.outcome is (
+        AttackOutcome.ERROR if corruption in {"sample_exception", "run_exception"} else AttackOutcome.UNDETERMINED
+    )
+    assert case.attack_result.outcome is not AttackOutcome.FAILURE
+    if corruption in {"sample_exception", "run_exception"}:
+        assert case.attack_result.error_type == "InspectEvalError"
+        assert case.attack_result.error_message
+    else:
+        assert case.attack_result.error_type is None
     original_stream = next(
         stream
         for stream in imported.episode.raw_streams
@@ -294,8 +385,8 @@ async def test_offline_import_seals_original_error_or_score_disagreement_as_ungr
     assert original_stream.source_complete
     assert original_stream.stored_sha256 == hashlib.sha256(await asyncio.to_thread(archive.read_bytes)).hexdigest()
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
-        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -329,6 +420,12 @@ async def test_two_original_samples_with_same_text_and_overlapping_sequences_hav
     assert imported.episode.coverage_complete
     assert imported.episode.conversation_id is None
     assert imported.sample_count == 2 and imported.message_piece_count == 4
+    assert len(imported.case_results) == 2
+    assert all(case.score.status is ScoreStatus.COMPLETE for case in imported.case_results)
+    assert all(case.attack_result.outcome is AttackOutcome.UNDETERMINED for case in imported.case_results)
+    assert (
+        imported.case_results[0].attack_result.conversation_id != imported.case_results[1].attack_result.conversation_id
+    )
     assert [(turn.source_turn_id, turn.turn_index) for turn in imported.episode.turns] == [
         (first.uuid, 1),
         (second.uuid, 2),
@@ -350,12 +447,299 @@ async def test_two_original_samples_with_same_text_and_overlapping_sequences_hav
         second_turn.request_piece_ids + second_turn.response_piece_ids
     )
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
-        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 2
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 2
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize("corrupt", ["archive", "event"])
+@pytest.mark.parametrize(
+    ("direction", "threshold", "outcomes"),
+    [
+        (InspectSuccessDirection.AT_LEAST, 0.5, (AttackOutcome.SUCCESS, AttackOutcome.FAILURE)),
+        (InspectSuccessDirection.AT_MOST, 0.5, (AttackOutcome.FAILURE, AttackOutcome.SUCCESS)),
+        (InspectSuccessDirection.AT_LEAST, 0.25, (AttackOutcome.SUCCESS, AttackOutcome.SUCCESS)),
+    ],
+)
+async def test_offline_import_matches_final_events_across_retries_and_epochs_with_explicit_success_rule(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    original_log_async: EvalLog,
+    direction: InspectSuccessDirection,
+    threshold: float,
+    outcomes: tuple[AttackOutcome, AttackOutcome],
+) -> None:
+    assert original_log_async.samples
+    first = original_log_async.samples[0]
+    assert first.scores
+    scorer = "original_inert_scorer"
+    first_final = next(event for event in first.events if isinstance(event, ScoreEvent))
+    second_score = Score(value=0.25)
+    retry_intermediate = ScoreEvent(
+        uuid=f"retry-intermediate-{uuid.uuid4().hex}", scorer=scorer, intermediate=True, score=Score(value=0.5)
+    )
+    retry_final = ScoreEvent(uuid=f"retry-final-{uuid.uuid4().hex}", scorer=scorer, score=Score(value=0.75))
+    second_events = [
+        event.model_copy(
+            update={
+                "uuid": f"epoch2-{uuid.uuid4().hex}",
+                **({"score": second_score} if isinstance(event, ScoreEvent) else {}),
+            }
+        )
+        for event in first.events
+    ]
+    second = first.model_copy(
+        update={
+            "epoch": first.epoch + 1,
+            "uuid": uuid.uuid4().hex,
+            "scores": {scorer: second_score},
+            "messages": [item.model_copy(update={"id": f"epoch2-{uuid.uuid4().hex}"}) for item in first.messages],
+            "events": second_events,
+            "error_retries": [
+                EvalRetryError(
+                    message="Inert first attempt failed",
+                    traceback="fixture",
+                    traceback_ansi="fixture",
+                    events=[retry_intermediate, retry_final],
+                )
+            ],
+        }
+    )
+    typed = original_log_async.model_copy(update={"samples": [first, second]})
+    archive = tmp_path / f"two-epochs-{direction.value}.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=[first, second])
+    policy = InspectOriginalScorePolicy(
+        task_name=typed.eval.task,
+        task_version=str(typed.eval.task_version),
+        primary_scorer=scorer,
+        success_direction=direction,
+        success_threshold=threshold,
+    )
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    with patch.object(EvalSourceFactory, "resolve_original_inert", side_effect=AssertionError("no task import")):
+        imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+        repeated = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    assert imported.episode.coverage_complete
+    assert imported.episode.score_id is None
+    assert imported.case_run_ids == tuple(run.case_run_id(case=case) for case in cases)
+    assert len(set(imported.case_run_ids)) == 2
+    assert [(item.sample_id, item.epoch) for item in imported.case_results] == [
+        (str(first.id), first.epoch),
+        (str(second.id), second.epoch),
+    ]
+    assert [item.score.score_value for item in imported.case_results] == ["1.0", "0.25"]
+    assert [item.attack_result.outcome for item in imported.case_results] == list(outcomes)
+    assert all(item.score.status is ScoreStatus.COMPLETE for item in imported.case_results)
+    assert all(item.score.score_metadata["inspect_case_run_id"] == item.case_run_id for item in imported.case_results)
+    assert all("pyrit_eval_role" not in item.score.score_metadata for item in imported.case_results)
+    assert (
+        imported.case_results[0].attack_result.conversation_id != imported.case_results[1].attack_result.conversation_id
+    )
+    assert [item.score.score_metadata["inspect_final_score_event_id"] for item in imported.case_results] == [
+        first_final.uuid,
+        next(event.uuid for event in second_events if isinstance(event, ScoreEvent)),
+    ]
+    events = sqlite_instance.native_cyber_evidence.read_event_payloads(
+        run_id=imported.episode.run.run_id, allow_sensitive=True
+    )
+    assert [item.event.source_event_id for item in events if item.event.event_type == "score"] == [
+        first_final.uuid,
+        retry_intermediate.uuid,
+        retry_final.uuid,
+        next(event.uuid for event in second_events if isinstance(event, ScoreEvent)),
+    ]
+    archive_stream = next(
+        item for item in imported.episode.raw_streams if item.key.observed_source_id == "inspect-original-eval-archive"
+    )
+    assert b"".join(
+        chunk.data
+        for chunk in sqlite_instance.native_cyber_evidence.read_raw_chunks(
+            run_id=imported.episode.run.run_id, stream_id=archive_stream.stream_id, allow_sensitive=True
+        )
+    ) == await asyncio.to_thread(archive.read_bytes)
+    assert repeated.case_results == imported.case_results
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 2
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 2
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("secondary_matches", [True, False])
+async def test_multiple_final_scorers_need_reviewed_primary_and_all_declared_events_must_match(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, secondary_matches: bool
+) -> None:
+    assert original_log_async.samples
+    original = original_log_async.samples[0]
+    assert original.scores
+    secondary_score = Score(value=0.3)
+    secondary = ScoreEvent(
+        uuid=f"secondary-{uuid.uuid4().hex}",
+        scorer="secondary_scorer",
+        score=secondary_score if secondary_matches else Score(value=0.9),
+    )
+    sample = original.model_copy(
+        update={
+            "scores": {**original.scores, "secondary_scorer": secondary_score},
+            "events": [*original.events, secondary],
+        }
+    )
+    typed = original_log_async.model_copy(update={"samples": [sample]})
+    archive = tmp_path / f"multiple-final-{secondary_matches}.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    unselected = await importer.import_eval_log_async(path=archive)
+    assert unselected.case_results[0].score.status is ScoreStatus.UNDETERMINED
+    assert unselected.case_results[0].attack_result.outcome is AttackOutcome.UNDETERMINED
+    assert unselected.original_final_score_events == (2 if secondary_matches else 1)
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=[sample])
+    policy = InspectOriginalScorePolicy(
+        task_name=typed.eval.task,
+        task_version=str(typed.eval.task_version),
+        primary_scorer="secondary_scorer" if secondary_matches else "original_inert_scorer",
+    )
+    with patch.object(EvalSourceFactory, "resolve_original_inert", side_effect=AssertionError("no task import")):
+        imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    [case] = imported.case_results
+    assert case.primary_scorer == policy.primary_scorer
+    assert case.score.status is (ScoreStatus.COMPLETE if secondary_matches else ScoreStatus.UNDETERMINED)
+    assert case.score.score_value == ("0.3" if secondary_matches else None)
+    assert case.attack_result.outcome is AttackOutcome.UNDETERMINED
+    if secondary_matches:
+        assert case.score.score_metadata["inspect_final_score_event_id"] == secondary.uuid
+    else:
+        assert "contradicts" in " ".join(imported.episode.gaps)
+    source_events = sqlite_instance.native_cyber_evidence.read_event_payloads(
+        run_id=imported.episode.run.run_id, allow_sensitive=True
+    )
+    assert secondary.uuid in [event.event.source_event_id for event in source_events]
+    assert imported.archive_sha256 == hashlib.sha256(await asyncio.to_thread(archive.read_bytes)).hexdigest()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    ("variant", "expected_type", "expected_value", "expected_outcome"),
+    [
+        ("boolean", "true_false", "true", AttackOutcome.SUCCESS),
+        ("boolean_false", "true_false", "false", AttackOutcome.FAILURE),
+        ("string", "unknown", None, AttackOutcome.UNDETERMINED),
+        ("out_of_range", "unknown", None, AttackOutcome.UNDETERMINED),
+        ("large_integer", "unknown", None, AttackOutcome.UNDETERMINED),
+        ("mapping", "unknown", None, AttackOutcome.UNDETERMINED),
+        ("missing_event", "unknown", None, AttackOutcome.UNDETERMINED),
+        ("missing_score", "unknown", None, AttackOutcome.UNDETERMINED),
+    ],
+)
+async def test_original_scalar_values_project_only_when_supported_and_source_matched(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    original_log_async: EvalLog,
+    variant: str,
+    expected_type: str,
+    expected_value: str | None,
+    expected_outcome: AttackOutcome,
+) -> None:
+    assert original_log_async.samples
+    original = original_log_async.samples[0]
+    source_value: bool | str | int | float | dict[str, str] | None = {
+        "boolean": True,
+        "boolean_false": False,
+        "string": "PASS",
+        "out_of_range": 2.0,
+        "large_integer": 10**400,
+        "mapping": {"result": "fixture"},
+        "missing_event": None,
+        "missing_score": None,
+    }[variant]
+    score = Score(value=source_value) if source_value is not None else None
+    events = [
+        event.model_copy(update={"score": score}) if isinstance(event, ScoreEvent) and score else event
+        for event in original.events
+        if variant not in {"missing_event", "missing_score"} or not isinstance(event, ScoreEvent)
+    ]
+    sample = original.model_copy(
+        update={
+            "events": events,
+            "scores": {}
+            if variant == "missing_score"
+            else ({"original_inert_scorer": score} if score else original.scores),
+        }
+    )
+    typed = original_log_async.model_copy(update={"samples": [sample]})
+    archive = tmp_path / f"source-value-{variant}.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=[sample])
+    policy = InspectOriginalScorePolicy(
+        task_name=typed.eval.task,
+        task_version=str(typed.eval.task_version),
+        primary_scorer="original_inert_scorer",
+        success_direction=InspectSuccessDirection.AT_LEAST,
+        success_threshold=0.5,
+    )
+    imported = await InspectOriginalEvalImporter(memory=sqlite_instance).import_eval_log_async(
+        path=archive, cases=cases, run=run, score_policy=policy
+    )
+    [case] = imported.case_results
+    assert case.score.score_type == expected_type
+    assert case.score.score_value == expected_value
+    assert case.score.status is (
+        ScoreStatus.COMPLETE if variant in {"boolean", "boolean_false"} else ScoreStatus.UNDETERMINED
+    )
+    assert case.attack_result.outcome is expected_outcome
+    assert case.attack_result.automated_score == case.score
+    if variant in {"string", "out_of_range", "large_integer", "mapping"}:
+        assert imported.original_final_score_events == 1
+        assert case.score.score_metadata["inspect_final_score_event_id"] is not None
+    else:
+        assert imported.original_final_score_events == (1 if variant in {"boolean", "boolean_false"} else 0)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_task_specific_success_policy_must_match_retained_task_and_bound_cases(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog
+) -> None:
+    archive = tmp_path / "policy-validation.eval"
+    await asyncio.to_thread(write_eval_log, original_log_async, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    with pytest.raises(ValueError, match="both a direction and a threshold"):
+        InspectOriginalScorePolicy(
+            task_name=original_log_async.eval.task,
+            task_version=str(original_log_async.eval.task_version),
+            primary_scorer="original_inert_scorer",
+            success_direction=InspectSuccessDirection.AT_LEAST,
+        )
+    with pytest.raises(ValueError, match="between zero and one"):
+        InspectOriginalScorePolicy(
+            task_name=original_log_async.eval.task,
+            task_version=str(original_log_async.eval.task_version),
+            primary_scorer="original_inert_scorer",
+            success_direction=InspectSuccessDirection.AT_LEAST,
+            success_threshold=float("nan"),
+        )
+    policy = InspectOriginalScorePolicy(
+        task_name=original_log_async.eval.task,
+        task_version=str(original_log_async.eval.task_version),
+        primary_scorer="original_inert_scorer",
+        success_direction=InspectSuccessDirection.AT_LEAST,
+        success_threshold=0.5,
+    )
+    with pytest.raises(ValueError, match="approved EvalCaseRef"):
+        await importer.import_eval_log_async(path=archive, score_policy=policy)
+    with pytest.raises(ValueError, match="differs from the retained Task"):
+        await importer.import_eval_log_async(
+            path=archive,
+            score_policy=InspectOriginalScorePolicy(
+                task_name="unapproved_task", task_version=policy.task_version, primary_scorer=policy.primary_scorer
+            ),
+        )
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(NativeCyberEpisodeEntry.run_id))) == 0
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("corrupt", ["archive", "event", "event_rehashed"])
 async def test_reimport_rejects_tampered_original_archive_or_event_payload(
     tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, corrupt: str
 ) -> None:
@@ -377,11 +761,97 @@ async def test_reimport_rejects_tampered_original_archive_or_event_payload(
             event = session.get(NativeCyberEventEntry, (imported.episode.run.run_id, 1))
             assert event is not None
             event.payload = {"type": "tampered"}
-    with pytest.raises(ValueError, match="corrupt byte range|failed integrity validation"):
+            if corrupt == "event_rehashed":
+                event.payload_sha256 = sqlite_instance.native_cyber_evidence._hash_payload(event.payload)
+    with pytest.raises(
+        ValueError, match="corrupt byte range|failed integrity validation|differs from its typed source"
+    ):
         await importer.import_eval_log_async(path=archive)
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "corrupt", ["score_value", "score_metadata", "result_outcome", "result_score_link", "both_deleted"]
+)
+async def test_reimport_rejects_tampered_projected_score_or_result(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, corrupt: str
+) -> None:
+    archive = tmp_path / f"projected-{corrupt}.eval"
+    await asyncio.to_thread(write_eval_log, original_log_async, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive)
+    [case] = imported.case_results
+    with sqlite_instance.get_session() as session, session.begin():
+        score = session.get(ScoreEntry, case.score.id)
+        result = session.get(AttackResultEntry, uuid.UUID(case.attack_result.attack_result_id))
+        assert score is not None and result is not None
+        if corrupt == "score_value":
+            score.score_value = "0.0"
+        elif corrupt == "score_metadata":
+            score.score_metadata = {**score.score_metadata, "inspect_archive_sha256": "f" * 64}
+        elif corrupt == "result_outcome":
+            result.outcome = AttackOutcome.FAILURE.value
+        elif corrupt == "both_deleted":
+            session.delete(result)
+            session.delete(score)
+        else:
+            result.automated_score_id = None
+    with pytest.raises(ValueError, match="Score/AttackResult (differs from its typed source|projection is partial)"):
+        await importer.import_eval_log_async(path=archive)
+    with sqlite_instance.get_session() as session:
+        expected_count = 0 if corrupt == "both_deleted" else 1
+        assert session.scalar(select(func.count(ScoreEntry.id))) == expected_count
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == expected_count
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_score_and_attack_result_write_is_atomic_and_incomplete_projection_fails_closed(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog
+) -> None:
+    archive = tmp_path / "interrupted-projection.eval"
+    await asyncio.to_thread(write_eval_log, original_log_async, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+
+    def _interrupt_after_score_flush(*, session: Session, attack_results: Sequence[AttackResult]) -> None:
+        assert len(attack_results) == 1
+        session.flush()
+        raise ValueError("interrupted after score flush")
+
+    with patch.object(sqlite_instance, "_persist_attack_result_rows", side_effect=_interrupt_after_score_flush):
+        with pytest.raises(ValueError, match="interrupted after score flush"):
+            await importer.import_eval_log_async(path=archive)
     with sqlite_instance.get_session() as session:
         assert session.scalar(select(func.count(ScoreEntry.id))) == 0
         assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        episode = session.scalar(select(NativeCyberEpisodeEntry))
+        assert episode is not None and episode.finalized_at is not None
+    with pytest.raises(ValueError, match="projection is partial or missing"):
+        await importer.import_eval_log_async(path=archive)
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(NativeCyberEpisodeEntry.run_id))) == 1
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_non_text_original_sample_still_has_its_own_persisted_case_conversation(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog
+) -> None:
+    assert original_log_async.samples
+    sample = original_log_async.samples[0].model_copy(update={"messages": []})
+    typed = original_log_async.model_copy(update={"samples": [sample]})
+    archive = tmp_path / "nontext-case.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    imported = await InspectOriginalEvalImporter(memory=sqlite_instance).import_eval_log_async(path=archive)
+    assert imported.message_piece_count == 0
+    [case] = imported.case_results
+    assert case.score.status is ScoreStatus.COMPLETE
+    with sqlite_instance.get_session() as session:
+        assert session.get(ConversationEntry, case.attack_result.conversation_id) is not None
+    assert not sqlite_instance.get_conversation_messages(conversation_id=case.attack_result.conversation_id)
 
 
 def _write_compressed_archive(*, path: Path) -> None:
@@ -429,8 +899,9 @@ async def test_relogged_sample_keeps_original_zip_bytes_but_blocks_complete_proj
     )
     assert original.stored_sha256 == hashlib.sha256(await asyncio.to_thread(archive.read_bytes)).hexdigest()
     assert original.source_complete
+    assert imported.case_results[0].score.status is ScoreStatus.UNDETERMINED
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -458,11 +929,13 @@ async def test_import_resolves_embedded_inspect_attachments_and_flags_missing_re
     if include_attachment:
         assert imported.episode.coverage_complete
         assert "non-text messages" in " ".join(imported.episode.optional_gaps)
+        assert imported.case_results[0].score.status is ScoreStatus.COMPLETE
     else:
         assert not imported.episode.coverage_complete
         assert "unresolved attachment" in " ".join(imported.episode.gaps)
+        assert imported.case_results[0].score.status is ScoreStatus.UNDETERMINED
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
 
 
 @pytest.mark.usefixtures("patch_central_database")

@@ -1,16 +1,18 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""Import original Inspect `.eval` bytes without executing a solver or creating a Score."""
+"""Import original Inspect `.eval` bytes and project source-attributed offline case results."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import io
+import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 from zipfile import BadZipFile, ZipFile
 
@@ -18,7 +20,16 @@ from inspect_ai.event import ScoreEvent, ToolEvent
 from inspect_ai.log import EvalLog, read_eval_log
 
 from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event, project_inspect_sample
-from pyrit.models import Conversation, EvalCaseRef, EvalRunRef, ScoreStatus, config_hash
+from pyrit.models import (
+    AttackOutcome,
+    AttackResult,
+    Conversation,
+    EvalCaseRef,
+    EvalRunRef,
+    Score,
+    ScoreStatus,
+    config_hash,
+)
 from pyrit.models.native_cyber_evidence import (
     NativeCyberEpisodeSnapshot,
     NativeCyberEpisodeStart,
@@ -35,9 +46,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from inspect_ai.log import EvalSample
+    from inspect_ai.scorer import Score as InspectScore
 
     from pyrit.executor.benchmark.inspect_eval_projection import InspectSampleProjection
     from pyrit.memory import MemoryInterface
+    from pyrit.models.native_cyber_evidence import NativeCyberCapturedEvent, NativeCyberTurnSummary
+    from pyrit.models.score.score import ScoreType
 
 
 class InspectLiveObserver(Protocol):
@@ -50,9 +64,58 @@ class InspectLiveObserver(Protocol):
         ...
 
 
+class InspectSuccessDirection(str, Enum):
+    """The explicitly reviewed meaning of a numeric original scorer value."""
+
+    AT_LEAST = "at_least"
+    AT_MOST = "at_most"
+
+
+@dataclass(frozen=True, kw_only=True)
+class InspectOriginalScorePolicy:
+    """Select one Task's original final scorer, optionally declaring its success threshold."""
+
+    task_name: str
+    task_version: str
+    primary_scorer: str
+    success_direction: InspectSuccessDirection | None = None
+    success_threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        """
+        Reject an ambiguous scorer or an incomplete success criterion.
+
+        Raises:
+            ValueError: If the policy is incomplete or its threshold is outside zero to one.
+        """
+        if any(not value.strip() for value in (self.task_name, self.task_version, self.primary_scorer)):
+            raise ValueError("Original Inspect score policy requires a Task, version, and primary scorer.")
+        if (self.success_direction is None) != (self.success_threshold is None):
+            raise ValueError("Original Inspect success requires both a direction and a threshold.")
+        if self.success_direction is not None and not isinstance(self.success_direction, InspectSuccessDirection):
+            raise ValueError("Original Inspect success direction must be an InspectSuccessDirection.")
+        threshold = self.success_threshold
+        if threshold is not None and (
+            type(threshold) not in (int, float) or not 0 <= threshold <= 1 or not math.isfinite(threshold)
+        ):
+            raise ValueError("Original Inspect success threshold must be a finite number between zero and one.")
+
+
+@dataclass(frozen=True, kw_only=True)
+class InspectOriginalCaseResult:
+    """One original Sample/epoch and its linked, persisted PyRIT result."""
+
+    sample_id: str
+    epoch: int
+    case_run_id: str | None
+    primary_scorer: str | None
+    score: Score
+    attack_result: AttackResult
+
+
 @dataclass(frozen=True, kw_only=True)
 class InspectOriginalImport:
-    """Safe result of an original-log import, never an inferred PyRIT benchmark verdict."""
+    """Retained original evidence and offline results; the episode itself remains unscored."""
 
     episode: NativeCyberEpisodeSnapshot
     inspect_run_id: str
@@ -67,6 +130,7 @@ class InspectOriginalImport:
     original_final_score_events: int
     case_run_ids: tuple[str, ...]
     no_grade_reasons: tuple[str, ...]
+    case_results: tuple[InspectOriginalCaseResult, ...] = ()
 
 
 class InspectOriginalEvalImporter:
@@ -100,17 +164,18 @@ class InspectOriginalEvalImporter:
         path: Path,
         cases: tuple[EvalCaseRef, ...] | None = None,
         run: EvalRunRef | None = None,
+        score_policy: InspectOriginalScorePolicy | None = None,
     ) -> InspectOriginalImport:
         """
         Import an existing `.eval` without importing or running any authored solver.
 
         Returns:
-            InspectOriginalImport: Verified original bytes and typed sample evidence, ungraded in PyRIT.
+            InspectOriginalImport: Verified source bytes and linked offline case results.
 
         Raises:
             ValueError: If the log, case bindings, or raw byte quota is unsupported.
         """
-        return await self._import_async(path=path, cases=cases, run=run, live_observer=None)
+        return await self._import_async(path=path, cases=cases, run=run, live_observer=None, score_policy=score_policy)
 
     async def _import_async(
         self,
@@ -120,6 +185,7 @@ class InspectOriginalEvalImporter:
         run: EvalRunRef | None,
         live_observer: InspectLiveObserver | None,
         require_no_model_calls: bool = False,
+        score_policy: InspectOriginalScorePolicy | None = None,
     ) -> InspectOriginalImport:
         archive, relogged_samples = await asyncio.to_thread(self._read_archive, path=path)
         log = await asyncio.to_thread(read_eval_log, io.BytesIO(archive), resolve_attachments="full", format="eval")
@@ -128,10 +194,19 @@ class InspectOriginalEvalImporter:
             raise ValueError("Resolved original Inspect log exceeds its bounded sensitive-memory quota.")
         archive_sha = hashlib.sha256(archive).hexdigest()
         self._validate_log(log=log, cases=cases, run=run)
+        self._validate_score_policy(log=log, cases=cases, score_policy=score_policy)
         case_run_ids = self._case_run_ids(log=log, cases=cases, run=run)
         live_run_id = live_observer.episode_id if live_observer is not None else None
         episode_id = live_run_id or (
-            "inspect-import-" + config_hash({"archive_sha256": archive_sha, "case_run_ids": case_run_ids, "schema": 1})
+            "inspect-import-"
+            + config_hash(
+                {
+                    "archive_sha256": archive_sha,
+                    "case_run_ids": case_run_ids,
+                    "score_policy": asdict(score_policy) if score_policy is not None else None,
+                    "schema": 2,
+                }
+            )
         )
         return await asyncio.to_thread(
             self._persist_import,
@@ -145,7 +220,21 @@ class InspectOriginalEvalImporter:
             live_gaps=live_observer.reconcile(log=log) if live_observer is not None else (),
             require_no_model_calls=require_no_model_calls,
             relogged_samples=relogged_samples,
+            score_policy=score_policy,
         )
+
+    @staticmethod
+    def _validate_score_policy(
+        *, log: EvalLog, cases: tuple[EvalCaseRef, ...] | None, score_policy: InspectOriginalScorePolicy | None
+    ) -> None:
+        if score_policy is None:
+            return
+        if not isinstance(score_policy, InspectOriginalScorePolicy):
+            raise TypeError("score_policy must be an InspectOriginalScorePolicy.")
+        if score_policy.task_name != log.eval.task or score_policy.task_version != str(log.eval.task_version):
+            raise ValueError("Original Inspect score policy differs from the retained Task and version.")
+        if score_policy.success_direction is not None and cases is None:
+            raise ValueError("Success thresholds require an approved EvalCaseRef inventory and EvalRunRef.")
 
     @classmethod
     def _read_archive(cls, *, path: Path) -> tuple[bytes, bool]:
@@ -227,6 +316,7 @@ class InspectOriginalEvalImporter:
         live_gaps: tuple[str, ...],
         require_no_model_calls: bool,
         relogged_samples: bool,
+        score_policy: InspectOriginalScorePolicy | None,
     ) -> InspectOriginalImport:
         try:
             existing = self._capture.get_episode(run_id=episode_id)
@@ -236,7 +326,12 @@ class InspectOriginalEvalImporter:
             if existing.finalized_at is None:
                 raise ValueError("Prior Inspect import is partial; reconcile its evidence before importing again.")
             return self._existing_result(
-                log=log, archive_sha=archive_sha, resolved=resolved, snapshot=existing, case_run_ids=case_run_ids
+                log=log,
+                archive_sha=archive_sha,
+                resolved=resolved,
+                snapshot=existing,
+                case_run_ids=case_run_ids,
+                score_policy=score_policy,
             )
         if live_run_id is not None:
             if existing is None or existing.finalized_at is not None or existing.run.binding_name != "inspect-original":
@@ -284,9 +379,27 @@ class InspectOriginalEvalImporter:
             optional_gaps=(*optional, *live_gaps),
         )
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
-        self._verify_event_readback(snapshot=snapshot)
+        self._verify_event_readback(log=log, snapshot=snapshot, archive_sha=archive_sha, case_run_ids=case_run_ids)
+        case_results = (
+            self._ensure_case_results(
+                log=log,
+                snapshot=snapshot,
+                archive_sha=archive_sha,
+                case_run_ids=case_run_ids,
+                score_policy=score_policy,
+                persist=True,
+            )
+            if live_run_id is None
+            else ()
+        )
         return self._result(
-            log=log, archive_sha=archive_sha, resolved=resolved, snapshot=snapshot, case_run_ids=case_run_ids
+            log=log,
+            archive_sha=archive_sha,
+            resolved=resolved,
+            snapshot=snapshot,
+            case_run_ids=case_run_ids,
+            case_results=case_results,
+            offline=live_run_id is None,
         )
 
     def _write_source(self, *, run_id: str, key: NativeCyberRawStreamKey, content: bytes) -> None:
@@ -320,12 +433,8 @@ class InspectOriginalEvalImporter:
         sequence = 1
         seen_sample_uuids: set[str] = set()
         for sample_index, sample in enumerate(log.samples or [], start=1):
-            sample_identity = f"{sample_index}:{sample.uuid or ''}:{sample.epoch}"
-            conversation_id = str(
-                uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    f"inspect-original:{episode_id}:{log.eval.run_id}:{sample_identity}",
-                )
+            conversation_id = self._conversation_id(
+                episode_id=episode_id, run_id=log.eval.run_id, sample=sample, sample_index=sample_index
             )
             projection = project_inspect_sample(
                 sample=sample,
@@ -337,8 +446,7 @@ class InspectOriginalEvalImporter:
                 conversation_id=conversation_id,
                 case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
             )
-            if projection.message_pieces:
-                self._memory.add_conversation_to_memory(conversation=Conversation(conversation_id=conversation_id))
+            self._memory.add_conversation_to_memory(conversation=Conversation(conversation_id=conversation_id))
             self._memory.add_message_pieces_to_memory(message_pieces=projection.message_pieces)
             source_id = sample.uuid if sample.uuid and sample.uuid not in seen_sample_uuids else None
             if sample.uuid:
@@ -385,6 +493,11 @@ class InspectOriginalEvalImporter:
         return gaps, optional
 
     @staticmethod
+    def _conversation_id(*, episode_id: str, run_id: str, sample: EvalSample, sample_index: int) -> str:
+        identity = f"{sample_index}:{sample.uuid or ''}:{sample.epoch}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"inspect-original:{episode_id}:{run_id}:{identity}"))
+
+    @staticmethod
     def _sample_timestamp(value: str | None, *, fallback: str) -> datetime:
         timestamp = datetime.fromisoformat(value or fallback)
         if timestamp.tzinfo is None:
@@ -425,6 +538,7 @@ class InspectOriginalEvalImporter:
         resolved: bytes,
         snapshot: NativeCyberEpisodeSnapshot,
         case_run_ids: tuple[str, ...],
+        score_policy: InspectOriginalScorePolicy | None,
     ) -> InspectOriginalImport:
         if snapshot.run.binding_name != "inspect-original" or snapshot.run.source_session_id != log.eval.run_id:
             raise ValueError("Prior Inspect import belongs to another original run.")
@@ -442,9 +556,246 @@ class InspectOriginalEvalImporter:
         ):
             raise ValueError("Existing Inspect import has incomplete or changed source bytes.")
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
-        self._verify_event_readback(snapshot=snapshot)
+        self._verify_event_readback(log=log, snapshot=snapshot, archive_sha=archive_sha, case_run_ids=case_run_ids)
+        case_results = self._ensure_case_results(
+            log=log,
+            snapshot=snapshot,
+            archive_sha=archive_sha,
+            case_run_ids=case_run_ids,
+            score_policy=score_policy,
+            persist=False,
+        )
         return self._result(
-            log=log, archive_sha=archive_sha, resolved=resolved, snapshot=snapshot, case_run_ids=case_run_ids
+            log=log,
+            archive_sha=archive_sha,
+            resolved=resolved,
+            snapshot=snapshot,
+            case_run_ids=case_run_ids,
+            case_results=case_results,
+            offline=True,
+        )
+
+    def _ensure_case_results(
+        self,
+        *,
+        log: EvalLog,
+        snapshot: NativeCyberEpisodeSnapshot,
+        archive_sha: str,
+        case_run_ids: tuple[str, ...],
+        score_policy: InspectOriginalScorePolicy | None,
+        persist: bool,
+    ) -> tuple[InspectOriginalCaseResult, ...]:
+        samples = log.samples or []
+        if len(snapshot.turns) != len(samples):
+            raise ValueError("Original Inspect case projection differs from the retained Sample count.")
+        turn_gaps = {gap for turn in snapshot.turns for gap in turn.gaps}
+        global_issue = next((gap for gap in snapshot.gaps if gap not in turn_gaps), None)
+        expected = tuple(
+            self._case_result(
+                log=log,
+                sample=sample,
+                turn=turn,
+                sample_index=index,
+                episode_id=snapshot.run.run_id,
+                archive_sha=archive_sha,
+                case_run_id=case_run_ids[index - 1] if case_run_ids else None,
+                global_issue=global_issue,
+                score_policy=score_policy,
+            )
+            for index, (sample, turn) in enumerate(zip(samples, snapshot.turns, strict=True), start=1)
+        )
+        if not expected:
+            return ()
+        if persist:
+            self._memory.add_score_attack_result_pairs_to_memory(
+                pairs=[(item.score, item.attack_result) for item in expected]
+            )
+        return self._readback_case_results(expected=expected)
+
+    def _readback_case_results(
+        self, *, expected: tuple[InspectOriginalCaseResult, ...]
+    ) -> tuple[InspectOriginalCaseResult, ...]:
+        score_ids = [str(item.score.id) for item in expected]
+        result_ids = [item.attack_result.attack_result_id for item in expected]
+        scores = self._memory.get_scores(score_ids=score_ids)
+        results = self._memory.get_attack_results(attack_result_ids=result_ids)
+        if len(scores) != len(expected) or len(results) != len(expected):
+            raise ValueError("Original Inspect case Score/AttackResult projection is partial or missing.")
+        by_score = {str(score.id): score for score in scores}
+        by_result = {result.attack_result_id: result for result in results}
+        verified: list[InspectOriginalCaseResult] = []
+        for item in expected:
+            score = by_score.get(str(item.score.id))
+            result = by_result.get(item.attack_result.attack_result_id)
+            if (
+                score is None
+                or result is None
+                or score.model_dump(mode="json") != item.score.model_dump(mode="json")
+                or result.model_dump(mode="json") != item.attack_result.model_dump(mode="json")
+            ):
+                raise ValueError("Original Inspect case Score/AttackResult differs from its typed source.")
+            verified.append(
+                InspectOriginalCaseResult(
+                    sample_id=item.sample_id,
+                    epoch=item.epoch,
+                    case_run_id=item.case_run_id,
+                    primary_scorer=item.primary_scorer,
+                    score=score,
+                    attack_result=result,
+                )
+            )
+        return tuple(verified)
+
+    def _case_result(
+        self,
+        *,
+        log: EvalLog,
+        sample: EvalSample,
+        turn: NativeCyberTurnSummary,
+        sample_index: int,
+        episode_id: str,
+        archive_sha: str,
+        case_run_id: str | None,
+        global_issue: str | None,
+        score_policy: InspectOriginalScorePolicy | None,
+    ) -> InspectOriginalCaseResult:
+        name, source_score, event, selection_issue = self._select_final_score(sample=sample, score_policy=score_policy)
+        score_type, value, numeric = self._representable_value(value=source_score.value if source_score else None)
+        if sample.error is not None or log.error is not None:
+            issue = "The original Inspect execution recorded an infrastructure exception."
+        elif global_issue is not None:
+            issue = global_issue
+        elif not turn.source_complete:
+            issue = turn.gaps[0] if turn.gaps else "Original Inspect Sample coverage is incomplete."
+        elif selection_issue is not None:
+            issue = selection_issue
+        elif source_score is not None and value is None:
+            issue = "The original Inspect final score value has no supported PyRIT representation."
+        else:
+            issue = None
+        metadata: dict[str, str | int | float] = {
+            "inspect_source": "original_eval_log",
+            "inspect_archive_sha256": archive_sha,
+            "inspect_run_id": log.eval.run_id,
+            "inspect_eval_id": log.eval.eval_id,
+            "inspect_task": log.eval.task,
+            "inspect_task_version": str(log.eval.task_version),
+            "inspect_sample_id": str(sample.id),
+            "inspect_epoch": sample.epoch,
+        }
+        if sample.uuid:
+            metadata["inspect_sample_uuid"] = sample.uuid
+        if case_run_id is not None:
+            metadata["inspect_case_run_id"] = case_run_id
+        if name is not None:
+            metadata["inspect_primary_scorer"] = name
+        if event is not None:
+            assert event.uuid is not None
+            metadata["inspect_final_score_event_id"] = event.uuid
+            metadata["inspect_final_score_event_sha256"] = config_hash(
+                {"event": event.model_dump(mode="json", exclude_none=True)}
+            )
+        timestamp = self._sample_timestamp(sample.completed_at, fallback=sample.started_at or log.eval.created)
+        score = Score(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"inspect-original-score:{episode_id}:{sample_index}"),
+            score_type=score_type,
+            score_value=value if issue is None else None,
+            status=ScoreStatus.UNDETERMINED if issue else ScoreStatus.COMPLETE,
+            score_value_description=issue,
+            score_metadata=metadata,
+            timestamp=timestamp,
+        )
+        outcome, reason = self._case_outcome(
+            log=log, sample=sample, issue=issue, numeric=numeric, score_policy=score_policy
+        )
+        result_metadata = dict(metadata)
+        if sample.turn_count is not None:
+            result_metadata["inspect_turn_count"] = sample.turn_count
+        result = AttackResult(
+            attack_result_id=str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"inspect-original-result:{episode_id}:{sample_index}")
+            ),
+            conversation_id=self._conversation_id(
+                episode_id=episode_id, run_id=log.eval.run_id, sample=sample, sample_index=sample_index
+            ),
+            objective=f"Original Inspect task {log.eval.task} Sample {sample.id} epoch {sample.epoch} (offline import)",
+            automated_score=score,
+            outcome=outcome,
+            outcome_reason=reason,
+            metadata=result_metadata,
+            error_type="InspectEvalError" if outcome is AttackOutcome.ERROR else None,
+            error_message=reason if outcome is AttackOutcome.ERROR else None,
+            timestamp=timestamp,
+        )
+        return InspectOriginalCaseResult(
+            sample_id=str(sample.id),
+            epoch=sample.epoch,
+            case_run_id=case_run_id,
+            primary_scorer=name,
+            score=score,
+            attack_result=result,
+        )
+
+    @staticmethod
+    def _select_final_score(
+        *, sample: EvalSample, score_policy: InspectOriginalScorePolicy | None
+    ) -> tuple[str | None, InspectScore | None, ScoreEvent | None, str | None]:
+        scores = sample.scores or {}
+        if score_policy is not None:
+            name = score_policy.primary_scorer
+        elif len(scores) == 1:
+            name = next(iter(scores))
+        elif scores:
+            return None, None, None, "Multiple final Inspect scorers require an explicitly reviewed primary."
+        else:
+            return None, None, None, "The original Inspect Sample has no final score."
+        if name not in scores:
+            return name, None, None, "The selected original Inspect scorer has no final sample score."
+        try:
+            event = final_original_score_event(sample=sample, scorer_name=name)
+        except ValueError:
+            return name, None, None, "The original Inspect final ScoreEvent disagrees with its sample score."
+        if event is None:
+            return name, None, None, "The original Inspect final sample score has no unique matching ScoreEvent."
+        return name, scores[name], event, None
+
+    @staticmethod
+    def _representable_value(*, value: object) -> tuple[ScoreType, str | None, float | None]:
+        if isinstance(value, bool):
+            return "true_false", str(value).lower(), float(value)
+        if isinstance(value, (int, float)) and 0 <= value <= 1 and math.isfinite(value):
+            return "float_scale", str(value), float(value)
+        return "unknown", None, None
+
+    @staticmethod
+    def _case_outcome(
+        *,
+        log: EvalLog,
+        sample: EvalSample,
+        issue: str | None,
+        numeric: float | None,
+        score_policy: InspectOriginalScorePolicy | None,
+    ) -> tuple[AttackOutcome, str]:
+        if sample.error is not None or log.error is not None:
+            return AttackOutcome.ERROR, "The original Inspect execution recorded an infrastructure exception."
+        if issue is not None:
+            return AttackOutcome.UNDETERMINED, issue
+        if score_policy is None or score_policy.success_direction is None:
+            return AttackOutcome.UNDETERMINED, "No task-specific success direction and threshold were supplied."
+        threshold = score_policy.success_threshold
+        if threshold is None or numeric is None:
+            raise ValueError("A complete original Inspect Score requires an explicit representable threshold.")
+        meets = (
+            numeric >= threshold
+            if score_policy.success_direction is InspectSuccessDirection.AT_LEAST
+            else numeric <= threshold
+        )
+        return (
+            AttackOutcome.SUCCESS if meets else AttackOutcome.FAILURE,
+            (
+                f"Original Inspect {score_policy.primary_scorer} compared using the explicit "
+                f"{score_policy.success_direction.value} {threshold} success criterion."
+            ),
         )
 
     def _verify_source_readback(
@@ -479,7 +830,34 @@ class InspectOriginalEvalImporter:
             if checksum.hexdigest() != digest or stream.stored_sha256 != digest or size != stream.stored_bytes:
                 raise ValueError("The retained original Inspect bytes differ from the authorized source digest.")
 
-    def _verify_event_readback(self, *, snapshot: NativeCyberEpisodeSnapshot) -> None:
+    def _verify_event_readback(
+        self,
+        *,
+        log: EvalLog,
+        snapshot: NativeCyberEpisodeSnapshot,
+        archive_sha: str,
+        case_run_ids: tuple[str, ...],
+    ) -> None:
+        expected: list[NativeCyberCapturedEvent] = []
+        sequence = 1
+        for sample_index, sample in enumerate(log.samples or [], start=1):
+            projection = project_inspect_sample(
+                sample=sample,
+                log_run_id=log.eval.run_id,
+                eval_id=log.eval.eval_id,
+                archive_sha256=archive_sha,
+                sample_index=sample_index,
+                start_sequence=sequence,
+                conversation_id=self._conversation_id(
+                    episode_id=snapshot.run.run_id,
+                    run_id=log.eval.run_id,
+                    sample=sample,
+                    sample_index=sample_index,
+                ),
+                case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
+            )
+            expected.extend(projection.events)
+            sequence += len(projection.events)
         cursor = 0
         while True:
             events = self._capture.read_event_payloads(
@@ -490,11 +868,16 @@ class InspectOriginalEvalImporter:
             )
             for captured in events:
                 cursor += 1
-                if captured.event.sequence != cursor:
-                    raise ValueError("Original Inspect projected event order changed in PyRIT memory.")
+                if (
+                    cursor > len(expected)
+                    or captured.source != expected[cursor - 1].source
+                    or config_hash(captured.event.model_dump(mode="json"))
+                    != config_hash(expected[cursor - 1].event.model_dump(mode="json"))
+                ):
+                    raise ValueError("Original Inspect projected event differs from its typed source.")
             if len(events) < self._capture.MAX_EVENT_BATCH:
                 break
-        if cursor != len(snapshot.events):
+        if cursor != len(snapshot.events) or cursor != len(expected):
             raise ValueError("Original Inspect projected event count changed in PyRIT memory.")
 
     @classmethod
@@ -506,9 +889,11 @@ class InspectOriginalEvalImporter:
         resolved: bytes,
         snapshot: NativeCyberEpisodeSnapshot,
         case_run_ids: tuple[str, ...],
+        case_results: tuple[InspectOriginalCaseResult, ...],
+        offline: bool,
     ) -> InspectOriginalImport:
         if snapshot.score_id is not None or snapshot.score_status is not ScoreStatus.UNDETERMINED:
-            raise ValueError("Original Inspect import must never create or link a PyRIT Score.")
+            raise ValueError("The original Inspect evidence episode must remain unscored.")
         samples = log.samples or []
         score_count = sum(len(sample.scores or {}) for sample in samples)
         return InspectOriginalImport(
@@ -531,10 +916,13 @@ class InspectOriginalEvalImporter:
             original_final_score_events=sum(cls._final_score_count(sample=sample) for sample in samples),
             case_run_ids=case_run_ids,
             no_grade_reasons=(
-                "Mode 1 retains Inspect scores as source evidence only; no qualified PyRIT scorer or AttackResult.",
+                "Offline results only mirror the original Inspect scorer; no independent PyRIT grading was performed."
+                if offline
+                else "The original Task runner retains source evidence without a PyRIT Score or AttackResult.",
                 "Inspect events cannot attest external CLI, provider, or OS activity outside the original log.",
                 *(() if score_count else ("The original Inspect log contains no final scorer verdict.",)),
             ),
+            case_results=case_results,
         )
 
     @staticmethod
