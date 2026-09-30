@@ -75,6 +75,8 @@ def project_inspect_sample(
     start_sequence: int,
     conversation_id: str,
     case_run_id: str | None = None,
+    mode2_control_ids: frozenset[str] = frozenset(),
+    omit_mode2_controls: bool = False,
 ) -> InspectSampleProjection:
     """
     Project the original attempt/event order and only lossless text messages.
@@ -139,7 +141,11 @@ def project_inspect_sample(
         )
     )
     pieces, unprojected = _project_messages(
-        sample=sample, archive_sha256=archive_sha256, conversation_id=conversation_id
+        sample=sample,
+        archive_sha256=archive_sha256,
+        conversation_id=conversation_id,
+        mode2_control_ids=mode2_control_ids,
+        omit_mode2_controls=omit_mode2_controls,
     )
     return InspectSampleProjection(
         events=tuple(events),
@@ -189,11 +195,20 @@ def _capture_event(
 
 
 def _project_messages(
-    *, sample: EvalSample, archive_sha256: str, conversation_id: str
+    *,
+    sample: EvalSample,
+    archive_sha256: str,
+    conversation_id: str,
+    mode2_control_ids: frozenset[str],
+    omit_mode2_controls: bool,
 ) -> tuple[list[MessagePiece], int]:
     pieces: list[MessagePiece] = []
     unprojected = 0
     for position, message in enumerate(sample.messages):
+        if omit_mode2_controls and (
+            message.id in mode2_control_ids or (message.metadata or {}).get("pyrit_mode2_control") == "on_continue"
+        ):
+            continue
         texts = _message_text_parts(message=message)
         if texts is None:
             unprojected += 1

@@ -199,7 +199,44 @@ Only this public runner's source pin uses Git's LF-normalized Python bytes
 so the same checked-in file remains approved in CRLF Windows worktrees;
 the original `.eval` archive is always hashed and stored **byte for byte**.
 
-The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
+## Mode 2: an Inspect-authored, in-agent ReAct continuation variant
+
+`run_mode2_inert_eval_async(memory=..., log_dir=...)` runs only the separately
+SHA-pinned public `inspect_mode2_inert` Task. Pass initialized PyRIT memory and
+an existing private local directory, as with the Mode 1 runner. No sandbox,
+remote model, Docker guest, credential, network call or cyber Task is used.
+Inspect's optional control and ACP servers are disabled for this local run.
+The authored Task keeps its own setup, `react()` solver, in-process `mockllm`
+model, harmless local tool, intermediate attempt feedback, final scorer and
+cleanup. This is a **steered variant**, identified by the
+`inspect_mode2_react_variant` harness profile and `inspect-mode2` unscored
+evidence binding. The original `Sample.input` and `EvalCaseRef` are unchanged;
+the separate `EvalRunRef` profile and case-run ID distinguish this variant
+from an unchanged baseline. Neither the original scorer nor the continuation
+policy creates a PyRIT benchmark Score or AttackResult.
+
+The original ReAct solver calls its authored async `on_continue(AgentState)`
+after each completed model/tool turn. A run-scoped PyRIT attack policy waits
+for the completed harmless lookup, returns one bounded nudge, preserves
+Inspect's incorrect-submission feedback, then stops after the third model
+turn. The runner enforces a 60-second local evaluation limit and a two-second
+decision limit. Inspect 0.3.272 accepts a returned `AgentState`; the nudge is one
+**tagged internal agent message**, not an external new user turn. The exact
+Inspect message remains in the raw `.eval` and the required bounded decision
+stream records its ID. The Mode 2 live projection excludes that verified
+control message from MessagePieces. The separate, solver-neutral **offline**
+`.eval` importer is unchanged: it neither loads the Task nor infers which
+Inspect messages were PyRIT control actions.
+
+The decision stream, original `.eval` bytes, typed log and per-Sample
+projection must all seal before the variant can report complete Inspect-visible
+coverage. Missing/repeated control messages, source drift, timeouts,
+exceptions and cancellation leave required gaps or a pending episode, never
+a benchmark grade. Complete Inspect-visible coverage does not attest a
+remote provider, OS side effect or real cyber outcome. This limited fixture
+does not authorize arbitrary `react()` solvers or other Inspect Tasks.
+
+The Mode 1 runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
 into a bounded run-scoped stream before the final `.eval` is read. Inspect
 emits these callbacks only for completed events, and hook exceptions are
 warnings rather than evaluation failures. A process-wide hook instance stays

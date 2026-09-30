@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 class NativeCyberEvidenceStore:
     """Persist source-observed evidence through either SQLite or SQL Server memory."""
 
+    _UNSCORED_INSPECT_BINDINGS = frozenset({"inspect-original", "inspect-mode2"})
     MAX_CHUNK_BYTES = 65_536
     MAX_APPEND_BYTES = 1_048_576
     MAX_EVENT_BATCH = 100
@@ -125,9 +126,9 @@ class NativeCyberEvidenceStore:
             self._require_open(episode)
             if (
                 turn.response_mode is NativeCyberResponseMode.SAMPLE_CAPTURE
-                and episode.binding_name != "inspect-original"
+                and episode.binding_name not in self._UNSCORED_INSPECT_BINDINGS
             ):
-                raise ValueError("Only an ungraded original Inspect import can store sample capture units.")
+                raise ValueError("Only an ungraded Inspect import can store sample capture units.")
             last_index = session.scalar(
                 select(func.max(NativeCyberTurnEntry.turn_index)).where(NativeCyberTurnEntry.run_id == turn.run_id)
             )
@@ -627,7 +628,7 @@ class NativeCyberEvidenceStore:
         optional_gaps: Sequence[str] = (),
     ) -> NativeCyberEpisodeSnapshot:
         """
-        Seal original Inspect bytes and sample projections without inventing a Score.
+        Seal an approved original or Mode 2 Inspect sample capture without inventing a Score.
 
         Returns:
             NativeCyberEpisodeSnapshot: Finalized capture; its Score and report links remain absent.
@@ -640,8 +641,8 @@ class NativeCyberEvidenceStore:
         with self._write_session(run_id=run_id) as session:
             episode = self._lock_episode(session=session, run_id=run_id)
             self._require_open(episode)
-            if episode.binding_name != "inspect-original" or episode.score_id is not None:
-                raise ValueError("Only an original unscored Inspect capture can be sealed without a Score.")
+            if episode.binding_name not in self._UNSCORED_INSPECT_BINDINGS or episode.score_id is not None:
+                raise ValueError("Only an unscored Inspect capture can be sealed without a Score.")
             required, optional = self._unscored_inspect_gaps(
                 session=session, episode=episode, expected_samples=expected_samples
             )
@@ -654,7 +655,7 @@ class NativeCyberEvidenceStore:
 
     def get_finalized_unscored_inspect_capture(self, *, run_id: str) -> NativeCyberEpisodeSnapshot:
         """
-        Read only a finalized original Inspect import, not a graded native run.
+        Read a finalized unscored Inspect import or variant, not a graded native run.
 
         Returns:
             NativeCyberEpisodeSnapshot: Metadata-only sample, event and stream evidence.
@@ -664,12 +665,12 @@ class NativeCyberEvidenceStore:
         """
         snapshot = self.get_episode(run_id=run_id)
         if (
-            snapshot.run.binding_name != "inspect-original"
+            snapshot.run.binding_name not in self._UNSCORED_INSPECT_BINDINGS
             or snapshot.finalized_at is None
             or snapshot.score_id is not None
             or snapshot.report_content_id is not None
         ):
-            raise ValueError("An original unscored Inspect capture is not finalized for readback.")
+            raise ValueError("An unscored Inspect capture is not finalized for readback.")
         return snapshot
 
     @classmethod
@@ -740,11 +741,14 @@ class NativeCyberEvidenceStore:
         required_keys = {
             (key["source"], key["kind"], key["observed_source_id"]) for key in episode.required_raw_streams
         }
-        if required_keys != {
+        expected_keys = {
             ("harness", "eval_log", "inspect-original-eval-archive"),
             ("harness", "jsonl", "inspect-resolved-eval-log"),
-        }:
-            required.append("Original Inspect import lacks its exact archive and resolved-log source contract.")
+        }
+        if episode.binding_name == "inspect-mode2":
+            expected_keys.add(("harness", "jsonl", "inspect-mode2-continuations"))
+        if required_keys != expected_keys:
+            required.append("Inspect import lacks its exact archive, resolved-log and variant source contract.")
         for stream in streams:
             if (stream.source, stream.kind, stream.observed_source_id) not in required_keys and (
                 stream.closed_at is None or stream.source_complete is not True
@@ -1873,8 +1877,9 @@ class NativeCyberEvidenceStore:
             cls._open_turn(session=session, episode=episode, turn_index=stream.turn_index)
         return stream
 
-    @staticmethod
+    @classmethod
     def _link_pieces(
+        cls,
         *,
         session: Session,
         episode: NativeCyberEpisodeEntry,
@@ -1885,7 +1890,9 @@ class NativeCyberEvidenceStore:
         if len(piece_ids) != len(set(piece_ids)):
             raise ValueError("A native outer turn cannot reference a MessagePiece twice.")
         valid_roles = {
-            "request": {"user", "system", "developer"} if episode.binding_name == "inspect-original" else {"user"},
+            "request": {"user", "system", "developer"}
+            if episode.binding_name in cls._UNSCORED_INSPECT_BINDINGS
+            else {"user"},
             "response": {"assistant", "simulated_assistant"},
             "tool_request": {"assistant", "simulated_assistant"},
             "tool_result": {"tool"},
@@ -1906,7 +1913,7 @@ class NativeCyberEvidenceStore:
                 or (direction == "tool_result" and piece.original_value_data_type != "function_call_output")
             ):
                 raise ValueError(f"Native {direction} MessagePiece {piece_id} has the wrong data type.")
-            if episode.binding_name != "inspect-original":
+            if episode.binding_name not in cls._UNSCORED_INSPECT_BINDINGS:
                 if episode.conversation_id is None:
                     episode.conversation_id = piece.conversation_id
                 elif episode.conversation_id != piece.conversation_id:

@@ -120,7 +120,13 @@ class InspectOriginalEvalImporter:
         run: EvalRunRef | None,
         live_observer: InspectLiveObserver | None,
         require_no_model_calls: bool = False,
+        binding_name: str = "inspect-original",
+        mode2_control_ids: frozenset[str] = frozenset(),
     ) -> InspectOriginalImport:
+        if binding_name not in {"inspect-original", "inspect-mode2"} or (
+            binding_name == "inspect-mode2" and live_observer is None
+        ):
+            raise ValueError("Mode 2 import requires its active, separately labeled live capture.")
         archive, relogged_samples = await asyncio.to_thread(self._read_archive, path=path)
         log = await asyncio.to_thread(read_eval_log, io.BytesIO(archive), resolve_attachments="full", format="eval")
         resolved = log.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
@@ -145,6 +151,8 @@ class InspectOriginalEvalImporter:
             live_gaps=live_observer.reconcile(log=log) if live_observer is not None else (),
             require_no_model_calls=require_no_model_calls,
             relogged_samples=relogged_samples,
+            binding_name=binding_name,
+            mode2_control_ids=mode2_control_ids,
         )
 
     @classmethod
@@ -227,6 +235,8 @@ class InspectOriginalEvalImporter:
         live_gaps: tuple[str, ...],
         require_no_model_calls: bool,
         relogged_samples: bool,
+        binding_name: str,
+        mode2_control_ids: frozenset[str],
     ) -> InspectOriginalImport:
         try:
             existing = self._capture.get_episode(run_id=episode_id)
@@ -239,7 +249,7 @@ class InspectOriginalEvalImporter:
                 log=log, archive_sha=archive_sha, resolved=resolved, snapshot=existing, case_run_ids=case_run_ids
             )
         if live_run_id is not None:
-            if existing is None or existing.finalized_at is not None or existing.run.binding_name != "inspect-original":
+            if existing is None or existing.finalized_at is not None or existing.run.binding_name != binding_name:
                 raise ValueError("The original Inspect live capture is absent or already finalized.")
             if existing.run.raw_byte_limit - existing.stored_raw_bytes < len(archive) + len(resolved):
                 self._capture.mark_capture_gap(run_id=episode_id, reason="Original Inspect archive exceeds live quota.")
@@ -265,8 +275,16 @@ class InspectOriginalEvalImporter:
         self._write_source(run_id=episode_id, key=self.ARCHIVE_KEY, content=archive)
         self._write_source(run_id=episode_id, key=self.RESOLVED_KEY, content=resolved)
         gaps, optional = self._project_log(
-            log=log, episode_id=episode_id, archive_sha=archive_sha, case_run_ids=case_run_ids
+            log=log,
+            episode_id=episode_id,
+            archive_sha=archive_sha,
+            case_run_ids=case_run_ids,
+            binding_name=binding_name,
+            mode2_control_ids=mode2_control_ids,
         )
+        if binding_name == "inspect-mode2":
+            gaps.extend(live_gaps)
+            live_gaps = ()
         if relogged_samples:
             gaps.append(
                 "Inspect archive re-logged a Sample; earlier ZIP member events were retained only as raw bytes."
@@ -286,7 +304,12 @@ class InspectOriginalEvalImporter:
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
         self._verify_event_readback(snapshot=snapshot)
         return self._result(
-            log=log, archive_sha=archive_sha, resolved=resolved, snapshot=snapshot, case_run_ids=case_run_ids
+            log=log,
+            archive_sha=archive_sha,
+            resolved=resolved,
+            snapshot=snapshot,
+            case_run_ids=case_run_ids,
+            binding_name=binding_name,
         )
 
     def _write_source(self, *, run_id: str, key: NativeCyberRawStreamKey, content: bytes) -> None:
@@ -309,7 +332,14 @@ class InspectOriginalEvalImporter:
         )
 
     def _project_log(
-        self, *, log: EvalLog, episode_id: str, archive_sha: str, case_run_ids: tuple[str, ...]
+        self,
+        *,
+        log: EvalLog,
+        episode_id: str,
+        archive_sha: str,
+        case_run_ids: tuple[str, ...],
+        binding_name: str,
+        mode2_control_ids: frozenset[str],
     ) -> tuple[list[str], list[str]]:
         gaps: list[str] = []
         optional: list[str] = []
@@ -324,7 +354,7 @@ class InspectOriginalEvalImporter:
             conversation_id = str(
                 uuid.uuid5(
                     uuid.NAMESPACE_URL,
-                    f"inspect-original:{episode_id}:{log.eval.run_id}:{sample_identity}",
+                    f"{binding_name}:{episode_id}:{log.eval.run_id}:{sample_identity}",
                 )
             )
             projection = project_inspect_sample(
@@ -336,6 +366,8 @@ class InspectOriginalEvalImporter:
                 start_sequence=sequence,
                 conversation_id=conversation_id,
                 case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
+                mode2_control_ids=mode2_control_ids,
+                omit_mode2_controls=binding_name == "inspect-mode2",
             )
             if projection.message_pieces:
                 self._memory.add_conversation_to_memory(conversation=Conversation(conversation_id=conversation_id))
@@ -506,11 +538,18 @@ class InspectOriginalEvalImporter:
         resolved: bytes,
         snapshot: NativeCyberEpisodeSnapshot,
         case_run_ids: tuple[str, ...],
+        binding_name: str = "inspect-original",
     ) -> InspectOriginalImport:
         if snapshot.score_id is not None or snapshot.score_status is not ScoreStatus.UNDETERMINED:
             raise ValueError("Original Inspect import must never create or link a PyRIT Score.")
         samples = log.samples or []
         score_count = sum(len(sample.scores or {}) for sample in samples)
+        if binding_name == "inspect-mode2":
+            grade_reason = "Mode 2 is a steered variant; its original Inspect scorer is not a PyRIT grade."
+        else:
+            grade_reason = (
+                "Mode 1 retains Inspect scores as source evidence only; no qualified PyRIT scorer or AttackResult."
+            )
         return InspectOriginalImport(
             episode=snapshot,
             inspect_run_id=log.eval.run_id,
@@ -531,7 +570,7 @@ class InspectOriginalEvalImporter:
             original_final_score_events=sum(cls._final_score_count(sample=sample) for sample in samples),
             case_run_ids=case_run_ids,
             no_grade_reasons=(
-                "Mode 1 retains Inspect scores as source evidence only; no qualified PyRIT scorer or AttackResult.",
+                grade_reason,
                 "Inspect events cannot attest external CLI, provider, or OS activity outside the original log.",
                 *(() if score_count else ("The original Inspect log contains no final scorer verdict.",)),
             ),
