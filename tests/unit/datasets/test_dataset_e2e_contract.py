@@ -46,7 +46,7 @@ async def test_intentional_empty_task_passes_actual_e2e_validation_async(
     seed = next(seed for seed in task_dataset_async.seeds if seed.value == "" and seed.metadata["family"] == family)
     dataset = task_dataset_async.model_copy(update={"seeds": [seed]}, deep=True)
     provider_cls = SeedDatasetProvider.get_all_providers()[_PROVIDER_NAME]
-    with patch.object(dataset_e2e_module, "_fetch_with_retry", new=AsyncMock(return_value=dataset)):
+    with patch.object(dataset_e2e_module, "_fetch_with_retry_async", new=AsyncMock(return_value=dataset)):
         await dataset_e2e_module.TestAllDatasets().test_fetch_dataset(_PROVIDER_NAME, provider_cls)
 
 
@@ -73,7 +73,7 @@ async def test_other_empty_seeds_fail_actual_e2e_validation_async(
     invalid = seed.model_copy(update=updates, deep=True)
     dataset = task_dataset_async.model_copy(update={"seeds": [invalid]}, deep=True)
     provider_cls = SeedDatasetProvider.get_all_providers()[_PROVIDER_NAME]
-    with patch.object(dataset_e2e_module, "_fetch_with_retry", new=AsyncMock(return_value=dataset)):
+    with patch.object(dataset_e2e_module, "_fetch_with_retry_async", new=AsyncMock(return_value=dataset)):
         with pytest.raises(AssertionError, match="has no value"):
             await dataset_e2e_module.TestAllDatasets().test_fetch_dataset(_PROVIDER_NAME, provider_cls)
 
@@ -86,6 +86,6 @@ async def test_empty_objective_cannot_claim_task_exception_async(
     objective = SeedObjective(value="", dataset_name=seed.dataset_name, source=seed.source, metadata=seed.metadata)
     dataset = task_dataset_async.model_copy(update={"seeds": [objective]}, deep=True)
     provider_cls = SeedDatasetProvider.get_all_providers()[_PROVIDER_NAME]
-    with patch.object(dataset_e2e_module, "_fetch_with_retry", new=AsyncMock(return_value=dataset)):
+    with patch.object(dataset_e2e_module, "_fetch_with_retry_async", new=AsyncMock(return_value=dataset)):
         with pytest.raises(AssertionError, match="has no value"):
             await dataset_e2e_module.TestAllDatasets().test_fetch_dataset(_PROVIDER_NAME, provider_cls)
