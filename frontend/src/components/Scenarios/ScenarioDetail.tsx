@@ -56,6 +56,11 @@ import { routerPathParamValue, scenarioRunRoutePath } from '@/utils/routeParams'
 import { targetModelName } from '@/utils/targetIdentity'
 
 import { useScenarioDetailStyles } from './ScenarioDetail.styles'
+import {
+  ORIGINAL_INERT_SCENARIO_NAME,
+  ORIGINAL_INERT_SCENARIO_TYPE,
+  ORIGINAL_INERT_TASK_ID,
+} from './originalInspectInert'
 import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
@@ -499,7 +504,10 @@ function ScenarioDetailContent({
     setRefetchCount((count) => count + 1)
   }
 
-  if (scenarioStatus === 'loading' || targets === null) {
+  const isOriginalInert = scenario?.scenario_name === ORIGINAL_INERT_SCENARIO_NAME
+    && scenario.scenario_type === ORIGINAL_INERT_SCENARIO_TYPE
+
+  if (scenarioStatus === 'loading' || (!isOriginalInert && targets === null)) {
     return (
       <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
         <div className={styles.centeredState}>
@@ -525,7 +533,7 @@ function ScenarioDetailContent({
     )
   }
 
-  if (scenarioStatus === 'error' || targetsError) {
+  if (scenarioStatus === 'error' || (!isOriginalInert && targetsError)) {
     return (
       <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
         <div className={styles.content}>
@@ -556,6 +564,14 @@ function ScenarioDetailContent({
     return null
   }
 
+  if (isOriginalInert) {
+    return <OriginalInspectInertLaunch scenario={scenario} />
+  }
+
+  if (targets === null) {
+    return null
+  }
+
   return (
     <ScenarioLaunchForm
       key={scenario.scenario_name}
@@ -565,6 +581,95 @@ function ScenarioDetailContent({
       labels={labels}
       onNavigate={onNavigate}
     />
+  )
+}
+
+interface OriginalInspectInertLaunchProps {
+  scenario: RegisteredScenario
+}
+
+function OriginalInspectInertLaunch({ scenario }: OriginalInspectInertLaunchProps) {
+  const styles = useScenarioDetailStyles()
+  const navigate = useNavigate()
+  const [submitting, setSubmitting] = useState(false)
+  const [apiError, setApiError] = useState<string | null>(null)
+  const submittingRef = useRef(false)
+  const taskParameter = scenario.supported_parameters.find((parameter) => parameter.name === 'eval_family')
+  const approved = taskParameter?.choices?.length === 1
+    && taskParameter.choices[0] === ORIGINAL_INERT_TASK_ID
+    && scenario.baseline_policy === 'forbidden'
+
+  const handleLaunch = async (): Promise<void> => {
+    if (submittingRef.current || !approved) {
+      return
+    }
+    submittingRef.current = true
+    setSubmitting(true)
+    setApiError(null)
+    try {
+      const summary = await scenariosApi.startRun({
+        scenario_name: ORIGINAL_INERT_SCENARIO_NAME,
+        scenario_params: { eval_family: ORIGINAL_INERT_TASK_ID },
+        max_concurrency: 1,
+      })
+      navigate(scenarioRunRoutePath(summary.scenario_result_id), {
+        state: { scenarioName: scenario.scenario_name },
+      })
+    } catch (error: unknown) {
+      setApiError(toApiError(error).detail)
+    } finally {
+      submittingRef.current = false
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section className={styles.root} data-testid="scenario-detail" aria-labelledby="scenario-detail-title">
+      <div className={styles.content}>
+        <Link to="/scanner" className={styles.backLink}>
+          <ArrowLeftRegular /> Back to scanners
+        </Link>
+        <div className={styles.headerText}>
+          <Text id="scenario-detail-title" as="h1" size={600} weight="semibold">
+            {scenario.scenario_name}
+          </Text>
+        </div>
+        <section className={styles.section} aria-label="Approved original Inspect Task">
+          <MarkdownContent
+            content={normalizeScenarioMarkdown(scenario.description_markdown || scenario.description)}
+            className={styles.description}
+            testId="scenario-detail-description"
+          />
+          <Text>Approved Task ID: <code>{ORIGINAL_INERT_TASK_ID}</code></Text>
+          <MessageBar intent="info">
+            <MessageBarBody>
+              Runs the unchanged Inspect setup, solver, scorer and cleanup once, then imports its exact
+              {' '}.eval into PyRIT SQLite. This slice does not create a PyRIT Score or AttackResult.
+            </MessageBarBody>
+          </MessageBar>
+          {!approved && (
+            <MessageBar intent="error">
+              <MessageBarBody role="alert">
+                This server did not publish the sole approved original Inspect Task. Launch is disabled.
+              </MessageBarBody>
+            </MessageBar>
+          )}
+          {apiError && (
+            <MessageBar intent="error">
+              <MessageBarBody role="alert">{apiError}</MessageBarBody>
+            </MessageBar>
+          )}
+          <Button
+            className={styles.launchButton}
+            appearance="primary"
+            disabled={!approved || submitting}
+            onClick={() => void handleLaunch()}
+          >
+            {submitting ? 'Starting original Inspect Task...' : 'Run original Inspect Task'}
+          </Button>
+        </section>
+      </div>
+    </section>
   )
 }
 

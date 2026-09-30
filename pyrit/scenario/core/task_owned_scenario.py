@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from pyrit.common.utils import to_sha256
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
+    EvalCaseRef,
+    EvalRunRef,
     ScenarioExecutionOwner,
     ScenarioIdentifier,
     ScenarioResult,
@@ -20,19 +22,30 @@ from pyrit.models import (
     ScenarioRunSizeEstimate,
     config_hash,
 )
+from pyrit.scenario.core.atomic_work import AtomicWork
 from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
-from pyrit.scenario.core.task_owned_atomic_attack import TaskOwnedAtomicAttack
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pyrit.models import AttackSeedGroup
     from pyrit.models.parameter import Parameter
     from pyrit.scenario.core.atomic_attack import AtomicAttack
-    from pyrit.scenario.core.atomic_work import AtomicWork
     from pyrit.scenario.core.scenario_context import ScenarioContext, TaskOwnedScenarioContext
 
 
+@runtime_checkable
+class TaskOwnedCaseWork(AtomicWork, Protocol):
+    """A case with source identity, whether or not a PyRIT grade is committed."""
+
+    case: EvalCaseRef
+    run: EvalRunRef
+    case_run_id: str
+    objective: str
+
+
 class TaskOwnedScenario(Scenario):
-    """Base for a Scenario whose selected Eval cases own execution and scoring."""
+    """Base for a Scenario whose selected Eval cases own execution and original evidence."""
 
     TASK_OWNED: ClassVar[bool] = True
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Forbidden
@@ -80,14 +93,14 @@ class TaskOwnedScenario(Scenario):
     @abstractmethod
     async def _build_task_owned_atomic_attacks_async(
         self, *, context: TaskOwnedScenarioContext
-    ) -> list[TaskOwnedAtomicAttack]:
+    ) -> Sequence[AtomicWork]:
         """Build one case-owned work item per selected Eval Task/Sample."""
         ...
 
-    def _task_owned_attacks(self) -> list[TaskOwnedAtomicAttack]:
-        attacks = [work for work in self._atomic_attacks if isinstance(work, TaskOwnedAtomicAttack)]
+    def _task_owned_attacks(self) -> list[TaskOwnedCaseWork]:
+        attacks = [work for work in self._atomic_attacks if isinstance(work, TaskOwnedCaseWork)]
         if len(attacks) != len(self._atomic_attacks):
-            raise TypeError("TaskOwnedScenario can schedule only TaskOwnedAtomicAttack work")
+            raise TypeError("TaskOwnedScenario can schedule only case-identified task-owned work")
         return attacks
 
     def _validate_task_owned_work(self) -> None:

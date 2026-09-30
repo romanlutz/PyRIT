@@ -34,10 +34,20 @@ class InspectOriginalRun:
 
 
 async def run_original_inert_eval_async(
-    *, memory: MemoryInterface, log_dir: Path, family: str = "inspect_original_inert"
+    *,
+    memory: MemoryInterface,
+    log_dir: Path,
+    family: str = "inspect_original_inert",
+    run_instance_id: uuid.UUID | None = None,
 ) -> InspectOriginalRun:
     """
     Run the sole approved in-process original Inspect Task without substituting any brick.
+
+    Args:
+        memory (MemoryInterface): The initialized PyRIT evidence store.
+        log_dir (Path): An existing private local directory for the original `.eval`.
+        family (str): The one approved named Task.
+        run_instance_id (uuid.UUID | None): A caller-owned unique run ID, if a Scenario allocated one.
 
     Returns:
         InspectOriginalRun: Case identity and sealed Inspect-only sample evidence, never a PyRIT Score.
@@ -54,8 +64,8 @@ async def run_original_inert_eval_async(
     if not directory_valid:
         raise ValueError("Original Inspect logs require an existing, non-symlink local directory.")
     await asyncio.to_thread(source.verify_unchanged)
-    run = EvalRunRef(spec=source.spec, run_instance_id=uuid.uuid4())
-    episode_id = f"inspect-run-{uuid.uuid4().hex}"
+    run = EvalRunRef(spec=source.spec, run_instance_id=run_instance_id or uuid.uuid4())
+    episode_id = f"inspect-run-{run.run_instance_id.hex}"
     importer = InspectOriginalEvalImporter(memory=memory)
     capture = memory.native_cyber_evidence
     await asyncio.to_thread(

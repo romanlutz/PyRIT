@@ -199,6 +199,42 @@ Only this public runner's source pin uses Git's LF-normalized Python bytes
 so the same checked-in file remains approved in CRLF Windows worktrees;
 the original `.eval` archive is always hashed and stored **byte for byte**.
 
+### One-click public Mode 1 entry
+
+With the backend configured for PyRIT SQLite, CoPyRIT's Scenario catalog
+automatically discovers `benchmark.inspect_original_inert`. Its detail page
+shows the sole approved Task ID, `inspect_original_inert`, and a **Run original
+Inspect Task** button; no target, Python code, path, model, sandbox, secret, or
+scorer editing is exposed. The same registry-backed action is available via
+`POST /api/scenarios/runs`:
+
+```json
+{
+  "scenario_name": "benchmark.inspect_original_inert",
+  "scenario_params": {"eval_family": "inspect_original_inert"}
+}
+```
+
+The Scenario checks the pinned public source and profile before allocating a
+fresh case-run ID and private local `.eval` directory. It calls the unchanged
+runner once, then checks that the imported SQLite evidence matches that case,
+source, Inspect log, and original ScoreEvent. A successful run removes its
+temporary disk log; a failed run retains its unique local log for reconciliation.
+No automatic retry or resume is allowed. The backend rejects other Task IDs,
+source paths and URLs, arbitrary request fields, target/model/sandbox settings,
+initializers (including secret-bearing arguments), labels, overlays, datasets,
+and extra execution techniques **before** running any initializer or Task.
+
+`GET /api/scenarios/runs/{scenario_result_id}` and the run-progress endpoint
+expose `original_inspect_import` after successful import: source SHA256,
+case-run ID, Inspect run/eval IDs, evidence episode ID, exact archive SHA256,
+and `score_status: "unscored"`. CoPyRIT displays these identifiers and the
+unscored state instead of a misleading attack-success rate. The original Inspect
+score remains in its typed `.eval` evidence; this slice deliberately does not
+create a PyRIT `Score` or `AttackResult`. The case-run ID and episode ID are
+the narrow integration seam for a separately reviewed score projection.
+Internal/private Tasks, arbitrary Python and cyber Evals are not selectable.
+
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
 into a bounded run-scoped stream before the final `.eval` is read. Inspect
 emits these callbacks only for completed events, and hook exceptions are

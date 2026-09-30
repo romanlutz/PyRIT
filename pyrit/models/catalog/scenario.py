@@ -14,9 +14,10 @@ canonical models.
 """
 
 from datetime import datetime
-from typing import Any, Literal
+from enum import Enum
+from typing import Any, ClassVar, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pyrit.models.parameter import Parameter
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -37,6 +38,12 @@ from pyrit.models.retry_event import RetryEvent
 #   - data_types -> OR + exact: a seed matches ANY value, compared for exact equality. So
 #     ``data_types=text,image_path`` is a union.
 DATASET_FILTERS: frozenset[str] = frozenset({"harm_categories", "data_types"})
+
+
+class OriginalInspectTaskId(str, Enum):
+    """Named original Inspect Tasks allowed by the one-click operator surface."""
+
+    INERT = "inspect_original_inert"
 
 
 def _validate_dataset_filter_mapping(
@@ -241,8 +248,12 @@ class ScenarioRunSizeEstimateRequest(BaseModel):
 class RunScenarioRequest(BaseModel):
     """Request body for starting a scenario run."""
 
+    # Preserve unknown fields so a restricted Scenario can reject them before
+    # request-supplied initializers run. Other Scenarios retain their existing inputs.
+    model_config = ConfigDict(extra="allow")
+
     scenario_name: str = Field(..., description="Scenario name (e.g., 'foundry.red_team_agent')")
-    target_name: str = Field(..., description="Name of a registered target from the TargetRegistry")
+    target_name: str | None = Field(None, description="Registered target name (required for target-owned Scenarios)")
     initializers: list[str] | None = Field(
         None, description="Initializer names to run before scenario (e.g., ['target', 'load_default_datasets'])"
     )
@@ -255,7 +266,9 @@ class RunScenarioRequest(BaseModel):
             "Dataset seed filters keyed by field, applied before sampling. Accepted keys: harm_categories, data_types."
         ),
     )
-    max_concurrency: int = Field(10, ge=1, le=100, description="Maximum concurrent operations")
+    max_concurrency: int | None = Field(
+        None, ge=1, le=100, description="Maximum concurrent operations; omitted uses the Scenario's default"
+    )
     max_retries: int = Field(0, ge=0, le=20, description="Maximum retry attempts on failure")
     include_baseline: bool | None = Field(
         None, description="Override the scenario baseline default; forbidden scenarios reject true"
@@ -321,6 +334,24 @@ class ScenarioOverloadSummary(BaseModel):
     latest_timestamp: datetime = Field(..., description="Latest overload signal timestamp")
 
 
+class OriginalInspectImportSummary(BaseModel):
+    """Evidence reference for a completed original Inspect import, not a PyRIT verdict."""
+
+    model_config = ConfigDict(extra="forbid")
+    METADATA_KEY: ClassVar[str] = "original_inspect_import"
+
+    task_id: OriginalInspectTaskId
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    case_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    episode_id: str = Field(pattern=r"^inspect-run-[0-9a-f]{32}$")
+    inspect_run_id: str = Field(min_length=1)
+    inspect_eval_id: str = Field(min_length=1)
+    archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sample_count: int = Field(ge=1, le=1)
+    original_final_score_events: int = Field(ge=1, le=1)
+    score_status: Literal["unscored"] = "unscored"
+
+
 class ScenarioRunSummary(BaseModel):
     """Response for a scenario run (status + result details)."""
 
@@ -378,6 +409,9 @@ class ScenarioRunSummary(BaseModel):
     overload_summaries: list[ScenarioOverloadSummary] = Field(
         default_factory=list,
         description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
+    )
+    original_inspect_import: OriginalInspectImportSummary | None = Field(
+        None, description="Original Inspect archive reference; it carries no PyRIT Score or AttackResult"
     )
 
 

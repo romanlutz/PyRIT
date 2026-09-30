@@ -77,6 +77,30 @@ function makeScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredSc
   }
 }
 
+function makeOriginalScenario(overrides: Partial<RegisteredScenario> = {}): RegisteredScenario {
+  return makeScenario({
+    scenario_name: 'benchmark.inspect_original_inert',
+    scenario_type: 'InspectOriginalInertScenario',
+    description: 'Import one unchanged original Inspect Task.',
+    default_technique: 'all',
+    default_techniques: ['original_task'],
+    aggregate_techniques: ['all'],
+    all_techniques: ['original_task'],
+    default_datasets: [],
+    baseline_policy: 'forbidden',
+    include_baseline_by_default: false,
+    supported_parameters: [{
+      name: 'eval_family',
+      type_name: 'OriginalInspectTaskId',
+      required: false,
+      default: 'inspect_original_inert',
+      choices: ['inspect_original_inert'],
+      is_list: false,
+    }],
+    ...overrides,
+  })
+}
+
 function makeTarget(name: string, modelName?: string): TargetInstance {
   return {
     target_registry_name: name,
@@ -1080,5 +1104,65 @@ describe('ScenarioDetail', () => {
     expect(within(preview).getByText('crescendo')).toBeInTheDocument()
     expect(within(preview).getByText('harmbench')).toBeInTheDocument()
     expect(within(preview).getByText('attempts').parentElement).toHaveTextContent('attempts3')
+  })
+
+  it('runs the approved original Task in one click without a target or Python editor', async () => {
+    const user = userEvent.setup()
+    mockGetScenario.mockResolvedValueOnce(makeOriginalScenario())
+    mockListTargets.mockRejectedValueOnce(new Error('No target service configured'))
+    renderDetail('/scanner/benchmark.inspect_original_inert')
+
+    const launch = await screen.findByRole('button', { name: 'Run original Inspect Task' })
+    expect(screen.getByText(/Approved Task ID:/)).toHaveTextContent('inspect_original_inert')
+    expect(screen.queryByTestId('scenario-target-select')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('dataset-override-input')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(mockEstimateRun).not.toHaveBeenCalled()
+
+    await user.click(launch)
+
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith({
+      scenario_name: 'benchmark.inspect_original_inert',
+      scenario_params: { eval_family: 'inspect_original_inert' },
+      max_concurrency: 1,
+    }))
+    expect(mockNavigate).toHaveBeenCalledWith(
+      '/scanner-history/sr-default',
+      { state: { scenarioName: 'benchmark.inspect_original_inert' } },
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('fails closed if the server catalog offers additional original Tasks', async () => {
+    mockGetScenario.mockResolvedValueOnce(makeOriginalScenario({
+      supported_parameters: [{
+        name: 'eval_family',
+        type_name: 'OriginalInspectTaskId',
+        required: false,
+        default: 'inspect_original_inert',
+        choices: ['inspect_original_inert', 'private_eval'],
+        is_list: false,
+      }],
+    }))
+    renderDetail('/scanner/benchmark.inspect_original_inert')
+
+    expect(await screen.findByRole('button', { name: 'Run original Inspect Task' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('Launch is disabled')
+    expect(mockStartRun).not.toHaveBeenCalled()
+  })
+
+  it('shows a rejected original-Task launch without implying success', async () => {
+    const user = userEvent.setup()
+    mockGetScenario.mockResolvedValueOnce(makeOriginalScenario())
+    mockStartRun.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 400, data: { detail: 'Approved Task source pin changed' } },
+    })
+    renderDetail('/scanner/benchmark.inspect_original_inert')
+    await user.click(await screen.findByRole('button', { name: 'Run original Inspect Task' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Approved Task source pin changed')
+    expect(screen.getByRole('button', { name: 'Run original Inspect Task' })).toBeEnabled()
+    expect(mockNavigate).not.toHaveBeenCalled()
   })
 })

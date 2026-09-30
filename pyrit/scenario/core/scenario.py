@@ -44,6 +44,7 @@ from pyrit.models import (
     ScenarioRunState,
     config_hash,
 )
+from pyrit.models.catalog.scenario import RunScenarioRequest
 from pyrit.models.parameter import ComponentType, Parameter, RegistryReference
 from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_target.common.target_requirements import TargetRequirements
@@ -309,6 +310,11 @@ class Scenario(ABC):
                     f"Task-owned Scenario metadata cannot override core identity fields: {sorted(reserved)}"
                 )
         self._initial_metadata = dict(metadata)
+
+    @classmethod
+    def validate_run_request(cls, *, request: RunScenarioRequest) -> None:
+        """Validate inputs before the backend runs any request-supplied initializers."""
+        return
 
     @classmethod
     def _common_scenario_parameters(cls) -> list[Parameter]:

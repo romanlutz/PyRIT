@@ -345,6 +345,54 @@ describe('ScenarioRunPage', () => {
     ])
   })
 
+  it('shows original Inspect evidence as unscored rather than zero attack success', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'InspectOriginalInertScenario',
+        scenario_registry_name: 'benchmark.inspect_original_inert',
+        scenario_version: 1,
+        status: 'COMPLETED',
+        created_at: '2026-01-01T00:00:00Z',
+        completed_at: '2026-01-01T00:01:00Z',
+        original_inspect_import: {
+          task_id: 'inspect_original_inert',
+          source_sha256: 'a'.repeat(64),
+          case_run_id: 'b'.repeat(64),
+          episode_id: `inspect-run-${'c'.repeat(32)}`,
+          inspect_run_id: 'inspect-123',
+          inspect_eval_id: 'eval-456',
+          archive_sha256: 'd'.repeat(64),
+          sample_count: 1,
+          original_final_score_events: 1,
+          score_status: 'unscored',
+        },
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: {
+          completed: 0,
+          planned: 1,
+          succeeded: 0,
+          success_percentage: 0,
+          errors: 0,
+          retries: 0,
+        },
+      },
+    }))
+
+    renderPage()
+
+    expect(screen.getByRole('heading', { name: 'Original Inspect import', level: 2 })).toBeInTheDocument()
+    expect(screen.getByText(/PyRIT result: unscored/)).toBeInTheDocument()
+    expect(screen.getByText('inspect-123')).toBeInTheDocument()
+    expect(screen.getByText('d'.repeat(64))).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar', { name: 'Overall scenario run progress' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Objective Scorer' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Attack success/)).not.toBeInTheDocument()
+  })
+
   it('renders contract-backed safe target and run configuration metadata', () => {
     mockHookState(makeState({
       run: {

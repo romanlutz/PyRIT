@@ -68,6 +68,40 @@ function makePage(overrides: Partial<ScenarioRunProgress> = {}): ScenarioRunProg
 }
 
 describe('scenarioRunProgressReducer', () => {
+  it('preserves the original Inspect evidence reference when a run summary arrives', () => {
+    const page = makePage()
+    const reference = {
+      task_id: 'inspect_original_inert' as const,
+      source_sha256: 'a'.repeat(64),
+      case_run_id: 'b'.repeat(64),
+      episode_id: `inspect-run-${'c'.repeat(32)}`,
+      inspect_run_id: 'run',
+      inspect_eval_id: 'eval',
+      archive_sha256: 'd'.repeat(64),
+      sample_count: 1,
+      original_final_score_events: 1,
+      score_status: 'unscored' as const,
+    }
+    const state = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'apply-run-summary',
+      run: {
+        ...page.run,
+        updated_at: '2026-01-01T00:01:00Z',
+        techniques_used: [],
+        total_attacks: 1,
+        completed_attacks: 0,
+        objective_achieved_rate: 0,
+        failed_attacks: [],
+        attack_retries: [],
+        total_retries: 0,
+        labels: {},
+        original_inspect_import: reference,
+      },
+    })
+
+    expect(state.run?.original_inspect_import).toEqual(reference)
+  })
+
   it('merges duplicated pages idempotently and uses the latest backend summary', () => {
     const result = makeResult('attempt-1', 1)
     const first = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {

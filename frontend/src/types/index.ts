@@ -664,7 +664,7 @@ export interface ListRegisteredScenariosResponse {
 
 export interface RunScenarioRequest {
   scenario_name: string
-  target_name: string
+  target_name?: string | null
   initializers?: string[] | null
   techniques?: string[] | null
   dataset_names?: string[] | null
@@ -828,6 +828,19 @@ export interface AttackRetrySummary {
 
 export type ScenarioRunState = 'CREATED' | 'QUEUED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
+export interface OriginalInspectImportSummary {
+  task_id: 'inspect_original_inert'
+  source_sha256: string
+  case_run_id: string
+  episode_id: string
+  inspect_run_id: string
+  inspect_eval_id: string
+  archive_sha256: string
+  sample_count: number
+  original_final_score_events: number
+  score_status: 'unscored'
+}
+
 export interface ScenarioOverloadSummary {
   component_role: string
   count: number
@@ -868,6 +881,7 @@ export interface ScenarioRunSummary {
   queue_position?: number | null
   active_scenario_result_id?: string | null
   overload_summaries?: ScenarioOverloadSummary[]
+  original_inspect_import?: OriginalInspectImportSummary | null
 }
 
 export interface ScenarioTargetSummary {
@@ -929,6 +943,7 @@ export interface ScenarioProgressHeader {
   queue_position?: number | null
   active_scenario_result_id?: string | null
   overload_summaries?: ScenarioOverloadSummary[]
+  original_inspect_import?: OriginalInspectImportSummary | null
 }
 
 export interface ScenarioQueueEntry {

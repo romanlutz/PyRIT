@@ -168,17 +168,22 @@ If you are contributing to PyRIT, that work will most likely land in one of the 
 - No result should depend on previous results (that is an attack's job)
 - **Does not own**: the per-objective conversation logic. Branching, turn-by-turn adaptation, and scoring-based decisions belong to the attack; a scenario selects and packages existing attack techniques rather than defining new attack algorithms or datasets.
 
-`TaskOwnedScenario` is an explicit opt-in for evaluation harnesses whose task creates its
-own target and commits its own grade. It schedules one `TaskOwnedAtomicAttack` per
-source Task/Sample, using a separate target-free context; ordinary `Scenario` runs
-still require a real external target and scorer. The injected case executor returns
-the ID and PyRIT provenance of the already committed original benchmark `Score`.
+`TaskOwnedScenario` is an explicit opt-in for evaluation harnesses whose task
+owns execution and original evidence. It schedules one case-identified unit of
+work per source Task/Sample using a separate target-free context; ordinary
+`Scenario` runs still require a real external target and scorer. A *graded*
+`TaskOwnedAtomicAttack` requires the injected executor to return the ID and
+PyRIT provenance of the already committed original benchmark `Score`.
 The adapter must independently validate the original Task/Sample, scorer identity,
 and ScoreEvent ID/hash against the retained evaluation log and source manifest
 **before** stamping `benchmark_original` and committing the Score. Core verifies
 the stored role, case-run ID, and PyRIT Score creator hash; those checks cannot
 attest an external scorer or ScoreEvent. PyRIT links that existing score to one
 `AttackResult`; it does not rescore the case or create a fake terminal score.
+The separate public `benchmark.inspect_original_inert` case instead retains only
+an original `.eval` reference in Scenario metadata. Its successful import is
+**unscored** in PyRIT: it creates no `Score` or `AttackResult` until an adapter
+can independently qualify the original scoring evidence.
 Source case IDs and stable public configuration fingerprints are separate from the
 fresh run-instance ID, so identical reruns remain distinct. V1 task-owned runs do
 not automatically retry or resume after an ambiguous post-score persistence failure.

@@ -31,6 +31,7 @@ import type { RegisteredScenario, ScenarioDatasetSummary } from '@/types'
 import { fetchAllPages } from '@/utils/fetchAllPages'
 
 import { useScenarioCatalogStyles } from './ScenarioCatalog.styles'
+import { ORIGINAL_INERT_SCENARIO_NAME } from './originalInspectInert'
 import {
   ScenarioRunEstimateSummary,
 } from './ScenarioRunEstimate'
@@ -425,6 +426,10 @@ export default function ScenarioCatalog() {
           <MessageBar intent="error">
             <MessageBarBody>{error}</MessageBarBody>
           </MessageBar>
+          <Text>The approved original Inspect Task can still be opened without a configured target.</Text>
+          <Link to={`/scanner/${encodeURIComponent(ORIGINAL_INERT_SCENARIO_NAME)}`}>
+            Open approved original Inspect Task
+          </Link>
           <Button
             className={styles.touchTarget}
             appearance="primary"

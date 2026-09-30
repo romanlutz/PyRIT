@@ -92,6 +92,7 @@ export function scenarioRunProgressReducer(
         queue_position: action.run.queue_position,
         active_scenario_result_id: action.run.active_scenario_result_id,
         overload_summaries: action.run.overload_summaries ?? [],
+        original_inspect_import: action.run.original_inspect_import,
       },
       error: null,
       stale: false,

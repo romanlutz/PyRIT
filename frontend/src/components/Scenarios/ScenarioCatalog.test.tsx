@@ -371,6 +371,36 @@ describe('ScenarioCatalog', () => {
     expect(screen.getByTestId('retry-btn')).toBeInTheDocument()
   })
 
+  it('links to the approved target-free Task if unrelated catalog metadata cannot load', async () => {
+    mockListCatalog.mockRejectedValueOnce(new Error('OPENAI_CHAT_MODEL is required'))
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    expect(await screen.findByTestId('error-state')).toBeInTheDocument()
+    expect(screen.getByText(/OPENAI_CHAT_MODEL is required/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Open approved original Inspect Task' })).toHaveAttribute(
+      'href',
+      '/scanner/benchmark.inspect_original_inert',
+    )
+  })
+
+  it('automatically displays the approved Task when it is in the Scenario registry catalog', async () => {
+    mockListCatalog.mockResolvedValue({
+      items: [makeScenario({
+        scenario_name: 'benchmark.inspect_original_inert',
+        scenario_type: 'InspectOriginalInertScenario',
+      })],
+      pagination: { limit: 200, has_more: false },
+    })
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    expect(await screen.findByRole('link', { name: 'benchmark.inspect_original_inert' })).toHaveAttribute(
+      'href',
+      '/scanner/benchmark.inspect_original_inert',
+    )
+  })
+
   it('retries the fetch when Retry is clicked', async () => {
     const user = userEvent.setup()
     mockListCatalog

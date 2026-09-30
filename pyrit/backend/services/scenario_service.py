@@ -137,7 +137,7 @@ class ScenarioService:
         Returns:
             RegisteredScenario | None: The catalog entry, or None when it is not registered.
         """
-        metadata = self._registry.get_registered_class_metadata(scenario_name)
+        metadata = self._get_metadata(scenario_name=scenario_name)
         if metadata is not None:
             estimate = await self._get_default_run_size_estimate_async(metadata=metadata)
             return _metadata_to_registered_scenario(metadata=metadata, default_run_size=estimate)
@@ -159,7 +159,7 @@ class ScenarioService:
         Returns:
             ScenarioRunSizeEstimate | None: Estimate, or ``None`` when the scenario is unknown.
         """
-        metadata = self._registry.get_registered_class_metadata(scenario_name)
+        metadata = self._get_metadata(scenario_name=scenario_name)
         if metadata is None:
             return None
 
@@ -172,6 +172,21 @@ class ScenarioService:
                 scenario_name=scenario_name,
                 request=request,
             )
+
+    def _get_metadata(self, *, scenario_name: str) -> ScenarioMetadata | None:
+        """
+        Resolve the approved inert Task without instantiating unrelated model-backed Scenarios.
+
+        Returns:
+            ScenarioMetadata | None: Registered metadata for the selected Scenario.
+        """
+        if scenario_name == "benchmark.inspect_original_inert":
+            try:
+                scenario_class = self._registry.get_class(scenario_name)
+            except KeyError:
+                return None
+            return self._registry.get_class_metadata(scenario_class)
+        return self._registry.get_registered_class_metadata(scenario_name)
 
     async def _get_default_run_size_estimate_async(self, *, metadata: ScenarioMetadata) -> ScenarioRunSizeEstimate:
         """Return a cached, cancellation-safe scenario-owned estimate."""

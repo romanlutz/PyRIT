@@ -62,6 +62,7 @@ from pyrit.models import (
 from pyrit.models.catalog.scenario import (
     AttackErrorSummary,
     AttackRetrySummary,
+    OriginalInspectImportSummary,
     RunScenarioRequest,
     ScenarioOverloadSummary,
     ScenarioRunListItem,
@@ -426,8 +427,17 @@ class ScenarioRunService:
             ValueError: If scenario, target, initializer, or technique cannot be found.
         """
         scenario_class = self._configuration_resolver.resolve_scenario_class(scenario_name=request.scenario_name)
+        scenario_class.validate_run_request(request=request)
+        task_owned = getattr(scenario_class, "TASK_OWNED", False) is True
+        if task_owned and request.target_name is not None:
+            raise ValueError("Task-owned scenarios cannot use a global objective target.")
         await self._run_initializers_async(request=request)
-        objective_target = self._configuration_resolver.resolve_target(target_name=request.target_name)
+        if task_owned:
+            objective_target = None
+        else:
+            if not request.target_name:
+                raise ValueError("target_name is required for a target-owned Scenario.")
+            objective_target = self._configuration_resolver.resolve_target(target_name=request.target_name)
         init_kwargs = self._configuration_resolver.resolve_configuration(
             scenario_name=request.scenario_name,
             scenario_class=scenario_class,
@@ -437,7 +447,9 @@ class ScenarioRunService:
             max_dataset_size=request.max_dataset_size,
             dataset_filters=request.dataset_filters,
             include_baseline=request.include_baseline,
-            max_concurrency=request.max_concurrency,
+            max_concurrency=(
+                request.max_concurrency if request.max_concurrency is not None else (None if task_owned else 10)
+            ),
             max_retries=request.max_retries,
             memory_labels=request.labels,
         )
@@ -1208,6 +1220,7 @@ class ScenarioRunService:
         target, datasets_used, scenario_parameters = self._safe_run_metadata(
             scenario_identifier=getattr(scenario_result, "scenario_identifier", None)
         )
+        original_inspect_import = self._original_inspect_import(scenario_result=scenario_result)
 
         # Surface per-attack errors and retry pressure regardless of overall run status:
         # a COMPLETED scenario can still hide errored objectives or rate-limit retries.
@@ -1292,6 +1305,7 @@ class ScenarioRunService:
             queue_position=queue_position,
             active_scenario_result_id=active_scenario_result_id,
             overload_summaries=self._build_overload_summaries(retry_events=overload_events),
+            original_inspect_import=original_inspect_import,
         )
 
     @staticmethod
@@ -1482,6 +1496,26 @@ class ScenarioRunService:
             list(scenario_identifier.datasets or []),
             ScenarioRunService._safe_scenario_parameters(parameters=dict(scenario_identifier.params)),
         )
+
+    @staticmethod
+    def _original_inspect_import(*, scenario_result: ScenarioResult) -> OriginalInspectImportSummary | None:
+        """
+        Read the unscored original archive reference without inventing an AttackResult.
+
+        Returns:
+            OriginalInspectImportSummary | None: The validated import, or none while it is pending.
+
+        Raises:
+            ValueError: If a completed run lacks its import reference.
+        """
+        if scenario_result.scenario_name != "InspectOriginalInertScenario":
+            return None
+        raw = (scenario_result.metadata or {}).get(OriginalInspectImportSummary.METADATA_KEY)
+        if raw is None:
+            if scenario_result.scenario_run_state == ScenarioRunState.COMPLETED:
+                raise ValueError("Completed original Inspect Scenario has no persisted import reference.")
+            return None
+        return OriginalInspectImportSummary.model_validate(raw)
 
     @staticmethod
     def _build_overload_summaries(*, retry_events: Sequence[Any]) -> list[ScenarioOverloadSummary]:
@@ -1805,6 +1839,7 @@ class ScenarioRunService:
         )
         scenario_identifier = header_result.scenario_identifier
         target, datasets_used, scenario_parameters = self._safe_run_metadata(scenario_identifier=scenario_identifier)
+        original_inspect_import = self._original_inspect_import(scenario_result=header_result)
         if plan is not None:
             techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
         else:
@@ -1828,6 +1863,7 @@ class ScenarioRunService:
                 queue_position=queue_position,
                 active_scenario_result_id=active_scenario_result_id,
                 overload_summaries=self._build_overload_summaries(retry_events=overload_events),
+                original_inspect_import=original_inspect_import,
             ),
             plan=response_plan,
             results=results,

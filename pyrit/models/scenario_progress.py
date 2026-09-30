@@ -9,7 +9,11 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
-from pyrit.models.catalog.scenario import ScenarioOverloadSummary, ScenarioTargetSummary  # noqa: TC001
+from pyrit.models.catalog.scenario import (  # noqa: TC001
+    OriginalInspectImportSummary,
+    ScenarioOverloadSummary,
+    ScenarioTargetSummary,
+)
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
 from pyrit.models.results.attack_result import AttackOutcome
 from pyrit.models.results.scenario_result import ScenarioRunState
@@ -122,6 +126,7 @@ class ScenarioProgressHeader(BaseModel):
     queue_position: int | None = Field(None, ge=1)
     active_scenario_result_id: str | None = None
     overload_summaries: list["ScenarioOverloadSummary"] = Field(default_factory=list)
+    original_inspect_import: "OriginalInspectImportSummary | None" = None
 
 
 class ScenarioProgressScore(BaseModel):

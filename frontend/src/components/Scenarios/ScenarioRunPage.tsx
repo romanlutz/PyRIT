@@ -68,6 +68,7 @@ import {
 } from '@/utils/scenarioRunProgress'
 
 import AttackExecutionTable from './AttackExecutionTable'
+import { ORIGINAL_INERT_SCENARIO_TYPE } from './originalInspectInert'
 import { ObjectiveDetailsDialog, TechniqueDetailsDialog } from './ScenarioRunDialogs'
 import { useScenarioRunPageStyles } from './ScenarioRunPage.styles'
 import ScenarioQueue from './ScenarioQueue'
@@ -273,6 +274,7 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
   }
 
   const run = state.run
+  const isOriginalInert = run.scenario_name === ORIGINAL_INERT_SCENARIO_TYPE
   const {
     overall,
     objective_scorer: objectiveScorer,
@@ -452,6 +454,44 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
           </MessageBar>
         )}
 
+        {isOriginalInert ? (
+          <section className={styles.section} aria-label="Original Inspect import status">
+            <Text as="h2" size={500} weight="semibold">Original Inspect import</Text>
+            {run.original_inspect_import ? (
+              <>
+                <MessageBar intent={run.status === 'COMPLETED' ? 'info' : 'warning'}>
+                  <MessageBarBody>
+                    {run.status === 'COMPLETED'
+                      ? 'The unchanged Task ran and its exact .eval was imported into PyRIT SQLite.'
+                      : 'Original .eval evidence was retained, but this Scenario did not complete successfully.'}
+                    {' '}PyRIT result: unscored. No PyRIT Score or AttackResult was created.
+                  </MessageBarBody>
+                </MessageBar>
+                <div className={styles.summaryGrid}>
+                  <ConfigurationItem label="Task ID" value={run.original_inspect_import.task_id} />
+                  <ConfigurationItem label="Inspect run ID" value={run.original_inspect_import.inspect_run_id} />
+                  <ConfigurationItem label="PyRIT evidence ID" value={run.original_inspect_import.episode_id} />
+                  <ConfigurationItem label="Case-run ID" value={run.original_inspect_import.case_run_id} />
+                  <ConfigurationItem label="Source SHA256" value={run.original_inspect_import.source_sha256} />
+                  <ConfigurationItem label="Original .eval SHA256" value={run.original_inspect_import.archive_sha256} />
+                  <ConfigurationItem
+                    label="Original score events retained"
+                    value={String(run.original_inspect_import.original_final_score_events)}
+                  />
+                </div>
+              </>
+            ) : (
+              <Text>
+                {run.status === 'COMPLETED'
+                  ? 'This run has no verified original Inspect import. Do not treat it as a completed evaluation.'
+                  : run.status === 'FAILED' || run.status === 'CANCELLED'
+                    ? 'The original Inspect import did not complete. Check the run error and reconcile any retained log.'
+                    : 'Awaiting the original Task and its .eval import. No PyRIT grade is available.'}
+              </Text>
+            )}
+          </section>
+        ) : (
+        <>
         <section className={styles.section} aria-labelledby="overall-progress-heading">
           <div className={styles.sectionHeading}>
             <Text as="h2" id="overall-progress-heading" size={500} weight="semibold">
@@ -675,6 +715,8 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
             </div>
           )}
         </section>
+        </>
+        )}
       </div>
 
       <Dialog
