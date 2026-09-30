@@ -99,6 +99,8 @@ class InspectOriginalScorePolicy:
             type(threshold) not in (int, float) or not 0 <= threshold <= 1 or not math.isfinite(threshold)
         ):
             raise ValueError("Original Inspect success threshold must be a finite number between zero and one.")
+        if threshold is not None:
+            object.__setattr__(self, "success_threshold", 0.0 if threshold == 0 else float(threshold))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -332,6 +334,7 @@ class InspectOriginalEvalImporter:
                 snapshot=existing,
                 case_run_ids=case_run_ids,
                 score_policy=score_policy,
+                relogged_samples=relogged_samples,
             )
         if live_run_id is not None:
             if existing is None or existing.finalized_at is not None or existing.run.binding_name != "inspect-original":
@@ -359,27 +362,27 @@ class InspectOriginalEvalImporter:
             )
         self._write_source(run_id=episode_id, key=self.ARCHIVE_KEY, content=archive)
         self._write_source(run_id=episode_id, key=self.RESOLVED_KEY, content=resolved)
-        gaps, optional = self._project_log(
-            log=log, episode_id=episode_id, archive_sha=archive_sha, case_run_ids=case_run_ids
+        optional = self._project_log(log=log, episode_id=episode_id, archive_sha=archive_sha, case_run_ids=case_run_ids)
+        source_gaps = self._source_log_gaps(
+            log=log,
+            resolved=resolved,
+            relogged_samples=relogged_samples,
+            require_no_model_calls=require_no_model_calls,
         )
-        if relogged_samples:
-            gaps.append(
-                "Inspect archive re-logged a Sample; earlier ZIP member events were retained only as raw bytes."
-            )
-        if b"attachment://" in resolved or b"tc://" in resolved:
-            gaps.append("Original Inspect EvalLog contains unresolved attachment references.")
-        if require_no_model_calls and any(
-            event.event_type == "model" for event in self._capture.get_episode(run_id=episode_id).events
-        ):
-            gaps.append("The approved inert original Task unexpectedly invoked an Inspect model.")
         snapshot = self._capture.finalize_unscored_inspect_capture(
             run_id=episode_id,
             expected_samples=len(log.samples or []),
-            required_gaps=tuple(gaps),
+            required_gaps=tuple(source_gaps),
             optional_gaps=(*optional, *live_gaps),
         )
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
-        self._verify_event_readback(log=log, snapshot=snapshot, archive_sha=archive_sha, case_run_ids=case_run_ids)
+        self._verify_event_readback(
+            log=log,
+            snapshot=snapshot,
+            archive_sha=archive_sha,
+            case_run_ids=case_run_ids,
+            required_source_gaps=source_gaps,
+        )
         case_results = (
             self._ensure_case_results(
                 log=log,
@@ -423,13 +426,8 @@ class InspectOriginalEvalImporter:
 
     def _project_log(
         self, *, log: EvalLog, episode_id: str, archive_sha: str, case_run_ids: tuple[str, ...]
-    ) -> tuple[list[str], list[str]]:
-        gaps: list[str] = []
+    ) -> list[str]:
         optional: list[str] = []
-        if log.status != "success" or log.invalidated or log.error is not None:
-            gaps.append("Original Inspect run did not finish successfully with an unmodified EvalLog.")
-        if not log.samples:
-            gaps.append("Original Inspect log has no fully retained Sample events.")
         sequence = 1
         seen_sample_uuids: set[str] = set()
         for sample_index, sample in enumerate(log.samples or [], start=1):
@@ -490,7 +488,37 @@ class InspectOriginalEvalImporter:
                 if projection.unprojected_messages
                 else []
             )
-        return gaps, optional
+        return optional
+
+    @staticmethod
+    def _source_log_gaps(
+        *, log: EvalLog, resolved: bytes, relogged_samples: bool, require_no_model_calls: bool
+    ) -> list[str]:
+        """
+        Recompute required run-level gaps from the original typed log and archive.
+
+        Returns:
+            list[str]: Source-required gaps that must remain in the sealed episode.
+        """
+        gaps: list[str] = []
+        if log.status != "success" or log.invalidated or log.error is not None:
+            gaps.append("Original Inspect run did not finish successfully with an unmodified EvalLog.")
+        if not log.samples:
+            gaps.append("Original Inspect log has no fully retained Sample events.")
+        if relogged_samples:
+            gaps.append(
+                "Inspect archive re-logged a Sample; earlier ZIP member events were retained only as raw bytes."
+            )
+        if b"attachment://" in resolved or b"tc://" in resolved:
+            gaps.append("Original Inspect EvalLog contains unresolved attachment references.")
+        if require_no_model_calls and any(
+            event.event == "model"
+            for sample in log.samples or []
+            for events in (sample.events, *(retry.events or [] for retry in sample.error_retries or []))
+            for event in events
+        ):
+            gaps.append("The approved inert original Task unexpectedly invoked an Inspect model.")
+        return gaps
 
     @staticmethod
     def _conversation_id(*, episode_id: str, run_id: str, sample: EvalSample, sample_index: int) -> str:
@@ -539,6 +567,7 @@ class InspectOriginalEvalImporter:
         snapshot: NativeCyberEpisodeSnapshot,
         case_run_ids: tuple[str, ...],
         score_policy: InspectOriginalScorePolicy | None,
+        relogged_samples: bool,
     ) -> InspectOriginalImport:
         if snapshot.run.binding_name != "inspect-original" or snapshot.run.source_session_id != log.eval.run_id:
             raise ValueError("Prior Inspect import belongs to another original run.")
@@ -556,7 +585,15 @@ class InspectOriginalEvalImporter:
         ):
             raise ValueError("Existing Inspect import has incomplete or changed source bytes.")
         self._verify_source_readback(snapshot=snapshot, archive_sha=archive_sha, resolved=resolved)
-        self._verify_event_readback(log=log, snapshot=snapshot, archive_sha=archive_sha, case_run_ids=case_run_ids)
+        self._verify_event_readback(
+            log=log,
+            snapshot=snapshot,
+            archive_sha=archive_sha,
+            case_run_ids=case_run_ids,
+            required_source_gaps=self._source_log_gaps(
+                log=log, resolved=resolved, relogged_samples=relogged_samples, require_no_model_calls=False
+            ),
+        )
         case_results = self._ensure_case_results(
             log=log,
             snapshot=snapshot,
@@ -837,9 +874,13 @@ class InspectOriginalEvalImporter:
         snapshot: NativeCyberEpisodeSnapshot,
         archive_sha: str,
         case_run_ids: tuple[str, ...],
+        required_source_gaps: list[str],
     ) -> None:
+        if snapshot.coverage_complete != (not snapshot.gaps) or not set(required_source_gaps).issubset(snapshot.gaps):
+            raise ValueError("Original Inspect stored run coverage differs from its source coverage.")
         expected: list[NativeCyberCapturedEvent] = []
         sequence = 1
+        seen_sample_uuids: set[str] = set()
         for sample_index, sample in enumerate(log.samples or [], start=1):
             projection = project_inspect_sample(
                 sample=sample,
@@ -856,6 +897,21 @@ class InspectOriginalEvalImporter:
                 ),
                 case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
             )
+            turn = snapshot.turns[sample_index - 1]
+            source_id = sample.uuid if sample.uuid and sample.uuid not in seen_sample_uuids else None
+            source_gaps = self._sample_gaps(sample=sample, projection=projection)
+            if source_id is None and sample.uuid:
+                source_gaps.append("Original Inspect sample UUID is duplicated across epochs or samples.")
+            if sample.uuid:
+                seen_sample_uuids.add(sample.uuid)
+            if (
+                turn.turn_index != sample_index
+                or turn.source_turn_id != source_id
+                or turn.source_complete != (not turn.gaps)
+                or not set(turn.gaps).issubset(snapshot.gaps)
+                or not set(source_gaps).issubset(turn.gaps)
+            ):
+                raise ValueError("Original Inspect stored Sample coverage differs from its source coverage.")
             expected.extend(projection.events)
             sequence += len(projection.events)
         cursor = 0
@@ -868,13 +924,18 @@ class InspectOriginalEvalImporter:
             )
             for captured in events:
                 cursor += 1
-                if (
-                    cursor > len(expected)
-                    or captured.source != expected[cursor - 1].source
-                    or config_hash(captured.event.model_dump(mode="json"))
-                    != config_hash(expected[cursor - 1].event.model_dump(mode="json"))
-                ):
+                if cursor > len(expected):
+                    raise ValueError("Original Inspect projected event count changed in PyRIT memory.")
+                original = expected[cursor - 1]
+                if captured.source != original.source or config_hash(
+                    captured.event.model_dump(mode="json")
+                ) != config_hash(original.event.model_dump(mode="json")):
                     raise ValueError("Original Inspect projected event differs from its typed source.")
+                if (
+                    original.event.event_type != "inspect.projection.sample"
+                    and captured.captured_at != original.captured_at
+                ):
+                    raise ValueError("Original Inspect event timestamp differs from its typed source.")
             if len(events) < self._capture.MAX_EVENT_BATCH:
                 break
         if cursor != len(snapshot.events) or cursor != len(expected):

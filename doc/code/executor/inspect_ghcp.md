@@ -191,31 +191,37 @@ declared final sample score must match exactly one non-intermediate final
 ScoreEvent in the final attempt, even when it is not the primary. Matched
 booleans become PyRIT true/false values and finite numbers in `[0, 1]`
 become float-scale values; unsupported values, missing/mismatched events,
-incomplete Sample or run-level capture and missing selected primaries create a value-less
-UNDETERMINED Score. The original value still survives in the exact `.eval`.
+incomplete Sample or run-level capture and missing selected primaries create
+a value-less UNDETERMINED Score. The original value still survives in the
+exact `.eval`.
 
 Even a COMPLETE imported Score leaves `AttackOutcome` UNDETERMINED until a
 caller supplies **both** a matching source case inventory/run and a
 task-specific `InspectOriginalScorePolicy` with `success_direction` set to
 `InspectSuccessDirection.AT_LEAST` or `AT_MOST` and a finite
 `success_threshold` in `[0, 1]`. Only then does that explicit threshold
-map a verified scalar to SUCCESS or FAILURE. An actual recorded Inspect
-Sample/run exception maps to ERROR with an undetermined Score, never to
-defender FAILURE; a non-success status without an exception remains
-UNDETERMINED. An offline AttackResult has zero executed PyRIT turns;
-the original Inspect turn count remains source metadata when available.
+map a verified scalar to SUCCESS or FAILURE. Equivalent numeric thresholds
+(for example, `1`/`1.0` or `-0.0`/`0.0`) share one canonical import identity.
+An actual recorded Inspect Sample/run exception maps to ERROR with an
+undetermined Score, never to defender FAILURE; a non-success status
+without an exception remains UNDETERMINED. An offline AttackResult has
+zero executed PyRIT turns; the original Inspect turn count remains
+source metadata when available.
 Offline Scores are source-attributed, **not** task-owned
 `benchmark_original` scorer attestations or independent external-activity
 proof. The allowlisted live original Task runner still creates neither
 per-case Score nor AttackResult.
 
 Re-import with the same archive, case bindings and policy rechecks the
-exact source bytes, typed event payloads and persisted Score/AttackResult
-links without rerunning Inspect or creating duplicates. Missing or
-tampered projection rows fail closed. Score and AttackResult rows are
-committed atomically; an interrupted import after the evidence episode
-is sealed but before projection publication requires explicit
-reconciliation rather than an automatic repair.
+exact source bytes, run/Sample coverage derived from the typed source,
+every original event's capture timestamp, typed event payloads, and
+persisted Score/AttackResult links without rerunning Inspect or creating
+duplicates. The synthetic per-Sample summary has no original event
+timestamp to check. Missing or tampered projection rows fail closed.
+Score and AttackResult rows are committed atomically; an interrupted
+import after the evidence episode is sealed but before projection
+publication requires explicit reconciliation rather than an automatic
+repair.
 
 For an unchanged-runner proof, `run_original_inert_eval_async(memory=...,
 log_dir=...)` invokes only the separately SHA-pinned public

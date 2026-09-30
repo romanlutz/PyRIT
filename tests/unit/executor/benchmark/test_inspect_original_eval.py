@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -40,6 +40,7 @@ from pyrit.memory.memory_models import (
     NativeCyberEpisodeEntry,
     NativeCyberEventEntry,
     NativeCyberRawChunkEntry,
+    NativeCyberTurnEntry,
     ScoreEntry,
 )
 from pyrit.models import AttackOutcome, EvalCaseRef, EvalRunRef, ScoreStatus
@@ -739,6 +740,91 @@ async def test_task_specific_success_policy_must_match_retained_task_and_bound_c
 
 
 @pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("source_gap", ["missing_completion", "cancelled_run"])
+async def test_reimport_rejects_forged_source_coverage_and_case_verdict(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, source_gap: str
+) -> None:
+    assert original_log_async.samples
+    sample = original_log_async.samples[0]
+    typed = (
+        original_log_async.model_copy(update={"samples": [sample.model_copy(update={"completed_at": None})]})
+        if source_gap == "missing_completion"
+        else original_log_async.model_copy(update={"status": "cancelled"})
+    )
+    archive = tmp_path / f"source-gap-{source_gap}.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=typed.samples or [])
+    policy = InspectOriginalScorePolicy(
+        task_name=typed.eval.task,
+        task_version=str(typed.eval.task_version),
+        primary_scorer="original_inert_scorer",
+        success_direction=InspectSuccessDirection.AT_LEAST,
+        success_threshold=0.5,
+    )
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+    [case] = imported.case_results
+    assert not imported.episode.coverage_complete
+    assert case.score.status is ScoreStatus.UNDETERMINED
+    assert case.attack_result.outcome is AttackOutcome.UNDETERMINED
+    with sqlite_instance.get_session() as session, session.begin():
+        episode = session.get(NativeCyberEpisodeEntry, imported.episode.run.run_id)
+        turn = session.get(NativeCyberTurnEntry, (imported.episode.run.run_id, 1))
+        score = session.get(ScoreEntry, case.score.id)
+        result = session.get(AttackResultEntry, uuid.UUID(case.attack_result.attack_result_id))
+        assert episode is not None and turn is not None and score is not None and result is not None
+        episode.capture_gaps = []
+        episode.coverage_complete = True
+        turn.capture_gaps = []
+        turn.source_complete = True
+        score.status = ScoreStatus.COMPLETE.value
+        score.score_value = "1.0"
+        score.score_value_description = None
+        result.outcome = AttackOutcome.SUCCESS.value
+        result.outcome_reason = (
+            "Original Inspect original_inert_scorer compared using the explicit at_least 0.5 success criterion."
+        )
+    with pytest.raises(ValueError, match="source coverage"):
+        await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policy)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(("first_threshold", "same_threshold"), [(1, 1.0), (-0.0, 0.0)])
+async def test_equivalent_thresholds_reuse_one_import_and_case_projection(
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    original_log_async: EvalLog,
+    first_threshold: float,
+    same_threshold: float,
+) -> None:
+    assert original_log_async.samples
+    archive = tmp_path / "equivalent-policy.eval"
+    await asyncio.to_thread(write_eval_log, original_log_async, location=archive, format="eval")
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=original_log_async.samples)
+    policies = [
+        InspectOriginalScorePolicy(
+            task_name=original_log_async.eval.task,
+            task_version=str(original_log_async.eval.task_version),
+            primary_scorer="original_inert_scorer",
+            success_direction=InspectSuccessDirection.AT_LEAST,
+            success_threshold=threshold,
+        )
+        for threshold in (first_threshold, same_threshold)
+    ]
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    first = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policies[0])
+    same = await importer.import_eval_log_async(path=archive, cases=cases, run=run, score_policy=policies[1])
+    assert first.episode.run.run_id == same.episode.run.run_id
+    assert first.case_results == same.case_results
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(NativeCyberEpisodeEntry.run_id))) == 1
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 1
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
+
+
+@pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize("corrupt", ["archive", "event", "event_rehashed"])
 async def test_reimport_rejects_tampered_original_archive_or_event_payload(
     tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, corrupt: str
@@ -770,6 +856,68 @@ async def test_reimport_rejects_tampered_original_archive_or_event_payload(
     with sqlite_instance.get_session() as session:
         assert session.scalar(select(func.count(ScoreEntry.id))) == 1
         assert session.scalar(select(func.count(AttackResultEntry.id))) == 1
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("source_event", ["first", "final_score", "retry_intermediate"])
+async def test_reimport_rejects_tampered_original_event_timestamp_without_payload_change(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog, source_event: str
+) -> None:
+    assert original_log_async.samples
+    sample = original_log_async.samples[0]
+    retry_event: ScoreEvent | None = None
+    if source_event == "retry_intermediate":
+        retry_event = ScoreEvent(
+            uuid=f"retry-{uuid.uuid4().hex}",
+            scorer="original_inert_scorer",
+            score=Score(value=0.25),
+            intermediate=True,
+        )
+        retry = EvalRetryError(
+            message="Inert earlier attempt failed",
+            traceback="fixture",
+            traceback_ansi="fixture",
+            events=[retry_event],
+        )
+        sample = sample.model_copy(update={"error_retries": [retry]})
+    typed = original_log_async.model_copy(update={"samples": [sample]})
+    archive = tmp_path / f"event-time-{source_event}.eval"
+    await asyncio.to_thread(write_eval_log, typed, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive)
+    if source_event == "retry_intermediate":
+        assert retry_event is not None
+        source_id = retry_event.uuid
+    elif source_event == "final_score":
+        source_id = next(event.uuid for event in sample.events if isinstance(event, ScoreEvent))
+    else:
+        source_id = imported.episode.events[0].observed_event_id
+    event_summary = next(event for event in imported.episode.events if event.observed_event_id == source_id)
+    with sqlite_instance.get_session() as session, session.begin():
+        event = session.get(NativeCyberEventEntry, (imported.episode.run.run_id, event_summary.sequence))
+        assert event is not None and event.event_type != "inspect.projection.sample"
+        original_payload_digest = event.payload_sha256
+        event.captured_at += timedelta(days=1)
+        assert event.payload_sha256 == original_payload_digest
+    with pytest.raises(ValueError, match="timestamp differs from its typed source"):
+        await importer.import_eval_log_async(path=archive)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_reimport_does_not_require_a_source_timestamp_for_synthetic_sample_summary(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog
+) -> None:
+    archive = tmp_path / "summary-time.eval"
+    await asyncio.to_thread(write_eval_log, original_log_async, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive)
+    summary = next(event for event in imported.episode.events if event.event_type == "inspect.projection.sample")
+    with sqlite_instance.get_session() as session, session.begin():
+        event = session.get(NativeCyberEventEntry, (imported.episode.run.run_id, summary.sequence))
+        assert event is not None
+        event.captured_at += timedelta(seconds=10)
+    repeated = await importer.import_eval_log_async(path=archive)
+    assert repeated.case_results == imported.case_results
 
 
 @pytest.mark.usefixtures("patch_central_database")
