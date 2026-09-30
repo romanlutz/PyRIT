@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import math
 import os
@@ -416,6 +418,26 @@ class DockerEngineClient:
         request = self._client.build_request(method, self._prefix + path, json=body)
         request.headers.pop("cookie", None)
         return request
+
+    @staticmethod
+    def _check_archive_directory_stat(*, headers: dict[str, str], path: PurePosixPath, private: bool) -> None:
+        encoded = headers.get("x-docker-container-path-stat", "")
+        if not encoded or len(encoded) > 4096:
+            raise DockerEngineError("Engine archive directory stat is missing or oversized.")
+        try:
+            value = json.loads(base64.b64decode(encoded, validate=True))
+        except (ValueError, UnicodeError, binascii.Error):
+            raise DockerEngineError("Engine archive directory stat is malformed.") from None
+        if (
+            not isinstance(value, dict)
+            or value.get("name") != path.name
+            or value.get("linkTarget") != ""
+            or type(value.get("mode")) is not int
+        ):
+            raise DockerEngineError("Engine archive directory identity is missing, linked or malformed.")
+        mode = value["mode"]
+        if mode & ~0o777 != 1 << 31 or (private and mode & 0o777 != 0o700):
+            raise DockerEngineError("Engine archive directory has an unsafe type or private permissions.")
 
     async def _config_archive_async(
         self,

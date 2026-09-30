@@ -162,8 +162,59 @@ rollback.
 It is not a durable raw-log or resource schema. The workflow records native
 events separately through `memory.native_cyber_evidence`. Tests here use
 only fake one-, two- and four-service allocations and an inert external
-controller. No Docker/VM provider, live harness, network transition or model
-transport is implemented or qualified by these tests.
+controller. These tests do not qualify a live Docker/VM provider, harness,
+network transition or model transport.
+
+## Pinned Inspect file-probe setup boundary
+
+The harmless positive sample in [Inspect AI's public sandbox-setup test at
+`674e6282`](https://github.com/UKGovernmentBEIS/inspect_ai/blob/674e62823b226b5cf2449db8dd014276533841f7/tests/util/sandbox/test_sandbox_setup.py)
+uses [a three-line script](https://github.com/UKGovernmentBEIS/inspect_ai/blob/674e62823b226b5cf2449db8dd014276533841f7/tests/util/sandbox/sandbox_setup.sh)
+whose sole setup command is `touch foo.txt`. The pinned script's SHA256 is
+`5ddb5ffce1c1af64195f8be5780fa01e1db418e42cea1bdf9d7bac61eb40df6e`.
+Its original `check_file` reads the named file and returns `FOUND` or `MISSING`;
+the Inspect `includes` scorer is **not** invoked or imported here. The fixture
+is from UK AI Security Institute's [MIT-licensed Inspect AI source](https://github.com/UKGovernmentBEIS/inspect_ai/blob/674e62823b226b5cf2449db8dd014276533841f7/LICENSE).
+
+`InspectFileProbeComposeLease` accepts only a local, exact copy of that script,
+one `default` service with `target` and `grader` roles, the approved digest-pinned
+Python image, nonroot UID/GID 1000 and the strict `/tmp` tmpfs. The source is
+verified before control I/O; the script is **not executed**. Instead, the
+lease translates its one approved command into an owner-only empty `foo.txt`
+under `/tmp`. It rejects preexisting files, uses the existing bounded host-only
+Engine archive transport, checks Engine/Compose container identity and reads
+back the exact regular file before returning the allocation. On staging failure,
+the owned Compose project is rolled back. `observe_file_async` checks readable
+file presence while the lease is live; `True`/`False` correspond to the original
+rule's `FOUND`/`MISSING` for this file and working directory, **not** to a
+benchmark score. Symlinks, other paths/roles, nonempty setup readback,
+oversized files, unsupported Compose options and other setup commands fail closed.
+For the original presence-only rule, later bounded readable changes to the
+file content still count as present.
+
+This upstream fixture has **no** `eval.yaml` or authored `compose.yaml`: Inspect
+Evals `eval.yaml` is catalog/provenance metadata, not an executable setup
+recipe. Its Task/Sample construction, `sandbox="docker"` runtime and Inspect
+setup interpreter are not reused; only the pinned shell setup asset's effect is
+translated. The prebuilt image and strict Compose service are a PyRIT-specific
+qualification profile. Unit tests prove only the fixture's staging, observation
+and owned rollback using in-memory Docker controls. They do not prove a running
+image, matching Inspect sandbox working directory, agent access, model transport
+or an original Inspect grade.
+
+To make this a real `NativeCyberTaskBinding`, the trusted owner must (1) pin and
+provision the approved image and script locally, qualify host evidence storage
+and guest exclusion, and bind agent tools and the original file rule to the
+same `/tmp` working directory; (2) construct a genuinely retained
+`NativeAgentTarget`/`NativeCyberRuntime` over this owned sandbox, with a
+verified stop/quiescence barrier and no guest access to PyRIT reports; and
+(3) acquire the original task-specific file observation once after the agent
+stops but **before** the lease closes, then let the native workflow persist
+the judgment and release the allocation. Until those checks are implemented,
+the binding must report blocked readiness, not a successful run. A different
+Inspect task with build, mounts, privileged services, arbitrary `Sample.setup`,
+`TaskState`, Store, sandbox hooks, solver or scorer callbacks needs its own
+reviewed adapter; none is loaded or executed here.
 
 ## Private host evidence boundary
 
@@ -243,6 +294,18 @@ child with no runtime. Direct constructor `parent_run_id` is rejected.
 Cross-restart reruns are currently unsupported: the backend must retain the
 verified parent controller or disable rerun. A client-provided parent ID or a
 reconstructed controller without ancestry must not substitute for that state.
+
+`step_async` accepts an **operator-supplied** next instruction only on a qualified
+retained native session; it is not a PyRIT-generated nudge. A PyRIT-selected
+second turn requires an attack technique to choose that nudge and use the same
+live target/session and owned lease, with the binding still responsible for the
+original rule and cleanup. The current evaluator records one outer turn for
+an attack technique's entire `execute_async` call and permits `step_async`
+only for the literal baseline; multi-turn, attack-selected nudges need
+per-send turn accounting rather than relabeling operator steps. This file-probe
+slice does not implement that attack or an agent transport. The current
+one-shot native CLI launcher cannot claim session retention by copying
+previous text into a new process.
 
 ## Event fidelity and coverage
 

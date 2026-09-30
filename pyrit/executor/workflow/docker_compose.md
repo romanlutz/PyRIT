@@ -75,10 +75,18 @@ limit. A separate target could instead approve noexec `/var/lib/grafana` and
 or real pinned CLI images. Tmpfs starts empty and hides image content at its
 mountpoint. A separately reviewed bootstrap in the prebuilt digest-pinned image
 must stage any required workspace files, binaries and nonsecret HOME/cache
-configuration. This policy adds no asset-transfer or guest-exec API and no
+configuration. This policy adds no general asset-transfer or guest-exec API and no
 runtime environment override. Compose still starts the approved service command
 and runs its declared health check. No downloads, authentication or SDK setup
 are added by this policy.
+
+`InspectFileProbeComposeLease` is a separate, fixture-specific exception to the
+absence of asset staging: it maps one hash-pinned public Inspect `touch foo.txt`
+setup script to a verified empty file on the default `/tmp` tmpfs. It advertises
+`SETUP` only for that exact source, image, service role and command profile.
+It does not parse arbitrary Inspect tasks, Compose YAML or setup scripts, and
+does not supply an agent or original grader. See
+[`native_cyber_eval.md`](native_cyber_eval.md#pinned-inspect-file-probe-setup-boundary).
 
 Image-declared `VOLUME` remains a blocker even if its destination matches an
 approved tmpfs path. Named/anonymous volumes and persistence are never silently

@@ -199,7 +199,14 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
     _NETWORK_LABEL = "com.docker.compose.network"
     _COMMAND_TIMEOUT = 5
 
-    def __init__(self, *, run_id: str, spec: ComposeEnvironmentSpec, runner: DockerCommandRunner) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        spec: ComposeEnvironmentSpec,
+        runner: DockerCommandRunner,
+        capabilities: frozenset[EnvironmentCapability] = frozenset({EnvironmentCapability.HEALTH_CHECK}),
+    ) -> None:
         """
         Reserve a unique project identity without contacting Docker.
 
@@ -207,15 +214,17 @@ class DockerComposeEnvironmentLease(EnvironmentLease[ComposeAllocation]):
             run_id (str): Owning native evaluation.
             spec (ComposeEnvironmentSpec): Trusted immutable service/resource approval.
             runner (DockerCommandRunner): Host-owned bounded control transport.
+            capabilities (frozenset[EnvironmentCapability]): Implemented provider operations.
 
         Raises:
-            ValueError: If run identity could be interpreted as Compose interpolation.
+            ValueError: If run identity could be interpolated or health checks were omitted.
+            NotImplementedError: If an optional operation is not implemented by the provider subclass.
         """
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", run_id):
             raise ValueError("Compose run identity must be a literal identifier without interpolation.")
-        super().__init__(
-            run_id=run_id, capabilities=frozenset({EnvironmentCapability.HEALTH_CHECK}), cleanup_timeout_seconds=150
-        )
+        if EnvironmentCapability.HEALTH_CHECK not in capabilities:
+            raise ValueError("A Compose environment must verify service health before returning its allocation.")
+        super().__init__(run_id=run_id, capabilities=capabilities, cleanup_timeout_seconds=150)
         self._spec = spec
         self._runner = runner
         self._project = "pyrit-" + self.lease_id.replace("-", "")

@@ -6,11 +6,8 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import io
-import json
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -41,7 +38,6 @@ class CodexConfigStaging:
 class DockerCodexConfigStager:
     """Write only a generated user configuration under a fresh, approved tmpfs subtree."""
 
-    _GO_DIRECTORY = 1 << 31
     _ARCHIVE_LIMIT = 65_536
 
     def __init__(self, *, engine: DockerEngineClient) -> None:
@@ -133,13 +129,13 @@ class DockerCodexConfigStager:
             )
             if status != 200:
                 raise DockerEngineError("Staged config directory is missing.")
-            self._check_directory_stat(headers=headers, path=path, private=True)
+            self._engine._check_archive_directory_stat(headers=headers, path=path, private=True)
         status, headers, archive = await self._engine._config_archive_async(
             container_id=expected.container_id, method="GET", path=expected.subtree
         )
         if status != 200:
             raise DockerEngineError("Engine config readback failed.")
-        self._check_directory_stat(headers=headers, path=expected.subtree, private=True)
+        self._engine._check_archive_directory_stat(headers=headers, path=expected.subtree, private=True)
         await asyncio.to_thread(self._verify_archive, expected=expected, archive=archive)
 
     async def _check_ancestors_async(self, *, container_id: str, path: PurePosixPath) -> None:
@@ -150,27 +146,7 @@ class DockerCodexConfigStager:
             )
             if status != 200:
                 raise DockerEngineError("Approved config mount ancestry is missing.")
-            self._check_directory_stat(headers=headers, path=ancestor, private=ancestor == path)
-
-    @classmethod
-    def _check_directory_stat(cls, *, headers: dict[str, str], path: PurePosixPath, private: bool) -> None:
-        encoded = headers.get("x-docker-container-path-stat", "")
-        if not encoded or len(encoded) > 4096:
-            raise DockerEngineError("Engine archive path stat is missing or oversized.")
-        try:
-            value = json.loads(base64.b64decode(encoded, validate=True))
-        except (ValueError, UnicodeError, binascii.Error):
-            raise DockerEngineError("Engine archive path stat is malformed.") from None
-        if (
-            not isinstance(value, dict)
-            or value.get("name") != path.name
-            or value.get("linkTarget") != ""
-            or type(value.get("mode")) is not int
-        ):
-            raise DockerEngineError("Engine archive path stat cannot prove exact non-link directory identity.")
-        mode = value["mode"]
-        if mode & ~0o777 != cls._GO_DIRECTORY or (private and mode & 0o777 != 0o700):
-            raise DockerEngineError("Config ancestry must be directories, without links or unsafe private permissions.")
+            self._engine._check_archive_directory_stat(headers=headers, path=ancestor, private=ancestor == path)
 
     @staticmethod
     def _build_archive(expected: CodexConfigStaging) -> bytes:
