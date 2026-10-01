@@ -236,6 +236,21 @@ def mock_all_registries(mock_memory):
         }
 
 
+async def _cancel_intentional_initializer_tasks_async(*, tasks: list[asyncio.Task[Any]]) -> None:
+    """Finish only tasks deliberately left pending by failed-drain tests."""
+    pending = [task for task in tasks if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _cancel_intentional_initializer_tasks(*, tasks: list[asyncio.Task[Any]]) -> None:
+    """Re-enter the originating thread's loop only if its test tasks survived asyncio.run."""
+    if any(not task.done() for task in tasks):
+        asyncio.run(_cancel_intentional_initializer_tasks_async(tasks=tasks))
+
+
 class TestScenarioRunServiceStartRun:
     """Tests for ScenarioRunService.start_run_async."""
 
@@ -1131,17 +1146,24 @@ class TestScenarioRunServiceStartRun:
     def test_prepare_run_blocking_fails_when_a_task_outlives_the_drain(self, mock_all_registries) -> None:
         """A task still running when the loop closes is cancelled, so the scenario is unusable."""
         service = ScenarioRunService()
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _leaky_prepare(*, request: Any) -> Any:
             task = asyncio.create_task(asyncio.sleep(3600))
             task.set_name("stray-initializer-task")
+            spawned.append(task)
             await asyncio.sleep(0)
             return mock_all_registries["scenario_instance"]
 
-        with patch.object(service, "_prepare_run_async", _leaky_prepare):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
-                with pytest.raises(RuntimeError, match="left background tasks on the initialization loop") as exc_info:
-                    service._prepare_run_blocking(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _leaky_prepare):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
+                    with pytest.raises(
+                        RuntimeError, match="left background tasks on the initialization loop"
+                    ) as exc_info:
+                        service._prepare_run_blocking(request=_make_request())
+        finally:
+            _cancel_intentional_initializer_tasks(tasks=spawned)
 
         assert "stray-initializer-task" in str(exc_info.value)
 
@@ -1150,18 +1172,23 @@ class TestScenarioRunServiceStartRun:
         service = ScenarioRunService()
         scenario_instance = mock_all_registries["scenario_instance"]
         scenario_instance._scenario_result_id = "drained-id"
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _leaky_prepare(*, request: Any) -> Any:
             task = asyncio.create_task(asyncio.sleep(3600))
             task.set_name("stray-initializer-task")
+            spawned.append(task)
             await asyncio.sleep(0)
             return scenario_instance
 
-        with patch.object(service, "_prepare_run_async", _leaky_prepare):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
-                with patch.object(service._memory, "try_update_scenario_run_state") as update_state:
-                    with pytest.raises(RuntimeError, match="left background tasks"):
-                        service._prepare_run_blocking(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _leaky_prepare):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
+                    with patch.object(service._memory, "try_update_scenario_run_state") as update_state:
+                        with pytest.raises(RuntimeError, match="left background tasks"):
+                            service._prepare_run_blocking(request=_make_request())
+        finally:
+            _cancel_intentional_initializer_tasks(tasks=spawned)
 
         update_state.assert_called_once()
         assert update_state.call_args.kwargs["scenario_result_id"] == "drained-id"
@@ -1177,18 +1204,23 @@ class TestScenarioRunServiceStartRun:
         service = ScenarioRunService()
         scenario_instance = mock_all_registries["scenario_instance"]
         scenario_instance._scenario_result_id = "drained-id"
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _leaky_prepare(*, request: Any) -> Any:
             task = asyncio.create_task(asyncio.sleep(3600))
             task.set_name("stray-initializer-task")
+            spawned.append(task)
             await asyncio.sleep(0)
             return scenario_instance
 
-        with patch.object(service, "_prepare_run_async", _leaky_prepare):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
-                with patch.object(service._memory, "try_update_scenario_run_state", side_effect=ValueError("gone")):
-                    with pytest.raises(RuntimeError, match="left background tasks"):
-                        service._prepare_run_blocking(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _leaky_prepare):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
+                    with patch.object(service._memory, "try_update_scenario_run_state", side_effect=ValueError("gone")):
+                        with pytest.raises(RuntimeError, match="left background tasks"):
+                            service._prepare_run_blocking(request=_make_request())
+        finally:
+            _cancel_intentional_initializer_tasks(tasks=spawned)
 
     def test_prepare_run_blocking_waits_for_a_task_spawned_during_the_drain(self, mock_all_registries) -> None:
         """A draining task can start another one, which the first snapshot never saw."""
@@ -1217,56 +1249,72 @@ class TestScenarioRunServiceStartRun:
     def test_prepare_run_blocking_fails_when_a_spawned_child_outlives_the_drain(self, mock_all_registries) -> None:
         """The child is the one that would be cancelled by the closing loop, so it must be named."""
         service = ScenarioRunService()
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _prepare_spawning_a_slow_child(*, request: Any) -> Any:
             async def _parent() -> None:
                 await asyncio.sleep(0.01)
-                asyncio.create_task(asyncio.sleep(3600), name="child-teardown-task")
+                spawned.append(asyncio.create_task(asyncio.sleep(3600), name="child-teardown-task"))
 
             asyncio.create_task(_parent(), name="parent-teardown-task")
             await asyncio.sleep(0)
             return mock_all_registries["scenario_instance"]
 
-        with patch.object(service, "_prepare_run_async", _prepare_spawning_a_slow_child):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.3):
-                with pytest.raises(RuntimeError, match="child-teardown-task"):
-                    service._prepare_run_blocking(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _prepare_spawning_a_slow_child):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.3):
+                    with pytest.raises(RuntimeError, match="child-teardown-task"):
+                        service._prepare_run_blocking(request=_make_request())
+        finally:
+            _cancel_intentional_initializer_tasks(tasks=spawned)
 
     def test_prepare_run_blocking_drain_uses_one_deadline_across_generations(self, mock_all_registries) -> None:
         """Re-scanning must not restart the budget, or a chain of tasks could stall a start forever."""
         service = ScenarioRunService()
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _prepare_spawning_a_chain(*, request: Any) -> Any:
             async def _link(depth: int) -> None:
                 await asyncio.sleep(0.05)
-                asyncio.create_task(_link(depth + 1), name=f"chain-task-{depth + 1}")
+                spawned.append(asyncio.create_task(_link(depth + 1), name=f"chain-task-{depth + 1}"))
 
-            asyncio.create_task(_link(0), name="chain-task-0")
+            spawned.append(asyncio.create_task(_link(0), name="chain-task-0"))
             await asyncio.sleep(0)
             return mock_all_registries["scenario_instance"]
 
         started = time.monotonic()
-        with patch.object(service, "_prepare_run_async", _prepare_spawning_a_chain):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.3):
-                with pytest.raises(RuntimeError, match="chain-task"):
-                    service._prepare_run_blocking(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _prepare_spawning_a_chain):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.3):
+                    with pytest.raises(RuntimeError, match="chain-task"):
+                        service._prepare_run_blocking(request=_make_request())
+        finally:
+            _cancel_intentional_initializer_tasks(tasks=spawned)
 
         assert time.monotonic() - started < 3
 
     async def test_start_run_fails_when_initialization_leaks_a_task(self, mock_all_registries) -> None:
         """A preparation with leaked tasks must fail before scheduling."""
         service = ScenarioRunService()
+        spawned: list[asyncio.Task[Any]] = []
 
         async def _leaky_prepare(*, request: Any) -> Any:
             task = asyncio.create_task(asyncio.sleep(3600))
             task.set_name("stray-initializer-task")
+            spawned.append(task)
             await asyncio.sleep(0)
             return mock_all_registries["scenario_instance"]
 
-        with patch.object(service, "_prepare_run_async", _leaky_prepare):
-            with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
-                with pytest.raises(RuntimeError, match="left background tasks"):
-                    await service.start_run_async(request=_make_request())
+        try:
+            with patch.object(service, "_prepare_run_async", _leaky_prepare):
+                with patch.object(ScenarioRunService, "_INITIALIZATION_DRAIN_TIMEOUT", 0.05):
+                    with pytest.raises(RuntimeError, match="left background tasks"):
+                        await service.start_run_async(request=_make_request())
+        finally:
+            await asyncio.wrap_future(
+                service._prepare_executor.submit(_cancel_intentional_initializer_tasks, tasks=spawned)
+            )
+            await service.shutdown_async()
 
     def test_prepare_run_blocking_is_quiet_when_initialization_is_self_contained(
         self, mock_all_registries, caplog

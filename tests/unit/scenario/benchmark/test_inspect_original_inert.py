@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import io
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +23,7 @@ from pyrit.backend.main import app
 from pyrit.backend.services.attack_service import AttackService
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import ScenarioService
+from pyrit.common.utils import to_sha256
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 from pyrit.memory.memory_models import (
@@ -30,6 +31,8 @@ from pyrit.memory.memory_models import (
     NativeCyberEpisodeEntry,
     NativeCyberRawChunkEntry,
     NativeCyberRawStreamEntry,
+    NativeCyberTurnMessagePieceEntry,
+    PromptMemoryEntry,
     ScoreEntry,
 )
 from pyrit.models import (
@@ -45,6 +48,7 @@ from pyrit.models import (
 )
 from pyrit.models.catalog.scenario import OriginalInspectImportSummary, OriginalInspectTaskId, RunScenarioRequest
 from pyrit.models.native_cyber_evidence import NativeCyberEvidenceSource, NativeCyberRawKind
+from pyrit.models.score.observation import _message_piece_digest
 from pyrit.registry import ScenarioRegistry
 from pyrit.scenario.scenarios.benchmark.inspect_original_inert import (
     InspectOriginalInertScenario,
@@ -453,6 +457,197 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
                     assert "harmless fixture" not in response.text
                     assert "inert response" not in response.text
                     assert "forged-final-event" not in response.text
+
+                await asyncio.to_thread(set_tamper, enabled=False)
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("tamper", ["text", "role", "source_metadata"])
+async def test_one_click_readback_rejects_rehashed_source_message_piece(
+    sqlite_instance: SQLiteMemory, tamper: str
+) -> None:
+    scenario = await ScenarioRegistry().create_and_initialize_async("benchmark.inspect_original_inert")
+    result = await scenario.run_async()
+    imported = OriginalInspectImportSummary.model_validate(result.metadata[OriginalInspectImportSummary.METADATA_KEY])
+    [attack] = sqlite_instance.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
+    user_piece = next(
+        piece
+        for piece in sqlite_instance.get_message_pieces(conversation_id=attack.conversation_id)
+        if piece.role == "user"
+    )
+    with sqlite_instance.get_session() as session:
+        row = session.get(PromptMemoryEntry, user_piece.id)
+        link = session.execute(
+            select(NativeCyberTurnMessagePieceEntry).where(
+                NativeCyberTurnMessagePieceEntry.run_id == imported.projection_episode_id,
+                NativeCyberTurnMessagePieceEntry.message_piece_id == user_piece.id,
+            )
+        ).scalar_one()
+        assert row is not None and row.prompt_metadata is not None
+        original = (
+            row.role,
+            row.original_value,
+            row.original_value_sha256,
+            dict(row.prompt_metadata),
+            link.piece_sha256,
+        )
+
+    def set_tamper(*, enabled: bool) -> None:
+        with sqlite_instance.get_session() as session, session.begin():
+            row = session.get(PromptMemoryEntry, user_piece.id)
+            link = session.execute(
+                select(NativeCyberTurnMessagePieceEntry).where(
+                    NativeCyberTurnMessagePieceEntry.run_id == imported.projection_episode_id,
+                    NativeCyberTurnMessagePieceEntry.message_piece_id == user_piece.id,
+                )
+            ).scalar_one()
+            assert row is not None
+            role, value, value_sha256, metadata, link_sha256 = original
+            link_identity = (link.run_id, link.turn_index, link.direction, link.position, link.message_piece_id)
+            session.delete(link)
+            session.flush()
+            row.role = "system" if enabled and tamper == "role" else role
+            row.original_value = "forged source text" if enabled and tamper == "text" else value
+            row.original_value_sha256 = to_sha256(row.original_value) if enabled and tamper == "text" else value_sha256
+            row.prompt_metadata = (
+                {**metadata, "inspect_message_source": "forged"}
+                if enabled and tamper == "source_metadata"
+                else dict(metadata)
+            )
+            session.flush()
+            session.add(
+                NativeCyberTurnMessagePieceEntry(
+                    run_id=link_identity[0],
+                    turn_index=link_identity[1],
+                    direction=link_identity[2],
+                    position=link_identity[3],
+                    message_piece_id=link_identity[4],
+                    piece_sha256=(
+                        _message_piece_digest(row.get_message_piece(), include_id=True) if enabled else link_sha256
+                    ),
+                )
+            )
+
+    service = ScenarioRunService()
+    attack_service = AttackService()
+    try:
+        with (
+            patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
+        ):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                endpoints = (
+                    f"/api/scenarios/runs/{result.id}",
+                    f"/api/scenarios/runs/{result.id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                    f"/api/attacks/{imported.attack_result_id}",
+                    f"/api/attacks/{imported.attack_result_id}/messages?conversation_id={attack.conversation_id}",
+                )
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+
+                await asyncio.to_thread(set_tamper, enabled=True)
+                snapshot = sqlite_instance.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+                    run_id=imported.projection_episode_id
+                )
+                assert snapshot.coverage_complete
+                statuses = {endpoint: await client.get(endpoint) for endpoint in endpoints}
+                assert all(response.status_code >= 400 for response in statuses.values()), {
+                    endpoint: response.status_code for endpoint, response in statuses.items()
+                }
+                for response in statuses.values():
+                    assert "forged source text" not in response.text
+                    assert "harmless fixture" not in response.text
+
+                await asyncio.to_thread(set_tamper, enabled=False)
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "tamper",
+    ["sample_uuid", "attack_objective", "turn_count_changed", "turn_count_presence", "timestamp"],
+)
+async def test_one_click_readback_binds_typed_sample_and_imported_result_fields(
+    sqlite_instance: SQLiteMemory, tamper: str
+) -> None:
+    scenario = await ScenarioRegistry().create_and_initialize_async("benchmark.inspect_original_inert")
+    result = await scenario.run_async()
+    imported = OriginalInspectImportSummary.model_validate(result.metadata[OriginalInspectImportSummary.METADATA_KEY])
+    [attack] = sqlite_instance.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
+    with sqlite_instance.get_session() as session:
+        score_row = session.get(ScoreEntry, imported.score_id)
+        attack_row = session.get(AttackResultEntry, imported.attack_result_id)
+        assert score_row is not None and score_row.score_metadata is not None
+        assert attack_row is not None and attack_row.attack_metadata is not None
+        original_score = dict(score_row.score_metadata)
+        original_attack = dict(attack_row.attack_metadata)
+        original_objective = attack_row.objective
+        original_score_timestamp = score_row.timestamp
+        original_attack_timestamp = attack_row.timestamp
+    forged_uuid = str(uuid.uuid4())
+    assert original_score["inspect_sample_uuid"] != forged_uuid
+
+    def set_tamper(*, enabled: bool) -> None:
+        with sqlite_instance.get_session() as session, session.begin():
+            score_row = session.get(ScoreEntry, imported.score_id)
+            attack_row = session.get(AttackResultEntry, imported.attack_result_id)
+            assert score_row is not None and attack_row is not None
+            changed = {"inspect_sample_uuid": forged_uuid} if enabled and tamper == "sample_uuid" else {}
+            score_row.score_metadata = {**original_score, **changed}
+            attack_metadata = {**original_attack, **changed}
+            if enabled and tamper == "turn_count_changed":
+                attack_metadata["inspect_turn_count"] = int(original_attack.get("inspect_turn_count") or 0) + 7
+            elif enabled and tamper == "turn_count_presence":
+                if "inspect_turn_count" in attack_metadata:
+                    attack_metadata.pop("inspect_turn_count")
+                else:
+                    attack_metadata["inspect_turn_count"] = 7
+            attack_row.attack_metadata = attack_metadata
+            attack_row.objective = (
+                "forged original Inspect objective" if enabled and tamper == "attack_objective" else original_objective
+            )
+            delta = timedelta(days=1) if enabled and tamper == "timestamp" else timedelta()
+            score_row.timestamp = original_score_timestamp + delta
+            attack_row.timestamp = original_attack_timestamp + delta
+
+    service = ScenarioRunService()
+    attack_service = AttackService()
+    try:
+        with (
+            patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
+        ):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                endpoints = (
+                    f"/api/scenarios/runs/{result.id}",
+                    f"/api/scenarios/runs/{result.id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                    f"/api/attacks/{imported.attack_result_id}",
+                    f"/api/attacks/{imported.attack_result_id}/messages?conversation_id={attack.conversation_id}",
+                )
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+
+                await asyncio.to_thread(set_tamper, enabled=True)
+                statuses = {endpoint: await client.get(endpoint) for endpoint in endpoints}
+                assert all(response.status_code >= 400 for response in statuses.values()), {
+                    endpoint: response.status_code for endpoint, response in statuses.items()
+                }
+                for response in statuses.values():
+                    assert "forged original Inspect objective" not in response.text
+                    assert "harmless fixture" not in response.text
 
                 await asyncio.to_thread(set_tamper, enabled=False)
                 for endpoint in endpoints:
@@ -1195,6 +1390,94 @@ async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqli
                 assert response.json()["objective_achieved_rate"] is None
     finally:
         await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_repeated_one_click_http_runs_then_ordinary_offline_scenario_leave_no_tasks(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    from pyrit.models import SeedPrompt
+    from pyrit.scenario.scenarios.garak.encoding import Encoding, EncodingDatasetConfiguration, EncodingTechnique
+    from pyrit.score import SubStringScorer
+    from tests.unit.mocks import MockPromptTarget
+
+    def worker_pending_tasks() -> tuple[str, ...]:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return ()
+        if loop.is_closed():
+            return ()
+        return tuple(sorted(task.get_name() for task in asyncio.all_tasks(loop) if not task.done()))
+
+    target_instances: list[MockPromptTarget] = []
+
+    async def prepare_ordinary_async(*, request: RunScenarioRequest) -> Encoding:
+        _ = request
+        target = MockPromptTarget()
+        target_instances.append(target)
+        ordinary = Encoding(objective_scorer=SubStringScorer(substring="default"), encoding_templates=[])
+        ordinary.set_params_from_args(
+            args={
+                "objective_target": target,
+                "scenario_techniques": [EncodingTechnique.ROT13],
+                "dataset_config": EncodingDatasetConfiguration(seeds=[SeedPrompt(value="harmless fixture")]),
+                "include_baseline": False,
+                "max_retries": 0,
+            }
+        )
+        await ordinary.initialize_async()
+        return ordinary
+
+    current = asyncio.current_task()
+    existing_tasks = {task for task in asyncio.all_tasks() if task is not current and not task.done()}
+    service = ScenarioRunService()
+    try:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                run_ids: list[str] = []
+                for _ in range(2):
+                    started = await client.post(
+                        "/api/scenarios/runs",
+                        json={
+                            "scenario_name": "benchmark.inspect_original_inert",
+                            "scenario_params": {"eval_family": "inspect_original_inert"},
+                        },
+                    )
+                    assert started.status_code == 202
+                    run_id = started.json()["scenario_result_id"]
+                    run_ids.append(run_id)
+                    active = service._active_tasks[run_id]
+                    assert active.task is not None
+                    await asyncio.wait_for(active.task, timeout=45)
+                    detail = await client.get(f"/api/scenarios/runs/{run_id}")
+                    progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
+                    assert detail.status_code == 200 and progress.status_code == 200
+                    assert detail.json()["status"] == "COMPLETED"
+                    assert (detail.json()["completed_attacks"], detail.json()["successful_attacks"]) == (1, 0)
+                    assert progress.json()["summary"]["overall"]["completed"] == 1
+                    assert progress.json()["run"]["original_inspect_import"]["outcome"] == "undetermined"
+                    assert not await asyncio.wrap_future(service._prepare_executor.submit(worker_pending_tasks))
+                assert len(set(run_ids)) == 2
+
+        with patch.object(service, "_prepare_run_async", new=prepare_ordinary_async):
+            ordinary = await asyncio.wrap_future(
+                service._prepare_executor.submit(
+                    service._prepare_run_blocking,
+                    request=RunScenarioRequest(scenario_name="garak.encoding", target_name="offline-mock"),
+                )
+            )
+        ordinary_result = await ordinary.run_async()
+        assert ordinary_result.scenario_run_state is ScenarioRunState.COMPLETED
+        assert ordinary_result.attack_results
+        assert len(target_instances) == 1 and target_instances[0].prompt_sent
+        assert not await asyncio.wrap_future(service._prepare_executor.submit(worker_pending_tasks))
+    finally:
+        await service.shutdown_async()
+    await asyncio.sleep(0)
+    assert not [
+        task for task in asyncio.all_tasks() if task is not current and task not in existing_tasks and not task.done()
+    ]
 
 
 @pytest.mark.usefixtures("patch_central_database")

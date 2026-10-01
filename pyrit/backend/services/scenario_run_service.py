@@ -55,6 +55,7 @@ from pyrit.models import (
     EvalCaseRef,
     EvalPackageRef,
     EvalSourceKind,
+    MessagePiece,
     ScenarioAttackResultDelta,
     ScenarioIdentifier,
     ScenarioProgressHeader,
@@ -1662,6 +1663,7 @@ class ScenarioRunService:
             imported=imported,
             task_version=score_metadata.get("inspect_task_version"),
             score_metadata=score_metadata,
+            score_timestamp=score.timestamp,
             attack=attack,
         )
 
@@ -1673,6 +1675,7 @@ class ScenarioRunService:
         imported: OriginalInspectImportSummary,
         task_version: str | int | float | None,
         score_metadata: Mapping[str, str | int | float],
+        score_timestamp: datetime,
         attack: AttackResult,
     ) -> tuple[str, str]:
         """
@@ -1728,6 +1731,7 @@ class ScenarioRunService:
             episode=episode,
             archive=archive,
             score_metadata=score_metadata,
+            score_timestamp=score_timestamp,
             attack=attack,
         )
 
@@ -1821,6 +1825,7 @@ class ScenarioRunService:
         episode: NativeCyberEpisodeSnapshot,
         archive: bytes,
         score_metadata: Mapping[str, str | int | float],
+        score_timestamp: datetime,
         attack: AttackResult,
     ) -> tuple[str, str]:
         """
@@ -1834,7 +1839,7 @@ class ScenarioRunService:
         """
         from inspect_ai.log import read_eval_log
 
-        from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event
+        from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event, project_inspect_sample
         from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 
         try:
@@ -1858,6 +1863,9 @@ class ScenarioRunService:
             score_type, score_value, _ = InspectOriginalEvalImporter._representable_value(
                 value=event.score.value if event is not None else None
             )
+            source_timestamp = InspectOriginalEvalImporter._sample_timestamp(
+                sample.completed_at, fallback=sample.started_at or log.eval.created
+            )
             if (
                 event is None
                 or event.uuid != score_metadata.get("inspect_final_score_event_id")
@@ -1865,9 +1873,23 @@ class ScenarioRunService:
                 != score_metadata.get("inspect_final_score_event_sha256")
                 or str(sample.id) != score_metadata.get("inspect_sample_id")
                 or sample.epoch != score_metadata.get("inspect_epoch")
+                or not sample.uuid
+                or score_metadata.get("inspect_sample_uuid") != sample.uuid
                 or str(log.eval.task_version) != score_metadata.get("inspect_task_version")
                 or score_type != imported.score_type
                 or score_value != imported.score_value
+                or score_timestamp != source_timestamp
+                or attack.timestamp != source_timestamp
+                or attack.objective
+                != f"Original Inspect task {log.eval.task} Sample {sample.id} epoch {sample.epoch} (offline import)"
+                or ("inspect_turn_count" in attack.metadata) != (sample.turn_count is not None)
+                or (
+                    sample.turn_count is not None
+                    and (
+                        type(attack.metadata.get("inspect_turn_count")) is not int
+                        or attack.metadata["inspect_turn_count"] != sample.turn_count
+                    )
+                )
             ):
                 raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
             if (
@@ -1882,19 +1904,22 @@ class ScenarioRunService:
                 or attack.related_conversations
             ):
                 raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
-            turn = episode.turns[0]
-            retained_ids = (
-                *turn.request_piece_ids,
-                *turn.response_piece_ids,
-                *turn.tool_result_piece_ids,
+            projection = project_inspect_sample(
+                sample=sample,
+                log_run_id=imported.inspect_run_id,
+                eval_id=imported.inspect_eval_id,
+                archive_sha256=imported.archive_sha256,
+                sample_index=1,
+                start_sequence=1,
+                conversation_id=attack.conversation_id,
+                case_run_id=imported.case_run_id,
             )
-            projected_pieces = memory.get_message_pieces(conversation_id=attack.conversation_id)
-            if (
-                not retained_ids
-                or len(projected_pieces) != len(retained_ids)
-                or {piece.id for piece in projected_pieces} != set(retained_ids)
-            ):
-                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+            cls._verify_original_inspect_message_pieces(
+                memory=memory,
+                episode=episode,
+                conversation_id=attack.conversation_id,
+                expected_pieces=projection.message_pieces,
+            )
             InspectOriginalEvalImporter(memory=memory)._verify_event_readback(
                 log=log,
                 snapshot=episode,
@@ -1916,6 +1941,54 @@ class ScenarioRunService:
             return case_id, sample.input
         except (BadZipFile, KeyError, ValueError) as error:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
+
+    @staticmethod
+    def _verify_original_inspect_message_pieces(
+        *,
+        memory: MemoryInterface,
+        episode: NativeCyberEpisodeSnapshot,
+        conversation_id: str,
+        expected_pieces: Sequence[MessagePiece],
+    ) -> None:
+        """Match the retained conversation to the text and provenance projected from the typed Sample."""
+        turn = episode.turns[0]
+        retained_ids = (*turn.request_piece_ids, *turn.response_piece_ids, *turn.tool_result_piece_ids)
+        stored = memory.get_message_pieces(conversation_id=conversation_id)
+        if (
+            not retained_ids
+            or len(retained_ids) != len(expected_pieces)
+            or len(stored) != len(expected_pieces)
+            or {piece.id for piece in stored} != set(retained_ids)
+        ):
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+
+        def part_index(piece: MessagePiece) -> int:
+            """
+            Return the original text-part position or an invalid sentinel.
+
+            Returns:
+                int: The part index, or -1 if missing or malformed.
+            """
+            value = (piece.prompt_metadata or {}).get("inspect_part_index")
+            return value if type(value) is int else -1
+
+        ordered = sorted(stored, key=lambda piece: (piece.sequence, part_index(piece)))
+        for actual, expected in zip(ordered, expected_pieces, strict=True):
+            if (
+                actual.role != expected.role
+                or actual.sequence != expected.sequence
+                or actual.original_value != expected.original_value
+                or actual.original_value_sha256 != expected.original_value_sha256
+                or actual.original_value_data_type != expected.original_value_data_type
+                or actual.converted_value != expected.converted_value
+                or actual.converted_value_sha256 != expected.converted_value_sha256
+                or actual.converted_value_data_type != expected.converted_value_data_type
+                or actual.response_error != expected.response_error
+                or actual.prompt_metadata != expected.prompt_metadata
+                or actual.converter_identifiers != expected.converter_identifiers
+                or actual.original_prompt_id != actual.id
+            ):
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
 
     @staticmethod
     def _original_inspect_completed_units(

@@ -310,10 +310,14 @@ case/run/archive metadata and undetermined outcome must still agree. The
 archive (`harness` / `eval_log`) and resolved typed log (`harness` / `jsonl`).
 An extra missing required stream cannot be excused by stale coverage metadata.
 Both bounded private streams are re-read through the integrity-checking
-memory reader: archive length/SHA256 and
-resolved-log bytes/length/SHA256 must match the verified `.eval`. Its typed
-final ScoreEvent ID, event hash and value must match the linked Score, and the
-projected native event stream is checked against that `.eval` again. The
+memory reader: archive length/SHA256 and resolved-log bytes/length/SHA256 must
+match the verified `.eval`. Its typed final ScoreEvent ID, event hash and value
+must match the linked Score, and the projected native event stream is checked
+against that `.eval` again. The imported Score and AttackResult timestamps,
+Sample UUID, original objective and optional original turn count must match
+the same typed Sample, including whether the turn count was present. Projected
+MessagePieces must retain the Sample's exact text, role, order and source
+metadata; matching mutable link digests and piece IDs alone is insufficient. The
 AttackResult must point to the deterministic imported conversation for that
 verified Sample, with no last-response or related-conversation links and no
 extra conversation MessagePieces. Direct attack detail, messages,
