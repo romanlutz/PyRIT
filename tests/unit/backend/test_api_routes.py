@@ -1630,8 +1630,11 @@ class TestScoreRoutes:
                     get_active_conversation_ids=MagicMock(
                         return_value={"primary-conversation-id", "forked-conversation-id"}
                     ),
+                    metadata={},
+                    automated_score=None,
                 )
             ]
+            memory.get_original_inspect_result_links.return_value = {}
             mock_scorer = mock_manual_scorer_class.return_value
             mock_scorer.score_async = AsyncMock(return_value=[score])
 
@@ -1681,8 +1684,11 @@ class TestScoreRoutes:
                     attack_result_id=str(attack_result_id),
                     objective="Evaluate the response",
                     get_active_conversation_ids=MagicMock(return_value={"conversation-id"}),
+                    metadata={},
+                    automated_score=None,
                 )
             ]
+            memory.get_original_inspect_result_links.return_value = {}
             memory.update_attack_result_by_id.return_value = True
             mock_scorer = mock_manual_scorer_class.return_value
             mock_scorer.score_async = AsyncMock(return_value=[score])
@@ -1733,8 +1739,11 @@ class TestScoreRoutes:
                     attack_result_id=str(attack_result_id),
                     objective="Evaluate the response",
                     get_active_conversation_ids=MagicMock(return_value={"conversation-id"}),
+                    metadata={},
+                    automated_score=None,
                 )
             ]
+            memory.get_original_inspect_result_links.return_value = {}
             mock_manual_scorer_class.return_value.score_async = AsyncMock(return_value=[score])
 
             response = client.post(
@@ -1772,8 +1781,11 @@ class TestScoreRoutes:
                     attack_result_id=str(attack_result_id),
                     objective="Evaluate the response",
                     get_active_conversation_ids=MagicMock(return_value={"conversation-id"}),
+                    metadata={},
+                    automated_score=None,
                 )
             ]
+            memory.get_original_inspect_result_links.return_value = {}
             memory.update_attack_result_by_id.return_value = True
             mock_manual_scorer_class.return_value.score_async = AsyncMock(return_value=[score])
 

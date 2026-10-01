@@ -39,7 +39,8 @@ from pyrit.backend.services.pagination import (
 )
 from pyrit.backend.services.scenario_configuration_resolver import ScenarioConfigurationResolver
 from pyrit.backend.services.scenario_progress_read_model import ResultUnitIdentity, ScenarioProgressReadModel
-from pyrit.memory import AttackResultKeysetCursor, CentralMemory, SQLiteMemory
+from pyrit.common.utils import to_sha256
+from pyrit.memory import AttackResultKeysetCursor, CentralMemory, MemoryInterface, SQLiteMemory
 from pyrit.memory.memory_interface import (
     ScenarioHistoryAggregate,
     ScenarioHistoryKeysetCursor,
@@ -1243,7 +1244,9 @@ class ScenarioRunService:
             )
             plan = None
         plan_lookup = self._progress_read_model.build_plan_lookup(plan=plan)
-        original_inspect_import = self._original_inspect_import(scenario_result=scenario_result, plan=plan)
+        original_inspect_import = self.verify_original_inspect_import(
+            memory=self._memory, scenario_result=scenario_result, plan=plan
+        )
         completed_import_units = self._original_inspect_completed_units(plan=plan, imported=original_inspect_import)
 
         # Build result fields from DB (always computed so in-progress runs show progress)
@@ -1457,7 +1460,9 @@ class ScenarioRunService:
             plan = self._load_run_plan(scenario_result=original_result)
             if plan is None:
                 raise ValueError("Original Inspect history run is missing its persisted case plan.")
-            imported = self._original_inspect_import(scenario_result=original_result, plan=plan)
+            imported = self.verify_original_inspect_import(
+                memory=self._memory, scenario_result=original_result, plan=plan
+            )
             completed_units = self._original_inspect_completed_units(plan=plan, imported=imported)
             planned_total, completed, _, successful = self._progress_read_model.calculate_progress_counts(
                 scenario_result=original_result,
@@ -1566,8 +1571,9 @@ class ScenarioRunService:
             ScenarioRunService._safe_scenario_parameters(parameters=dict(scenario_identifier.params)),
         )
 
-    def _original_inspect_import(
-        self, *, scenario_result: ScenarioResult, plan: ScenarioRunPlan | None
+    @classmethod
+    def verify_original_inspect_import(
+        cls, *, memory: MemoryInterface, scenario_result: ScenarioResult, plan: ScenarioRunPlan | None
     ) -> OriginalInspectImportSummary | None:
         """
         Read the original archive reference and verify its persisted offline result.
@@ -1586,17 +1592,29 @@ class ScenarioRunService:
                 raise ValueError("Completed original Inspect Scenario has no persisted import reference.")
             return None
         imported = OriginalInspectImportSummary.model_validate(raw)
-        derived_case_id = self._validate_original_inspect_projection(imported=imported)
-        if plan is None or len(plan.seed_groups) != 1 or plan.seed_groups[0].case_id != derived_case_id:
+        derived_case_id, objective = cls._validate_original_inspect_projection(memory=memory, imported=imported)
+        if plan is None or len(plan.seed_groups) != 1:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        seed = plan.seed_groups[0]
+        if (
+            seed.case_id != derived_case_id
+            or seed.objective != objective
+            or seed.objective_sha256 != to_sha256(objective)
+            or seed.prompts
+            or seed.input_variant_sha256 is not None
+        ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
         return imported
 
-    def _validate_original_inspect_projection(self, *, imported: OriginalInspectImportSummary) -> str:
+    @classmethod
+    def _validate_original_inspect_projection(
+        cls, *, memory: MemoryInterface, imported: OriginalInspectImportSummary
+    ) -> tuple[str, str]:
         """
         Recheck the source-attributed Score, AttackResult and original archive on readback.
 
         Returns:
-            str: The source-derived case ID.
+            tuple[str, str]: The source-derived case ID and original Sample input.
 
         Raises:
             ValueError: If referenced rows, their FK, or their source provenance differ.
@@ -1605,8 +1623,8 @@ class ScenarioRunService:
 
         if imported.source_sha256 != EvalSourceFactory.ORIGINAL_INERT_SHA256:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
-        scores = self._memory.get_scores(score_ids=[str(imported.score_id)])
-        attacks = self._memory.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
+        scores = memory.get_scores(score_ids=[str(imported.score_id)])
+        attacks = memory.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
         if len(scores) != 1 or len(attacks) != 1:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
         score, attack = scores[0], attacks[0]
@@ -1639,26 +1657,29 @@ class ScenarioRunService:
             or any(attack.metadata.get(key) != value for key, value in score_metadata.items())
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
-        return self._verify_original_inspect_archive(
+        return cls._verify_original_inspect_archive(
+            memory=memory,
             imported=imported,
             task_version=score_metadata.get("inspect_task_version"),
             score_metadata=score_metadata,
             attack=attack,
         )
 
+    @classmethod
     def _verify_original_inspect_archive(
-        self,
+        cls,
         *,
+        memory: MemoryInterface,
         imported: OriginalInspectImportSummary,
         task_version: str | int | float | None,
         score_metadata: Mapping[str, str | int | float],
         attack: AttackResult,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Match the referenced result to the verified bytes of its finalized `.eval`.
 
         Returns:
-            str: The source-derived case ID.
+            tuple[str, str]: The source-derived case ID and original Sample input.
 
         Raises:
             ValueError: If the offline episode, archive or original final event is inconsistent.
@@ -1666,7 +1687,7 @@ class ScenarioRunService:
         from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 
         try:
-            episode = self._memory.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+            episode = memory.native_cyber_evidence.get_finalized_unscored_inspect_capture(
                 run_id=imported.projection_episode_id
             )
         except (KeyError, ValueError) as error:
@@ -1681,7 +1702,8 @@ class ScenarioRunService:
             or episode.run.task_version != task_version
             or episode.run.source_session_id != imported.inspect_run_id
             or len(episode.turns) != 1
-            or archive_key not in episode.run.required_raw_streams
+            or len(episode.run.required_raw_streams) != 2
+            or set(episode.run.required_raw_streams) != {archive_key, InspectOriginalEvalImporter.RESOLVED_KEY}
             or len(archive_streams) != 1
             or archive_streams[0].key != archive_key
             or not archive_streams[0].source_complete
@@ -1693,18 +1715,30 @@ class ScenarioRunService:
             or not 0 < archive_streams[0].stored_bytes <= InspectOriginalEvalImporter.MAX_ARCHIVE_BYTES
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
-        archive = self._read_original_inspect_stream(
+        archive = cls._read_original_inspect_stream(
+            memory=memory,
             run_id=imported.projection_episode_id,
             stream_id=archive_streams[0].stream_id,
             expected_bytes=archive_streams[0].stored_bytes,
             expected_sha256=imported.archive_sha256,
         )
-        return self._verify_final_original_event(
-            imported=imported, episode=episode, archive=archive, score_metadata=score_metadata, attack=attack
+        return cls._verify_final_original_event(
+            memory=memory,
+            imported=imported,
+            episode=episode,
+            archive=archive,
+            score_metadata=score_metadata,
+            attack=attack,
         )
 
+    @classmethod
     def _verify_original_inspect_resolved(
-        self, *, imported: OriginalInspectImportSummary, episode: NativeCyberEpisodeSnapshot, resolved: bytes
+        cls,
+        *,
+        memory: MemoryInterface,
+        imported: OriginalInspectImportSummary,
+        episode: NativeCyberEpisodeSnapshot,
+        resolved: bytes,
     ) -> None:
         """Verify the required resolved stream against the typed original log."""
         from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
@@ -1727,7 +1761,8 @@ class ScenarioRunService:
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
         if (
-            self._read_original_inspect_stream(
+            cls._read_original_inspect_stream(
+                memory=memory,
                 run_id=imported.projection_episode_id,
                 stream_id=streams[0].stream_id,
                 expected_bytes=streams[0].stored_bytes,
@@ -1737,8 +1772,9 @@ class ScenarioRunService:
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
 
+    @staticmethod
     def _read_original_inspect_stream(
-        self, *, run_id: str, stream_id: uuid.UUID, expected_bytes: int, expected_sha256: str
+        *, memory: MemoryInterface, run_id: str, stream_id: uuid.UUID, expected_bytes: int, expected_sha256: str
     ) -> bytes:
         """
         Read bounded private chunks through their integrity-checking memory API.
@@ -1749,7 +1785,7 @@ class ScenarioRunService:
         Raises:
             ValueError: If a stored chunk, length or digest differs from its sealed stream.
         """
-        capture = self._memory.native_cyber_evidence
+        capture = memory.native_cyber_evidence
         checksum = hashlib.sha256()
         archive = bytearray()
         after_sequence = 0
@@ -1776,20 +1812,22 @@ class ScenarioRunService:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
         return bytes(archive)
 
+    @classmethod
     def _verify_final_original_event(
-        self,
+        cls,
         *,
+        memory: MemoryInterface,
         imported: OriginalInspectImportSummary,
         episode: NativeCyberEpisodeSnapshot,
         archive: bytes,
         score_metadata: Mapping[str, str | int | float],
         attack: AttackResult,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Compare the persisted ScoreEvent, planned case, and conversation to the typed `.eval`.
 
         Returns:
-            str: The source-derived case ID.
+            tuple[str, str]: The source-derived case ID and original Sample input.
 
         Raises:
             ValueError: If the original event, typed sample or projected events have changed.
@@ -1812,8 +1850,10 @@ class ScenarioRunService:
             ):
                 raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
             sample = samples[0]
+            if not isinstance(sample.input, str):
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
             resolved = log.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
-            self._verify_original_inspect_resolved(imported=imported, episode=episode, resolved=resolved)
+            cls._verify_original_inspect_resolved(memory=memory, imported=imported, episode=episode, resolved=resolved)
             event = final_original_score_event(sample=sample, scorer_name=imported.primary_scorer)
             score_type, score_value, _ = InspectOriginalEvalImporter._representable_value(
                 value=event.score.value if event is not None else None
@@ -1842,14 +1882,27 @@ class ScenarioRunService:
                 or attack.related_conversations
             ):
                 raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
-            InspectOriginalEvalImporter(memory=self._memory)._verify_event_readback(
+            turn = episode.turns[0]
+            retained_ids = (
+                *turn.request_piece_ids,
+                *turn.response_piece_ids,
+                *turn.tool_result_piece_ids,
+            )
+            projected_pieces = memory.get_message_pieces(conversation_id=attack.conversation_id)
+            if (
+                not retained_ids
+                or len(projected_pieces) != len(retained_ids)
+                or {piece.id for piece in projected_pieces} != set(retained_ids)
+            ):
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+            InspectOriginalEvalImporter(memory=memory)._verify_event_readback(
                 log=log,
                 snapshot=episode,
                 archive_sha=imported.archive_sha256,
                 case_run_ids=(imported.case_run_id,),
                 required_source_gaps=[],
             )
-            return EvalCaseRef(
+            case_id = EvalCaseRef(
                 package=EvalPackageRef(
                     kind=EvalSourceKind.NAMED,
                     name=imported.task_id.value,
@@ -1860,6 +1913,7 @@ class ScenarioRunService:
                 sample_id=str(sample.id),
                 epoch=sample.epoch,
             ).case_id
+            return case_id, sample.input
         except (BadZipFile, KeyError, ValueError) as error:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
 
@@ -2210,7 +2264,9 @@ class ScenarioRunService:
             )
             plan = None
         plan_complete = plan is not None
-        original_inspect_import = self._original_inspect_import(scenario_result=header_result, plan=plan)
+        original_inspect_import = self.verify_original_inspect_import(
+            memory=self._memory, scenario_result=header_result, plan=plan
+        )
         completed_import_units = self._original_inspect_completed_units(plan=plan, imported=original_inspect_import)
         cursor = self._decode_progress_cursor(since=since, scenario_result_id=scenario_result_id)
         terminal = header_result.scenario_run_state in (

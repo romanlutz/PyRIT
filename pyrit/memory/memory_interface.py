@@ -4834,6 +4834,54 @@ class MemoryInterface(abc.ABC):
             entry = session.query(ScenarioResultEntry).filter_by(id=scenario_result_id).first()
             return entry.get_scenario_result() if entry is not None else None
 
+    def get_original_inspect_result_links(
+        self, *, scenario_name: str, attack_result_ids: Sequence[str]
+    ) -> dict[str, ScenarioResult]:
+        """
+        Find persisted Scenario import references by result ID, independent of AttackResult metadata.
+
+        Returns:
+            dict[str, ScenarioResult]: Unique referenced run headers keyed by imported AttackResult ID.
+
+        Raises:
+            ValueError: If multiple Scenario runs reference the same imported result.
+        """
+        if not attack_result_ids:
+            return {}
+        from pyrit.models.catalog.scenario import OriginalInspectImportSummary
+
+        ids = set(attack_result_ids)
+        path = f"$.{OriginalInspectImportSummary.METADATA_KEY}.attack_result_id"
+        match = or_(
+            *(
+                self._get_condition_json_property_match(
+                    json_column=ScenarioResultEntry.scenario_metadata,
+                    property_path=path,
+                    value=attack_id,
+                    case_sensitive=True,
+                )
+                for attack_id in ids
+            )
+        )
+        with closing(self.get_session()) as session:
+            rows = (
+                session.execute(
+                    select(ScenarioResultEntry)
+                    .where(ScenarioResultEntry.scenario_name == scenario_name, match)
+                    .limit(len(ids) + 1)
+                )
+                .scalars()
+                .all()
+            )
+            links: dict[str, ScenarioResult] = {}
+            for row in rows:
+                reference = (row.scenario_metadata or {}).get(OriginalInspectImportSummary.METADATA_KEY)
+                attack_id = reference.get("attack_result_id") if isinstance(reference, dict) else None
+                if not isinstance(attack_id, str) or attack_id not in ids or attack_id in links:
+                    raise ValueError("Original Inspect result has an ambiguous persisted Scenario reference.")
+                links[attack_id] = row.get_scenario_result()
+            return links
+
     def get_scenario_run_state_page(
         self,
         *,

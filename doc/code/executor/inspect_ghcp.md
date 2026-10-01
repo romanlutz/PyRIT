@@ -297,24 +297,35 @@ The Scenario progress read model counts the one planned case as completed
 **only** when its persisted verified import matches the plan's run ID, source
 SHA and case-run ID. Readback also checks the fixed public source SHA and
 recomputes the planned `EvalCaseRef.case_id` from the verified `.eval` Task
-name/version and Sample ID/epoch, without executing a Task factory. It reports
-1/1 completed, zero successes and no success percentage; this is import
-completion, not a success verdict or a synthetic Scenario AttackResult. The
-history API validates the same persisted run and case metadata before counting
-1/1. Detail, progress and history also read back
-the referenced Score, AttackResult and sealed offline `.eval` episode: their
-foreign key, source case/run/archive metadata and undetermined outcome must
-still agree. The archive must remain a required `harness` / `eval_log` stream
-with the approved source identity; the resolved typed log must remain a
-required `harness` / `jsonl` stream. Both bounded private streams are re-read
-through the integrity-checking memory reader: archive length/SHA256 and
+name/version and Sample ID/epoch, without executing a Task factory. The
+planned objective text and SHA256 must equal the verified typed Sample input;
+extra prompts or input variants are not approved. It reports 1/1 completed,
+zero successes and no success percentage; this is import completion, not a
+success verdict or a synthetic Scenario AttackResult. The history API
+validates the same persisted run and case metadata before counting 1/1.
+Detail, progress and history also read back the referenced Score,
+AttackResult and sealed offline `.eval` episode: their foreign key, source
+case/run/archive metadata and undetermined outcome must still agree. The
+**entire required-stream set** must be exactly the approved
+archive (`harness` / `eval_log`) and resolved typed log (`harness` / `jsonl`).
+An extra missing required stream cannot be excused by stale coverage metadata.
+Both bounded private streams are re-read through the integrity-checking
+memory reader: archive length/SHA256 and
 resolved-log bytes/length/SHA256 must match the verified `.eval`. Its typed
 final ScoreEvent ID, event hash and value must match the linked Score, and the
 projected native event stream is checked against that `.eval` again. The
 AttackResult must point to the deterministic imported conversation for that
-verified Sample, with no last-response or related-conversation links. Direct
-attack detail, messages, conversations and list reads check the qualified
-result's Score/MessagePiece source links before serving its conversation.
+verified Sample, with no last-response or related-conversation links and no
+extra conversation MessagePieces. Direct attack detail, messages,
+conversations and list reads resolve its ID through the Scenario's independent
+persisted import reference and rerun the same typed-evidence verification,
+rather than trusting matching Score/AttackResult metadata. Missing or
+ambiguous import bindings fail closed, including removed source markers.
+The imported original result cannot be edited through generic attack PATCH,
+human-score deletion, manual scoring, message send/storage or conversation
+branch/promote routes; rejection occurs before any scorer, target dispatch or
+write. Ordinary attacks retain these actions. Human judgments for the
+original run need a separate, explicitly approved representation.
 Raw bytes never enter the REST response. Missing or substituted IDs or altered
 event/stream bytes, planned cases or conversation links fail closed without
 rerunning the Task or inventing another result. Detail and history return

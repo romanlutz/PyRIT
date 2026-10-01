@@ -63,8 +63,9 @@ from pyrit.backend.services.pagination import (
 from pyrit.backend.services.target_service import get_target_service
 from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.utils import to_sha256
-from pyrit.memory import AttackResultKeysetCursor, CentralMemory, data_serializer_factory
+from pyrit.memory import AttackResultKeysetCursor, CentralMemory, MemoryInterface, data_serializer_factory
 from pyrit.models import (
+    SCENARIO_RUN_PLAN_METADATA_KEY,
     AtomicAttackIdentifier,
     AttackIdentifier,
     AttackOutcome,
@@ -76,6 +77,8 @@ from pyrit.models import (
     ConversationType,
     ConverterIdentifier,
     PromptDataType,
+    ScenarioRunPlan,
+    ScenarioRunState,
 )
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 
@@ -108,6 +111,10 @@ class AttackObjectiveConflictError(Exception):
     """The attack already has a different objective."""
 
 
+class AttackSourceImmutableError(ValueError):
+    """The imported original Inspect evidence is immutable through attack APIs."""
+
+
 class AttackService:
     """
     Service for managing attacks.
@@ -115,9 +122,9 @@ class AttackService:
     Uses PyRIT memory (database) as the source of truth via AttackResult.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, memory: MemoryInterface | None = None) -> None:
         """Initialize the attack service."""
-        self._memory = CentralMemory.get_memory_instance()
+        self._memory = memory if memory is not None else CentralMemory.get_memory_instance()
 
     # ========================================================================
     # Public API Methods
@@ -249,9 +256,9 @@ class AttackService:
 
         # Phase 2: Lightweight DB aggregation for the page only.
         # Collect conversation IDs we care about (main + pruned, not adversarial).
+        await self._guard_original_inspect_attacks_async(results=page_results, mutating=False)
         all_conv_ids: set[str] = set()
         for ar in page_results:
-            await self._validate_original_inspect_attack_async(result=ar)
             all_conv_ids.update(ar.get_active_conversation_ids())
 
         stats_map = self._memory.get_conversation_stats(conversation_ids=list(all_conv_ids)) if all_conv_ids else {}
@@ -324,7 +331,7 @@ class AttackService:
             return None
 
         ar = results[0]
-        await self._validate_original_inspect_attack_async(result=ar)
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
         stats_map = self._memory.get_conversation_stats(conversation_ids=[ar.conversation_id])
         stats = stats_map.get(ar.conversation_id, ConversationStats(message_count=0))
         return await attack_result_to_summary_async(ar, stats=stats)
@@ -355,7 +362,7 @@ class AttackService:
 
         # Verify the conversation belongs to this attack
         ar = results[0]
-        await self._validate_original_inspect_attack_async(result=ar)
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
         if conversation_id not in ar.get_active_conversation_ids():
             raise ValueError(f"Conversation '{conversation_id}' is not part of attack '{attack_result_id}'")
 
@@ -479,6 +486,7 @@ class AttackService:
         results = self._memory.get_attack_results(attack_result_ids=[attack_result_id])
         if not results:
             return None
+        await self._guard_original_inspect_attacks_async(results=results, mutating=True)
 
         update_fields: dict[str, Any] = {"timestamp": datetime.now(UTC)}
         if request.outcome is not None:
@@ -522,6 +530,7 @@ class AttackService:
         )
         if not results:
             return None
+        await self._guard_original_inspect_attacks_async(results=results, mutating=True)
 
         automated_score = results[0].automated_score
         if automated_score is None or automated_score.score_value is None:
@@ -563,7 +572,7 @@ class AttackService:
 
         # attack_result_id is a unique primary key, so at most one result is returned.
         ar = results[0]
-        await self._validate_original_inspect_attack_async(result=ar)
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
 
         # Collect all conversation IDs (main + PRUNED related) and fetch stats in one query.
         active_conv_ids = list(ar.get_active_conversation_ids())
@@ -601,56 +610,83 @@ class AttackService:
             conversations=conversations,
         )
 
-    async def _validate_original_inspect_attack_async(self, *, result: AttackResult) -> None:
-        """Keep a pinned original-import result from serving another run's conversation."""
-        score = result.automated_score
-        score_metadata = score.score_metadata if score is not None else None
-        metadata = result.metadata
-        if (
-            metadata.get("inspect_source") != "original_eval_log"
-            and (score_metadata or {}).get("inspect_source") != "original_eval_log"
-        ):
-            return
-        if (
-            metadata.get("inspect_task") != "inspect_original_inert"
-            and (score_metadata or {}).get("inspect_task") != "inspect_original_inert"
-        ):
-            return
-        if metadata.get("inspect_case_run_id") is None and (score_metadata or {}).get("inspect_case_run_id") is None:
-            return
-        source_keys = (
-            "inspect_source",
-            "inspect_task",
-            "inspect_case_run_id",
-            "inspect_archive_sha256",
-            "inspect_run_id",
-            "inspect_sample_id",
-            "inspect_sample_uuid",
-            "inspect_epoch",
-        )
-        if (
-            score_metadata is None
-            or any(score_metadata.get(key) != metadata.get(key) for key in source_keys)
-            or any(
-                not isinstance(score_metadata.get(key), str)
-                for key in ("inspect_case_run_id", "inspect_archive_sha256", "inspect_sample_id", "inspect_sample_uuid")
-            )
-            or not isinstance(score_metadata.get("inspect_epoch"), int)
-            or result.last_response is not None
-            or result.related_conversations
-        ):
-            raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+    async def ensure_attack_mutable_async(self, *, result: AttackResult) -> None:
+        """
+        Refuse changes to an imported original result before scoring or persistence.
 
-        pieces = await asyncio.to_thread(self._memory.get_message_pieces, conversation_id=result.conversation_id)
-        if not pieces or any(
-            piece.prompt_metadata is None
-            or any(
-                piece.prompt_metadata.get(key) != score_metadata.get(key)
-                for key in ("inspect_archive_sha256", "inspect_sample_id", "inspect_sample_uuid", "inspect_epoch")
+        Raises:
+            AttackSourceImmutableError: If the result belongs to an original Inspect import.
+        """
+        await self._guard_original_inspect_attacks_async(results=[result], mutating=True)
+
+    async def _guard_original_inspect_attacks_async(self, *, results: Sequence[AttackResult], mutating: bool) -> None:
+        """Run bounded persisted-import checks off the event loop."""
+        if results:
+            await asyncio.to_thread(self._guard_original_inspect_attacks, results=results, mutating=mutating)
+
+    def _guard_original_inspect_attacks(self, *, results: Sequence[AttackResult], mutating: bool) -> None:
+        """
+        Bind source-attributed results to their independent persisted Scenario import.
+
+        Raises:
+            ValueError: If an original import has no verifiable Scenario/evidence link.
+            AttackSourceImmutableError: If a caller tries to change imported evidence.
+        """
+        from pyrit.backend.services.scenario_run_service import (
+            _ORIGINAL_INSPECT_SCENARIO_NAME,
+            ScenarioRunService,
+        )
+
+        try:
+            links = self._memory.get_original_inspect_result_links(
+                scenario_name=_ORIGINAL_INSPECT_SCENARIO_NAME,
+                attack_result_ids=[result.attack_result_id for result in results],
             )
-            for piece in pieces
-        ):
-            raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+        except ValueError as error:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK) from error
+
+        for result in results:
+            scenario = links.get(result.attack_result_id)
+            if scenario is None:
+                if self._has_unbound_original_inspect_evidence(result=result):
+                    if mutating:
+                        raise AttackSourceImmutableError("Imported original Inspect results cannot be edited.")
+                    raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+                continue
+            if mutating:
+                raise AttackSourceImmutableError("Imported original Inspect results cannot be edited.")
+            if scenario.scenario_run_state is not ScenarioRunState.COMPLETED:
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+            try:
+                raw_plan = (scenario.metadata or {}).get(SCENARIO_RUN_PLAN_METADATA_KEY)
+                plan = ScenarioRunPlan.model_validate(raw_plan)
+                imported = ScenarioRunService.verify_original_inspect_import(
+                    memory=self._memory, scenario_result=scenario, plan=plan
+                )
+                if imported is None or str(imported.attack_result_id) != result.attack_result_id:
+                    raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+            except (KeyError, ValueError) as error:
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK) from error
+
+    @staticmethod
+    def _has_unbound_original_inspect_evidence(*, result: AttackResult) -> bool:
+        """
+        Treat orphaned source metadata as unverified, not an ordinary editable attack.
+
+        Returns:
+            bool: Whether either result row still describes an original Inspect import.
+        """
+        score = result.automated_score
+        metadata = (result.metadata, score.score_metadata if score is not None else None)
+        return any(
+            source is not None
+            and (
+                source.get("inspect_source") == "original_eval_log"
+                or source.get("inspect_task") == "inspect_original_inert"
+                or source.get("inspect_case_run_id") is not None
+            )
+            for source in metadata
+        )
 
     async def create_related_conversation_async(
         self, *, attack_result_id: str, request: CreateConversationRequest
@@ -671,6 +707,7 @@ class AttackService:
             return None
 
         ar = results[0]
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=True)
         now = datetime.now(UTC)
 
         # Validate that both or neither branching fields are provided
@@ -726,6 +763,7 @@ class AttackService:
             return None
 
         ar = results[0]
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=True)
         target_conv_id = request.conversation_id
 
         # If the target is already the main conversation, nothing to do.
@@ -796,6 +834,7 @@ class AttackService:
             raise ValueError(f"Attack '{attack_result_id}' not found")
 
         ar = results[0]
+        await self._guard_original_inspect_attacks_async(results=[ar], mutating=True)
         main_conversation_id = ar.conversation_id
 
         self._validate_target_match(attack_identifier=ar.get_attack_strategy_identifier(), request=request)

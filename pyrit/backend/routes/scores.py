@@ -13,6 +13,7 @@ from pyrit.backend.middleware.auth import AuthenticatedUser
 from pyrit.backend.models.attacks import ScoreView
 from pyrit.backend.models.common import ProblemDetail
 from pyrit.backend.models.scores import ManualScoreRequest
+from pyrit.backend.services.attack_service import AttackService, AttackSourceImmutableError
 from pyrit.memory import CentralMemory
 from pyrit.models import AttackOutcome, MessageScorable, ScoringExpectation
 from pyrit.score import ManualScorer
@@ -44,6 +45,7 @@ def _get_user_identifier(*, request: Request) -> str:
     status_code=status.HTTP_201_CREATED,
     responses={
         404: {"model": ProblemDetail, "description": "Message or attack not found"},
+        409: {"model": ProblemDetail, "description": "Original import cannot be edited or verified"},
         422: {"model": ProblemDetail, "description": "Validation error"},
     },
 )
@@ -88,6 +90,16 @@ async def create_manual_score(  # pyrit-async-suffix-exempt
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="An attack objective is required before adding a manual score",
         )
+
+    try:
+        await AttackService(memory=memory).ensure_attack_mutable_async(result=attack)
+    except AttackSourceImmutableError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Original Inspect source evidence cannot be verified for manual scoring.",
+        ) from error
 
     scorer = ManualScorer(
         value=request_body.value,

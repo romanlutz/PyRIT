@@ -65,6 +65,7 @@ def mock_memory():
     memory.get_conversation_stats.return_value = {}
     memory._get_conversation.return_value = None
     memory.get_prompt_scores.return_value = []
+    memory.get_original_inspect_result_links.return_value = {}
 
     return memory
 
@@ -880,7 +881,7 @@ class TestGetConversationMessages:
         """The message mapper receives the attack's canonical objective score ID."""
         ar = make_attack_result(conversation_id="test-id")
         objective_score_id = uuid.uuid4()
-        ar.automated_score = MagicMock(id=objective_score_id)
+        ar.automated_score = MagicMock(id=objective_score_id, score_metadata={})
         mock_memory.get_attack_results.return_value = [ar]
         mock_memory.get_conversation_messages.return_value = []
 
@@ -901,7 +902,7 @@ class TestGetConversationMessages:
         """The message mapper receives string score IDs without UUID conversion."""
         ar = make_attack_result(conversation_id="test-id")
         objective_score_id = str(uuid.uuid4())
-        ar.automated_score = MagicMock(id=objective_score_id)
+        ar.automated_score = MagicMock(id=objective_score_id, score_metadata={})
         mock_memory.get_attack_results.return_value = [ar]
         mock_memory.get_conversation_messages.return_value = []
 

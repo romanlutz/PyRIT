@@ -33,7 +33,11 @@ from pyrit.backend.models.attacks import (
 )
 from pyrit.backend.models.common import ProblemDetail
 from pyrit.backend.routes.common import parse_label_query_params
-from pyrit.backend.services.attack_service import AttackObjectiveConflictError, get_attack_service
+from pyrit.backend.services.attack_service import (
+    AttackObjectiveConflictError,
+    AttackSourceImmutableError,
+    get_attack_service,
+)
 from pyrit.common.deprecation import print_deprecation_message
 
 logger = logging.getLogger(__name__)
@@ -257,7 +261,7 @@ async def get_attack(attack_result_id: str) -> AttackSummary:  # pyrit-async-suf
     response_model=AttackSummary,
     responses={
         404: {"model": ProblemDetail, "description": "Attack not found"},
-        409: {"model": ProblemDetail, "description": "Attack already has a different objective"},
+        409: {"model": ProblemDetail, "description": "Attack conflict or immutable original import"},
     },
 )
 async def update_attack(  # pyrit-async-suffix-exempt
@@ -274,7 +278,7 @@ async def update_attack(  # pyrit-async-suffix-exempt
 
     try:
         attack = await service.update_attack_async(attack_result_id=attack_result_id, request=request)
-    except AttackObjectiveConflictError as exc:
+    except (AttackObjectiveConflictError, AttackSourceImmutableError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not attack:
         raise HTTPException(
@@ -290,6 +294,7 @@ async def update_attack(  # pyrit-async-suffix-exempt
     response_model=AttackSummary,
     responses={
         404: {"model": ProblemDetail, "description": "Attack not found"},
+        409: {"model": ProblemDetail, "description": "Imported original result cannot be edited"},
     },
 )
 async def remove_human_score(attack_result_id: str) -> AttackSummary:  # pyrit-async-suffix-exempt
@@ -300,7 +305,10 @@ async def remove_human_score(attack_result_id: str) -> AttackSummary:  # pyrit-a
         AttackSummary: Updated attack details.
     """
     service = get_attack_service()
-    attack = await service.remove_human_score_async(attack_result_id=attack_result_id)
+    try:
+        attack = await service.remove_human_score_async(attack_result_id=attack_result_id)
+    except AttackSourceImmutableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not attack:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
