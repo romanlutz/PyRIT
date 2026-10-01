@@ -17,6 +17,7 @@ from pyrit.backend.services.environment_file_service import EnvironmentFileServi
 from pyrit.backend.services.scenario_run_service import get_scenario_run_service, peek_scenario_run_service
 from pyrit.backend.services.service_lifecycle import close_services_async, outstanding_estimates
 from pyrit.common.path import CONFIGURATION_DIRECTORY_PATH
+from pyrit.memory import CentralMemory
 from pyrit.registry import InitializerRegistry
 from pyrit.setup.configuration_loader import ConfigurationLoader
 from pyrit.setup.environment_loading import resolve_environment_async
@@ -58,7 +59,7 @@ class RuntimeLifecycle:
 
     @property
     def is_stopping(self) -> bool:
-        """Report closed admission even if an accepted apply is still finishing."""
+        """Whether admission is closed even if an accepted apply is still finishing."""
         return self._shutdown_task is not None
 
     def status(self) -> dict[str, Any]:
@@ -251,12 +252,20 @@ class RuntimeLifecycle:
         results = await asyncio.gather(*pending, return_exceptions=True)
         errors = [result for result in results if isinstance(result, BaseException)]
         self.state = "stopping"
-        service = peek_scenario_run_service()
         try:
+            service = peek_scenario_run_service()
             if service:
                 await service.shutdown_async()
+        except (Exception, asyncio.CancelledError) as error:
+            errors.append(error)
+        try:
             await close_services_async()
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
+            errors.append(error)
+        try:
+            if CentralMemory._memory_instance is not None:
+                await CentralMemory.get_memory_instance().dispose_engine_async()
+        except (Exception, asyncio.CancelledError) as error:
             errors.append(error)
         if errors:
             raise BaseExceptionGroup("Runtime shutdown failed after draining admitted work.", errors)
