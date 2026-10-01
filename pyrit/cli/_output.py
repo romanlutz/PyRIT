@@ -345,7 +345,8 @@ def print_scenario_run_progress(*, run: ScenarioRunSummary) -> None:
     else:
         parts.append(f"units: {run.completed_attacks}")
 
-    parts.append(f"success rate: {run.objective_achieved_rate}%")
+    rate = f"{run.objective_achieved_rate}%" if run.objective_achieved_rate is not None else "undetermined"
+    parts.append(f"success rate: {rate}")
     parts.append(run.status.value)
 
     line = "\r  " + " | ".join(parts)
@@ -367,7 +368,8 @@ def print_scenario_run_summary(*, run: ScenarioRunSummary) -> None:
     # Count of individual attack-result records persisted (one per technique x objective
     # that ran), not a planned total. It stops growing wherever a failed run halted.
     print(f"  Attack Results: {run.total_attacks}")
-    print(f"  Success Rate:   {run.objective_achieved_rate}%")
+    rate = f"{run.objective_achieved_rate}%" if run.objective_achieved_rate is not None else "undetermined"
+    print(f"  Success Rate:   {rate}")
 
     if run.total_retries:
         print(f"  Retries:        {run.total_retries} (endpoint-stress signal)")

@@ -433,6 +433,25 @@ def test_print_scenario_run_progress_completed_units_without_plan(capsys):
     assert "units: 1" in captured.out
 
 
+def test_print_scenario_run_undetermined_rate_without_fabricating_percentage(capsys):
+    run = _make_run(
+        scenario_name="InspectOriginalInertScenario",
+        status=ScenarioRunState.COMPLETED,
+        total_attacks=1,
+        completed_attacks=1,
+        objective_achieved_rate=None,
+    )
+
+    _output.print_scenario_run_progress(run=run)
+    _output.print_scenario_run_summary(run=run)
+
+    output = capsys.readouterr().out
+    assert "units: 1/1" in output
+    assert "success rate: undetermined" in output
+    assert "Success Rate:   undetermined" in output
+    assert "None%" not in output
+
+
 # ---------------------------------------------------------------------------
 # print_scenario_retry_warnings
 # ---------------------------------------------------------------------------

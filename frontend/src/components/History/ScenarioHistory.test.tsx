@@ -152,6 +152,23 @@ describe('ScenarioHistory', () => {
     expect(screen.queryByText('1/1 (100%)')).not.toBeInTheDocument()
   })
 
+  it('renders a nullable success rate without showing null percent', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        completed_attacks: 1,
+        successful_attacks: 0,
+        objective_achieved_rate: null,
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    expect(await screen.findByText('0/1 (undetermined)')).toBeInTheDocument()
+    expect(screen.queryByText(/null%/)).not.toBeInTheDocument()
+  })
+
   it('shows imported original Inspect work without implying zero success', async () => {
     mockedScenariosApi.listRuns.mockResolvedValue({
       items: [{
@@ -159,9 +176,9 @@ describe('ScenarioHistory', () => {
         scenario_name: 'InspectOriginalInertScenario',
         scenario_registry_name: 'benchmark.inspect_original_inert',
         total_attacks: 1,
-        completed_attacks: 0,
+        completed_attacks: 1,
         successful_attacks: 0,
-        objective_achieved_rate: 0,
+        objective_achieved_rate: null,
         target: null,
       }],
       pagination: { limit: 25, has_more: false },

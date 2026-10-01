@@ -204,6 +204,7 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
         assert summary.status == ScenarioRunState.COMPLETED
         assert summary.target is None
         assert (summary.completed_attacks, summary.total_attacks, summary.successful_attacks) == (1, 1, 0)
+        assert summary.objective_achieved_rate is None
         assert summary.original_inspect_import is not None
         assert progress.run.original_inspect_import == summary.original_inspect_import
         assert progress.results == []
@@ -243,6 +244,8 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
                 service.get_run(scenario_result_id=str(result.id))
             with pytest.raises(ValueError, match="does not match.*planned case"):
                 service.get_run_progress(scenario_result_id=str(result.id), since=None, limit=10)
+            with pytest.raises(ValueError, match="does not match.*planned case"):
+                service.list_runs(scenario_names=["benchmark.inspect_original_inert"])
     finally:
         await service.shutdown_async()
 
@@ -311,6 +314,14 @@ async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqli
                 assert progress.json()["summary"]["overall"]["success_percentage"] is None
                 assert progress.json()["summary"]["atomic_groups"][0]["status"] == "COMPLETED"
                 assert progress.json()["results"] == []
+                history = await client.get("/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert")
+                assert history.status_code == 200
+                assert len(history.json()["items"]) == 1
+                [item] = history.json()["items"]
+                assert item["scenario_result_id"] == run_id
+                assert (item["completed_attacks"], item["total_attacks"], item["successful_attacks"]) == (1, 1, 0)
+                assert item["objective_achieved_rate"] is None
+                assert response.json()["objective_achieved_rate"] is None
     finally:
         await service.shutdown_async()
 
@@ -362,6 +373,16 @@ async def test_offline_projection_failure_keeps_evidence_but_never_completes_sce
                 assert progress.json()["summary"]["atomic_groups"][0]["status"] == "INCOMPLETE"
                 assert "api_key=not-for-ui" not in progress.text
                 assert "example.invalid" not in summary.text
+                history = await client.get("/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert")
+                assert history.status_code == 200
+                [item] = history.json()["items"]
+                assert item["scenario_result_id"] == run_id
+                assert item["error"] == expected
+                assert item["completed_attacks"] == 0
+                assert item["objective_achieved_rate"] is None
+                assert summary.json()["objective_achieved_rate"] is None
+                assert "api_key=not-for-ui" not in history.text
+                assert "example.invalid" not in history.text
                 await asyncio.to_thread(
                     sqlite_instance.update_scenario_run_state,
                     scenario_result_id=run_id,
@@ -378,6 +399,14 @@ async def test_offline_projection_failure_keeps_evidence_but_never_completes_sce
                 assert fallback_progress.json()["run"]["failure_reason"] == fallback_summary.json()["error"]
                 assert "credentials.txt" not in fallback_progress.text
                 assert "api_key=not-for-ui" not in fallback_summary.text
+                fallback_history = await client.get(
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert"
+                )
+                assert fallback_history.status_code == 200
+                [item] = fallback_history.json()["items"]
+                assert item["error"] == fallback_summary.json()["error"]
+                assert "credentials.txt" not in fallback_history.text
+                assert "api_key=not-for-ui" not in fallback_history.text
     finally:
         await service.shutdown_async()
 

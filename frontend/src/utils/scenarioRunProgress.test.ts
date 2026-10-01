@@ -93,22 +93,51 @@ describe('scenarioRunProgressReducer', () => {
       type: 'apply-run-summary',
       run: {
         ...page.run,
+        scenario_name: 'InspectOriginalInertScenario',
+        scenario_registry_name: 'benchmark.inspect_original_inert',
+        status: 'COMPLETED',
         updated_at: '2026-01-01T00:01:00Z',
         techniques_used: [],
         total_attacks: 1,
-        completed_attacks: 0,
-        objective_achieved_rate: 0,
+        completed_attacks: 1,
+        objective_achieved_rate: null,
         failed_attacks: [],
         attack_retries: [],
         total_retries: 0,
         labels: {},
         original_inspect_import: reference,
-        error: 'Original Inspect archive is not a readable `.eval` ZIP.',
       },
     })
 
     expect(state.run?.original_inspect_import).toEqual(reference)
-    expect(state.run?.failure_reason).toBe('Original Inspect archive is not a readable `.eval` ZIP.')
+    expect(state.run?.failure_reason).toBeUndefined()
+  })
+
+  it('keeps the sanitized original Inspect failure reason from a nullable-rate run summary', () => {
+    const error = 'Original Inspect archive is not a readable `.eval` ZIP.'
+    const state = scenarioRunProgressReducer(INITIAL_SCENARIO_RUN_PROGRESS_STATE, {
+      type: 'apply-run-summary',
+      run: {
+        ...makePage().run,
+        scenario_name: 'InspectOriginalInertScenario',
+        scenario_registry_name: 'benchmark.inspect_original_inert',
+        status: 'FAILED',
+        updated_at: '2026-01-01T00:01:00Z',
+        techniques_used: [],
+        total_attacks: 1,
+        completed_attacks: 0,
+        objective_achieved_rate: null,
+        failed_attacks: [],
+        attack_retries: [],
+        total_retries: 0,
+        labels: {},
+        original_inspect_import: null,
+        error,
+      },
+    })
+
+    expect(state.run?.failure_reason).toBe(error)
+    expect(state.run?.original_inspect_import).toBeNull()
   })
 
   it('merges duplicated pages idempotently and uses the latest backend summary', () => {

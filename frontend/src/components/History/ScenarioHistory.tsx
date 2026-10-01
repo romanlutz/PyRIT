@@ -560,6 +560,9 @@ function formatSuccess(run: ScenarioRunListItem): string {
   if (run.completed_attacks === 0) {
     return '0/0'
   }
+  if (run.objective_achieved_rate === null) {
+    return `${successful}/${run.completed_attacks} (undetermined)`
+  }
   return `${successful}/${run.completed_attacks} (${run.objective_achieved_rate}%)`
 }
 

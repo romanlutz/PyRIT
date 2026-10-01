@@ -871,7 +871,7 @@ export interface ScenarioRunSummary {
   techniques_used: string[]
   total_attacks: number
   completed_attacks: number
-  objective_achieved_rate: number
+  objective_achieved_rate: number | null
   failed_attacks: AttackErrorSummary[]
   attack_retries: AttackRetrySummary[]
   total_retries: number
@@ -912,7 +912,7 @@ export interface ScenarioRunListItem {
   techniques_used: string[]
   total_attacks: number | null
   completed_attacks: number
-  objective_achieved_rate: number
+  objective_achieved_rate: number | null
   total_retries: number
   labels: Record<string, string>
   completed_at?: string | null

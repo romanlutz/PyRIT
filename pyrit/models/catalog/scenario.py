@@ -395,7 +395,9 @@ class ScenarioRunSummary(BaseModel):
         0, ge=0, description="Planned execution units, or the observed units when no plan is persisted"
     )
     completed_attacks: int = Field(0, ge=0, description="Planned execution units that reached a terminal outcome")
-    objective_achieved_rate: int = Field(0, ge=0, le=100, description="Success rate as percentage (0-100)")
+    objective_achieved_rate: int | None = Field(
+        0, ge=0, le=100, description="Success rate (0-100), or null without an approved outcome"
+    )
     failed_attacks: list[AttackErrorSummary] = Field(
         default_factory=list,
         description="Individual attack results that errored, surfaced regardless of overall run status",
@@ -456,7 +458,9 @@ class ScenarioRunListItem(BaseModel):
     techniques_used: list[str] = Field(default_factory=list, description="Planned technique display groups")
     total_attacks: int | None = Field(None, ge=0, description="Number of planned execution units when known")
     completed_attacks: int = Field(0, ge=0, description="Latest completed planned units")
-    objective_achieved_rate: int = Field(0, ge=0, le=100, description="Success rate as percentage (0-100)")
+    objective_achieved_rate: int | None = Field(
+        0, ge=0, le=100, description="Success rate (0-100), or null without an approved outcome"
+    )
     total_retries: int = Field(0, ge=0, description="Retry attempts recorded across projected work units")
     labels: dict[str, str] = Field(default_factory=dict, description="Labels attached to this run")
     completed_at: datetime | None = Field(None, description="When the scenario finished")

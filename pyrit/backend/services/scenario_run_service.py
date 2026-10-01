@@ -579,12 +579,21 @@ class ScenarioRunService:
                 **aggregates,
                 **self._memory.get_scenario_history_aggregates(scenario_result_ids=unusable_plan_ids),
             }
+        original_ids = [
+            record.scenario_result_id for record in records if record.scenario_name == _ORIGINAL_INSPECT_SCENARIO_NAME
+        ]
+        original_results: dict[str, ScenarioResult] = (
+            {str(result.id): result for result in self._memory.get_scenario_results(scenario_result_ids=original_ids)}
+            if original_ids
+            else {}
+        )
         items = [
             self._build_history_summary(
                 record=record,
                 atomic_groups=plans[record.scenario_result_id],
                 aggregate=aggregates.get(record.scenario_result_id)
                 or ScenarioHistoryAggregate.empty(scenario_result_id=record.scenario_result_id),
+                original_result=original_results.get(record.scenario_result_id),
             )
             for record in records
         ]
@@ -1199,7 +1208,11 @@ class ScenarioRunService:
         # Fallback: in-memory error for in-flight tasks where DB hasn't been updated yet
         if not error:
             error = active_error
-        safe_failure = self._original_inspect_failure_reason(scenario_result=scenario_result)
+        safe_failure = self._original_inspect_failure_reason(
+            scenario_name=scenario_result.scenario_name,
+            scenario_run_state=scenario_result.scenario_run_state,
+            error_message=scenario_result.error_message,
+        )
         if safe_failure is not None:
             error = safe_failure
 
@@ -1302,7 +1315,9 @@ class ScenarioRunService:
             techniques_used=techniques_used,
             total_attacks=total_attacks,
             completed_attacks=completed_attacks,
-            objective_achieved_rate=objective_achieved_rate,
+            objective_achieved_rate=(
+                None if scenario_result.scenario_name == _ORIGINAL_INSPECT_SCENARIO_NAME else objective_achieved_rate
+            ),
             failed_attacks=failed_attacks,
             attack_retries=attack_retries,
             total_retries=total_retries,
@@ -1381,6 +1396,7 @@ class ScenarioRunService:
         record: ScenarioHistoryRunRecord,
         atomic_groups: list[ScenarioRunPlanAtomicGroup] | None,
         aggregate: ScenarioHistoryAggregate,
+        original_result: ScenarioResult | None = None,
     ) -> ScenarioRunListItem:
         """
         Map lightweight persisted history projections to the public summary DTO.
@@ -1422,6 +1438,22 @@ class ScenarioRunService:
         completed = aggregate.completed_units
         successful = aggregate.successful_units
         status = ScenarioRunState(record.status)
+        is_original_inspect = record.scenario_name == _ORIGINAL_INSPECT_SCENARIO_NAME
+        if is_original_inspect:
+            if original_result is None:
+                raise ValueError("Original Inspect history run is missing its persisted Scenario result.")
+            plan = self._load_run_plan(scenario_result=original_result)
+            if plan is None:
+                raise ValueError("Original Inspect history run is missing its persisted case plan.")
+            imported = self._original_inspect_import(scenario_result=original_result)
+            completed_units = self._original_inspect_completed_units(plan=plan, imported=imported)
+            planned_total, completed, _, successful = self._progress_read_model.calculate_progress_counts(
+                scenario_result=original_result,
+                plan=plan,
+                plan_lookup=self._progress_read_model.build_plan_lookup(plan=plan),
+                completed_without_attack_result=completed_units,
+            )
+            atomic_groups = plan.atomic_groups
         terminal = status in (
             ScenarioRunState.COMPLETED,
             ScenarioRunState.FAILED,
@@ -1446,12 +1478,20 @@ class ScenarioRunService:
             created_at=record.created_at,
             started_at=record.started_at,
             updated_at=max(timestamps),
-            error=record.error_message,
+            error=self._original_inspect_failure_reason(
+                scenario_name=record.scenario_name,
+                scenario_run_state=status,
+                error_message=record.error_message,
+            )
+            if is_original_inspect
+            else record.error_message,
             error_type=record.error_type,
             techniques_used=techniques,
             total_attacks=planned_total if atomic_groups is not None or planned_total else None,
             completed_attacks=completed,
-            objective_achieved_rate=int((successful / completed) * 100) if completed else 0,
+            objective_achieved_rate=(
+                None if is_original_inspect else (int((successful / completed) * 100) if completed else 0)
+            ),
             total_retries=aggregate.total_retries,
             labels=record.labels,
             completed_at=record.completed_at if terminal else None,
@@ -1575,20 +1615,22 @@ class ScenarioRunService:
         return frozenset({ResultUnitIdentity(atomic_group_id=group.id, seed_group_id=seed.id)})
 
     @staticmethod
-    def _original_inspect_failure_reason(*, scenario_result: ScenarioResult) -> str | None:
+    def _original_inspect_failure_reason(
+        *, scenario_name: str, scenario_run_state: ScenarioRunState, error_message: str | None
+    ) -> str | None:
         """
         Show only vetted diagnoses from persisted original-Task errors.
 
         Returns:
             str | None: A safe failure reason, or none for unrelated/unfinished runs.
         """
-        if scenario_result.scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
+        if scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
             return None
-        if scenario_result.scenario_run_state == ScenarioRunState.CANCELLED:
+        if scenario_run_state == ScenarioRunState.CANCELLED:
             return "Original Inspect run was cancelled before a qualified result was published."
-        if scenario_result.scenario_run_state != ScenarioRunState.FAILED:
+        if scenario_run_state != ScenarioRunState.FAILED:
             return None
-        persisted = scenario_result.error_message or ""
+        persisted = error_message or ""
         for prefix in _SAFE_ORIGINAL_INSPECT_FAILURE_PREFIXES:
             if persisted.startswith(prefix):
                 return prefix
@@ -1943,7 +1985,11 @@ class ScenarioRunService:
                 active_scenario_result_id=active_scenario_result_id,
                 overload_summaries=self._build_overload_summaries(retry_events=overload_events),
                 original_inspect_import=original_inspect_import,
-                failure_reason=self._original_inspect_failure_reason(scenario_result=header_result),
+                failure_reason=self._original_inspect_failure_reason(
+                    scenario_name=header_result.scenario_name,
+                    scenario_run_state=header_result.scenario_run_state,
+                    error_message=header_result.error_message,
+                ),
             ),
             plan=response_plan,
             results=results,

@@ -297,10 +297,13 @@ The Scenario progress read model counts the one planned case as completed
 **only** when its persisted verified import matches the plan's run ID, source
 SHA and case-run ID. It reports 1/1 completed, zero successes and no success
 percentage; this is import completion, not a success verdict or a synthetic
-Scenario AttackResult. A rejected `.eval` leaves the planned case incomplete.
-The progress header exposes only a vetted failure diagnosis (or a safe generic
-failure message), while full exception details remain in backend logs for
-reconciliation.
+Scenario AttackResult. The history API validates the same persisted run and
+case metadata before counting 1/1. Detail and history return
+`objective_achieved_rate: null`, and CLI output says "undetermined"; other
+Scenarios retain their numeric rate. A rejected `.eval` leaves the planned
+case incomplete. Detail, history and the progress header expose only a vetted
+failure diagnosis (or a safe generic failure message), while full exception
+details remain in backend logs for reconciliation.
 Internal/private Tasks, arbitrary Python and cyber Evals are not selectable.
 
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
