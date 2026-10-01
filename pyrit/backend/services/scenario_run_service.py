@@ -57,6 +57,7 @@ from pyrit.models import (
     ScenarioRunPlanAtomicGroup,
     ScenarioRunProgress,
     ScenarioRunState,
+    ScoreStatus,
     TargetIdentifier,
     config_hash,
 )
@@ -93,6 +94,9 @@ _SHUTDOWN_INTERRUPTION_REASON = "The backend process shut down before this scena
 _USER_CANCELLATION_REASON = "Run was cancelled by user"
 _ORIGINAL_INSPECT_SCENARIO_NAME = "InspectOriginalInertScenario"
 _ORIGINAL_INSPECT_REGISTRY_NAME = "benchmark.inspect_original_inert"
+_INVALID_ORIGINAL_INSPECT_PROJECTION = (
+    "Original Inspect import references missing or mismatched persisted Score/AttackResult evidence."
+)
 _SAFE_ORIGINAL_INSPECT_FAILURE_PREFIXES = (
     "Original Inspect archive is not a readable `.eval` ZIP.",
     "Original Inspect archive is empty or exceeds its bounded byte quota.",
@@ -1554,16 +1558,15 @@ class ScenarioRunService:
             ScenarioRunService._safe_scenario_parameters(parameters=dict(scenario_identifier.params)),
         )
 
-    @staticmethod
-    def _original_inspect_import(*, scenario_result: ScenarioResult) -> OriginalInspectImportSummary | None:
+    def _original_inspect_import(self, *, scenario_result: ScenarioResult) -> OriginalInspectImportSummary | None:
         """
-        Read the unscored original archive reference without inventing an AttackResult.
+        Read the original archive reference and verify its persisted offline result.
 
         Returns:
-            OriginalInspectImportSummary | None: The validated import, or none while it is pending.
+            OriginalInspectImportSummary | None: The verified import, or none while it is pending.
 
         Raises:
-            ValueError: If a completed run lacks its import reference.
+            ValueError: If a completed run lacks its import or linked Score/AttackResult.
         """
         if scenario_result.scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
             return None
@@ -1572,7 +1575,85 @@ class ScenarioRunService:
             if scenario_result.scenario_run_state == ScenarioRunState.COMPLETED:
                 raise ValueError("Completed original Inspect Scenario has no persisted import reference.")
             return None
-        return OriginalInspectImportSummary.model_validate(raw)
+        imported = OriginalInspectImportSummary.model_validate(raw)
+        self._validate_original_inspect_projection(imported=imported)
+        return imported
+
+    def _validate_original_inspect_projection(self, *, imported: OriginalInspectImportSummary) -> None:
+        """
+        Recheck the source-attributed Score, AttackResult and original archive on readback.
+
+        Raises:
+            ValueError: If referenced rows, their FK, or their source provenance differ.
+        """
+        scores = self._memory.get_scores(score_ids=[str(imported.score_id)])
+        attacks = self._memory.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
+        if len(scores) != 1 or len(attacks) != 1:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        score, attack = scores[0], attacks[0]
+        score_metadata = score.score_metadata
+        if score_metadata is None:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        expected = {
+            "inspect_source": "original_eval_log",
+            "inspect_archive_sha256": imported.archive_sha256,
+            "inspect_run_id": imported.inspect_run_id,
+            "inspect_eval_id": imported.inspect_eval_id,
+            "inspect_task": imported.task_id.value,
+            "inspect_case_run_id": imported.case_run_id,
+            "inspect_primary_scorer": imported.primary_scorer,
+        }
+        if (
+            str(score.id) != str(imported.score_id)
+            or attack.attack_result_id != str(imported.attack_result_id)
+            or score.status is not ScoreStatus.COMPLETE
+            or score.score_type != imported.score_type
+            or score.score_value != imported.score_value
+            or attack.automated_score is None
+            or str(attack.automated_score.id) != str(score.id)
+            or attack.outcome is not AttackOutcome.UNDETERMINED
+            or attack.attribution_parent_id is not None
+            or attack.timestamp != score.timestamp
+            or not score_metadata.get("inspect_final_score_event_id")
+            or not score_metadata.get("inspect_final_score_event_sha256")
+            or any(score_metadata.get(key) != value for key, value in expected.items())
+            or any(attack.metadata.get(key) != value for key, value in score_metadata.items())
+        ):
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        self._verify_original_inspect_archive(
+            imported=imported, task_version=score_metadata.get("inspect_task_version")
+        )
+
+    def _verify_original_inspect_archive(
+        self, *, imported: OriginalInspectImportSummary, task_version: str | int | float | None
+    ) -> None:
+        """
+        Match the referenced result to the finalized original `.eval` stream.
+
+        Raises:
+            ValueError: If the offline episode or its archive digest is missing or inconsistent.
+        """
+        try:
+            episode = self._memory.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+                run_id=imported.projection_episode_id
+            )
+        except (KeyError, ValueError) as error:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
+        archive_streams = [
+            stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-original-eval-archive"
+        ]
+        if (
+            not episode.coverage_complete
+            or episode.run.task_id != imported.task_id.value
+            or episode.run.task_version != task_version
+            or episode.run.source_session_id != imported.inspect_run_id
+            or len(episode.turns) != 1
+            or len(archive_streams) != 1
+            or not archive_streams[0].source_complete
+            or archive_streams[0].stored_sha256 != imported.archive_sha256
+            or archive_streams[0].observed_sha256 != imported.archive_sha256
+        ):
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
 
     @staticmethod
     def _original_inspect_completed_units(

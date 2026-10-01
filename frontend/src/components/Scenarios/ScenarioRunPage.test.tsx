@@ -437,6 +437,20 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByRole('link', { name: 'View projected PyRIT AttackResult' })).not.toBeInTheDocument()
   })
 
+  it('does not link a projected result when its persisted Score or AttackResult cannot be verified', () => {
+    mockHookState({
+      ...INITIAL_SCENARIO_RUN_PROGRESS_STATE,
+      loadStatus: 'error',
+      error: 'Original Inspect import references missing or mismatched persisted Score/AttackResult evidence.',
+    })
+
+    renderPage()
+
+    expect(screen.getByRole('heading', { name: 'Unable to load scenario run' })).toBeInTheDocument()
+    expect(screen.getByText(/missing or mismatched persisted Score\/AttackResult evidence/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'View projected PyRIT AttackResult' })).not.toBeInTheDocument()
+  })
+
   it('renders contract-backed safe target and run configuration metadata', () => {
     mockHookState(makeState({
       run: {

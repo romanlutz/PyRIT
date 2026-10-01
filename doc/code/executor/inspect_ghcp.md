@@ -298,7 +298,11 @@ The Scenario progress read model counts the one planned case as completed
 SHA and case-run ID. It reports 1/1 completed, zero successes and no success
 percentage; this is import completion, not a success verdict or a synthetic
 Scenario AttackResult. The history API validates the same persisted run and
-case metadata before counting 1/1. Detail and history return
+case metadata before counting 1/1. Detail, progress and history also read back
+the referenced Score, AttackResult and sealed offline `.eval` episode: their
+foreign key, source case/run/archive metadata and undetermined outcome must
+still agree. Missing or substituted IDs fail closed without rerunning the Task
+or inventing another result. Detail and history return
 `objective_achieved_rate: null`, and CLI output says "undetermined"; other
 Scenarios retain their numeric rate. A rejected `.eval` leaves the planned
 case incomplete. Detail, history and the progress header expose only a vetted

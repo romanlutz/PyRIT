@@ -68,6 +68,7 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
 ) -> None:
     registry = ScenarioRegistry()
     run_references: list[OriginalInspectImportSummary] = []
+    run_ids: list[str] = []
     original_dirs: list[Path] = []
 
     def allocate_test_dir(*, run_instance_id: uuid.UUID) -> Path:
@@ -85,6 +86,7 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
             assert scenario.atomic_attack_count == 1
             [work] = scenario._atomic_attacks
             result = await scenario.run_async()
+            run_ids.append(str(result.id))
             assert result.scenario_run_state == ScenarioRunState.COMPLETED
             assert result.attack_results == {}
             with pytest.raises(RuntimeError, match="replay is disabled"):
@@ -183,6 +185,95 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
         assert session.scalar(select(func.count(ScoreEntry.id))) == 2
         assert session.scalar(select(func.count(AttackResultEntry.id))) == 2
 
+    first_id = run_ids[0]
+    original = run_references[0].model_dump(mode="json")
+    other = run_references[1]
+    swaps = (
+        ("score_id", str(uuid.uuid4())),
+        ("score_id", str(other.score_id)),
+        ("attack_result_id", str(uuid.uuid4())),
+        ("attack_result_id", str(other.attack_result_id)),
+        ("projection_episode_id", other.projection_episode_id),
+    )
+    [original_score] = sqlite_instance.get_scores(score_ids=[original["score_id"]])
+    [original_attack] = sqlite_instance.get_attack_results(attack_result_ids=[original["attack_result_id"]])
+    assert original_score.score_metadata is not None
+    original_score_metadata = dict(original_score.score_metadata)
+    original_attack_metadata = dict(original_attack.metadata)
+
+    def set_stored_corruption(*, corruption: str | None) -> None:
+        score_id = uuid.UUID(str(original_score.id))
+        with sqlite_instance.get_session() as session, session.begin():
+            score_row = session.get(ScoreEntry, score_id)
+            attack_row = session.get(AttackResultEntry, uuid.UUID(original_attack.attack_result_id))
+            assert score_row is not None and attack_row is not None
+            score_row.score_metadata = original_score_metadata
+            attack_row.attack_metadata = original_attack_metadata
+            attack_row.automated_score_id = score_id
+            attack_row.outcome = AttackOutcome.UNDETERMINED.value
+            if corruption == "score_case":
+                score_row.score_metadata = {**original_score_metadata, "inspect_case_run_id": other.case_run_id}
+            elif corruption == "score_archive":
+                score_row.score_metadata = {**original_score_metadata, "inspect_archive_sha256": other.archive_sha256}
+            elif corruption == "attack_archive":
+                attack_row.attack_metadata = {
+                    **original_attack_metadata,
+                    "inspect_archive_sha256": other.archive_sha256,
+                }
+            elif corruption == "attack_score_fk":
+                attack_row.automated_score_id = other.score_id
+            elif corruption == "attack_outcome":
+                attack_row.outcome = AttackOutcome.SUCCESS.value
+            elif corruption is not None:
+                raise AssertionError(f"Unknown stored corruption: {corruption}")
+
+    service = ScenarioRunService()
+    try:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                endpoints = (
+                    f"/api/scenarios/runs/{first_id}",
+                    f"/api/scenarios/runs/{first_id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                )
+                for field, swapped_id in swaps:
+                    await asyncio.to_thread(
+                        sqlite_instance.update_scenario_metadata_fields,
+                        scenario_result_id=first_id,
+                        fields={OriginalInspectImportSummary.METADATA_KEY: {**original, field: swapped_id}},
+                    )
+                    for endpoint in endpoints:
+                        response = await client.get(endpoint)
+                        assert response.status_code >= 400, f"{field}={swapped_id} was accepted by {endpoint}"
+                        assert "harmless fixture" not in response.text
+                        assert "inert response" not in response.text
+
+                await asyncio.to_thread(
+                    sqlite_instance.update_scenario_metadata_fields,
+                    scenario_result_id=first_id,
+                    fields={OriginalInspectImportSummary.METADATA_KEY: original},
+                )
+                for corruption in (
+                    "score_case",
+                    "score_archive",
+                    "attack_archive",
+                    "attack_score_fk",
+                    "attack_outcome",
+                ):
+                    await asyncio.to_thread(set_stored_corruption, corruption=corruption)
+                    for endpoint in endpoints:
+                        response = await client.get(endpoint)
+                        assert response.status_code >= 400, f"{corruption} was accepted by {endpoint}"
+                        assert "harmless fixture" not in response.text
+                    await asyncio.to_thread(set_stored_corruption, corruption=None)
+
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
 
 @pytest.mark.usefixtures("patch_central_database")
 async def test_one_click_backend_returns_original_score_with_undetermined_outcome(
@@ -226,6 +317,7 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
         assert sqlite_instance.get_attack_results(
             attack_result_ids=[str(summary.original_inspect_import.attack_result_id)]
         )
+        mismatch_pattern = "Original Inspect import (does not match|references missing or mismatched)"
         for mismatch in (
             {"case_run_id": "f" * 64},
             {"source_sha256": "f" * 64},
@@ -240,11 +332,11 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
                     }
                 },
             )
-            with pytest.raises(ValueError, match="does not match.*planned case"):
+            with pytest.raises(ValueError, match=mismatch_pattern):
                 service.get_run(scenario_result_id=str(result.id))
-            with pytest.raises(ValueError, match="does not match.*planned case"):
+            with pytest.raises(ValueError, match=mismatch_pattern):
                 service.get_run_progress(scenario_result_id=str(result.id), since=None, limit=10)
-            with pytest.raises(ValueError, match="does not match.*planned case"):
+            with pytest.raises(ValueError, match=mismatch_pattern):
                 service.list_runs(scenario_names=["benchmark.inspect_original_inert"])
     finally:
         await service.shutdown_async()
