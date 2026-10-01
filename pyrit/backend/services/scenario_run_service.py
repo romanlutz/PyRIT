@@ -1651,8 +1651,9 @@ class ScenarioRunService:
             )
         except (KeyError, ValueError) as error:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
+        archive_key = InspectOriginalEvalImporter.ARCHIVE_KEY
         archive_streams = [
-            stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-original-eval-archive"
+            stream for stream in episode.raw_streams if stream.key.observed_source_id == archive_key.observed_source_id
         ]
         if (
             not episode.coverage_complete
@@ -1660,7 +1661,9 @@ class ScenarioRunService:
             or episode.run.task_version != task_version
             or episode.run.source_session_id != imported.inspect_run_id
             or len(episode.turns) != 1
+            or archive_key not in episode.run.required_raw_streams
             or len(archive_streams) != 1
+            or archive_streams[0].key != archive_key
             or not archive_streams[0].source_complete
             or archive_streams[0].stored_sha256 != imported.archive_sha256
             or archive_streams[0].observed_sha256 != imported.archive_sha256

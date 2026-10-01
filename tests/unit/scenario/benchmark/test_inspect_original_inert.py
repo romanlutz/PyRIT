@@ -23,9 +23,16 @@ from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import ScenarioService
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
-from pyrit.memory.memory_models import AttackResultEntry, NativeCyberRawChunkEntry, ScoreEntry
+from pyrit.memory.memory_models import (
+    AttackResultEntry,
+    NativeCyberEpisodeEntry,
+    NativeCyberRawChunkEntry,
+    NativeCyberRawStreamEntry,
+    ScoreEntry,
+)
 from pyrit.models import AttackOutcome, ScenarioRunPlan, ScenarioRunState, ScoreStatus, config_hash
 from pyrit.models.catalog.scenario import OriginalInspectImportSummary, OriginalInspectTaskId, RunScenarioRequest
+from pyrit.models.native_cyber_evidence import NativeCyberEvidenceSource, NativeCyberRawKind
 from pyrit.registry import ScenarioRegistry
 from pyrit.scenario.scenarios.benchmark.inspect_original_inert import (
     InspectOriginalInertScenario,
@@ -276,8 +283,19 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
 
 
 @pytest.mark.usefixtures("patch_central_database")
-@pytest.mark.parametrize("tamper", ["score_event", "archive_chunk", "archive_chunk_rehashed", "archive_truncated"])
-async def test_one_click_readback_rejects_tampered_final_event_or_archive_bytes(
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "score_event",
+        "archive_chunk",
+        "archive_chunk_rehashed",
+        "archive_truncated",
+        "archive_source",
+        "archive_kind",
+        "archive_not_required",
+    ],
+)
+async def test_one_click_readback_rejects_tampered_final_event_or_archive_evidence(
     sqlite_instance: SQLiteMemory, tamper: str
 ) -> None:
     scenario = await ScenarioRegistry().create_and_initialize_async("benchmark.inspect_original_inert")
@@ -289,25 +307,35 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_bytes(
     archive = next(
         stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-original-eval-archive"
     )
+    assert InspectOriginalEvalImporter.ARCHIVE_KEY in episode.run.required_raw_streams
     with sqlite_instance.get_session() as session:
         score = session.get(ScoreEntry, reference.score_id)
         attack = session.get(AttackResultEntry, reference.attack_result_id)
         chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
+        stream = session.get(NativeCyberRawStreamEntry, archive.stream_id)
+        episode_row = session.get(NativeCyberEpisodeEntry, reference.projection_episode_id)
         assert score is not None and score.score_metadata is not None
         assert attack is not None and attack.attack_metadata is not None
         assert chunk is not None and len(chunk.data) > 1
+        assert stream is not None and episode_row is not None
         original_score_metadata = dict(score.score_metadata)
         original_attack_metadata = dict(attack.attack_metadata)
         original_chunk = chunk.data
         original_chunk_sha256 = chunk.sha256
         original_chunk_length = chunk.byte_length
+        original_source = stream.source
+        original_kind = stream.kind
+        original_required = [dict(key) for key in episode_row.required_raw_streams]
 
     def set_tamper(*, enabled: bool) -> None:
         with sqlite_instance.get_session() as session, session.begin():
             score = session.get(ScoreEntry, reference.score_id)
             attack = session.get(AttackResultEntry, reference.attack_result_id)
             chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
+            stream = session.get(NativeCyberRawStreamEntry, archive.stream_id)
+            episode_row = session.get(NativeCyberEpisodeEntry, reference.projection_episode_id)
             assert score is not None and attack is not None and chunk is not None
+            assert stream is not None and episode_row is not None
             event_fields = (
                 {"inspect_final_score_event_id": "forged-final-event", "inspect_final_score_event_sha256": "f" * 64}
                 if enabled and tamper == "score_event"
@@ -328,6 +356,19 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_bytes(
                 hashlib.sha256(chunk.data).hexdigest()
                 if enabled and tamper in {"archive_chunk_rehashed", "archive_truncated"}
                 else original_chunk_sha256
+            )
+            stream.source = (
+                NativeCyberEvidenceSource.TOOL.value if enabled and tamper == "archive_source" else original_source
+            )
+            stream.kind = NativeCyberRawKind.JSONL.value if enabled and tamper == "archive_kind" else original_kind
+            episode_row.required_raw_streams = (
+                [
+                    key
+                    for key in original_required
+                    if key["observed_source_id"] != InspectOriginalEvalImporter.ARCHIVE_KEY.observed_source_id
+                ]
+                if enabled and tamper == "archive_not_required"
+                else [dict(key) for key in original_required]
             )
 
     service = ScenarioRunService()

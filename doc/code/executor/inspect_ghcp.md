@@ -301,8 +301,10 @@ Scenario AttackResult. The history API validates the same persisted run and
 case metadata before counting 1/1. Detail, progress and history also read back
 the referenced Score, AttackResult and sealed offline `.eval` episode: their
 foreign key, source case/run/archive metadata and undetermined outcome must
-still agree. The bounded private archive chunks are re-read through the
-integrity-checking memory reader and their length/SHA256 are recomputed. Its
+still agree. The archive must remain a required `harness` / `eval_log` stream
+with the approved source identity. The bounded private archive chunks are
+re-read through the integrity-checking memory reader and their length/SHA256
+are recomputed. Its
 typed final ScoreEvent ID, event hash and value must match the linked Score,
 and the projected native event stream is checked against that `.eval` again.
 Raw bytes never enter the REST response. Missing or substituted IDs or altered
