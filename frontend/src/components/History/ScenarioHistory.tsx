@@ -26,6 +26,10 @@ import {
   ScriptRegular,
 } from '@fluentui/react-icons'
 
+import {
+  ORIGINAL_INERT_SCENARIO_NAME,
+  ORIGINAL_INERT_SCENARIO_TYPE,
+} from '@/components/Scenarios/originalInspectInert'
 import { useScenarioQueue } from '@/hooks/useScenarioQueue'
 import { labelsApi, scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
@@ -449,16 +453,18 @@ function ScenarioHistoryTable({ runs, queueSnapshot, onOpenRun, now }: ScenarioH
                     </Text>
                   </div>
                 </Tooltip>
-              ) : 'Unavailable'}
+              ) : isOriginalInspectInert(run) ? 'Task-owned (no external target)' : 'Unavailable'}
             </TableCell>
             <TableCell className={styles.nowrap}>{formatTimestamp(run.created_at)}</TableCell>
             <TableCell className={styles.nowrap}>
               {formatRuntime(run, now)}
             </TableCell>
             <TableCell className={styles.nowrap}>
-              {run.planned_total_available !== false && run.total_attacks !== null
-                ? `${run.completed_attacks}/${run.total_attacks}`
-                : `${run.completed_attacks} known / total unknown`}
+              {isOriginalInspectInert(run) && run.status === 'COMPLETED'
+                ? 'Original log imported'
+                : run.planned_total_available !== false && run.total_attacks !== null
+                  ? `${run.completed_attacks}/${run.total_attacks}`
+                  : `${run.completed_attacks} known / total unknown`}
             </TableCell>
             <TableCell className={styles.nowrap}>
               {formatSuccess(run)}
@@ -544,6 +550,9 @@ function isTerminal(status: ScenarioRunState): boolean {
 }
 
 function formatSuccess(run: ScenarioRunListItem): string {
+  if (isOriginalInspectInert(run) && run.status === 'COMPLETED') {
+    return 'Undetermined (original Inspect scorer)'
+  }
   const successful = run.successful_attacks
   if (run.planned_total_available === false) {
     return `${successful}/${run.completed_attacks} known results`
@@ -552,4 +561,9 @@ function formatSuccess(run: ScenarioRunListItem): string {
     return '0/0'
   }
   return `${successful}/${run.completed_attacks} (${run.objective_achieved_rate}%)`
+}
+
+function isOriginalInspectInert(run: ScenarioRunListItem): boolean {
+  return run.scenario_name === ORIGINAL_INERT_SCENARIO_TYPE
+    && run.scenario_registry_name === ORIGINAL_INERT_SCENARIO_NAME
 }

@@ -56,6 +56,7 @@ import type {
   ScenarioTechniqueProgress,
 } from '@/types'
 import {
+  attackRoutePath,
   attackConversationRoutePath,
   routerPathParamValue,
   scenarioRunAttackRoutePath,
@@ -464,21 +465,33 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
                     {run.status === 'COMPLETED'
                       ? 'The unchanged Task ran and its exact .eval was imported into PyRIT SQLite.'
                       : 'Original .eval evidence was retained, but this Scenario did not complete successfully.'}
-                    {' '}PyRIT result: unscored. No PyRIT Score or AttackResult was created.
+                    {' '}The original scorer has a linked PyRIT Score and AttackResult.
+                    {' '}Outcome: undetermined. No success threshold was approved.
                   </MessageBarBody>
                 </MessageBar>
                 <div className={styles.summaryGrid}>
                   <ConfigurationItem label="Task ID" value={run.original_inspect_import.task_id} />
+                  <ConfigurationItem label="Original scorer" value={run.original_inspect_import.primary_scorer} />
+                  <ConfigurationItem label="Original score value" value={run.original_inspect_import.score_value} />
+                  <ConfigurationItem label="PyRIT outcome" value="Undetermined (no approved success threshold)" />
                   <ConfigurationItem label="Inspect run ID" value={run.original_inspect_import.inspect_run_id} />
                   <ConfigurationItem label="PyRIT evidence ID" value={run.original_inspect_import.episode_id} />
+                  <ConfigurationItem
+                    label="Offline projection ID"
+                    value={run.original_inspect_import.projection_episode_id}
+                  />
                   <ConfigurationItem label="Case-run ID" value={run.original_inspect_import.case_run_id} />
                   <ConfigurationItem label="Source SHA256" value={run.original_inspect_import.source_sha256} />
                   <ConfigurationItem label="Original .eval SHA256" value={run.original_inspect_import.archive_sha256} />
+                  <ConfigurationItem label="PyRIT Score ID" value={run.original_inspect_import.score_id} />
                   <ConfigurationItem
                     label="Original score events retained"
                     value={String(run.original_inspect_import.original_final_score_events)}
                   />
                 </div>
+                <Link to={attackRoutePath(run.original_inspect_import.attack_result_id, scenarioResultId)}>
+                  View projected PyRIT AttackResult
+                </Link>
               </>
             ) : (
               <Text>
@@ -486,7 +499,7 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
                   ? 'This run has no verified original Inspect import. Do not treat it as a completed evaluation.'
                   : run.status === 'FAILED' || run.status === 'CANCELLED'
                     ? 'The original Inspect import did not complete. Check the run error and reconcile any retained log.'
-                    : 'Awaiting the original Task and its .eval import. No PyRIT grade is available.'}
+                    : 'Awaiting the original Task and its .eval import. No projected Score is available yet.'}
               </Text>
             )}
           </section>

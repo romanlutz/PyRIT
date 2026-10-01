@@ -180,10 +180,13 @@ and ScoreEvent ID/hash against the retained evaluation log and source manifest
 the stored role, case-run ID, and PyRIT Score creator hash; those checks cannot
 attest an external scorer or ScoreEvent. PyRIT links that existing score to one
 `AttackResult`; it does not rescore the case or create a fake terminal score.
-The separate public `benchmark.inspect_original_inert` case instead retains only
-an original `.eval` reference in Scenario metadata. Its successful import is
-**unscored** in PyRIT: it creates no `Score` or `AttackResult` until an adapter
-can independently qualify the original scoring evidence.
+The separate public `benchmark.inspect_original_inert` case retains the live
+original `.eval` and then uses the strict offline importer to project its
+verified original scorer into a source-attributed PyRIT `Score` and
+`AttackResult`. Scenario metadata links both evidence episodes and the projected
+result IDs. There is no reviewed success threshold for this Task, so its
+`AttackOutcome` remains UNDETERMINED even when the source Score is COMPLETE;
+the Scenario does not create a second, synthetic attack result or grade.
 Source case IDs and stable public configuration fingerprints are separate from the
 fresh run-instance ID, so identical reruns remain distinct. V1 task-owned runs do
 not automatically retry or resume after an ambiguous post-score persistence failure.

@@ -644,7 +644,8 @@ function OriginalInspectInertLaunch({ scenario }: OriginalInspectInertLaunchProp
           <MessageBar intent="info">
             <MessageBarBody>
               Runs the unchanged Inspect setup, solver, scorer and cleanup once, then imports its exact
-              {' '}.eval into PyRIT SQLite. This slice does not create a PyRIT Score or AttackResult.
+              {' '}.eval into PyRIT SQLite. The original score is projected afterward into a PyRIT
+              {' '}Score and AttackResult, but no success threshold is approved.
             </MessageBarBody>
           </MessageBar>
           {!approved && (

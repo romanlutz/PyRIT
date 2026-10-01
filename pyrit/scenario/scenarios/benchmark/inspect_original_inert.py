@@ -17,6 +17,7 @@ from pyrit.common import apply_defaults
 from pyrit.executor.attack import AttackExecutorResult
 from pyrit.memory import SQLiteMemory
 from pyrit.models import (
+    AttackOutcome,
     EvalRunRef,
     Parameter,
     ScenarioRunSizeComponent,
@@ -30,6 +31,7 @@ from pyrit.scenario.core import DatasetAttackConfiguration, ScenarioTechnique, T
 if TYPE_CHECKING:
     from pyrit.executor.attack import AttackExecutor
     from pyrit.executor.benchmark.inspect_eval_source import ResolvedOriginalInspectTask
+    from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalCaseResult, InspectOriginalImport
     from pyrit.executor.benchmark.inspect_original_runner import InspectOriginalRun
     from pyrit.models import AttackResult
     from pyrit.models.catalog.scenario import RunScenarioRequest
@@ -58,7 +60,7 @@ def _allocate_log_dir(*, run_instance_id: uuid.UUID) -> Path:
 
 
 class _OriginalInertAtomicWork:
-    """One original Task/Sample import with no synthetic PyRIT AttackResult."""
+    """One unchanged Task followed by strict offline projection of its original score."""
 
     def __init__(
         self,
@@ -112,10 +114,11 @@ class _OriginalInertAtomicWork:
         **attack_params: Any,
     ) -> AttackExecutorResult[AttackResult]:
         """
-        Execute the unchanged Task once and retain its `.eval` reference, not a grade.
+        Execute the unchanged Task once and project its original scorer after cleanup.
 
         Returns:
-            AttackExecutorResult[AttackResult]: No AttackResults until original scoring is qualified.
+            AttackExecutorResult[AttackResult]: No duplicate Scenario AttackResult; the linked offline
+                Score/AttackResult IDs are retained in Scenario metadata.
 
         Raises:
             ValueError: If execution arguments or imported source evidence differ.
@@ -134,6 +137,10 @@ class _OriginalInertAtomicWork:
         log_dir = await asyncio.to_thread(_allocate_log_dir, run_instance_id=self.run.run_instance_id)
 
         try:
+            from pyrit.executor.benchmark.inspect_original_eval import (
+                InspectOriginalEvalImporter,
+                InspectOriginalScorePolicy,
+            )
             from pyrit.executor.benchmark.inspect_original_runner import run_original_inert_eval_async
 
             completed = await run_original_inert_eval_async(
@@ -143,7 +150,19 @@ class _OriginalInertAtomicWork:
                 run_instance_id=self.run.run_instance_id,
             )
             self._verify_import(completed=completed)
-            reference = self._import_reference(completed=completed)
+            await asyncio.to_thread(self._source.verify_unchanged)
+            projected = await InspectOriginalEvalImporter(memory=self._memory).import_eval_log_async(
+                path=completed.archive_path,
+                cases=(self.case,),
+                run=self.run,
+                score_policy=InspectOriginalScorePolicy(
+                    task_name=self.case.task_name,
+                    task_version=self.case.task_version,
+                    primary_scorer="original_inert_scorer",
+                ),
+            )
+            case_result = self._verify_projection(live=completed.imported, projected=projected)
+            reference = self._import_reference(completed=completed, projected=projected, case_result=case_result)
             await asyncio.to_thread(
                 self._memory.update_scenario_metadata_fields,
                 scenario_result_id=self._scenario_result_id,
@@ -181,24 +200,86 @@ class _OriginalInertAtomicWork:
         if imported.episode.score_id is not None or imported.episode.score_status is not ScoreStatus.UNDETERMINED:
             raise ValueError("Original Inspect import unexpectedly claims a qualified PyRIT Score.")
 
-    def _import_reference(self, *, completed: InspectOriginalRun) -> OriginalInspectImportSummary:
+    def _verify_projection(
+        self, *, live: InspectOriginalImport, projected: InspectOriginalImport
+    ) -> InspectOriginalCaseResult:
         """
-        Capture the narrow evidence-to-future-result integration seam.
+        Match the separately qualified offline result to this original live archive.
 
         Returns:
-            OriginalInspectImportSummary: Immutable source/run/archive IDs, without a verdict.
+            InspectOriginalCaseResult: The source-attributed, persisted original scorer result.
+
+        Raises:
+            ValueError: If the projection changes the source, case, or outcome.
         """
+        if (
+            projected.archive_sha256 != live.archive_sha256
+            or projected.inspect_run_id != live.inspect_run_id
+            or projected.inspect_eval_id != live.inspect_eval_id
+            or projected.case_run_ids != (self.case_run_id,)
+            or projected.sample_count != 1
+            or projected.original_final_score_events != 1
+            or not projected.episode.coverage_complete
+            or len(projected.case_results) != 1
+        ):
+            raise ValueError("Offline Inspect score projection differs from the approved live archive or case.")
+        case_result = projected.case_results[0]
+        score = case_result.score
+        attack = case_result.attack_result
+        metadata = score.score_metadata
+        if metadata is None:
+            raise ValueError("Offline Inspect Score has no source attribution.")
+        if (
+            case_result.case_run_id != self.case_run_id
+            or case_result.sample_id != self.case.sample_id
+            or case_result.epoch != self.case.epoch
+            or case_result.primary_scorer != "original_inert_scorer"
+            or score.status is not ScoreStatus.COMPLETE
+            or score.score_type != "float_scale"
+            or score.score_value is None
+            or metadata.get("inspect_archive_sha256") != live.archive_sha256
+            or not metadata.get("inspect_final_score_event_id")
+            or attack.automated_score != score
+            or attack.outcome is not AttackOutcome.UNDETERMINED
+        ):
+            raise ValueError("Offline Inspect Score/AttackResult has unapproved source or success attribution.")
+        return case_result
+
+    def _import_reference(
+        self, *, completed: InspectOriginalRun, projected: InspectOriginalImport, case_result: InspectOriginalCaseResult
+    ) -> OriginalInspectImportSummary:
+        """
+        Preserve both episode identities and the verified offline result links.
+
+        Returns:
+            OriginalInspectImportSummary: Source evidence and Score/AttackResult IDs without a success claim.
+
+        Raises:
+            ValueError: If the original source score cannot be published.
+        """
+        scorer_name = case_result.primary_scorer
+        score_value = case_result.score.score_value
+        if scorer_name is None or score_value is None:
+            raise ValueError("Original Inspect source score was not qualified for Scenario result publication.")
         imported = completed.imported
         return OriginalInspectImportSummary(
             task_id=OriginalInspectTaskId.INERT,
             source_sha256=self.case.package.source_sha256,
             case_run_id=self.case_run_id,
             episode_id=imported.episode.run.run_id,
+            projection_episode_id=projected.episode.run.run_id,
             inspect_run_id=imported.inspect_run_id,
             inspect_eval_id=imported.inspect_eval_id,
             archive_sha256=imported.archive_sha256,
             sample_count=imported.sample_count,
             original_final_score_events=imported.original_final_score_events,
+            primary_scorer=scorer_name,
+            score_id=case_result.score.id,
+            attack_result_id=uuid.UUID(case_result.attack_result.attack_result_id),
+            score_type=case_result.score.score_type,
+            score_value=score_value,
+            score_status=case_result.score.status,
+            outcome=case_result.attack_result.outcome,
         )
 
 
@@ -214,8 +295,10 @@ class InspectOriginalInertScenario(TaskOwnedScenario):
     Run only the SHA-pinned public `inspect_original_inert` Task and import its `.eval`.
 
     No external target, credentials, arbitrary Python, URL, sandbox, model profile
-    or GUI Task editing is accepted. The original Inspect scorer runs unchanged,
-    but its numeric grade is **not** a qualified PyRIT Score or AttackResult.
+    or GUI Task editing is accepted. The original Inspect scorer runs unchanged;
+    a separate strict offline import projects its value into one source-attributed
+    PyRIT Score/AttackResult. No success threshold is approved, so the outcome
+    remains UNDETERMINED.
     """
 
     VERSION: int = 1
@@ -312,7 +395,7 @@ class InspectOriginalInertScenario(TaskOwnedScenario):
         return ScenarioRunSizeEstimate(
             estimated_attack_count=1,
             components=[ScenarioRunSizeComponent(label="Approved original Inspect Task", count=1)],
-            note="One unchanged original Task and one unscored `.eval` import; no PyRIT AttackResult yet.",
+            note="One unchanged original Task; its offline result has no success threshold.",
         )
 
     async def _build_task_owned_atomic_attacks_async(

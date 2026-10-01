@@ -172,11 +172,61 @@ sample, event-order and MessagePiece-link checks. `coverage_complete` says
 the **Inspect-visible log** was retained and projected, not that an external
 CLI, OS action, provider request, or benchmark result was independently
 attested. An error, incomplete attempt, missing event ID, unmatched final
-ScoreEvent or truncated source remains explicitly incomplete. **No PyRIT
-Score or AttackResult is created on import**, even when the original Inspect
-scorer has a numeric result; the Score status remains UND. Re-import of the
-same bytes and case bindings reads back the original streams instead of
-rerunning Inspect or adding results.
+ScoreEvent or truncated source remains explicitly incomplete. The **episode**
+remains unscored (`episode.score_id is None`), while the offline importer
+persists one separately linked PyRIT `Score` and `AttackResult` per retained
+Sample/epoch in `imported.case_results`. These are projections of the
+**original** Inspect scorer, not a second call to a Task, solver or scorer.
+They include the exact archive digest and Inspect run/eval/Sample identity;
+when a final ScoreEvent matches, its ID and typed-event digest are also
+recorded. A case-run ID is included when matching `EvalCaseRef`/`EvalRunRef`
+bindings are provided. All intermediate, retry and additional final scorer
+events remain in the retained raw and typed streams.
+
+For one final scorer, its score is the primary by default. For several,
+provide an `InspectOriginalScorePolicy` naming the **reviewed** primary
+scorer and the exact original Task name/version; without one, the PyRIT
+Score is UNDETERMINED rather than silently choosing a grade. **Every**
+declared final sample score must match exactly one non-intermediate final
+ScoreEvent in the final attempt, even when it is not the primary. Matched
+booleans become PyRIT true/false values and finite numbers in `[0, 1]`
+become float-scale values; unsupported values, missing/mismatched events,
+incomplete Sample or run-level capture and missing selected primaries create
+a value-less UNDETERMINED Score. The original value still survives in the
+exact `.eval`.
+
+Even a COMPLETE imported Score leaves `AttackOutcome` UNDETERMINED until a
+caller supplies **both** a matching source case inventory/run and a
+task-specific `InspectOriginalScorePolicy` with `success_direction` set to
+`InspectSuccessDirection.AT_LEAST` or `AT_MOST` and a finite
+`success_threshold` in `[0, 1]`. Only then does that explicit threshold
+map a verified scalar to SUCCESS or FAILURE. Equivalent numeric thresholds
+(for example, `1`/`1.0` or `-0.0`/`0.0`) share one canonical import identity.
+An actual recorded Inspect Sample/run exception maps to ERROR with an
+undetermined Score, never to defender FAILURE; a non-success status
+without an exception remains UNDETERMINED. An offline AttackResult has
+zero executed PyRIT turns; the original Inspect turn count remains
+source metadata when available.
+Offline Scores are source-attributed, **not** task-owned
+`benchmark_original` scorer attestations or independent external-activity
+proof. The allowlisted live original Task runner still creates neither
+per-case Score nor AttackResult.
+
+Re-import with the same archive, case bindings and policy rechecks the
+exact source bytes, run/Sample coverage derived from the typed source,
+every original event's capture timestamp, typed event payloads, and
+persisted Score/AttackResult links without rerunning Inspect or creating
+duplicates. The synthetic per-Sample summary has no original event
+timestamp to check. Missing or tampered projection rows fail closed.
+An original run-level gap applies to every Sample: moving it into one
+turn's stored gaps cannot make another Sample's Score complete. Each
+stored turn gap must match that Sample's evidence or observed native
+tool-capture gap.
+
+Score and AttackResult rows are committed atomically; an interrupted
+import after the evidence episode is sealed but before projection
+publication requires explicit reconciliation rather than an automatic
+repair.
 
 For an unchanged-runner proof, `run_original_inert_eval_async(memory=...,
 log_dir=...)` invokes only the separately SHA-pinned public
@@ -202,7 +252,9 @@ the original `.eval` archive is always hashed and stored **byte for byte**.
 ### One-click public Mode 1 entry
 
 With the backend configured for PyRIT SQLite, CoPyRIT's Scenario catalog
-automatically discovers `benchmark.inspect_original_inert`. Its detail page
+automatically discovers `benchmark.inspect_original_inert`. If unrelated
+model-backed catalog introspection fails without credentials, the catalog
+still links to this Task's independently readable detail page. That page
 shows the sole approved Task ID, `inspect_original_inert`, and a **Run original
 Inspect Task** button; no target, Python code, path, model, sandbox, secret, or
 scorer editing is exposed. The same registry-backed action is available via
@@ -217,22 +269,30 @@ scorer editing is exposed. The same registry-backed action is available via
 
 The Scenario checks the pinned public source and profile before allocating a
 fresh case-run ID and private local `.eval` directory. It calls the unchanged
-runner once, then checks that the imported SQLite evidence matches that case,
-source, Inspect log, and original ScoreEvent. A successful run removes its
-temporary disk log; a failed run retains its unique local log for reconciliation.
+runner once and checks its live evidence. **After** the original setup, solver,
+scorer and cleanup, the strict offline importer reads that same `.eval` with
+the approved case/run inventory and `original_inert_scorer` as its primary
+scorer. The Scenario requires identical archive/run/Sample identities and a
+linked, persisted source Score and AttackResult before marking the run complete.
+No success direction or threshold is supplied: the source-attributed PyRIT
+Score is COMPLETE with the original value, while the AttackResult outcome is
+UNDETERMINED, not SUCCESS or FAILURE. The original live episode remains
+unscored. A successful run removes its temporary disk log; a failed run retains
+its unique local log for reconciliation.
 No automatic retry or resume is allowed. The backend rejects other Task IDs,
 source paths and URLs, arbitrary request fields, target/model/sandbox settings,
 initializers (including secret-bearing arguments), labels, overlays, datasets,
 and extra execution techniques **before** running any initializer or Task.
 
 `GET /api/scenarios/runs/{scenario_result_id}` and the run-progress endpoint
-expose `original_inspect_import` after successful import: source SHA256,
-case-run ID, Inspect run/eval IDs, evidence episode ID, exact archive SHA256,
-and `score_status: "unscored"`. CoPyRIT displays these identifiers and the
-unscored state instead of a misleading attack-success rate. The original Inspect
-score remains in its typed `.eval` evidence; this slice deliberately does not
-create a PyRIT `Score` or `AttackResult`. The case-run ID and episode ID are
-the narrow integration seam for a separately reviewed score projection.
+expose `original_inspect_import` after successful projection: source SHA256,
+case-run ID, Inspect run/eval IDs, live and offline evidence episode IDs, exact
+archive SHA256, and the linked PyRIT Score/AttackResult IDs. The fields
+`score_status: "complete"` and `outcome: "undetermined"` are deliberately
+distinct. CoPyRIT displays the original scorer value and a link to the
+source-attributed AttackResult instead of a misleading attack-success rate.
+The offline AttackResult is not a task-owned `benchmark_original` attestation
+or a second Scenario attack; its original `.eval` remains the source of truth.
 Internal/private Tasks, arbitrary Python and cyber Evals are not selectable.
 
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`

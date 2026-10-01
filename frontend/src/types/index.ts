@@ -833,12 +833,19 @@ export interface OriginalInspectImportSummary {
   source_sha256: string
   case_run_id: string
   episode_id: string
+  projection_episode_id: string
   inspect_run_id: string
   inspect_eval_id: string
   archive_sha256: string
   sample_count: number
   original_final_score_events: number
-  score_status: 'unscored'
+  primary_scorer: 'original_inert_scorer'
+  score_id: string
+  attack_result_id: string
+  score_type: 'float_scale'
+  score_value: string
+  score_status: 'complete'
+  outcome: 'undetermined'
 }
 
 export interface ScenarioOverloadSummary {

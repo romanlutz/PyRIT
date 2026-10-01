@@ -31,6 +31,7 @@ class InspectOriginalRun:
     case: EvalCaseRef
     run: EvalRunRef
     imported: InspectOriginalImport
+    archive_path: Path
 
 
 async def run_original_inert_eval_async(
@@ -135,7 +136,7 @@ async def run_original_inert_eval_async(
             f"Original Inspect run {episode_id} has unqualified or incomplete imported evidence; "
             "do not publish a benchmark grade."
         )
-    return InspectOriginalRun(case=source.case, run=run, imported=imported)
+    return InspectOriginalRun(case=source.case, run=run, imported=imported, archive_path=location)
 
 
 def _approved_log_location(*, path: str, log_dir: Path) -> Path:

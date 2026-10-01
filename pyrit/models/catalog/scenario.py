@@ -16,12 +16,15 @@ canonical models.
 from datetime import datetime
 from enum import Enum
 from typing import Any, ClassVar, Literal
+from uuid import UUID
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pyrit.models.parameter import Parameter
+from pyrit.models.results.attack_result import AttackOutcome
 from pyrit.models.results.scenario_result import ScenarioRunState
 from pyrit.models.retry_event import RetryEvent
+from pyrit.models.score.score import ScoreStatus
 
 # Authoritative set of dataset seed filters exposed over the run request surface. Each entry
 # is used verbatim as a ``MemoryInterface.get_seeds`` keyword argument, so a filter key IS the
@@ -335,7 +338,7 @@ class ScenarioOverloadSummary(BaseModel):
 
 
 class OriginalInspectImportSummary(BaseModel):
-    """Evidence reference for a completed original Inspect import, not a PyRIT verdict."""
+    """Live archive and source-attributed offline Score/AttackResult, not a success verdict."""
 
     model_config = ConfigDict(extra="forbid")
     METADATA_KEY: ClassVar[str] = "original_inspect_import"
@@ -344,12 +347,34 @@ class OriginalInspectImportSummary(BaseModel):
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     case_run_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     episode_id: str = Field(pattern=r"^inspect-run-[0-9a-f]{32}$")
+    projection_episode_id: str = Field(pattern=r"^inspect-import-[0-9a-f]{64}$")
     inspect_run_id: str = Field(min_length=1)
     inspect_eval_id: str = Field(min_length=1)
     archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     sample_count: int = Field(ge=1, le=1)
     original_final_score_events: int = Field(ge=1, le=1)
-    score_status: Literal["unscored"] = "unscored"
+    primary_scorer: str = Field(pattern=r"^original_inert_scorer$")
+    score_id: UUID
+    attack_result_id: UUID
+    score_type: str = Field(pattern=r"^float_scale$")
+    score_value: str = Field(min_length=1)
+    score_status: ScoreStatus
+    outcome: AttackOutcome
+
+    @model_validator(mode="after")
+    def _require_undetermined_outcome(self) -> "OriginalInspectImportSummary":
+        """
+        Reject a claim of success without a separately reviewed criterion.
+
+        Returns:
+            OriginalInspectImportSummary: A source score without an inferred outcome.
+
+        Raises:
+            ValueError: If the scorer was not verified or success was inferred.
+        """
+        if self.score_status is not ScoreStatus.COMPLETE or self.outcome is not AttackOutcome.UNDETERMINED:
+            raise ValueError("The public original Inspect Task requires a complete source score and no success claim.")
+        return self
 
 
 class ScenarioRunSummary(BaseModel):
@@ -411,7 +436,7 @@ class ScenarioRunSummary(BaseModel):
         description="Bounded recent HTTP 429 and 5xx retry evidence grouped by component role",
     )
     original_inspect_import: OriginalInspectImportSummary | None = Field(
-        None, description="Original Inspect archive reference; it carries no PyRIT Score or AttackResult"
+        None, description="Exact archive and linked offline Score/AttackResult; outcome remains undetermined"
     )
 
 

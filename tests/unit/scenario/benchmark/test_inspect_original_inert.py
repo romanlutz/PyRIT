@@ -13,15 +13,18 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from inspect_ai.event import ScoreEvent
 from inspect_ai.log import read_eval_log
 from sqlalchemy import func, select
 
+from pyrit.backend.main import app
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import ScenarioService
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
+from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 from pyrit.memory.memory_models import AttackResultEntry, ScoreEntry
-from pyrit.models import ScenarioRunPlan, ScenarioRunState, ScoreStatus
+from pyrit.models import AttackOutcome, ScenarioRunPlan, ScenarioRunState, ScoreStatus, config_hash
 from pyrit.models.catalog.scenario import OriginalInspectImportSummary, OriginalInspectTaskId, RunScenarioRequest
 from pyrit.registry import ScenarioRegistry
 from pyrit.scenario.scenarios.benchmark.inspect_original_inert import (
@@ -60,7 +63,7 @@ async def test_registry_discovers_only_pinned_public_task_without_executing_it()
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_one_click_runs_unchanged_inspect_twice_with_distinct_unscored_sqlite_evidence(
+async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqlite_results(
     tmp_path: Path, sqlite_instance: SQLiteMemory
 ) -> None:
     registry = ScenarioRegistry()
@@ -94,14 +97,25 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_unscored_sql
             assert reference.task_id is OriginalInspectTaskId.INERT
             assert reference.case_run_id == work.case_run_id
             assert reference.source_sha256 == EvalSourceFactory.ORIGINAL_INERT_SHA256
-            assert reference.score_status == "unscored"
+            assert reference.score_status is ScoreStatus.COMPLETE
+            assert reference.score_type == "float_scale"
+            assert reference.score_value == "1.0"
+            assert reference.outcome is AttackOutcome.UNDETERMINED
+            assert reference.primary_scorer == "original_inert_scorer"
             assert reference.episode_id == f"inspect-run-{work.run.run_instance_id.hex}"
+            assert reference.episode_id != reference.projection_episode_id
 
             snapshot = sqlite_instance.native_cyber_evidence.get_finalized_unscored_inspect_capture(
                 run_id=reference.episode_id
             )
             assert snapshot.coverage_complete
             assert snapshot.score_id is None and snapshot.score_status is ScoreStatus.UNDETERMINED
+            projected_snapshot = sqlite_instance.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+                run_id=reference.projection_episode_id
+            )
+            assert projected_snapshot.coverage_complete
+            assert projected_snapshot.score_id is None
+            assert len(projected_snapshot.turns) == 1
             archive_stream = next(
                 stream
                 for stream in snapshot.raw_streams
@@ -116,6 +130,19 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_unscored_sql
                 )
             )
             assert hashlib.sha256(archive).hexdigest() == reference.archive_sha256
+            projected_stream = next(
+                stream
+                for stream in projected_snapshot.raw_streams
+                if stream.key.observed_source_id == "inspect-original-eval-archive"
+            )
+            assert archive == b"".join(
+                chunk.data
+                for chunk in sqlite_instance.native_cyber_evidence.read_raw_chunks(
+                    run_id=reference.projection_episode_id,
+                    stream_id=projected_stream.stream_id,
+                    allow_sensitive=True,
+                )
+            )
             typed = await asyncio.to_thread(
                 read_eval_log, io.BytesIO(archive), resolve_attachments="full", format="eval"
             )
@@ -126,23 +153,41 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_unscored_sql
             assert len([event for event in typed.samples[0].events if isinstance(event, ScoreEvent)]) == 1
             assert typed.samples[0].scores and typed.samples[0].scores["original_inert_scorer"].value == 1.0
             assert typed.samples[0].model_usage == {}
+            [score] = sqlite_instance.get_scores(score_ids=[str(reference.score_id)])
+            [attack] = sqlite_instance.get_attack_results(attack_result_ids=[str(reference.attack_result_id)])
+            assert score.status is ScoreStatus.COMPLETE and score.score_value == "1.0"
+            assert score.score_metadata["inspect_archive_sha256"] == reference.archive_sha256
+            assert score.score_metadata["inspect_case_run_id"] == reference.case_run_id
+            final_event = next(event for event in typed.samples[0].events if isinstance(event, ScoreEvent))
+            assert score.score_metadata["inspect_final_score_event_id"] == final_event.uuid
+            assert score.score_metadata["inspect_final_score_event_sha256"] == config_hash(
+                {"event": final_event.model_dump(mode="json", exclude_none=True)}
+            )
+            assert attack.automated_score == score
+            assert attack.outcome is AttackOutcome.UNDETERMINED
+            assert attack.attribution_parent_id is None
             plan = ScenarioRunPlan.model_validate(result.metadata["run_plan"])
             assert plan.run_instance_id == work.run.run_instance_id
             assert plan.seed_groups[0].id == reference.case_run_id
             assert plan.seed_groups[0].source_sha256 == reference.source_sha256
 
     assert len({reference.episode_id for reference in run_references}) == 2
+    assert len({reference.projection_episode_id for reference in run_references}) == 2
     assert len({reference.case_run_id for reference in run_references}) == 2
     assert len({reference.inspect_run_id for reference in run_references}) == 2
     assert len({reference.archive_sha256 for reference in run_references}) == 2
+    assert len({reference.score_id for reference in run_references}) == 2
+    assert len({reference.attack_result_id for reference in run_references}) == 2
     assert all(not directory.exists() for directory in original_dirs)
     with sqlite_instance.get_session() as session:
-        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
-        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 2
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 2
 
 
 @pytest.mark.usefixtures("patch_central_database")
-async def test_one_click_backend_returns_unscored_summary_and_progress(sqlite_instance: SQLiteMemory) -> None:
+async def test_one_click_backend_returns_original_score_with_undetermined_outcome(
+    sqlite_instance: SQLiteMemory,
+) -> None:
     service = ScenarioRunService()
     try:
         scenario = await service._prepare_run_async(
@@ -162,9 +207,104 @@ async def test_one_click_backend_returns_unscored_summary_and_progress(sqlite_in
         assert progress.run.original_inspect_import == summary.original_inspect_import
         assert progress.results == []
         assert summary.successful_attacks == 0
-        assert summary.original_inspect_import.score_status == "unscored"
+        assert summary.original_inspect_import.score_status is ScoreStatus.COMPLETE
+        assert summary.original_inspect_import.outcome is AttackOutcome.UNDETERMINED
+        assert summary.original_inspect_import.score_value == "1.0"
+        assert sqlite_instance.get_scores(score_ids=[str(summary.original_inspect_import.score_id)])
+        assert sqlite_instance.get_attack_results(
+            attack_result_ids=[str(summary.original_inspect_import.attack_result_id)]
+        )
     finally:
         await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqlite_instance: SQLiteMemory) -> None:
+    service = ScenarioRunService()
+    catalog = ScenarioService()
+    try:
+        with (
+            patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.routes.scenarios.get_scenario_service", return_value=catalog),
+            patch.dict("os.environ", {"OPENAI_CHAT_MODEL": ""}),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                details = await client.get("/api/scenarios/catalog/benchmark.inspect_original_inert")
+                assert details.status_code == 200
+                assert details.json()["scenario_name"] == "benchmark.inspect_original_inert"
+                missing_target = await client.post(
+                    "/api/scenarios/runs",
+                    json={"scenario_name": "foundry.red_team_agent"},
+                )
+                assert missing_target.status_code == 400
+                assert "target_name is required" in missing_target.json()["detail"]
+                rejected = await client.post(
+                    "/api/scenarios/runs",
+                    json={
+                        "scenario_name": "benchmark.inspect_original_inert",
+                        "task_url": "https://example.invalid/private",
+                    },
+                )
+                assert rejected.status_code == 400
+                assert "task_url" in rejected.json()["detail"]
+
+                started = await client.post(
+                    "/api/scenarios/runs",
+                    json={
+                        "scenario_name": "benchmark.inspect_original_inert",
+                        "scenario_params": {"eval_family": "inspect_original_inert"},
+                    },
+                )
+                assert started.status_code == 202
+                run_id = started.json()["scenario_result_id"]
+                active = service._active_tasks[run_id]
+                assert active.task is not None
+                await asyncio.wait_for(active.task, timeout=45)
+
+                response = await client.get(f"/api/scenarios/runs/{run_id}")
+                assert response.status_code == 200
+                assert response.json()["status"] == "COMPLETED"
+                reference = response.json()["original_inspect_import"]
+                assert reference["score_status"] == "complete"
+                assert reference["score_value"] == "1.0"
+                assert reference["outcome"] == "undetermined"
+                assert sqlite_instance.get_scores(score_ids=[reference["score_id"]])
+                assert sqlite_instance.get_attack_results(attack_result_ids=[reference["attack_result_id"]])
+
+                progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
+                assert progress.status_code == 200
+                assert progress.json()["run"]["original_inspect_import"] == reference
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_offline_projection_failure_keeps_evidence_but_never_completes_scenario(
+    tmp_path: Path, sqlite_instance: SQLiteMemory
+) -> None:
+    registry = ScenarioRegistry()
+    scenario = await registry.create_and_initialize_async("benchmark.inspect_original_inert")
+    log_dir = tmp_path / "failed-projection"
+    log_dir.mkdir()
+    with (
+        patch("pyrit.scenario.scenarios.benchmark.inspect_original_inert._allocate_log_dir", return_value=log_dir),
+        patch.object(
+            InspectOriginalEvalImporter,
+            "import_eval_log_async",
+            new_callable=AsyncMock,
+            side_effect=ValueError("Strict offline projection rejected the log"),
+        ) as projection,
+        pytest.raises(ValueError, match="Strict offline projection rejected"),
+    ):
+        await scenario.run_async()
+    projection.assert_awaited_once()
+    [stored] = sqlite_instance.get_scenario_results(scenario_result_ids=[scenario._scenario_result_id])
+    assert stored.scenario_run_state is ScenarioRunState.FAILED
+    assert OriginalInspectImportSummary.METADATA_KEY not in stored.metadata
+    assert list(log_dir.glob("*.eval"))
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count(ScoreEntry.id))) == 0
+        assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
 
 
 @pytest.mark.usefixtures("patch_central_database")

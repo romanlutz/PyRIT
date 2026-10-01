@@ -152,6 +152,31 @@ describe('ScenarioHistory', () => {
     expect(screen.queryByText('1/1 (100%)')).not.toBeInTheDocument()
   })
 
+  it('shows imported original Inspect work without implying zero success', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        scenario_name: 'InspectOriginalInertScenario',
+        scenario_registry_name: 'benchmark.inspect_original_inert',
+        total_attacks: 1,
+        completed_attacks: 0,
+        successful_attacks: 0,
+        objective_achieved_rate: 0,
+        target: null,
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    const row = await screen.findByTestId('scenario-history-row-run-1')
+    expect(within(row).getByText('Original log imported')).toBeInTheDocument()
+    expect(within(row).getByText('Undetermined (original Inspect scorer)')).toBeInTheDocument()
+    expect(within(row).getByText('Task-owned (no external target)')).toBeInTheDocument()
+    expect(within(row).queryByText('0/1')).not.toBeInTheDocument()
+    expect(within(row).queryByText('0/0')).not.toBeInTheDocument()
+  })
+
   it('renders safe fallbacks when optional run metadata is unavailable', async () => {
     jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:30Z'))
     mockedScenariosApi.listRuns.mockResolvedValue({

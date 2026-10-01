@@ -345,7 +345,7 @@ describe('ScenarioRunPage', () => {
     ])
   })
 
-  it('shows original Inspect evidence as unscored rather than zero attack success', () => {
+  it('shows the original Inspect Score and undetermined outcome rather than zero attack success', () => {
     mockHookState(makeState({
       run: {
         scenario_result_id: SCENARIO_RESULT_ID,
@@ -360,12 +360,19 @@ describe('ScenarioRunPage', () => {
           source_sha256: 'a'.repeat(64),
           case_run_id: 'b'.repeat(64),
           episode_id: `inspect-run-${'c'.repeat(32)}`,
+          projection_episode_id: `inspect-import-${'e'.repeat(64)}`,
           inspect_run_id: 'inspect-123',
           inspect_eval_id: 'eval-456',
           archive_sha256: 'd'.repeat(64),
           sample_count: 1,
           original_final_score_events: 1,
-          score_status: 'unscored',
+          primary_scorer: 'original_inert_scorer',
+          score_id: '123e4567-e89b-12d3-a456-426614174001',
+          attack_result_id: '123e4567-e89b-12d3-a456-426614174002',
+          score_type: 'float_scale',
+          score_value: '1.0',
+          score_status: 'complete',
+          outcome: 'undetermined',
         },
       },
       results: [],
@@ -385,9 +392,15 @@ describe('ScenarioRunPage', () => {
     renderPage()
 
     expect(screen.getByRole('heading', { name: 'Original Inspect import', level: 2 })).toBeInTheDocument()
-    expect(screen.getByText(/PyRIT result: unscored/)).toBeInTheDocument()
+    expect(screen.getByText(/Outcome: undetermined/)).toBeInTheDocument()
+    expect(screen.getByText('original_inert_scorer')).toBeInTheDocument()
+    expect(screen.getByText('1.0')).toBeInTheDocument()
     expect(screen.getByText('inspect-123')).toBeInTheDocument()
     expect(screen.getByText('d'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View projected PyRIT AttackResult' })).toHaveAttribute(
+      'href',
+      `/attacks/123e4567-e89b-12d3-a456-426614174002?scenarioResultId=${SCENARIO_RESULT_ID}`,
+    )
     expect(screen.queryByRole('progressbar', { name: 'Overall scenario run progress' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Objective Scorer' })).not.toBeInTheDocument()
     expect(screen.queryByText(/Attack success/)).not.toBeInTheDocument()
