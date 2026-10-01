@@ -78,6 +78,7 @@ class _ProgressSummaryState:
     active_group_ids: tuple[str, ...]
     terminal: bool
     plan_complete: bool
+    completed_without_attack_result: frozenset[ResultUnitIdentity]
 
 
 @dataclass
@@ -186,6 +187,7 @@ class ScenarioProgressReadModel:
         active_group_ids: Sequence[str],
         terminal: bool,
         objective_scorer_identifier: ComponentIdentifier | None,
+        completed_without_attack_result: frozenset[ResultUnitIdentity] = frozenset(),
     ) -> ScenarioProgressSnapshot:
         """
         Refresh and return the mapped progress state for one run.
@@ -226,6 +228,7 @@ class ScenarioProgressReadModel:
                 active_group_ids=tuple(active_group_ids),
                 terminal=terminal,
                 plan_complete=plan_complete,
+                completed_without_attack_result=completed_without_attack_result,
             )
             if entry.summary is None or first_new_index < len(entry.deltas) or entry.summary_state != summary_state:
                 technique_details_by_group = self._build_technique_details_by_group(
@@ -240,6 +243,7 @@ class ScenarioProgressReadModel:
                     terminal=terminal,
                     objective_scorer_identifier=objective_scorer_identifier,
                     technique_details_by_group=technique_details_by_group,
+                    completed_without_attack_result=completed_without_attack_result,
                 )
                 entry.summary_state = summary_state
 
@@ -333,6 +337,7 @@ class ScenarioProgressReadModel:
         scenario_result: ScenarioResult,
         plan: ScenarioRunPlan | None,
         plan_lookup: ScenarioPlanLookup,
+        completed_without_attack_result: frozenset[ResultUnitIdentity] = frozenset(),
     ) -> tuple[int, int, int, int]:
         """
         Calculate planned-unit totals without inflating retries or error attempts.
@@ -354,9 +359,14 @@ class ScenarioProgressReadModel:
                     latest_result_by_unit[unit_identity] = attack_result
 
         planned_units = plan_lookup.planned_units if plan is not None else frozenset(latest_result_by_unit)
+        if completed_without_attack_result - planned_units:
+            raise ValueError("A completed evidence-only case is not in the Scenario run plan.")
+        if completed_without_attack_result & latest_result_by_unit.keys():
+            raise ValueError("A completed evidence-only case already has a Scenario AttackResult.")
         total = len(planned_units)
         completed_results = [result for unit, result in latest_result_by_unit.items() if unit in planned_units]
-        completed = len(completed_results)
+        completed_units = {unit for unit in latest_result_by_unit if unit in planned_units}
+        completed = len(completed_units | completed_without_attack_result)
         succeeded = sum(result.outcome == AttackOutcome.SUCCESS for result in completed_results)
         rate = int((succeeded / completed) * 100) if completed else 0
         return total, completed, rate, succeeded
@@ -427,6 +437,7 @@ class ScenarioProgressReadModel:
         terminal: bool,
         objective_scorer_identifier: ComponentIdentifier | None,
         technique_details_by_group: dict[str, ScenarioAttackTechniqueDetails],
+        completed_without_attack_result: frozenset[ResultUnitIdentity] = frozenset(),
     ) -> ScenarioProgressSummary:
         """
         Build canonical progress rollups from a plan and persisted attempts.
@@ -441,9 +452,12 @@ class ScenarioProgressReadModel:
                 seed_group_id=result.seed_group_id,
             )
             attempts_by_unit.setdefault(identity, []).append(result)
+        if completed_without_attack_result & attempts_by_unit.keys():
+            raise ValueError("A completed evidence-only case already has a Scenario AttackResult.")
 
         def aggregate(*, units: Sequence[ResultUnitIdentity], planned: int | None) -> ScenarioProgressCounts:
             completed = 0
+            evidence_only = 0
             succeeded = 0
             errors = 0
             retries = 0
@@ -457,11 +471,14 @@ class ScenarioProgressReadModel:
                         attempts_per_unit=[len(attempts)],
                         persisted_retries=[attempt.total_retries for attempt in attempts],
                     )
+                elif unit in completed_without_attack_result:
+                    completed += 1
+                    evidence_only += 1
             return ScenarioProgressCounts(
                 completed=completed,
                 planned=planned,
                 succeeded=succeeded,
-                success_percentage=int((succeeded / completed) * 100) if completed else None,
+                success_percentage=int((succeeded / completed) * 100) if completed and not evidence_only else None,
                 errors=errors,
                 retries=retries,
             )
@@ -476,6 +493,8 @@ class ScenarioProgressReadModel:
         overall_units = (
             [unit for units in group_units.values() for unit in units] if plan_complete else list(attempts_by_unit)
         )
+        if completed_without_attack_result - set(overall_units):
+            raise ValueError("A completed evidence-only case is not in the Scenario run plan.")
         overall = aggregate(
             units=overall_units,
             planned=len(overall_units) if plan_complete else None,

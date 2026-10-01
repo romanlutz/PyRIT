@@ -458,8 +458,18 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
         {isOriginalInert ? (
           <section className={styles.section} aria-label="Original Inspect import status">
             <Text as="h2" size={500} weight="semibold">Original Inspect import</Text>
+            {(run.status === 'FAILED' || run.status === 'CANCELLED') && run.failure_reason && (
+              <MessageBar intent={run.status === 'FAILED' ? 'error' : 'warning'}>
+                <MessageBarBody role="alert">{run.failure_reason}</MessageBarBody>
+              </MessageBar>
+            )}
             {run.original_inspect_import ? (
               <>
+                {overall.planned !== null && (
+                  <Text>
+                    {overall.completed} of {overall.planned} original case{overall.planned === 1 ? '' : 's'} imported.
+                  </Text>
+                )}
                 <MessageBar intent={run.status === 'COMPLETED' ? 'info' : 'warning'}>
                   <MessageBarBody>
                     {run.status === 'COMPLETED'
@@ -498,7 +508,7 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
                 {run.status === 'COMPLETED'
                   ? 'This run has no verified original Inspect import. Do not treat it as a completed evaluation.'
                   : run.status === 'FAILED' || run.status === 'CANCELLED'
-                    ? 'The original Inspect import did not complete. Check the run error and reconcile any retained log.'
+                    ? 'The original Inspect import did not complete. Reconcile any retained log before retrying.'
                     : 'Awaiting the original Task and its .eval import. No projected Score is available yet.'}
               </Text>
             )}

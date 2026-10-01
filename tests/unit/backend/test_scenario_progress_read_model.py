@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyrit.backend.services.scenario_progress_read_model import (
+    ResultUnitIdentity,
     ScenarioProgressReadModel,
     ScenarioProgressSnapshot,
 )
@@ -141,6 +142,58 @@ def test_get_snapshot_invalidates_cache_when_plan_changes() -> None:
         None,
         None,
     ]
+
+
+def test_get_snapshot_recalculates_when_verified_case_import_lands_without_attack_result() -> None:
+    memory = MagicMock(spec=MemoryInterface)
+    memory.get_scenario_attack_result_deltas.return_value = ([], False)
+    read_model = ScenarioProgressReadModel(memory=memory)
+    plan = ScenarioRunPlan(
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="original-case",
+                atomic_attack_name="original_task",
+                display_group="original_inspect_inert",
+                technique_eval_hash="a" * 64,
+                seed_group_ids=["case-run-id"],
+            )
+        ],
+        seed_groups=[
+            ScenarioRunPlanSeedGroup(id="case-run-id", objective_sha256="b" * 64, objective="harmless fixture")
+        ],
+    )
+    completed = frozenset({ResultUnitIdentity(atomic_group_id="original-case", seed_group_id="case-run-id")})
+
+    def snapshot(*, completed_units: frozenset[ResultUnitIdentity]) -> ScenarioProgressSnapshot:
+        return read_model.get_snapshot(
+            scenario_result_id="one-click",
+            plan=plan,
+            plan_complete=True,
+            active_group_ids=(),
+            terminal=False,
+            objective_scorer_identifier=None,
+            completed_without_attack_result=completed_units,
+        )
+
+    pending = snapshot(completed_units=frozenset())
+    imported = snapshot(completed_units=completed)
+    restored = snapshot(completed_units=frozenset())
+
+    assert pending.summary.overall.completed == 0
+    assert pending.summary.atomic_groups[0].status == "PENDING"
+    assert imported.summary.overall.completed == 1
+    assert imported.summary.overall.succeeded == 0
+    assert imported.summary.overall.success_percentage is None
+    assert imported.summary.atomic_groups[0].status == "COMPLETED"
+    assert imported.summary.seed_groups[0].completed == 1
+    assert imported.results == ()
+    assert restored.summary.overall.completed == 0
+    attributed = _make_delta(run_id="one-click").model_copy(
+        update={"attribution_data": {"parent_collection": "original_task", "seed_group_id": "case-run-id"}}
+    )
+    memory.get_scenario_attack_result_deltas.return_value = ([attributed], False)
+    with pytest.raises(ValueError, match="already has a Scenario AttackResult"):
+        snapshot(completed_units=completed)
 
 
 @pytest.mark.parametrize(

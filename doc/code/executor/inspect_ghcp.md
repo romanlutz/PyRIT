@@ -293,6 +293,14 @@ distinct. CoPyRIT displays the original scorer value and a link to the
 source-attributed AttackResult instead of a misleading attack-success rate.
 The offline AttackResult is not a task-owned `benchmark_original` attestation
 or a second Scenario attack; its original `.eval` remains the source of truth.
+The Scenario progress read model counts the one planned case as completed
+**only** when its persisted verified import matches the plan's run ID, source
+SHA and case-run ID. It reports 1/1 completed, zero successes and no success
+percentage; this is import completion, not a success verdict or a synthetic
+Scenario AttackResult. A rejected `.eval` leaves the planned case incomplete.
+The progress header exposes only a vetted failure diagnosis (or a safe generic
+failure message), while full exception details remain in backend logs for
+reconciliation.
 Internal/private Tasks, arbitrary Python and cyber Evals are not selectable.
 
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`

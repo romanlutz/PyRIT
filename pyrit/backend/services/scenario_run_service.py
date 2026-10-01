@@ -58,6 +58,7 @@ from pyrit.models import (
     ScenarioRunProgress,
     ScenarioRunState,
     TargetIdentifier,
+    config_hash,
 )
 from pyrit.models.catalog.scenario import (
     AttackErrorSummary,
@@ -90,6 +91,17 @@ _RESTART_INTERRUPTION_REASON = (
 )
 _SHUTDOWN_INTERRUPTION_REASON = "The backend process shut down before this scenario run completed."
 _USER_CANCELLATION_REASON = "Run was cancelled by user"
+_ORIGINAL_INSPECT_SCENARIO_NAME = "InspectOriginalInertScenario"
+_ORIGINAL_INSPECT_REGISTRY_NAME = "benchmark.inspect_original_inert"
+_SAFE_ORIGINAL_INSPECT_FAILURE_PREFIXES = (
+    "Original Inspect archive is not a readable `.eval` ZIP.",
+    "Original Inspect archive is empty or exceeds its bounded byte quota.",
+    "Original Inspect log Samples/epochs differ from the approved case inventory.",
+    "Original Inspect case Score/AttackResult projection is partial or missing.",
+    "Original Inspect case Score/AttackResult differs from its typed source.",
+    "Offline Inspect score projection differs from the approved live archive or case.",
+    "Offline Inspect Score/AttackResult has unapproved source or success attribution.",
+)
 
 _SAFE_SCENARIO_PARAMETER_NAMES = frozenset(
     {
@@ -1187,6 +1199,9 @@ class ScenarioRunService:
         # Fallback: in-memory error for in-flight tasks where DB hasn't been updated yet
         if not error:
             error = active_error
+        safe_failure = self._original_inspect_failure_reason(scenario_result=scenario_result)
+        if safe_failure is not None:
+            error = safe_failure
 
         status = scenario_result.scenario_run_state
         terminal = status in (
@@ -1203,6 +1218,8 @@ class ScenarioRunService:
             )
             plan = None
         plan_lookup = self._progress_read_model.build_plan_lookup(plan=plan)
+        original_inspect_import = self._original_inspect_import(scenario_result=scenario_result)
+        completed_import_units = self._original_inspect_completed_units(plan=plan, imported=original_inspect_import)
 
         # Build result fields from DB (always computed so in-progress runs show progress)
         total_attacks, completed_attacks, objective_achieved_rate, successful_attacks = (
@@ -1210,6 +1227,7 @@ class ScenarioRunService:
                 scenario_result=scenario_result,
                 plan=plan,
                 plan_lookup=plan_lookup,
+                completed_without_attack_result=completed_import_units,
             )
         )
         techniques_used = (
@@ -1220,7 +1238,6 @@ class ScenarioRunService:
         target, datasets_used, scenario_parameters = self._safe_run_metadata(
             scenario_identifier=getattr(scenario_result, "scenario_identifier", None)
         )
-        original_inspect_import = self._original_inspect_import(scenario_result=scenario_result)
 
         # Surface per-attack errors and retry pressure regardless of overall run status:
         # a COMPLETED scenario can still hide errored objectives or rate-limit retries.
@@ -1508,7 +1525,7 @@ class ScenarioRunService:
         Raises:
             ValueError: If a completed run lacks its import reference.
         """
-        if scenario_result.scenario_name != "InspectOriginalInertScenario":
+        if scenario_result.scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
             return None
         raw = (scenario_result.metadata or {}).get(OriginalInspectImportSummary.METADATA_KEY)
         if raw is None:
@@ -1516,6 +1533,66 @@ class ScenarioRunService:
                 raise ValueError("Completed original Inspect Scenario has no persisted import reference.")
             return None
         return OriginalInspectImportSummary.model_validate(raw)
+
+    @staticmethod
+    def _original_inspect_completed_units(
+        *, plan: ScenarioRunPlan | None, imported: OriginalInspectImportSummary | None
+    ) -> frozenset[ResultUnitIdentity]:
+        """
+        Match a verified import's durable case-run ID to its one planned unit.
+
+        Returns:
+            frozenset[ResultUnitIdentity]: The completed case, or none before import.
+
+        Raises:
+            ValueError: If source, run, or case identity differs from the persisted plan.
+        """
+        if imported is None:
+            return frozenset[ResultUnitIdentity]()
+        if (
+            plan is None
+            or plan.scenario_registry_name != _ORIGINAL_INSPECT_REGISTRY_NAME
+            or plan.run_instance_id is None
+            or plan.eval_spec_sha256 is None
+            or len(plan.atomic_groups) != 1
+            or len(plan.seed_groups) != 1
+        ):
+            raise ValueError("Original Inspect import does not match its planned case or run.")
+        group, seed = plan.atomic_groups[0], plan.seed_groups[0]
+        if (
+            imported.episode_id != f"inspect-run-{plan.run_instance_id.hex}"
+            or seed.id != imported.case_run_id
+            or seed.source_sha256 != imported.source_sha256
+            or group.seed_group_ids != [imported.case_run_id]
+            or group.atomic_attack_name != f"eval_case_{imported.case_run_id}"
+            or group.technique_eval_hash != plan.eval_spec_sha256
+            or group.id
+            != config_hash(
+                {"atomic_attack_name": group.atomic_attack_name, "technique_eval_hash": group.technique_eval_hash}
+            )
+        ):
+            raise ValueError("Original Inspect import does not match its planned case or run.")
+        return frozenset({ResultUnitIdentity(atomic_group_id=group.id, seed_group_id=seed.id)})
+
+    @staticmethod
+    def _original_inspect_failure_reason(*, scenario_result: ScenarioResult) -> str | None:
+        """
+        Show only vetted diagnoses from persisted original-Task errors.
+
+        Returns:
+            str | None: A safe failure reason, or none for unrelated/unfinished runs.
+        """
+        if scenario_result.scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
+            return None
+        if scenario_result.scenario_run_state == ScenarioRunState.CANCELLED:
+            return "Original Inspect run was cancelled before a qualified result was published."
+        if scenario_result.scenario_run_state != ScenarioRunState.FAILED:
+            return None
+        persisted = scenario_result.error_message or ""
+        for prefix in _SAFE_ORIGINAL_INSPECT_FAILURE_PREFIXES:
+            if persisted.startswith(prefix):
+                return prefix
+        return "Original Inspect Task or offline projection failed; reconcile its retained log before retrying."
 
     @staticmethod
     def _build_overload_summaries(*, retry_events: Sequence[Any]) -> list[ScenarioOverloadSummary]:
@@ -1802,6 +1879,8 @@ class ScenarioRunService:
             )
             plan = None
         plan_complete = plan is not None
+        original_inspect_import = self._original_inspect_import(scenario_result=header_result)
+        completed_import_units = self._original_inspect_completed_units(plan=plan, imported=original_inspect_import)
         cursor = self._decode_progress_cursor(since=since, scenario_result_id=scenario_result_id)
         terminal = header_result.scenario_run_state in (
             ScenarioRunState.COMPLETED,
@@ -1818,6 +1897,7 @@ class ScenarioRunService:
             active_group_ids=active_group_ids,
             terminal=terminal,
             objective_scorer_identifier=objective_scorer_identifier,
+            completed_without_attack_result=completed_import_units,
         )
         overload_events: deque[Any] = deque(maxlen=_MAX_OVERLOAD_EVENTS)
         for delta in progress_snapshot.deltas:
@@ -1839,7 +1919,6 @@ class ScenarioRunService:
         )
         scenario_identifier = header_result.scenario_identifier
         target, datasets_used, scenario_parameters = self._safe_run_metadata(scenario_identifier=scenario_identifier)
-        original_inspect_import = self._original_inspect_import(scenario_result=header_result)
         if plan is not None:
             techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
         else:
@@ -1864,6 +1943,7 @@ class ScenarioRunService:
                 active_scenario_result_id=active_scenario_result_id,
                 overload_summaries=self._build_overload_summaries(retry_events=overload_events),
                 original_inspect_import=original_inspect_import,
+                failure_reason=self._original_inspect_failure_reason(scenario_result=header_result),
             ),
             plan=response_plan,
             results=results,

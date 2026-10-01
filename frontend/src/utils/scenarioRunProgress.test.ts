@@ -103,10 +103,12 @@ describe('scenarioRunProgressReducer', () => {
         total_retries: 0,
         labels: {},
         original_inspect_import: reference,
+        error: 'Original Inspect archive is not a readable `.eval` ZIP.',
       },
     })
 
     expect(state.run?.original_inspect_import).toEqual(reference)
+    expect(state.run?.failure_reason).toBe('Original Inspect archive is not a readable `.eval` ZIP.')
   })
 
   it('merges duplicated pages idempotently and uses the latest backend summary', () => {

@@ -203,9 +203,20 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
         assert summary is not None and progress is not None
         assert summary.status == ScenarioRunState.COMPLETED
         assert summary.target is None
+        assert (summary.completed_attacks, summary.total_attacks, summary.successful_attacks) == (1, 1, 0)
         assert summary.original_inspect_import is not None
         assert progress.run.original_inspect_import == summary.original_inspect_import
         assert progress.results == []
+        assert (progress.summary.overall.completed, progress.summary.overall.planned) == (1, 1)
+        assert progress.summary.overall.succeeded == 0
+        assert progress.summary.overall.success_percentage is None
+        assert len(progress.summary.atomic_groups) == 1
+        assert progress.summary.atomic_groups[0].status == "COMPLETED"
+        assert progress.summary.atomic_groups[0].completed == 1
+        assert progress.summary.display_groups[0].completed == 1
+        assert progress.summary.techniques[0].completed == 1
+        assert progress.summary.seed_groups[0].id == summary.original_inspect_import.case_run_id
+        assert progress.summary.seed_groups[0].completed == 1
         assert summary.successful_attacks == 0
         assert summary.original_inspect_import.score_status is ScoreStatus.COMPLETE
         assert summary.original_inspect_import.outcome is AttackOutcome.UNDETERMINED
@@ -214,6 +225,24 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
         assert sqlite_instance.get_attack_results(
             attack_result_ids=[str(summary.original_inspect_import.attack_result_id)]
         )
+        for mismatch in (
+            {"case_run_id": "f" * 64},
+            {"source_sha256": "f" * 64},
+            {"episode_id": f"inspect-run-{'f' * 32}"},
+        ):
+            sqlite_instance.update_scenario_metadata_fields(
+                scenario_result_id=str(result.id),
+                fields={
+                    OriginalInspectImportSummary.METADATA_KEY: {
+                        **summary.original_inspect_import.model_dump(mode="json"),
+                        **mismatch,
+                    }
+                },
+            )
+            with pytest.raises(ValueError, match="does not match.*planned case"):
+                service.get_run(scenario_result_id=str(result.id))
+            with pytest.raises(ValueError, match="does not match.*planned case"):
+                service.get_run_progress(scenario_result_id=str(result.id), since=None, limit=10)
     finally:
         await service.shutdown_async()
 
@@ -264,6 +293,9 @@ async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqli
                 response = await client.get(f"/api/scenarios/runs/{run_id}")
                 assert response.status_code == 200
                 assert response.json()["status"] == "COMPLETED"
+                assert response.json()["total_attacks"] == 1
+                assert response.json()["completed_attacks"] == 1
+                assert response.json()["successful_attacks"] == 0
                 reference = response.json()["original_inspect_import"]
                 assert reference["score_status"] == "complete"
                 assert reference["score_value"] == "1.0"
@@ -274,6 +306,11 @@ async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqli
                 progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
                 assert progress.status_code == 200
                 assert progress.json()["run"]["original_inspect_import"] == reference
+                assert progress.json()["summary"]["overall"]["completed"] == 1
+                assert progress.json()["summary"]["overall"]["succeeded"] == 0
+                assert progress.json()["summary"]["overall"]["success_percentage"] is None
+                assert progress.json()["summary"]["atomic_groups"][0]["status"] == "COMPLETED"
+                assert progress.json()["results"] == []
     finally:
         await service.shutdown_async()
 
@@ -292,19 +329,57 @@ async def test_offline_projection_failure_keeps_evidence_but_never_completes_sce
             InspectOriginalEvalImporter,
             "import_eval_log_async",
             new_callable=AsyncMock,
-            side_effect=ValueError("Strict offline projection rejected the log"),
+            side_effect=ValueError(
+                "Original Inspect archive is not a readable `.eval` ZIP. "
+                "api_key=not-for-ui https://example.invalid/private"
+            ),
         ) as projection,
-        pytest.raises(ValueError, match="Strict offline projection rejected"),
+        pytest.raises(ValueError, match="Original Inspect archive is not a readable"),
     ):
         await scenario.run_async()
     projection.assert_awaited_once()
     [stored] = sqlite_instance.get_scenario_results(scenario_result_ids=[scenario._scenario_result_id])
     assert stored.scenario_run_state is ScenarioRunState.FAILED
     assert OriginalInspectImportSummary.METADATA_KEY not in stored.metadata
+    assert stored.error_message is not None
+    assert "api_key=not-for-ui" in stored.error_message
     assert list(log_dir.glob("*.eval"))
     with sqlite_instance.get_session() as session:
         assert session.scalar(select(func.count(ScoreEntry.id))) == 0
         assert session.scalar(select(func.count(AttackResultEntry.id))) == 0
+    service = ScenarioRunService()
+    try:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                run_id = str(stored.id)
+                summary = await client.get(f"/api/scenarios/runs/{run_id}")
+                progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
+                assert summary.status_code == progress.status_code == 200
+                expected = "Original Inspect archive is not a readable `.eval` ZIP."
+                assert summary.json()["error"] == expected
+                assert progress.json()["run"]["failure_reason"] == expected
+                assert progress.json()["summary"]["overall"]["completed"] == 0
+                assert progress.json()["summary"]["atomic_groups"][0]["status"] == "INCOMPLETE"
+                assert "api_key=not-for-ui" not in progress.text
+                assert "example.invalid" not in summary.text
+                await asyncio.to_thread(
+                    sqlite_instance.update_scenario_run_state,
+                    scenario_result_id=run_id,
+                    scenario_run_state=ScenarioRunState.FAILED,
+                    error_message="Parser failed at C:\\private\\credentials.txt api_key=not-for-ui",
+                    error_type="ValueError",
+                )
+                fallback_summary = await client.get(f"/api/scenarios/runs/{run_id}")
+                fallback_progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
+                assert fallback_summary.status_code == fallback_progress.status_code == 200
+                assert fallback_summary.json()["error"] == (
+                    "Original Inspect Task or offline projection failed; reconcile its retained log before retrying."
+                )
+                assert fallback_progress.json()["run"]["failure_reason"] == fallback_summary.json()["error"]
+                assert "credentials.txt" not in fallback_progress.text
+                assert "api_key=not-for-ui" not in fallback_summary.text
+    finally:
+        await service.shutdown_async()
 
 
 @pytest.mark.usefixtures("patch_central_database")

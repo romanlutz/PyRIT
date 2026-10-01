@@ -951,6 +951,7 @@ export interface ScenarioProgressHeader {
   active_scenario_result_id?: string | null
   overload_summaries?: ScenarioOverloadSummary[]
   original_inspect_import?: OriginalInspectImportSummary | null
+  failure_reason?: string | null
 }
 
 export interface ScenarioQueueEntry {

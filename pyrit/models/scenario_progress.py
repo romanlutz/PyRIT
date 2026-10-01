@@ -127,6 +127,7 @@ class ScenarioProgressHeader(BaseModel):
     active_scenario_result_id: str | None = None
     overload_summaries: list["ScenarioOverloadSummary"] = Field(default_factory=list)
     original_inspect_import: "OriginalInspectImportSummary | None" = None
+    failure_reason: str | None = None
 
 
 class ScenarioProgressScore(BaseModel):

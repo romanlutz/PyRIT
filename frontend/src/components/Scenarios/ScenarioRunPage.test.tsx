@@ -379,10 +379,10 @@ describe('ScenarioRunPage', () => {
       summary: {
         ...SUMMARY,
         overall: {
-          completed: 0,
+          completed: 1,
           planned: 1,
           succeeded: 0,
-          success_percentage: 0,
+          success_percentage: null,
           errors: 0,
           retries: 0,
         },
@@ -392,6 +392,7 @@ describe('ScenarioRunPage', () => {
     renderPage()
 
     expect(screen.getByRole('heading', { name: 'Original Inspect import', level: 2 })).toBeInTheDocument()
+    expect(screen.getByText('1 of 1 original case imported.')).toBeInTheDocument()
     expect(screen.getByText(/Outcome: undetermined/)).toBeInTheDocument()
     expect(screen.getByText('original_inert_scorer')).toBeInTheDocument()
     expect(screen.getByText('1.0')).toBeInTheDocument()
@@ -404,6 +405,36 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByRole('progressbar', { name: 'Overall scenario run progress' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Objective Scorer' })).not.toBeInTheDocument()
     expect(screen.queryByText(/Attack success/)).not.toBeInTheDocument()
+  })
+
+  it('shows the sanitized persisted reason when the original .eval projection fails', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'InspectOriginalInertScenario',
+        scenario_registry_name: 'benchmark.inspect_original_inert',
+        scenario_version: 1,
+        status: 'FAILED',
+        created_at: '2026-01-01T00:00:00Z',
+        completed_at: '2026-01-01T00:01:00Z',
+        failure_reason: 'Original Inspect archive is not a readable `.eval` ZIP.',
+        original_inspect_import: null,
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: { completed: 0, planned: 1, succeeded: 0, success_percentage: null, errors: 0, retries: 0 },
+      },
+    }))
+
+    renderPage()
+
+    const originalImport = screen.getByRole('region', { name: 'Original Inspect import status' })
+    expect(within(originalImport).getByText('Original Inspect archive is not a readable `.eval` ZIP.'))
+      .toBeInTheDocument()
+    expect(within(originalImport).queryByText(/Check the run error/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/api_key=not-for-ui/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'View projected PyRIT AttackResult' })).not.toBeInTheDocument()
   })
 
   it('renders contract-backed safe target and run configuration metadata', () => {
