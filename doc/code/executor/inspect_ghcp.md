@@ -295,21 +295,29 @@ The offline AttackResult is not a task-owned `benchmark_original` attestation
 or a second Scenario attack; its original `.eval` remains the source of truth.
 The Scenario progress read model counts the one planned case as completed
 **only** when its persisted verified import matches the plan's run ID, source
-SHA and case-run ID. It reports 1/1 completed, zero successes and no success
-percentage; this is import completion, not a success verdict or a synthetic
-Scenario AttackResult. The history API validates the same persisted run and
-case metadata before counting 1/1. Detail, progress and history also read back
+SHA and case-run ID. Readback also checks the fixed public source SHA and
+recomputes the planned `EvalCaseRef.case_id` from the verified `.eval` Task
+name/version and Sample ID/epoch, without executing a Task factory. It reports
+1/1 completed, zero successes and no success percentage; this is import
+completion, not a success verdict or a synthetic Scenario AttackResult. The
+history API validates the same persisted run and case metadata before counting
+1/1. Detail, progress and history also read back
 the referenced Score, AttackResult and sealed offline `.eval` episode: their
 foreign key, source case/run/archive metadata and undetermined outcome must
 still agree. The archive must remain a required `harness` / `eval_log` stream
-with the approved source identity. The bounded private archive chunks are
-re-read through the integrity-checking memory reader and their length/SHA256
-are recomputed. Its
-typed final ScoreEvent ID, event hash and value must match the linked Score,
-and the projected native event stream is checked against that `.eval` again.
+with the approved source identity; the resolved typed log must remain a
+required `harness` / `jsonl` stream. Both bounded private streams are re-read
+through the integrity-checking memory reader: archive length/SHA256 and
+resolved-log bytes/length/SHA256 must match the verified `.eval`. Its typed
+final ScoreEvent ID, event hash and value must match the linked Score, and the
+projected native event stream is checked against that `.eval` again. The
+AttackResult must point to the deterministic imported conversation for that
+verified Sample, with no last-response or related-conversation links. Direct
+attack detail, messages, conversations and list reads check the qualified
+result's Score/MessagePiece source links before serving its conversation.
 Raw bytes never enter the REST response. Missing or substituted IDs or altered
-event/archive bytes fail closed without rerunning the Task or inventing another
-result. Detail and history return
+event/stream bytes, planned cases or conversation links fail closed without
+rerunning the Task or inventing another result. Detail and history return
 `objective_achieved_rate: null`, and CLI output says "undetermined"; other
 Scenarios retain their numeric rate. A rejected `.eval` leaves the planned
 case incomplete. Detail, history and the progress header expose only a vetted

@@ -80,6 +80,7 @@ from pyrit.models import (
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 
 logger = logging.getLogger(__name__)
+_INVALID_ORIGINAL_INSPECT_ATTACK = "Original Inspect AttackResult has inconsistent persisted conversation evidence."
 
 
 def _get_latest_target_response_status(messages: list[MessageView]) -> TargetResponseStatus | None:
@@ -250,6 +251,7 @@ class AttackService:
         # Collect conversation IDs we care about (main + pruned, not adversarial).
         all_conv_ids: set[str] = set()
         for ar in page_results:
+            await self._validate_original_inspect_attack_async(result=ar)
             all_conv_ids.update(ar.get_active_conversation_ids())
 
         stats_map = self._memory.get_conversation_stats(conversation_ids=list(all_conv_ids)) if all_conv_ids else {}
@@ -322,6 +324,7 @@ class AttackService:
             return None
 
         ar = results[0]
+        await self._validate_original_inspect_attack_async(result=ar)
         stats_map = self._memory.get_conversation_stats(conversation_ids=[ar.conversation_id])
         stats = stats_map.get(ar.conversation_id, ConversationStats(message_count=0))
         return await attack_result_to_summary_async(ar, stats=stats)
@@ -352,6 +355,7 @@ class AttackService:
 
         # Verify the conversation belongs to this attack
         ar = results[0]
+        await self._validate_original_inspect_attack_async(result=ar)
         if conversation_id not in ar.get_active_conversation_ids():
             raise ValueError(f"Conversation '{conversation_id}' is not part of attack '{attack_result_id}'")
 
@@ -559,6 +563,7 @@ class AttackService:
 
         # attack_result_id is a unique primary key, so at most one result is returned.
         ar = results[0]
+        await self._validate_original_inspect_attack_async(result=ar)
 
         # Collect all conversation IDs (main + PRUNED related) and fetch stats in one query.
         active_conv_ids = list(ar.get_active_conversation_ids())
@@ -595,6 +600,57 @@ class AttackService:
             main_conversation_id=ar.conversation_id,
             conversations=conversations,
         )
+
+    async def _validate_original_inspect_attack_async(self, *, result: AttackResult) -> None:
+        """Keep a pinned original-import result from serving another run's conversation."""
+        score = result.automated_score
+        score_metadata = score.score_metadata if score is not None else None
+        metadata = result.metadata
+        if (
+            metadata.get("inspect_source") != "original_eval_log"
+            and (score_metadata or {}).get("inspect_source") != "original_eval_log"
+        ):
+            return
+        if (
+            metadata.get("inspect_task") != "inspect_original_inert"
+            and (score_metadata or {}).get("inspect_task") != "inspect_original_inert"
+        ):
+            return
+        if metadata.get("inspect_case_run_id") is None and (score_metadata or {}).get("inspect_case_run_id") is None:
+            return
+        source_keys = (
+            "inspect_source",
+            "inspect_task",
+            "inspect_case_run_id",
+            "inspect_archive_sha256",
+            "inspect_run_id",
+            "inspect_sample_id",
+            "inspect_sample_uuid",
+            "inspect_epoch",
+        )
+        if (
+            score_metadata is None
+            or any(score_metadata.get(key) != metadata.get(key) for key in source_keys)
+            or any(
+                not isinstance(score_metadata.get(key), str)
+                for key in ("inspect_case_run_id", "inspect_archive_sha256", "inspect_sample_id", "inspect_sample_uuid")
+            )
+            or not isinstance(score_metadata.get("inspect_epoch"), int)
+            or result.last_response is not None
+            or result.related_conversations
+        ):
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
+
+        pieces = await asyncio.to_thread(self._memory.get_message_pieces, conversation_id=result.conversation_id)
+        if not pieces or any(
+            piece.prompt_metadata is None
+            or any(
+                piece.prompt_metadata.get(key) != score_metadata.get(key)
+                for key in ("inspect_archive_sha256", "inspect_sample_id", "inspect_sample_uuid", "inspect_epoch")
+            )
+            for piece in pieces
+        ):
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
 
     async def create_related_conversation_async(
         self, *, attack_result_id: str, request: CreateConversationRequest

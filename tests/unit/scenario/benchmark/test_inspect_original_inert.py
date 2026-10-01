@@ -19,6 +19,7 @@ from inspect_ai.log import read_eval_log
 from sqlalchemy import func, select
 
 from pyrit.backend.main import app
+from pyrit.backend.services.attack_service import AttackService
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import ScenarioService
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
@@ -293,6 +294,11 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
         "archive_source",
         "archive_kind",
         "archive_not_required",
+        "resolved_chunk",
+        "resolved_chunk_rehashed",
+        "resolved_missing",
+        "resolved_kind",
+        "resolved_not_required",
     ],
 )
 async def test_one_click_readback_rejects_tampered_final_event_or_archive_evidence(
@@ -307,17 +313,24 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
     archive = next(
         stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-original-eval-archive"
     )
+    resolved_stream = next(
+        stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-resolved-eval-log"
+    )
     assert InspectOriginalEvalImporter.ARCHIVE_KEY in episode.run.required_raw_streams
+    assert InspectOriginalEvalImporter.RESOLVED_KEY in episode.run.required_raw_streams
     with sqlite_instance.get_session() as session:
         score = session.get(ScoreEntry, reference.score_id)
         attack = session.get(AttackResultEntry, reference.attack_result_id)
         chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
         stream = session.get(NativeCyberRawStreamEntry, archive.stream_id)
+        resolved_chunk = session.get(NativeCyberRawChunkEntry, (resolved_stream.stream_id, 1))
+        resolved_row = session.get(NativeCyberRawStreamEntry, resolved_stream.stream_id)
         episode_row = session.get(NativeCyberEpisodeEntry, reference.projection_episode_id)
         assert score is not None and score.score_metadata is not None
         assert attack is not None and attack.attack_metadata is not None
         assert chunk is not None and len(chunk.data) > 1
-        assert stream is not None and episode_row is not None
+        assert resolved_chunk is not None and len(resolved_chunk.data) > 1
+        assert stream is not None and resolved_row is not None and episode_row is not None
         original_score_metadata = dict(score.score_metadata)
         original_attack_metadata = dict(attack.attack_metadata)
         original_chunk = chunk.data
@@ -325,6 +338,12 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
         original_chunk_length = chunk.byte_length
         original_source = stream.source
         original_kind = stream.kind
+        original_resolved_chunk = resolved_chunk.data
+        original_resolved_chunk_sha256 = resolved_chunk.sha256
+        original_resolved_stored_sha256 = resolved_row.stored_sha256
+        original_resolved_observed_sha256 = resolved_row.observed_sha256
+        original_resolved_id = resolved_row.observed_source_id
+        original_resolved_kind = resolved_row.kind
         original_required = [dict(key) for key in episode_row.required_raw_streams]
 
     def set_tamper(*, enabled: bool) -> None:
@@ -333,9 +352,11 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
             attack = session.get(AttackResultEntry, reference.attack_result_id)
             chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
             stream = session.get(NativeCyberRawStreamEntry, archive.stream_id)
+            resolved_chunk = session.get(NativeCyberRawChunkEntry, (resolved_stream.stream_id, 1))
+            resolved_row = session.get(NativeCyberRawStreamEntry, resolved_stream.stream_id)
             episode_row = session.get(NativeCyberEpisodeEntry, reference.projection_episode_id)
-            assert score is not None and attack is not None and chunk is not None
-            assert stream is not None and episode_row is not None
+            assert score is not None and attack is not None and chunk is not None and resolved_chunk is not None
+            assert stream is not None and resolved_row is not None and episode_row is not None
             event_fields = (
                 {"inspect_final_score_event_id": "forged-final-event", "inspect_final_score_event_sha256": "f" * 64}
                 if enabled and tamper == "score_event"
@@ -361,13 +382,44 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
                 NativeCyberEvidenceSource.TOOL.value if enabled and tamper == "archive_source" else original_source
             )
             stream.kind = NativeCyberRawKind.JSONL.value if enabled and tamper == "archive_kind" else original_kind
+            resolved_chunk.data = (
+                bytes([original_resolved_chunk[0] ^ 1]) + original_resolved_chunk[1:]
+                if enabled and tamper in {"resolved_chunk", "resolved_chunk_rehashed"}
+                else original_resolved_chunk
+            )
+            resolved_chunk.sha256 = (
+                hashlib.sha256(resolved_chunk.data).hexdigest()
+                if enabled and tamper == "resolved_chunk_rehashed"
+                else original_resolved_chunk_sha256
+            )
+            resolved_row.stored_sha256 = (
+                hashlib.sha256(resolved_chunk.data).hexdigest()
+                if enabled and tamper == "resolved_chunk_rehashed"
+                else original_resolved_stored_sha256
+            )
+            resolved_row.observed_sha256 = (
+                hashlib.sha256(resolved_chunk.data).hexdigest()
+                if enabled and tamper == "resolved_chunk_rehashed"
+                else original_resolved_observed_sha256
+            )
+            resolved_row.observed_source_id = (
+                "missing-resolved-eval-log" if enabled and tamper == "resolved_missing" else original_resolved_id
+            )
+            resolved_row.kind = (
+                NativeCyberRawKind.TOOL.value if enabled and tamper == "resolved_kind" else original_resolved_kind
+            )
             episode_row.required_raw_streams = (
                 [
                     key
                     for key in original_required
-                    if key["observed_source_id"] != InspectOriginalEvalImporter.ARCHIVE_KEY.observed_source_id
+                    if key["observed_source_id"]
+                    != (
+                        InspectOriginalEvalImporter.ARCHIVE_KEY.observed_source_id
+                        if tamper == "archive_not_required"
+                        else InspectOriginalEvalImporter.RESOLVED_KEY.observed_source_id
+                    )
                 ]
-                if enabled and tamper == "archive_not_required"
+                if enabled and tamper in {"archive_not_required", "resolved_not_required"}
                 else [dict(key) for key in original_required]
             )
 
@@ -396,6 +448,172 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
                 await asyncio.to_thread(set_tamper, enabled=False)
                 for endpoint in endpoints:
                     assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("tamper", ["case_id", "source_pin"])
+async def test_one_click_readback_rejects_foreign_plan_case_or_source_pin(
+    sqlite_instance: SQLiteMemory, tamper: str
+) -> None:
+    scenario = await ScenarioRegistry().create_and_initialize_async("benchmark.inspect_original_inert")
+    result = await scenario.run_async()
+    plan = result.metadata["run_plan"]
+    reference = dict(result.metadata[OriginalInspectImportSummary.METADATA_KEY])
+    assert len(plan["seed_groups"]) == 1
+    assert plan["seed_groups"][0]["case_id"] != "f" * 64
+    source = EvalSourceFactory.resolve_original_inert(family=OriginalInspectTaskId.INERT.value)
+    foreign_package = source.case.package.model_copy(update={"source_sha256": "f" * 64})
+    foreign_case = source.case.model_copy(update={"package": foreign_package})
+    changed_plan = {
+        **plan,
+        "seed_groups": [
+            {
+                **plan["seed_groups"][0],
+                "case_id": "f" * 64 if tamper == "case_id" else foreign_case.case_id,
+                "source_sha256": "f" * 64 if tamper == "source_pin" else plan["seed_groups"][0]["source_sha256"],
+            }
+        ],
+    }
+    changed_reference = {**reference, "source_sha256": "f" * 64} if tamper == "source_pin" else reference
+    service = ScenarioRunService()
+    try:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                endpoints = (
+                    f"/api/scenarios/runs/{result.id}",
+                    f"/api/scenarios/runs/{result.id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                )
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+                await asyncio.to_thread(
+                    sqlite_instance.update_scenario_metadata_fields,
+                    scenario_result_id=str(result.id),
+                    fields={
+                        "run_plan": changed_plan,
+                        OriginalInspectImportSummary.METADATA_KEY: changed_reference,
+                    },
+                )
+                for endpoint in endpoints:
+                    response = await client.get(endpoint)
+                    assert response.status_code >= 400, f"Foreign {tamper} was accepted by {endpoint}"
+                    assert "harmless fixture" not in response.text
+                await asyncio.to_thread(
+                    sqlite_instance.update_scenario_metadata_fields,
+                    scenario_result_id=str(result.id),
+                    fields={"run_plan": plan, OriginalInspectImportSummary.METADATA_KEY: reference},
+                )
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    "corruption",
+    ["conversation", "last_response", "related_pruned", "related_preparation", "related_adversarial"],
+)
+async def test_one_click_attack_conversation_links_reject_unrelated_real_run(
+    sqlite_instance: SQLiteMemory, corruption: str
+) -> None:
+    registry = ScenarioRegistry()
+    runs = []
+    for _ in range(2):
+        scenario = await registry.create_and_initialize_async("benchmark.inspect_original_inert")
+        run = await scenario.run_async()
+        imported = OriginalInspectImportSummary.model_validate(run.metadata[OriginalInspectImportSummary.METADATA_KEY])
+        [attack] = sqlite_instance.get_attack_results(attack_result_ids=[str(imported.attack_result_id)])
+        runs.append((run, imported, attack))
+    first_run, first_import, first_attack = runs[0]
+    _, _, other_attack = runs[1]
+    assert first_attack.conversation_id != other_attack.conversation_id
+    other_response = next(
+        piece
+        for piece in sqlite_instance.get_message_pieces(conversation_id=other_attack.conversation_id)
+        if piece.role == "assistant"
+    )
+
+    def set_corruption(*, enabled: bool) -> None:
+        with sqlite_instance.get_session() as session, session.begin():
+            row = session.get(AttackResultEntry, first_import.attack_result_id)
+            assert row is not None
+            row.conversation_id = (
+                other_attack.conversation_id
+                if enabled and corruption == "conversation"
+                else first_attack.conversation_id
+            )
+            row.last_response_id = (
+                uuid.UUID(str(other_response.id)) if enabled and corruption == "last_response" else None
+            )
+            row.pruned_conversation_ids = (
+                [other_attack.conversation_id] if enabled and corruption == "related_pruned" else None
+            )
+            row.preparation_conversation_ids = (
+                [other_attack.conversation_id] if enabled and corruption == "related_preparation" else None
+            )
+            row.adversarial_chat_conversation_ids = (
+                [other_attack.conversation_id] if enabled and corruption == "related_adversarial" else None
+            )
+
+    service = ScenarioRunService()
+    attack_service = AttackService()
+    try:
+        with (
+            patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
+            patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
+        ):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                scenario_endpoints = (
+                    f"/api/scenarios/runs/{first_run.id}",
+                    f"/api/scenarios/runs/{first_run.id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                )
+                attack_id = str(first_import.attack_result_id)
+                attack_endpoints = (
+                    f"/api/attacks/{attack_id}",
+                    f"/api/attacks/{attack_id}/conversations",
+                )
+                list_endpoint = "/api/attacks?limit=20"
+                for endpoint in (*scenario_endpoints, *attack_endpoints):
+                    assert (await client.get(endpoint)).status_code == 200
+                baseline_list = await client.get(list_endpoint)
+                assert baseline_list.status_code == 200
+                assert any(item["attack_result_id"] == attack_id for item in baseline_list.json()["items"])
+                original_messages = f"/api/attacks/{attack_id}/messages?conversation_id={first_attack.conversation_id}"
+                assert (await client.get(original_messages)).status_code == 200
+
+                await asyncio.to_thread(set_corruption, enabled=True)
+                for endpoint in (*attack_endpoints, *scenario_endpoints):
+                    response = await client.get(endpoint)
+                    assert response.status_code >= 400, f"{corruption} was accepted by {endpoint}"
+                    assert other_attack.conversation_id not in response.text
+                attack_list = await client.get(list_endpoint)
+                if attack_list.status_code == 200:
+                    assert all(item["attack_result_id"] != attack_id for item in attack_list.json()["items"])
+                else:
+                    assert attack_list.status_code >= 400
+                    assert other_attack.conversation_id not in attack_list.text
+                active_conversation_id = (
+                    other_attack.conversation_id if corruption == "conversation" else first_attack.conversation_id
+                )
+                messages = await client.get(
+                    f"/api/attacks/{attack_id}/messages?conversation_id={active_conversation_id}"
+                )
+                assert messages.status_code >= 400
+                assert "inert response" not in messages.text
+
+                await asyncio.to_thread(set_corruption, enabled=False)
+                for endpoint in (*scenario_endpoints, *attack_endpoints):
+                    assert (await client.get(endpoint)).status_code == 200
+                assert (await client.get(list_endpoint)).status_code == 200
+                assert (await client.get(original_messages)).status_code == 200
     finally:
         await service.shutdown_async()
 
