@@ -301,8 +301,13 @@ Scenario AttackResult. The history API validates the same persisted run and
 case metadata before counting 1/1. Detail, progress and history also read back
 the referenced Score, AttackResult and sealed offline `.eval` episode: their
 foreign key, source case/run/archive metadata and undetermined outcome must
-still agree. Missing or substituted IDs fail closed without rerunning the Task
-or inventing another result. Detail and history return
+still agree. The bounded private archive chunks are re-read through the
+integrity-checking memory reader and their length/SHA256 are recomputed. Its
+typed final ScoreEvent ID, event hash and value must match the linked Score,
+and the projected native event stream is checked against that `.eval` again.
+Raw bytes never enter the REST response. Missing or substituted IDs or altered
+event/archive bytes fail closed without rerunning the Task or inventing another
+result. Detail and history return
 `objective_achieved_rate: null`, and CLI output says "undetermined"; other
 Scenarios retain their numeric rate. A rejected `.eval` leaves the planned
 case incomplete. Detail, history and the progress header expose only a vetted

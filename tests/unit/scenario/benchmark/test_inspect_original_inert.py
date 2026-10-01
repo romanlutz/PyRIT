@@ -23,7 +23,7 @@ from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.backend.services.scenario_service import ScenarioService
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
-from pyrit.memory.memory_models import AttackResultEntry, ScoreEntry
+from pyrit.memory.memory_models import AttackResultEntry, NativeCyberRawChunkEntry, ScoreEntry
 from pyrit.models import AttackOutcome, ScenarioRunPlan, ScenarioRunState, ScoreStatus, config_hash
 from pyrit.models.catalog.scenario import OriginalInspectImportSummary, OriginalInspectTaskId, RunScenarioRequest
 from pyrit.registry import ScenarioRegistry
@@ -269,6 +269,90 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
                         assert "harmless fixture" not in response.text
                     await asyncio.to_thread(set_stored_corruption, corruption=None)
 
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("tamper", ["score_event", "archive_chunk", "archive_chunk_rehashed", "archive_truncated"])
+async def test_one_click_readback_rejects_tampered_final_event_or_archive_bytes(
+    sqlite_instance: SQLiteMemory, tamper: str
+) -> None:
+    scenario = await ScenarioRegistry().create_and_initialize_async("benchmark.inspect_original_inert")
+    result = await scenario.run_async()
+    reference = OriginalInspectImportSummary.model_validate(result.metadata[OriginalInspectImportSummary.METADATA_KEY])
+    episode = sqlite_instance.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+        run_id=reference.projection_episode_id
+    )
+    archive = next(
+        stream for stream in episode.raw_streams if stream.key.observed_source_id == "inspect-original-eval-archive"
+    )
+    with sqlite_instance.get_session() as session:
+        score = session.get(ScoreEntry, reference.score_id)
+        attack = session.get(AttackResultEntry, reference.attack_result_id)
+        chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
+        assert score is not None and score.score_metadata is not None
+        assert attack is not None and attack.attack_metadata is not None
+        assert chunk is not None and len(chunk.data) > 1
+        original_score_metadata = dict(score.score_metadata)
+        original_attack_metadata = dict(attack.attack_metadata)
+        original_chunk = chunk.data
+        original_chunk_sha256 = chunk.sha256
+        original_chunk_length = chunk.byte_length
+
+    def set_tamper(*, enabled: bool) -> None:
+        with sqlite_instance.get_session() as session, session.begin():
+            score = session.get(ScoreEntry, reference.score_id)
+            attack = session.get(AttackResultEntry, reference.attack_result_id)
+            chunk = session.get(NativeCyberRawChunkEntry, (archive.stream_id, 1))
+            assert score is not None and attack is not None and chunk is not None
+            event_fields = (
+                {"inspect_final_score_event_id": "forged-final-event", "inspect_final_score_event_sha256": "f" * 64}
+                if enabled and tamper == "score_event"
+                else {}
+            )
+            score.score_metadata = {**original_score_metadata, **event_fields}
+            attack.attack_metadata = {**original_attack_metadata, **event_fields}
+            if enabled and tamper == "archive_truncated":
+                chunk.data = original_chunk[:-1]
+                chunk.byte_length = len(chunk.data)
+            elif enabled and tamper in {"archive_chunk", "archive_chunk_rehashed"}:
+                chunk.data = bytes([original_chunk[0] ^ 1]) + original_chunk[1:]
+                chunk.byte_length = original_chunk_length
+            else:
+                chunk.data = original_chunk
+                chunk.byte_length = original_chunk_length
+            chunk.sha256 = (
+                hashlib.sha256(chunk.data).hexdigest()
+                if enabled and tamper in {"archive_chunk_rehashed", "archive_truncated"}
+                else original_chunk_sha256
+            )
+
+    service = ScenarioRunService()
+    try:
+        with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
+            async with AsyncClient(
+                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+            ) as client:
+                endpoints = (
+                    f"/api/scenarios/runs/{result.id}",
+                    f"/api/scenarios/runs/{result.id}/progress",
+                    "/api/scenarios/runs?scenario_names=benchmark.inspect_original_inert",
+                )
+                for endpoint in endpoints:
+                    assert (await client.get(endpoint)).status_code == 200
+
+                await asyncio.to_thread(set_tamper, enabled=True)
+                for endpoint in endpoints:
+                    response = await client.get(endpoint)
+                    assert response.status_code >= 400, f"{tamper} was accepted by {endpoint}"
+                    assert "harmless fixture" not in response.text
+                    assert "inert response" not in response.text
+                    assert "forged-final-event" not in response.text
+
+                await asyncio.to_thread(set_tamper, enabled=False)
                 for endpoint in endpoints:
                     assert (await client.get(endpoint)).status_code == 200
     finally:

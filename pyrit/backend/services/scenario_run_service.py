@@ -12,6 +12,8 @@ import asyncio
 import base64
 import contextlib
 import functools
+import hashlib
+import io
 import json
 import logging
 import uuid
@@ -23,6 +25,7 @@ from datetime import UTC, datetime
 from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from zipfile import BadZipFile
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -72,6 +75,7 @@ from pyrit.models.catalog.scenario import (
     ScenarioTargetSummary,
     ScenarioTechniqueSummary,
 )
+from pyrit.models.native_cyber_evidence import NativeCyberEpisodeSnapshot
 from pyrit.registry import InitializerRegistry, ScenarioRegistry
 from pyrit.scenario import Scenario
 
@@ -1621,18 +1625,26 @@ class ScenarioRunService:
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
         self._verify_original_inspect_archive(
-            imported=imported, task_version=score_metadata.get("inspect_task_version")
+            imported=imported,
+            task_version=score_metadata.get("inspect_task_version"),
+            score_metadata=score_metadata,
         )
 
     def _verify_original_inspect_archive(
-        self, *, imported: OriginalInspectImportSummary, task_version: str | int | float | None
+        self,
+        *,
+        imported: OriginalInspectImportSummary,
+        task_version: str | int | float | None,
+        score_metadata: Mapping[str, str | int | float],
     ) -> None:
         """
-        Match the referenced result to the finalized original `.eval` stream.
+        Match the referenced result to the verified bytes of its finalized `.eval`.
 
         Raises:
-            ValueError: If the offline episode or its archive digest is missing or inconsistent.
+            ValueError: If the offline episode, archive or original final event is inconsistent.
         """
+        from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
+
         try:
             episode = self._memory.native_cyber_evidence.get_finalized_unscored_inspect_capture(
                 run_id=imported.projection_episode_id
@@ -1652,8 +1664,118 @@ class ScenarioRunService:
             or not archive_streams[0].source_complete
             or archive_streams[0].stored_sha256 != imported.archive_sha256
             or archive_streams[0].observed_sha256 != imported.archive_sha256
+            or archive_streams[0].expected_bytes != archive_streams[0].stored_bytes
+            or archive_streams[0].truncated
+            or archive_streams[0].omitted_bytes
+            or not 0 < archive_streams[0].stored_bytes <= InspectOriginalEvalImporter.MAX_ARCHIVE_BYTES
         ):
             raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        archive = self._read_original_inspect_archive(
+            run_id=imported.projection_episode_id,
+            stream_id=archive_streams[0].stream_id,
+            expected_bytes=archive_streams[0].stored_bytes,
+            expected_sha256=imported.archive_sha256,
+        )
+        self._verify_final_original_event(
+            imported=imported, episode=episode, archive=archive, score_metadata=score_metadata
+        )
+
+    def _read_original_inspect_archive(
+        self, *, run_id: str, stream_id: uuid.UUID, expected_bytes: int, expected_sha256: str
+    ) -> bytes:
+        """
+        Read bounded private chunks through their integrity-checking memory API.
+
+        Returns:
+            bytes: The original archive for internal typed-log verification only.
+
+        Raises:
+            ValueError: If a stored chunk, length or digest differs from its sealed stream.
+        """
+        capture = self._memory.native_cyber_evidence
+        checksum = hashlib.sha256()
+        archive = bytearray()
+        after_sequence = 0
+        while True:
+            try:
+                chunks = capture.read_raw_chunks(
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    allow_sensitive=True,
+                    after_sequence=after_sequence,
+                    limit=capture.MAX_RAW_READ_CHUNKS,
+                )
+            except (KeyError, ValueError) as error:
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
+            for chunk in chunks:
+                archive.extend(chunk.data)
+                checksum.update(chunk.data)
+                if len(archive) > expected_bytes:
+                    raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+            if len(chunks) < capture.MAX_RAW_READ_CHUNKS:
+                break
+            after_sequence = chunks[-1].sequence
+        if len(archive) != expected_bytes or checksum.hexdigest() != expected_sha256:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+        return bytes(archive)
+
+    def _verify_final_original_event(
+        self,
+        *,
+        imported: OriginalInspectImportSummary,
+        episode: NativeCyberEpisodeSnapshot,
+        archive: bytes,
+        score_metadata: Mapping[str, str | int | float],
+    ) -> None:
+        """
+        Compare persisted ScoreEvent identity and value to the typed original `.eval`.
+
+        Raises:
+            ValueError: If the original event, typed sample or projected events have changed.
+        """
+        from inspect_ai.log import read_eval_log
+
+        from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event
+        from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
+
+        try:
+            log = read_eval_log(io.BytesIO(archive), resolve_attachments="full", format="eval")
+            InspectOriginalEvalImporter._validate_log(log=log, cases=None, run=None)
+            samples = log.samples or []
+            if (
+                log.status != "success"
+                or log.eval.run_id != imported.inspect_run_id
+                or log.eval.eval_id != imported.inspect_eval_id
+                or log.eval.task != imported.task_id.value
+                or len(samples) != 1
+            ):
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+            sample = samples[0]
+            event = final_original_score_event(sample=sample, scorer_name=imported.primary_scorer)
+            score_type, score_value, _ = InspectOriginalEvalImporter._representable_value(
+                value=event.score.value if event is not None else None
+            )
+            if (
+                event is None
+                or event.uuid != score_metadata.get("inspect_final_score_event_id")
+                or config_hash({"event": event.model_dump(mode="json", exclude_none=True)})
+                != score_metadata.get("inspect_final_score_event_sha256")
+                or str(sample.id) != score_metadata.get("inspect_sample_id")
+                or sample.epoch != score_metadata.get("inspect_epoch")
+                or str(log.eval.task_version) != score_metadata.get("inspect_task_version")
+                or score_type != imported.score_type
+                or score_value != imported.score_value
+            ):
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION)
+            InspectOriginalEvalImporter(memory=self._memory)._verify_event_readback(
+                log=log,
+                snapshot=episode,
+                archive_sha=imported.archive_sha256,
+                case_run_ids=(imported.case_run_id,),
+                required_source_gaps=[],
+            )
+        except (BadZipFile, KeyError, ValueError) as error:
+            raise ValueError(_INVALID_ORIGINAL_INSPECT_PROJECTION) from error
 
     @staticmethod
     def _original_inspect_completed_units(
