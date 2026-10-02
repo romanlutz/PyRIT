@@ -52,6 +52,15 @@ def test_every_seed_carries_a_known_family(dataset_name):
         assert family in LatentInjectionDatasetConfiguration.FAMILIES, f"unknown family {family!r} in {dataset_name}"
 
 
+def test_empty_task_seeds_are_intentional_ingredients() -> None:
+    seeds = _load("garak_latent_injection_tasks").seeds
+    assert [seed.metadata["garak_class"] for seed in seeds if not seed.value] == [
+        "LatentInjectionReport",
+        "LatentInjectionResume",
+        "LatentJailbreak",
+    ]
+
+
 def test_every_carrier_family_has_seeds_for_each_role():
     """Each family the scenario can run must have a task, an instruction, and a payload."""
     for role in ("tasks", "instructions", "payload_templates", "triggers"):

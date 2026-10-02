@@ -11,9 +11,9 @@ not on every PR.
 Resiliency: each fetch is retried up to 3 times with exponential backoff to
 handle transient HuggingFace / GitHub rate-limiting and network errors.
 
-Three pinned Garak task ingredients intentionally omit the instruction prefix.
-Only those exact ingredients may be empty; composed prompts are checked in
-test_garak_latent_injection_dataset.py.
+The local Garak task dataset contains three empty instruction-prefix variants.
+Their identities and composed prompts are checked in
+test_garak_latent_injection_dataset.py; all other datasets must have no empty seeds.
 """
 
 import asyncio
@@ -50,7 +50,7 @@ from pyrit.datasets.seed_datasets.remote import (
     _VLSUMultimodalDataset,
     _WildGuardMixDataset,
 )
-from pyrit.models import Seed, SeedDataset, SeedObjective, SeedPrompt
+from pyrit.models import SeedDataset, SeedObjective, SeedPrompt
 from pyrit.setup import IN_MEMORY, initialize_pyrit_async
 
 if TYPE_CHECKING:
@@ -92,20 +92,7 @@ _HF_GATED_PROVIDERS: set[type] = {
 }
 
 
-def _is_intentional_empty_garak_task(*, seed: Seed) -> bool:
-    return (
-        isinstance(seed, SeedPrompt)
-        and seed.value == ""
-        and seed.dataset_name == "garak_latent_injection_tasks"
-        and seed.source
-        == "https://github.com/NVIDIA/garak/blob/2212c73e4886c9c9fe78768e82a543a47284addf/garak/probes/latentinjection.py"
-        and seed.metadata
-        in (
-            {"family": "report", "language": "en", "garak_class": "LatentInjectionReport"},
-            {"family": "resume", "language": "en", "garak_class": "LatentInjectionResume"},
-            {"family": "latent_jailbreak", "language": "en", "garak_class": "LatentJailbreak"},
-        )
-    )
+_EXPECTED_EMPTY_SEEDS: dict[str, int] = {"garak_latent_injection_tasks": 3}
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -370,8 +357,11 @@ class TestAllDatasets:
         assert dataset.dataset_name, f"{name} has no dataset_name"
         assert len(dataset.seeds) > 0, f"{name} returned an empty dataset"
 
+        empty = [seed for seed in dataset.seeds if not seed.value]
+        expected = _EXPECTED_EMPTY_SEEDS.get(dataset.dataset_name, 0)
+        assert len(empty) == expected, f"{name}: expected {expected} empty, got {len(empty)}"
+
         for seed in dataset.seeds:
-            assert seed.value or _is_intentional_empty_garak_task(seed=seed), f"Seed in {name} has no value"
             assert seed.dataset_name == dataset.dataset_name, (
                 f"Seed dataset_name mismatch in {name}: {seed.dataset_name} != {dataset.dataset_name}"
             )
