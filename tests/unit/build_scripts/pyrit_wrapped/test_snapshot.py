@@ -49,6 +49,7 @@ async def test_collector_runs_with_typed_records(
         "state": "closed",
         "labels": [],
         "changed_files": 1,
+        "closed_at": "2026-01-03T00:00:00Z",
     }
     items = {
         1: {
@@ -112,7 +113,7 @@ async def test_collector_runs_with_typed_records(
     client.response_times = [period.cutoff]
     client.get_async = AsyncMock(side_effect=get_async)
     client.list_async = AsyncMock(side_effect=list_async)
-    client.search_async = AsyncMock(side_effect=[{1}, {3}, {1, 2}, {2}])
+    client.search_async = AsyncMock(side_effect=[{1}, {3}, {1, 2}, {2}, set(), set()])
     result = await Collector(client=client, progress=lambda message: None).collect_async(
         login="owner", period=period, taxonomy=taxonomy_config
     )

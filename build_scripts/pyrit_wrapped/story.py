@@ -3,39 +3,12 @@
 
 from __future__ import annotations
 
-from collections import Counter
-
-from build_scripts.pyrit_wrapped.models import Activity, Evidence, OmittedSlide, Slide, Stats, Story
+from build_scripts.pyrit_wrapped.models import Activity, OmittedSlide, Slide, Stats, Story
+from build_scripts.pyrit_wrapped.songs import SongCatalog
 
 
 class StoryBuilder:
-    _ORDER = (
-        "welcome",
-        "snapshot",
-        "authored",
-        "landed",
-        "merged",
-        "issues",
-        "reviews",
-        "comments",
-        "collaborators",
-        "timeline",
-        "busiest_month",
-        "home_territory",
-        "surfaces",
-        "artifacts",
-        "intent_mix",
-        "fixes",
-        "features",
-        "tests",
-        "documentation",
-        "datasets",
-        "infrastructure",
-        "review_topics",
-        "issue_topics",
-        "highlights",
-        "recap",
-    )
+    _ORDER = ("overview", "prs", "reviews_people", "issues", "topics", "busiest", "loc", "recap")
 
     def __init__(self, stats: Stats) -> None:
         self.stats = stats
@@ -43,312 +16,209 @@ class StoryBuilder:
         self.omitted: dict[str, OmittedSlide] = {}
 
     def build(self) -> Story:
-        self._identity_slides()
-        self._activity_slides()
-        self._timeline_slides()
-        self._focus_slides()
-        self._chapter_slides()
-        self._closing_slides()
-        if set(self.slides) | set(self.omitted) != set(self._ORDER):
-            raise ValueError("Every catalog slide must be included or have an omission reason.")
+        self._overview()
+        self._prs()
+        self._reviews_people()
+        self._issues()
+        self._topics()
+        self._busiest()
+        self._loc()
+        self._add(
+            key="recap",
+            title="The recap",
+            summary=self._count_summary(),
+            roles=[Activity.AUTHORED, Activity.MERGED, Activity.ISSUES, Activity.REVIEWED],
+        )
         return Story(
             contributor=self.stats.contributor,
+            release=self.stats.release,
             period=self.stats.period,
             slides=[self.slides[key] for key in self._ORDER if key in self.slides],
             omitted=[self.omitted[key] for key in self._ORDER if key in self.omitted],
         )
 
-    def _identity_slides(self) -> None:
-        year = self.stats.period.year
-        suffix = " (year to date)" if self.stats.period.year_to_date else ""
-        self._add(
-            key="welcome",
-            title=f"@{self.stats.contributor.login}'s PyRIT Wrapped",
-            summary=f"{year}{suffix}. Public GitHub records, with separate credit for each role.",
-            facts={},
-            records=[],
-            required=True,
+    def _overview(self) -> None:
+        if self.stats.release is not None:
+            title = f"PyRIT release wrapped: {self.stats.release.head.tag}"
+            summary = (
+                f"{self.stats.release.label}. All contributors' activity between publication dates; "
+                f"{self._value(Activity.SHIPPED)} PR merge commits are in the pinned tag range."
+            )
+            roles = [Activity.SHIPPED, Activity.AUTHORED, Activity.MERGED]
+        else:
+            title = f"@{self.stats.contributor.login}'s PyRIT Wrapped" if self.stats.contributor else "PyRIT Wrapped"
+            suffix = " (year to date)" if self.stats.period.year_to_date else ""
+            summary = f"{self.stats.period.year}{suffix}. {self._count_summary()}"
+            roles = [Activity.AUTHORED, Activity.LANDED, Activity.MERGED]
+        self._add(key="overview", title=title, summary=summary, roles=roles)
+
+    def _prs(self) -> None:
+        summary = (
+            f"{self._value(Activity.AUTHORED)} PRs opened; {self._value(Activity.PR_CLOSED)} closed "
+            f"(including merges); {self._value(Activity.LANDED)} authored PRs landed. "
         )
+        if self.stats.release is not None:
+            summary += f"{self._value(Activity.SHIPPED)} PRs have a merge commit in the release range. "
+        else:
+            summary += "These are your own PRs, not every PR you merged. "
+        role = Activity.SHIPPED if self.stats.release else Activity.AUTHORED
+        breakdown = self.stats.breakdowns.get(role)
+        if breakdown:
+            summary += "Change intent: " + self._distribution(breakdown.intents) + "."
         self._add(
-            key="snapshot",
-            title="Your contribution snapshot",
-            summary=self._count_summary(),
-            facts={role.value: count for role, count in self.stats.counts.items()},
-            records=self._all_records(),
-            required=True,
+            key="prs",
+            title="The PR pipeline",
+            summary=summary,
+            roles=[Activity.AUTHORED, Activity.PR_CLOSED, Activity.LANDED, Activity.SHIPPED],
         )
 
-    def _activity_slides(self) -> None:
-        definitions = [
-            ("authored", Activity.AUTHORED, "What you authored", "You opened {count} PRs in the selected period."),
-            (
-                "landed",
-                Activity.LANDED,
-                "Your work landed",
-                "{count} PRs you authored were merged, including older PRs.",
-            ),
-            ("merged", Activity.MERGED, "Work you helped land", "GitHub records you as the merger of {count} PRs."),
-            ("issues", Activity.ISSUES, "You raised the questions", "You opened {count} issues, separate from PRs."),
-            ("reviews", Activity.REVIEWED, "Your review footprint", "You formally reviewed {count} distinct PRs."),
+    def _reviews_people(self) -> None:
+        roles = [
+            Activity.REVIEWED,
+            Activity.REVIEWS,
+            Activity.MERGED,
+            Activity.INLINE,
+            Activity.REVIEW_BODIES,
+            Activity.PR_COMMENTS,
         ]
-        for key, role, title, template in definitions:
-            count = self.stats.counts[role]
-            facts = {role.value: count}
-            summary = template.format(count=count)
-            if role == Activity.MERGED:
-                facts.update(own_prs=self.stats.own_prs_merged, other_prs=self.stats.other_prs_merged)
-                summary += (
-                    f" {self.stats.own_prs_merged} were your own; {self.stats.other_prs_merged} were others' work."
-                )
-                if self.stats.unknown_authors_merged:
-                    summary += f" {self.stats.unknown_authors_merged} have an unavailable author."
-            if role == Activity.REVIEWED:
-                facts[Activity.REVIEWS.value] = self.stats.counts[Activity.REVIEWS]
-                summary += f" You submitted {self.stats.counts[Activity.REVIEWS]} reviews, including repeat reviews."
-            self._add(key=key, title=title, summary=summary, facts=facts, records=self.stats.activities[role])
-        self._comment_and_collaborator_slides()
+        if not any(self.stats.activities[role] for role in roles):
+            self.omitted["reviews_people"] = OmittedSlide(
+                type="reviews_people", reason="No review/merge/comment activity."
+            )
+            return
+        summary = (
+            f"{self._value(Activity.REVIEWED)} distinct PRs reviewed "
+            f"in {self._value(Activity.REVIEWS)} submitted reviews; "
+            f"{self._value(Activity.MERGED)} PRs merged. "
+        )
+        summary += (
+            f"{self._value(Activity.INLINE)} inline comments, {self._value(Activity.REVIEW_BODIES)} review summaries, "
+            f"{self._value(Activity.PR_COMMENTS)} PR discussion comments. "
+        )
+        if self.stats.release is None:
+            summary += f"Work reviewed from {len(self.stats.reviewed_authors)} other identifiable human authors. "
+        else:
+            for role in ("authors", "reviewers", "mergers"):
+                actors = self.stats.participants[role]
+                people = sum(actor.type == "User" for actor in actors)
+                bots = sum(actor.type == "Bot" for actor in actors)
+                summary += f"{role.replace('_', ' ')}: {people} people, {bots} bots; "
+            summary = summary.rstrip("; ") + ". Roles overlap."
+        self._add(key="reviews_people", title="Reviews, merges, and people", summary=summary, roles=roles)
 
-    def _comment_and_collaborator_slides(self) -> None:
-        roles = [Activity.INLINE, Activity.REVIEW_BODIES, Activity.PR_COMMENTS, Activity.ISSUE_COMMENTS]
-        counts = self.stats.counts
-        self._add(
-            key="comments",
-            title="You joined the conversation",
-            summary=(
-                f"{counts[Activity.INLINE]} inline comments, {counts[Activity.REVIEW_BODIES]} review summaries, "
-                f"{counts[Activity.PR_COMMENTS]} PR discussion comments, "
-                f"and {counts[Activity.ISSUE_COMMENTS]} issue comments. "
-                f"PR comments: {self.stats.own_pr_comments} on your own work, "
-                f"{self.stats.other_pr_comments} on others' work, "
-                f"{self.stats.unknown_author_pr_comments} with an unavailable author."
-            ),
-            facts={role.value: counts[role] for role in roles},
-            records=[record for role in roles for record in self.stats.activities[role]],
+    def _issues(self) -> None:
+        summary = (
+            f"{self._value(Activity.ISSUES)} issues opened; {self._value(Activity.ISSUES_CLOSED)} closed; "
+            f"{self._value(Activity.ISSUE_COMMENTS)} issue discussion comments. "
+            "Closure uses the last recorded closure timestamp, not a reconstructed history of reopenings."
         )
         self._add(
-            key="collaborators",
-            title="People whose work you reviewed",
-            summary=f"You reviewed PRs from {len(self.stats.reviewed_authors)} "
-            "identifiable human accounts other than yourself.",
-            facts={"reviewed_authors": len(self.stats.reviewed_authors)},
-            records=self.stats.activities[Activity.REVIEWED] if self.stats.reviewed_authors else [],
+            key="issues",
+            title="Questions and resolutions",
+            summary=summary,
+            roles=[Activity.ISSUES, Activity.ISSUES_CLOSED, Activity.ISSUE_COMMENTS],
         )
 
-    def _timeline_slides(self) -> None:
-        events = self.stats.distinct_monthly_events
-        volume = sum(events.values())
-        self._add(
-            key="timeline",
-            title="Your activity through the year",
-            summary=f"{volume} distinct recorded actions across "
-            f"{sum(count > 0 for count in events.values())} active UTC months. "
-            "Opening, merging, reviewing, and commenting are different actions, not a productivity score.",
-            facts=events,
-            records=self._all_records(),
-        )
-        peak = max(events.values(), default=0)
-        months = sorted(month for month, count in events.items() if count == peak)
-        self._add(
-            key="busiest_month",
-            title="Your busiest month" if len(months) == 1 else "Your busiest months",
-            summary=f"{', '.join(months)}: {peak} distinct recorded actions each. Ties are retained.",
-            facts=dict.fromkeys(months, peak),
-            records=self._all_records() if peak else [],
-        )
-
-    def _focus_slides(self) -> None:
-        role = Activity.AUTHORED
-        breakdown = self.stats.breakdowns[role]
-        records = self.stats.activities[role]
-        self._add(
-            key="home_territory",
-            title="Your home territory",
-            summary=self._home_summary(),
-            facts=breakdown.primary_topics,
-            records=records,
-        )
-        self._add(
-            key="surfaces",
-            title="Where you built",
-            summary=self._focus_summary(counts=breakdown.surfaces, label="Primary surfaces")
-            + ". GUI backend work can also be Python; surface is not language.",
-            facts=breakdown.surfaces,
-            records=records,
-        )
-        self._add(
-            key="artifacts",
-            title="What kind of work you did",
-            summary=self._focus_summary(counts=breakdown.primary_artifacts, label="Primary artifacts")
-            + ". Mixed and Unknown remain in the denominator; generated files do not outweigh substantive paths.",
-            facts=breakdown.primary_artifacts,
-            records=records,
-        )
-        self._add(
-            key="intent_mix",
-            title="Your change mix",
-            summary=self._focus_summary(counts=breakdown.intents, label="Recognized change intent")
-            + ". Intent comes from prefixes or explicit labels, not a judgment of impact.",
-            facts=breakdown.intents,
-            records=records,
-        )
-
-    def _chapter_slides(self) -> None:
-        definitions = [
-            ("fixes", "The fixer chapter", "FIX", None),
-            ("features", "The feature chapter", "FEAT", None),
-            ("tests", "The testing chapter", None, "Tests"),
-            ("documentation", "The documentation chapter", None, "Documentation/examples"),
-            ("infrastructure", "Behind-the-scenes work", "MAINT", "Configuration/CI"),
-        ]
-        for key, title, intent, artifact in definitions:
-            records = [
-                record
-                for record in self.stats.activities[Activity.AUTHORED]
-                if self.stats.classifications[record.item_ref].intent == intent
-                or artifact in self.stats.classifications[record.item_ref].artifacts
+    def _topics(self) -> None:
+        role = Activity.SHIPPED if self.stats.release else Activity.AUTHORED
+        breakdown = self.stats.breakdowns.get(role)
+        if self.stats.release is not None:
+            summary = "Top changed-file areas between tags: " + self._top(self.stats.release_file_topics) + ". "
+        elif breakdown:
+            total = breakdown.count
+            leaders = [
+                name
+                for name, count in breakdown.surfaces.items()
+                if name not in {"Mixed", "Unknown"} and total >= 5 and count > total / 2
             ]
-            description = f"{len(records)} PRs you opened"
-            if intent and artifact:
-                description += f" with {intent} intent or {artifact.lower()} changes"
-            elif intent:
-                description += f" classified as {intent}"
-            else:
-                description += f" touching {str(artifact).lower()}"
-            self._add(key=key, title=title, summary=description + ".", facts={"prs": len(records)}, records=records)
-        self._dataset_slide()
-        for key, role, title in (
-            ("review_topics", Activity.REVIEWED, "Areas you reviewed"),
-            ("issue_topics", Activity.ISSUES, "Topics you surfaced in issues"),
-        ):
-            groups = self.stats.breakdowns[role].topics
-            qualifier = (
-                "These describe reviewed PR scope, not every line inspected."
-                if role == Activity.REVIEWED
-                else ("Issue topics use labels and conservative title inference; Unknown remains visible.")
+            prefix = f"Primarily {leaders[0]}. " if leaders else ""
+            summary = prefix + "Areas: " + self._top(breakdown.primary_topics) + ". "
+            summary += "Surfaces: " + self._top(breakdown.surfaces) + ". "
+        else:
+            summary = "No source-supported topic distribution. "
+        if breakdown:
+            summary += "Primary artifacts: " + self._top(breakdown.primary_artifacts) + ". "
+            tags: dict[str, int] = {}
+            for record in self.stats.activities[role]:
+                for artifact in self.stats.classifications[record.item_ref].artifacts:
+                    tags[artifact] = tags.get(artifact, 0) + 1
+            summary += (
+                "PRs touching artifacts (overlapping): " + self._top(tags) + ". Full breakdowns are in the evidence."
             )
-            self._add(
-                key=key,
-                title=title,
-                summary=self._distribution({topic: len(refs) for topic, refs in groups.items()})
-                + ". Topic groups overlap. "
-                + qualifier,
-                facts={topic: len(refs) for topic, refs in groups.items()},
-                records=self.stats.activities[role],
-            )
+        self._add(key="topics", title="Where the work focused", summary=summary, roles=[role])
 
-    def _closing_slides(self) -> None:
-        selected: dict[str, Evidence] = {}
-        for role in (Activity.AUTHORED, Activity.LANDED, Activity.MERGED, Activity.ISSUES, Activity.REVIEWED):
-            for topic in sorted(self.stats.breakdowns[role].topics):
-                refs = set(self.stats.breakdowns[role].topics[topic])
-                record = next((record for record in self.stats.activities[role] if record.ref in refs), None)
-                if record is not None:
-                    selected[record.ref] = record
+    def _busiest(self) -> None:
+        if not any(peak.count for peak in self.stats.peaks.values()):
+            self.omitted["busiest"] = OmittedSlide(type="busiest", reason="No recorded actions in the window.")
+            return
+        descriptions = [
+            f"{scale}: {', '.join(peak.buckets[:3])}"
+            + (f" (+{len(peak.buckets) - 3} tied buckets)" if len(peak.buckets) > 3 else "")
+            + f" ({peak.count} distinct actions)"
+            for scale, peak in self.stats.peaks.items()
+        ]
         self._add(
-            key="highlights",
-            title="Highlights worth revisiting",
-            summary="The earliest recorded item for each topic and role, deduplicated. "
-            "Representative, not ranked by importance.",
-            facts={"representative_items": len(selected)},
-            records=list(selected.values()),
-        )
-        self._add(
-            key="recap",
-            title="Your PyRIT recap",
-            summary=self._count_summary(),
-            facts={role.value: count for role, count in self.stats.counts.items()},
-            records=self._all_records(),
-            required=True,
+            key="busiest",
+            title="The activity peaks",
+            summary="; ".join(descriptions) + ". UTC calendar months/days and ISO weeks; ties retained.",
+            roles=[Activity.AUTHORED, Activity.MERGED, Activity.REVIEWS],
         )
 
-    def _home_summary(self) -> str:
-        breakdown = self.stats.breakdowns[Activity.AUTHORED]
-        known = {topic: count for topic, count in breakdown.primary_topics.items() if topic not in {"Unknown", "Mixed"}}
-        if not known:
-            return "No confirmed primary topic for the PRs you opened. Mixed/Unknown evidence is retained."
-        maximum = max(known.values())
-        leaders = sorted(topic for topic, count in known.items() if count == maximum)
-        certain = Counter(
-            self.stats.classifications[record.item_ref].primary_topic
-            for record in self.stats.activities[Activity.AUTHORED]
-            if not self.stats.classifications[record.item_ref].inferred
-        )
-        word = (
-            "Primarily"
-            if breakdown.count >= 5 and len(leaders) == 1 and certain[leaders[0]] > breakdown.count / 2
-            else ("Most frequent primary topic(s):")
-        )
-        return f"{word} {', '.join(leaders)}: {maximum} of {breakdown.count} PRs you opened. " + (
-            "Small samples are descriptive, not contributor personas."
-            if breakdown.count < 5
-            else "Mixed/Unknown are included."
+    def _loc(self) -> None:
+        loc = self.stats.loc
+        if not loc.complete or loc.totals is None or loc.by_language is None:
+            summary = loc.reason or "Complete LOC data is unavailable; recollect this snapshot."
+            facts = {}
+        else:
+            label = "Net tag-to-tag tree diff" if self.stats.release else "Sum of your landed PR diffs"
+            summary = (
+                f"{label}: +{loc.totals.additions:,} / -{loc.totals.deletions:,} text lines. "
+                + "; ".join(
+                    f"{name}: +{loc.by_language[name].additions:,} / -{loc.by_language[name].deletions:,}"
+                    for name in ("TypeScript", "Python", "YAML")
+                )
+                + ". Other languages remain in the totals and evidence. LOC is not a productivity score."
+            )
+            facts = {"additions": loc.totals.additions, "deletions": loc.totals.deletions, "files": loc.file_count}
+        self._add(
+            key="loc",
+            title="The code that changed",
+            summary=summary,
+            roles=[Activity.SHIPPED if self.stats.release else Activity.LANDED],
+            facts=facts,
         )
 
     def _count_summary(self) -> str:
-        counts = self.stats.counts
         return (
-            f"{counts[Activity.AUTHORED]} PRs opened; {counts[Activity.LANDED]} authored PRs landed; "
-            f"{counts[Activity.MERGED]} PRs credited to you as merger; {counts[Activity.ISSUES]} issues opened; "
-            f"{counts[Activity.REVIEWED]} distinct PRs reviewed in {counts[Activity.REVIEWS]} submitted reviews."
+            f"{self._value(Activity.AUTHORED)} PRs opened, {self._value(Activity.PR_CLOSED)} closed, "
+            f"{self._value(Activity.MERGED)} merged; {self._value(Activity.REVIEWED)} PRs reviewed; "
+            f"{self._value(Activity.ISSUES)} issues opened, {self._value(Activity.ISSUES_CLOSED)} closed."
         )
 
-    def _all_records(self) -> list[Evidence]:
-        return [record for records in self.stats.activities.values() for record in records]
-
-    def _focus_summary(self, *, counts: dict[str, int], label: str) -> str:
-        total = self.stats.counts[Activity.AUTHORED]
-        majority = [
-            name
-            for name, count in counts.items()
-            if name not in {"Mixed", "Unknown", "Generated/lock files"} and total >= 5 and count > total / 2
-        ]
-        prefix = f"Primarily {majority[0]} ({counts[majority[0]]} of {total} opened PRs). " if majority else ""
-        return prefix + f"{label} of PRs you opened: " + self._distribution(counts)
-
-    def _dataset_slide(self) -> None:
-        records = [
-            record
-            for record in self.stats.activities[Activity.AUTHORED]
-            if "Datasets" in self.stats.classifications[record.item_ref].topics
-        ]
-        content = sum("Dataset content" in self.stats.classifications[record.item_ref].artifacts for record in records)
-        implementation = sum(
-            "Product code" in self.stats.classifications[record.item_ref].artifacts for record in records
-        )
-        self._add(
-            key="datasets",
-            title="The dataset chapter",
-            summary=f"{len(records)} PRs you opened touched datasets: {content} included dataset content "
-            f"and {implementation} included implementation code. These groups can overlap.",
-            facts={"prs": len(records), "content_prs": content, "implementation_prs": implementation},
-            records=records,
-        )
+    def _value(self, role: Activity) -> str:
+        value = self.stats.counts[role]
+        return f"{value:,}" if value is not None else "unavailable"
 
     def _add(
-        self,
-        *,
-        key: str,
-        title: str,
-        summary: str,
-        facts: dict[str, int],
-        records: list[Evidence],
-        required: bool = False,
+        self, *, key: str, title: str, summary: str, roles: list[Activity], facts: dict[str, int] | None = None
     ) -> None:
-        if not records and not required:
-            self.omitted[key] = OmittedSlide(
-                type=key, reason="No supporting contributor activity in the selected period."
-            )
-            return
+        known = {role.value: value for role in roles if (value := self.stats.counts[role]) is not None}
         self.slides[key] = Slide(
             type=key,
             title=title,
             summary=summary,
-            facts=facts,
-            evidence_refs=sorted({record.ref for record in records}),
+            facts={**known, **(facts or {})},
+            evidence_refs=sorted({record.ref for role in roles for record in self.stats.activities[role]}),
+            song_candidates=SongCatalog.candidates(key),
         )
 
     @staticmethod
     def _distribution(counts: dict[str, int]) -> str:
-        return "; ".join(
-            f"{name}: {count}" for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-        ) or ("no classified activity")
+        return (
+            "; ".join(f"{key}: {value}" for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+            or "no activity"
+        )
+
+    @staticmethod
+    def _top(counts: dict[str, int]) -> str:
+        return StoryBuilder._distribution(dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:3]))

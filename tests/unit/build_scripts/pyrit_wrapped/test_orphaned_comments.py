@@ -88,3 +88,20 @@ async def test_orphan_comment_is_not_counted_without_public_proof(*, collector: 
     with pytest.raises(WrappedError, match="Cannot verify publication"):
         await collector._verify_public_comment_async(comment=comment, public_client=public_client)
     assert comment.publicly_verified_at is None
+
+
+async def test_public_proof_rate_limit_retries_without_claiming_success(
+    *, collector: Collector, comment: Comment
+) -> None:
+    public_client = MagicMock(spec=httpx.AsyncClient)
+    public_client.get = AsyncMock(
+        side_effect=[
+            httpx.Response(403, json={"message": "API rate limit exceeded"}, headers={"Retry-After": "0"}),
+            httpx.Response(404),
+        ]
+    )
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(WrappedError, match="Cannot verify publication"):
+            await collector._verify_public_comment_async(comment=comment, public_client=public_client)
+    assert public_client.get.call_count == 2
+    assert comment.publicly_verified_at is None

@@ -1,8 +1,9 @@
 # PyRIT Wrapped
 
-PyRIT Wrapped summarizes a contributor's public activity in `microsoft/PyRIT`.
-This first milestone produces facts and slide summaries, not an HTML player,
-soundtrack, or video. It is repository tooling, independent of the PyRIT runtime.
+PyRIT Wrapped summarizes either a contributor's public activity or an entire
+release in `microsoft/PyRIT`. Both modes produce a compact 6-8-slide story,
+complete evidence, and song candidates. They do not include an HTML player,
+recordings, or video. This is repository tooling, independent of the PyRIT runtime.
 
 ## Generate a recap
 
@@ -28,18 +29,55 @@ never overwritten. Each report contains:
 | `summary.md` | Readable slide summaries, counts, and methodology |
 | `activity.md` | Complete topic-grouped activity lists with GitHub source links |
 | `story.json` | Supported slide types, facts, evidence references, and omission reasons |
+| `songs.md` | Track/artist candidates and rationale for each emitted slide type |
 
-The catalog has 25 types, but each contributor receives only supported stories.
-Sparse activity is not turned into invented achievements.
+Eight reusable types cover overview, PR pipeline, reviews/people, issues,
+focus areas, activity peaks, LOC/languages, and recap. Review and peak slides
+are omitted when there is no activity. Empty and unavailable figures are
+described honestly, not turned into achievements.
+
+## Wrap a release
+
+```powershell
+uv run python -m build_scripts.pyrit_wrapped summarize --release v1.1.0 --since-release v1.0.1
+```
+
+Omit `--since-release` to use the previous published stable release.
+The selected tags are resolved to immutable commit SHAs and saved in the
+snapshot. Draft releases and unordered or identical boundaries are rejected.
+Release mode does not accept `--year`.
+
+Release stories intentionally distinguish two cohorts:
+
+- **Activity:** PRs opened/closed, merges, submitted reviews, issues, and
+  comments between the two publication timestamps, across all contributors.
+- **Shipped changes:** PRs whose merged commit is newly reachable in
+  `base..head`, plus the complete net tree diff between the tags. PR membership
+  is discovered through commit-to-PR associations and checked against the
+  PR's recorded merge commit. Date-only merge counts are not shipping evidence.
+
+Direct commits appear in the tree diff even if no PR is associated.
+Contributor role counts describe identifiable PR/review/issue accounts,
+not a complete census of every commit author. People and bots are shown
+separately; unknown/deleted identities are not invented.
+
+If the tags have divergent histories, the report warns that newly reachable
+merge commits do not prove each patch shipped for the first time.
+The tree diff remains an exact comparison of the selected snapshots.
+The local Git reader may fetch missing commit/blob objects from origin;
+it never checks out a tag, changes the current branch, or rebases.
 
 ## What the numbers mean
 
 - **Authored/opened PRs:** created in the reporting window by the contributor.
+- **Own closed PRs:** authored by the contributor and currently closed, with
+  their last recorded closure in the window. This includes merged PRs.
 - **Authored PRs that landed:** merged in the window, even if opened earlier.
 - **PRs merged:** GitHub records this account in the PR's `merged_by` field.
   Own, other-author, and unavailable-author work are separated. A merge queue's
   recorded actor does not establish who clicked Merge.
 - **Issues opened:** created in the window; pull requests are excluded.
+- **Issues closed:** same ownership rule, using the last recorded closure.
 - **PRs reviewed:** distinct PRs with a submitted review in the window.
   Repeated reviews count separately as submitted reviews, not additional PRs.
 - **Comments:** inline review comments (including replies), nonempty submitted
@@ -60,8 +98,35 @@ not the PR's creation or merge date.
 
 Roles overlap and should not be summed into a productivity score. Monthly
 distinct actions deduplicate a merge appearing under both author and merger
-credit and do not count a review body again as an independent action.
+credit or the same merge's closure and do not count a review body again as
+an independent action. Release membership is not an extra activity event.
 The `reviewed_prs` monthly series marks each PR's first review in the window.
+The busiest month, ISO week, and calendar day use UTC and preserve all ties.
+An ISO week can belong to a different year than its calendar dates.
+Closures are the latest recorded timestamps, not every historical close/reopen
+transition; the tool does not claim to reconstruct lifecycle timelines.
+Closure discovery uses the fully paginated repository issue/PR endpoint's
+updated-since window and then checks each record's actual closure timestamp.
+It does not rely only on closed-date search, which can omit records that REST
+and GraphQL both confirm are closed in the window.
+
+## Lines changed
+
+Contributor LOC is the sum of the contributor's PR diffs **merged in the
+window**, not every opened/unmerged PR and not a net yearly repository diff.
+The same lines can therefore be changed in multiple PRs.
+Release LOC is the **net tag-to-tag tree diff**, without adding overlapping
+PR diffs on top. Both are labeled and must not be used as productivity scores.
+
+TypeScript includes `.ts` and `.tsx`; Python is `.py`; YAML includes `.yml`
+and `.yaml`. Other text languages remain in the totals and full breakdown.
+Notebook JSON is not counted as Python, and lockfiles have a separate bucket.
+For renames, additions use the destination language and deletions use the
+original language. Unchanged renamed lines do not become churn.
+Git binary records have no text LOC; PR API metadata does not reliably identify
+binary files, so that classification remains unavailable in contributor mode.
+Incomplete file coverage produces unavailable totals, never a plausible
+partial total or a silent zero.
 
 ## Topics and interpretation
 
@@ -112,9 +177,16 @@ uv run python -m build_scripts.pyrit_wrapped summarize --snapshot .\results\wrap
 Replay retains the original year, source timestamps, and taxonomy. Changing
 the taxonomy requires a new collection, not an implicit change to a replay.
 
+Version-1 snapshots remain replayable. Closed-activity and LOC capabilities
+that were not collected are explicitly unavailable, rather than inferred from
+the old subset of records. Live collection starts a version-2 cache session.
+
 The collector follows pagination and splits searches around GitHub's
 1,000-result search limit. It uses actual review/comment timestamps and
 fetches older reviewed PRs rather than limiting reviews to PRs opened that year.
+Release reviews use batched, independently paginated read-only GraphQL
+connections, including review-only activity on old PRs. Full database review
+IDs avoid GraphQL's legacy 32-bit ID limitation.
 Incomplete search results, authentication failures, missing required records,
 and exhausted retries fail explicitly; successful requests remain cached.
 
@@ -138,6 +210,9 @@ or reviewed activity still fails explicitly.
 
 Review the counts, topic groups, narrative, and omitted slide types before
 implementing the local browser form or self-contained HTML story.
-The next music workshop can suggest candidates for each supported slide type.
-Song selection and how recordings will be supplied remain user decisions.
-No recordings or external music service are included in this milestone.
+`songs.md` proposes two candidates per emitted slide, such as "Changes" for
+LOC and "With a Little Help from My Friends" for reviews/people.
+These are references to audition, not final selections or license claims.
+Roughly 10-second cues are the intended format, but short duration does not
+itself grant usage rights. Song selection, permissions, and how recordings will
+be supplied remain user decisions. No recordings or music service are included.

@@ -4,26 +4,27 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import UTC
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
 
+from build_scripts.pyrit_wrapped.churn import summarize_churn
 from build_scripts.pyrit_wrapped.models import (
     Activity,
     Actor,
     Breakdown,
+    Capability,
     CommentKind,
     Evidence,
     ItemKind,
+    LocReport,
+    LocScope,
+    Peak,
     Snapshot,
     Stats,
     WorkItem,
     WrappedError,
 )
-from build_scripts.pyrit_wrapped.snapshot import same_actor
+from build_scripts.pyrit_wrapped.snapshot import in_scope, same_actor
 from build_scripts.pyrit_wrapped.taxonomy import Taxonomy
-
-if TYPE_CHECKING:
-    from datetime import datetime
 
 
 class Metrics:
@@ -36,6 +37,8 @@ class Metrics:
         Activity.INLINE,
         Activity.PR_COMMENTS,
         Activity.ISSUE_COMMENTS,
+        Activity.PR_CLOSED,
+        Activity.ISSUES_CLOSED,
     }
 
     def __init__(self, snapshot: Snapshot) -> None:
@@ -59,6 +62,15 @@ class Metrics:
             [Activity.INLINE, Activity.REVIEW_BODIES, Activity.PR_COMMENTS]
         )
         monthly, distinct_events = self._monthly_activity()
+        unavailable = {Activity.SHIPPED} if self.snapshot.release is None else set()
+        if Capability.CLOSURES not in self.snapshot.capabilities:
+            unavailable.update({Activity.PR_CLOSED, Activity.ISSUES_CLOSED})
+        warnings = list(self.snapshot.warnings)
+        if Capability.CLOSURES not in self.snapshot.capabilities:
+            warnings.append(
+                "Closure totals were not collected in this legacy snapshot; "
+                "recollect rather than treating them as zero."
+            )
         return Stats(
             repository=self.snapshot.repository,
             contributor=self.snapshot.contributor,
@@ -66,10 +78,17 @@ class Metrics:
             collected_at=self.snapshot.collected_at,
             earliest_response_at=self.snapshot.earliest_response_at,
             taxonomy=self.snapshot.taxonomy,
-            counts={activity: len(records) for activity, records in self.activities.items()},
+            counts={
+                activity: None if activity in unavailable else len(records)
+                for activity, records in self.activities.items()
+            },
             activities=self.activities,
             classifications=self.classifications,
-            breakdowns={activity: self._breakdown(records) for activity, records in self.activities.items()},
+            breakdowns={
+                activity: self._breakdown(records)
+                for activity, records in self.activities.items()
+                if activity not in unavailable
+            },
             monthly=monthly,
             distinct_monthly_events=distinct_events,
             reviewed_authors=self._reviewed_authors(),
@@ -84,24 +103,48 @@ class Metrics:
                 for comment in self.snapshot.comments
                 if (timestamp := comment.publicly_verified_at) is not None
             },
-            warnings=self.snapshot.warnings,
+            warnings=warnings,
+            release=self.snapshot.release,
+            loc=self._loc(),
+            peaks=self._peaks(),
+            participants=self._participants(),
+            release_file_topics=(
+                dict(
+                    sorted(
+                        Counter(
+                            self.taxonomy.classify_file(file.path).primary_topic for file in self.snapshot.release.files
+                        ).items()
+                    )
+                )
+                if self.snapshot.release is not None
+                else {}
+            ),
         )
 
     def _item_activity(self) -> None:
         contributor, period = self.snapshot.contributor, self.snapshot.period
         for item in self.snapshot.items:
-            if same_actor(item.author, contributor):
+            if in_scope(item.author, contributor):
                 if period.contains(item.created_at):
                     role = Activity.AUTHORED if item.kind == ItemKind.PR else Activity.ISSUES
                     self._record(activity=role, item=item, event_at=item.created_at)
                 if item.kind == ItemKind.PR and period.contains(item.merged_at):
                     self._record(activity=Activity.LANDED, item=item, event_at=item.merged_at)
-            if item.kind == ItemKind.PR and same_actor(item.merged_by, contributor) and period.contains(item.merged_at):
+                if (
+                    Capability.CLOSURES in self.snapshot.capabilities
+                    and item.state == "closed"
+                    and period.contains(item.closed_at)
+                ):
+                    role = Activity.PR_CLOSED if item.kind == ItemKind.PR else Activity.ISSUES_CLOSED
+                    self._record(activity=role, item=item, event_at=item.closed_at)
+            if item.kind == ItemKind.PR and in_scope(item.merged_by, contributor) and period.contains(item.merged_at):
                 self._record(activity=Activity.MERGED, item=item, event_at=item.merged_at)
+            if self.snapshot.release is not None and item.number in self.snapshot.release.shipped_pr_numbers:
+                self._record(activity=Activity.SHIPPED, item=item, event_at=self.snapshot.release.head.published_at)
 
     def _review_activity(self) -> None:
         for review in self.snapshot.reviews:
-            if not same_actor(review.author, self.snapshot.contributor):
+            if not in_scope(review.author, self.snapshot.contributor):
                 continue
             if review.state == "PENDING" or not self.snapshot.period.contains(review.submitted_at):
                 continue
@@ -122,7 +165,7 @@ class Metrics:
     def _comment_activity(self) -> None:
         reviews = {review.id: review for review in self.snapshot.reviews}
         for comment in self.snapshot.comments:
-            if not same_actor(comment.author, self.snapshot.contributor) or not self.snapshot.period.contains(
+            if not in_scope(comment.author, self.snapshot.contributor) or not self.snapshot.period.contains(
                 comment.created_at
             ):
                 continue
@@ -174,23 +217,22 @@ class Metrics:
         )
 
     def _monthly_activity(self) -> tuple[dict[str, dict[Activity, int]], dict[str, int]]:
-        months = [
-            f"{self.snapshot.period.year}-{month:02}"
-            for month in range(1, 13)
-            if month <= (self.snapshot.period.cutoff.month if self.snapshot.period.year_to_date else 12)
-        ]
+        months = sorted({day.strftime("%Y-%m") for day in self._days()})
         monthly = {month: dict.fromkeys(Activity, 0) for month in months}
         unique_events: dict[str, set[str]] = {month: set() for month in months}
         for activity, records in self.activities.items():
+            if activity == Activity.SHIPPED:
+                continue
             for record in records:
                 month = record.event_at.astimezone(UTC).strftime("%Y-%m")
                 monthly[month][activity] += 1
                 if activity in self._EVENT_ROLES:
-                    prefix = "merged" if activity in {Activity.LANDED, Activity.MERGED} else activity.value
-                    unique_events[month].add(f"{prefix}:{record.ref}")
+                    unique_events[month].add(self._event_key(activity=activity, record=record))
         return monthly, {month: len(events) for month, events in unique_events.items()}
 
-    def _ownership_counts(self, roles: list[Activity]) -> tuple[int, int, int]:
+    def _ownership_counts(self, roles: list[Activity]) -> tuple[int | None, int | None, int | None]:
+        if self.snapshot.contributor is None:
+            return None, None, None
         own, other, unknown = 0, 0, 0
         by_ref = {item.ref: item for item in self.snapshot.items}
         for role in roles:
@@ -217,3 +259,90 @@ class Metrics:
             ):
                 authors[author.id] = author
         return sorted(authors.values(), key=lambda author: author.login.lower())
+
+    def _days(self) -> list[datetime]:
+        cursor = self.snapshot.period.start.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        result = []
+        while cursor < self.snapshot.period.cutoff:
+            result.append(cursor)
+            cursor += timedelta(days=1)
+        return result
+
+    def _event_key(self, *, activity: Activity, record: Evidence) -> str:
+        item = self.items[int(record.item_ref.split(":")[1])]
+        merged_closure = activity == Activity.PR_CLOSED and item.merged_at == record.event_at
+        prefix = "merged" if activity in {Activity.LANDED, Activity.MERGED} or merged_closure else activity.value
+        return f"{prefix}:{record.ref}"
+
+    def _peaks(self) -> dict[str, Peak]:
+        buckets: dict[str, dict[str, set[str]]] = {name: {} for name in ("month", "week", "day")}
+        for role in self._EVENT_ROLES:
+            for record in self.activities[role]:
+                instant = record.event_at.astimezone(UTC)
+                iso_year, iso_week, _ = instant.isocalendar()
+                names = {
+                    "month": instant.strftime("%Y-%m"),
+                    "week": f"{iso_year}-W{iso_week:02}",
+                    "day": instant.date().isoformat(),
+                }
+                for scale, name in names.items():
+                    buckets[scale].setdefault(name, set()).add(self._event_key(activity=role, record=record))
+        result = {}
+        for scale, values in buckets.items():
+            maximum = max((len(events) for events in values.values()), default=0)
+            result[scale] = Peak(
+                buckets=sorted(name for name, events in values.items() if len(events) == maximum), count=maximum
+            )
+        return result
+
+    def _loc(self) -> LocReport:
+        if self.snapshot.release is not None:
+            return summarize_churn(files=self.snapshot.release.files, scope=LocScope.RELEASE_DIFF, complete=True)
+        landed = {record.item_ref for record in self.activities[Activity.LANDED]}
+        items = [item for item in self.snapshot.items if item.ref in landed]
+        complete = Capability.LOC in self.snapshot.capabilities and all(item.loc_complete for item in items)
+        return summarize_churn(
+            files=[file for item in items for file in item.file_changes],
+            scope=LocScope.LANDED_PRS,
+            complete=complete,
+            reason=None
+            if complete
+            else "Complete landed-PR file additions/deletions were not collected; LOC is unavailable.",
+        )
+
+    def _participants(self) -> dict[str, list[Actor]]:
+        result: dict[str, dict[str, Actor]] = {
+            role: {} for role in ("authors", "reviewers", "mergers", "issue_authors", "commenters")
+        }
+        author_refs = {
+            record.item_ref
+            for role in (Activity.AUTHORED, Activity.LANDED, Activity.SHIPPED)
+            for record in self.activities[role]
+        }
+        merger_refs = {record.item_ref for record in self.activities[Activity.MERGED]}
+        issue_refs = {record.item_ref for record in self.activities[Activity.ISSUES]}
+        review_refs = {record.ref for record in self.activities[Activity.REVIEWS]}
+        comment_refs = {
+            record.ref
+            for role in (Activity.INLINE, Activity.PR_COMMENTS, Activity.ISSUE_COMMENTS)
+            for record in self.activities[role]
+        }
+
+        def add(*, role: str, actor: Actor | None) -> None:
+            if actor is not None and not actor.is_deleted:
+                result[role][str(actor.database_id) if actor.database_id is not None else actor.id] = actor
+
+        for item in self.snapshot.items:
+            if item.ref in author_refs:
+                add(role="authors", actor=item.author)
+            if item.ref in merger_refs:
+                add(role="mergers", actor=item.merged_by)
+            if item.ref in issue_refs:
+                add(role="issue_authors", actor=item.author)
+        for review in self.snapshot.reviews:
+            if review.ref in review_refs:
+                add(role="reviewers", actor=review.author)
+        for comment in self.snapshot.comments:
+            if comment.ref in comment_refs:
+                add(role="commenters", actor=comment.author)
+        return {role: sorted(actors.values(), key=lambda actor: actor.login.lower()) for role, actors in result.items()}

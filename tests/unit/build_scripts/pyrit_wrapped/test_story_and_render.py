@@ -15,8 +15,9 @@ from build_scripts.pyrit_wrapped.story import StoryBuilder
 
 def test_empty_story_has_no_fake_achievements(snapshot: Snapshot) -> None:
     story = StoryBuilder(Metrics(snapshot).calculate()).build()
-    assert [slide.type for slide in story.slides] == ["welcome", "snapshot", "recap"]
-    assert len(story.slides) + len(story.omitted) == 25
+    assert [slide.type for slide in story.slides] == ["overview", "prs", "issues", "topics", "loc", "recap"]
+    assert len(story.slides) + len(story.omitted) == 8
+    assert 5 <= len(story.slides) <= 10
     assert all(slide.cue_id is None and slide.duration_ms is None for slide in story.slides)
 
 
@@ -25,22 +26,23 @@ def test_fix_and_artifact_stories_use_actual_evidence(*, snapshot: Snapshot, ite
     stats = Metrics(snapshot.model_copy(update={"items": [item]})).calculate()
     story = StoryBuilder(stats).build()
     by_type = {slide.type: slide for slide in story.slides}
-    assert by_type["fixes"].facts == {"prs": 1}
-    assert by_type["tests"].evidence_refs == ["pr:1"]
-    assert "features" not in by_type
-    assert "Primarily" not in by_type["home_territory"].summary
+    assert by_type["prs"].facts["authored_prs"] == 1
+    assert "FIX: 1" in by_type["prs"].summary
+    assert by_type["topics"].evidence_refs == ["pr:1"]
+    assert "Tests: 1" in by_type["topics"].summary
+    assert "Primarily" not in by_type["topics"].summary
 
 
 def test_dominance_requires_confirmed_majority(*, snapshot: Snapshot, item: WorkItem) -> None:
     items = [item.model_copy(update={"id": f"PR_{number}", "number": number}) for number in range(1, 6)]
     story = StoryBuilder(Metrics(snapshot.model_copy(update={"items": items})).calculate()).build()
-    assert next(slide for slide in story.slides if slide.type == "home_territory").summary.startswith(
-        "Primarily Converters"
+    assert next(slide for slide in story.slides if slide.type == "topics").summary.startswith(
+        "Primarily Python framework"
     )
-    assert next(slide for slide in story.slides if slide.type == "intent_mix").summary.startswith("Primarily FIX")
+    assert "FIX: 5" in next(slide for slide in story.slides if slide.type == "prs").summary
     inferred = [value.model_copy(update={"files_complete": False}) for value in items]
     story = StoryBuilder(Metrics(snapshot.model_copy(update={"items": inferred})).calculate()).build()
-    assert not next(slide for slide in story.slides if slide.type == "home_territory").summary.startswith("Primarily")
+    assert not next(slide for slide in story.slides if slide.type == "topics").summary.startswith("Primarily")
 
 
 def test_export_round_trip_and_complete_lists(*, snapshot: Snapshot, item: WorkItem, tmp_path: Path) -> None:
@@ -54,7 +56,8 @@ def test_export_round_trip_and_complete_lists(*, snapshot: Snapshot, item: WorkI
     assert "FIX converter behavior" in activity
     assert "Converters (1)" in activity
     assert "[activity.md](activity.md)" in summary
-    assert "Music candidates and recording supply remain undecided" in summary
+    assert "final song selections and recording supply remain undecided" in summary
+    assert "Daft Punk" in (destination / "songs.md").read_text(encoding="utf-8")
     with pytest.raises(WrappedError, match="already exists"):
         write_reports(snapshot=snapshot, stats=stats, story=story, output_dir=destination)
 
@@ -73,7 +76,7 @@ def test_offline_cli_replays_identically(*, snapshot: Snapshot, tmp_path: Path) 
     source.write_text(snapshot.model_dump_json(), encoding="utf-8")
     for index in (1, 2):
         assert main(["summarize", "--snapshot", str(source), "--output-dir", str(tmp_path / f"report{index}")]) == 0
-    for name in ("stats.json", "story.json", "summary.md", "activity.md"):
+    for name in ("stats.json", "story.json", "summary.md", "activity.md", "songs.md"):
         assert (tmp_path / "report1" / name).read_bytes() == (tmp_path / "report2" / name).read_bytes()
 
 
@@ -87,8 +90,10 @@ def test_dataset_story_separates_code_and_payloads(*, snapshot: Snapshot, item: 
     provider = item.model_copy(update={"paths": ["pyrit/datasets/seed_datasets/provider.py"]})
     stats = Metrics(snapshot.model_copy(update={"items": [provider]})).calculate()
     story = StoryBuilder(stats).build()
-    slide = next(slide for slide in story.slides if slide.type == "datasets")
-    assert slide.facts == {"prs": 1, "content_prs": 0, "implementation_prs": 1}
+    slide = next(slide for slide in story.slides if slide.type == "topics")
+    assert "Datasets: 1" in slide.summary
+    assert "Product code: 1" in slide.summary
+    assert stats.classifications[provider.ref].primary_artifact == "Product code"
 
 
 def test_live_cli_reuses_a_complete_snapshot_instead_of_mixing_windows(*, snapshot: Snapshot, tmp_path: Path) -> None:

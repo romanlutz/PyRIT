@@ -97,9 +97,17 @@ class GitHubClient:
         self._next_search = 0.0
 
     async def get_async(self, *, path: str, params: dict[str, str] | None = None) -> Response:
-        if not re.fullmatch(r"(?:users/[A-Za-z0-9-]+|repos/microsoft/PyRIT(?:/[\w/-]+)?|search/issues)", path):
+        if ".." in path or not re.fullmatch(
+            r"(?:users/[A-Za-z0-9-]+|repos/microsoft/PyRIT(?:/[\w.%/-]+)?|search/issues|graphql)", path
+        ):
             raise WrappedError(f"Refusing an unexpected GitHub API endpoint: {path}")
         params = params or {}
+        if path == "graphql" and (
+            set(params) != {"query"}
+            or not params["query"].lstrip().startswith("query")
+            or re.search(r"\b(?:mutation|subscription)\b", params["query"])
+        ):
+            raise WrappedError("Only a single read-only GraphQL query parameter is permitted.")
         key = hashlib.sha256(json.dumps([path, sorted(params.items())]).encode()).hexdigest()
         cache_file = self.cache_dir / f"{key}.json"
         cached = await asyncio.to_thread(self._read_cache, cache_file)
@@ -137,7 +145,7 @@ class GitHubClient:
     async def search_async(self, *, query: str, date_field: str, start: datetime, end: datetime) -> set[int]:
         if end <= start:
             return set()
-        if date_field not in {"created", "merged"}:
+        if date_field not in {"created", "merged", "closed"}:
             raise WrappedError(f"Unsupported search date field: {date_field}")
         start = start.replace(microsecond=0)
         # Search timestamps have second precision. Local event filtering preserves the exact cutoff.
@@ -189,6 +197,8 @@ class GitHubClient:
                 continue
             status, headers, data = self._parse_response(output)
             if code == 0 and 200 <= status < 300:
+                if path == "graphql" and isinstance(data, dict) and data.get("errors"):
+                    raise WrappedError("GitHub GraphQL returned errors; no incomplete review response was cached.")
                 return Response(
                     fetched_at=datetime.now(UTC),
                     next_page=self._next_page(headers.get("link", "")),
@@ -208,7 +218,18 @@ class GitHubClient:
         raise WrappedError("GitHub retry budget exhausted.")
 
     async def _run_async(self, *, path: str, params: dict[str, str]) -> tuple[int, str]:
-        args = ["gh", "api", "--hostname", "github.com", "--method", "GET", "--include", path]
+        if path == "graphql" and not params.get("query", "").lstrip().startswith("query"):
+            raise WrappedError("Only read-only GraphQL queries are permitted.")
+        args = [
+            "gh",
+            "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "POST" if path == "graphql" else "GET",
+            "--include",
+            path,
+        ]
         args.extend(["-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"])
         for key, value in sorted(params.items()):
             args.extend(["-f", f"{key}={value}"])

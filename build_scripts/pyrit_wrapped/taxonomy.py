@@ -36,6 +36,19 @@ class Taxonomy:
             evidence=intent_evidence + [f"path: {path}" for path in sorted(item.paths)],
         )
 
+    def classify_file(self, path: str) -> Classification:
+        topic, surface, artifact, language = self._classify_path(path)
+        return Classification(
+            topics=[topic],
+            primary_topic=topic,
+            surface=surface,
+            artifacts=[artifact],
+            primary_artifact=artifact,
+            languages=[language] if language else [],
+            intent="Unknown",
+            evidence=[f"path: {path}"],
+        )
+
     def _intent(self, item: WorkItem) -> tuple[str, list[str]]:
         match = self._INTENT_PREFIX.match(item.title)
         if match and match[1].upper() in self.config.intent_aliases:
