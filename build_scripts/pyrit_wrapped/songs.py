@@ -5,6 +5,16 @@ from build_scripts.pyrit_wrapped.models import SongCandidate
 
 
 class SongCatalog:
+    _VIDEOS = {
+        "overview": "TBS6gAtj8gE",
+        "prs": "cJRw7rYOOzA",
+        "reviews_people": "0C58ttB2-Qg",
+        "issues": "iS1g8G_njx8",
+        "topics": "hOEMsqWx4nE",
+        "busiest": "HgzGwKwLmgM",
+        "loc": "4BgF7Y3q-as",
+        "recap": "Tdxn1wc3As0",
+    }
     _SELECTIONS = {
         "overview": ("Celebration", "Kool & the Gang"),
         "prs": ("Work", "Ava Max"),
@@ -58,6 +68,7 @@ class SongCatalog:
                 artist=artist,
                 rationale=reason,
                 selected=cls._SELECTIONS.get(slide_type) == (title, artist),
+                youtube_id=cls._VIDEOS.get(slide_type),
             )
             for title, artist, reason in cls._TRACKS[slide_type]
         ]

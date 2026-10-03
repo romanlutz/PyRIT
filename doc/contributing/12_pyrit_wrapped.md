@@ -1,9 +1,9 @@
 # PyRIT Wrapped
 
 PyRIT Wrapped summarizes either a contributor's public activity or an entire
-release in `microsoft/PyRIT`. Both modes produce a compact 6-8-slide story,
-complete evidence, and song candidates. They do not include an HTML player,
-recordings, or video. This is repository tooling, independent of the PyRIT runtime.
+release in `microsoft/PyRIT`. Both modes produce a compact 6-8-slide
+click-through HTML deck, complete evidence, and selected soundtrack references.
+No recordings are extracted, downloaded, or bundled. This is repository tooling, independent of the PyRIT runtime.
 
 ## Generate a recap
 
@@ -30,11 +30,49 @@ never overwritten. Each report contains:
 | `activity.md` | Complete topic-grouped activity lists with GitHub source links |
 | `story.json` | Supported slide types, facts, evidence references, and omission reasons |
 | `songs.md` | Track/artist candidates and rationale for each emitted slide type |
+| `index.html` | Self-contained click-through deck with charts and optional visible YouTube playback |
 
 Eight reusable types cover overview, PR pipeline, reviews/people, issues,
 focus areas, activity peaks, LOC/languages, and recap. Review and peak slides
 are omitted when there is no activity. Empty and unavailable figures are
 described honestly, not turned into achievements.
+
+## Click through the HTML deck
+
+Open the generated `index.html` to review the stats offline. Previous/Next,
+chapter buttons, arrow keys, and Restart navigate the same compact story.
+The transcript and full evidence remain available separately.
+
+For YouTube music, serve the generated report over local HTTP:
+
+```powershell
+uv run python -m build_scripts.pyrit_wrapped preview --report-dir .\results\wrapped\your-report --port 8879
+```
+
+Open `http://127.0.0.1:8879/`, then choose **Enable music**. No YouTube script
+or iframe is loaded before that action. One visible player at the bottom
+switches to the selected track on navigation and plays approximately ten
+seconds. Replay cue restarts it; Disable music removes the player.
+
+The player is at least 200 by 200 pixels. Scripted playback requires more
+than half of it to be visible and the document to be in the foreground.
+Scrolling it off-screen or backgrounding the page pauses playback. It is not
+hidden, moved below the viewport for background audio, or covered by overlays.
+Private use does not waive [YouTube's embed requirements](https://developers.google.com/youtube/terms/required-minimum-functionality).
+The preview preserves the required referrer; `file://` is for silent review,
+not reliable YouTube playback.
+
+Browsers may block autoplay even after initial consent. The page reports that
+and keeps the native YouTube Play controls available. Owner-disabled embeds,
+regional restrictions, network failures, and missing referrers are reported
+explicitly, with a Watch on YouTube link. The tool does not bypass restrictions
+or extract audio. Official audio/Topic uploads can be used when a music video
+does not permit embedding, without changing the selected song.
+
+The preview binds only to `127.0.0.1`, serves an explicit allowlist of generated
+report files, rejects non-loopback Host headers and escaping symlinks, and
+offers no mutation or credential endpoint. It does not serve the repository
+or `.cache` directory.
 
 ## Wrap a release
 
@@ -209,7 +247,8 @@ or reviewed activity still fails explicitly.
 ## Review checkpoint and later work
 
 Review the counts, topic groups, narrative, and omitted slide types before
-implementing the local browser form or self-contained HTML story.
+expanding to a contributor lookup form or public hosting. The standalone
+HTML story and local preview are already available.
 `songs.md` distinguishes selected tracks from undecided suggestions. The current
 selections are "Celebration" for the opening, Ava Max's "Work" for PRs,
 "With a Little Help from My Friends" for reviews/people, Ariana Grande's
@@ -218,5 +257,5 @@ selections are "Celebration" for the opening, Ava Max's "Work" for PRs,
 "Bottle Up" for the recap. All eight slide types now have a selected track.
 Selection is not a claim that recordings are supplied or licensed.
 Roughly 10-second cues are the intended format, but short duration does not
-itself grant usage rights. Permissions and how recordings will be supplied
-remain user decisions. No recordings or music service are included.
+itself grant usage rights. The optional player streams from YouTube under its
+embed rules; no recordings are downloaded or bundled.

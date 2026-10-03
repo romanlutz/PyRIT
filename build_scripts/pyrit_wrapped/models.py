@@ -439,6 +439,15 @@ class SongCandidate(Model):
     artist: str
     rationale: str
     selected: bool = False
+    youtube_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{11}$")
+    start_seconds: int = Field(default=0, ge=0)
+    end_seconds: int = Field(default=10, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_clip(self) -> SongCandidate:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("Song cue must end after it starts.")
+        return self
 
 
 class Slide(Model):

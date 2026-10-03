@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from build_scripts.pyrit_wrapped.html_deck import HtmlDeck
 from build_scripts.pyrit_wrapped.models import Activity, Evidence, Snapshot, Stats, Story, WrappedError
 
 
@@ -259,6 +260,7 @@ def write_reports(*, snapshot: Snapshot, stats: Stats, story: Story, output_dir:
     report = MarkdownReport(stats=stats, story=story)
     summary = report.render()
     activity = report.render_activity()
+    deck = HtmlDeck(stats=stats, story=story).render()
     with tempfile.TemporaryDirectory(prefix=".wrapped-report-", dir=destination.parent) as temporary:
         staging = Path(temporary) / "report"
         staging.mkdir()
@@ -267,5 +269,6 @@ def write_reports(*, snapshot: Snapshot, stats: Stats, story: Story, output_dir:
         (staging / "summary.md").write_text(summary, encoding="utf-8")
         (staging / "activity.md").write_text(activity, encoding="utf-8")
         (staging / "songs.md").write_text(report.render_songs(), encoding="utf-8")
+        (staging / "index.html").write_text(deck, encoding="utf-8")
         os.replace(staging, destination)
     return destination

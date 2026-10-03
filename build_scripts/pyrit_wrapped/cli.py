@@ -23,6 +23,7 @@ from build_scripts.pyrit_wrapped.models import (
     WrappedError,
     parse_contributor,
 )
+from build_scripts.pyrit_wrapped.preview import serve_preview
 from build_scripts.pyrit_wrapped.release import ReleaseResolver
 from build_scripts.pyrit_wrapped.render import write_reports
 from build_scripts.pyrit_wrapped.snapshot import Collector
@@ -32,7 +33,7 @@ from build_scripts.pyrit_wrapped.story import StoryBuilder
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compact, evidence-backed PyRIT contributor and release summaries.")
     commands = parser.add_subparsers(dest="command", required=True)
-    summarize = commands.add_parser("summarize", help="Generate facts and summaries, stopping before HTML and music.")
+    summarize = commands.add_parser("summarize", help="Generate facts, summaries, and a click-through HTML deck.")
     source = summarize.add_mutually_exclusive_group(required=True)
     source.add_argument("--contributor", help="GitHub username, @username, or profile URL.")
     source.add_argument("--snapshot", type=Path, help="Replay a saved complete snapshot offline.")
@@ -49,6 +50,9 @@ def _parser() -> argparse.ArgumentParser:
         "--refresh", action="store_true", help="Bypass cached requests and refresh live GitHub data."
     )
     summarize.add_argument("--taxonomy", type=Path, help="Custom versioned taxonomy JSON, for live collection.")
+    preview = commands.add_parser("preview", help="Serve one generated HTML report locally for YouTube playback.")
+    preview.add_argument("--report-dir", type=Path, required=True)
+    preview.add_argument("--port", type=int, default=8879)
     return parser
 
 
@@ -168,6 +172,8 @@ def _collection_session(
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "preview":
+            return serve_preview(report_dir=args.report_dir, port=args.port)
         snapshot = _load_snapshot(args)
         stats = Metrics(snapshot).calculate()
         story = StoryBuilder(stats).build()
@@ -185,5 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PyRIT Wrapped: {error}", file=sys.stderr)
         return 1
     print(f"Summaries written to {destination}")
-    print("Review summary.md, story.json, and songs.md. Song candidates are references, not licensed audio.")
+    print(
+        "Open index.html for the deck. Use preview for visible YouTube playback; music starts only after enabling it."
+    )
     return 0
