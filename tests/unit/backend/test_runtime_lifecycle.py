@@ -20,6 +20,7 @@ from pyrit.backend.middleware.auth import require_admin
 from pyrit.backend.middleware.runtime import RuntimeAdmissionMiddleware
 from pyrit.backend.routes import configuration, health
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
+from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.runtime_lifecycle import RuntimeLifecycle
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.memory import CentralMemory, MemoryInterface
@@ -96,7 +97,11 @@ async def test_shutdown_disposes_memory_after_services_even_on_failure(
         errors = tuple(asyncio.CancelledError(name) if cancelled else RuntimeError(name) for name in failures)
         for name, error in zip(failures, errors, strict=True):
             getattr(order, name).side_effect = error
-        if errors:
+        if len(errors) == 1:
+            with pytest.raises(type(errors[0])) as single_error:
+                await runtime.shutdown_async()
+            assert single_error.value is errors[0]
+        elif errors:
             with pytest.raises(BaseExceptionGroup) as caught:
                 await runtime.shutdown_async()
             assert caught.value.exceptions == errors
@@ -104,6 +109,18 @@ async def test_shutdown_disposes_memory_after_services_even_on_failure(
             await runtime.shutdown_async()
 
     assert order.mock_calls == [call.scenarios(), call.services(), call.memory()]
+
+
+async def test_shutdown_repeated_failure_preserves_original_error_async(runtime: RuntimeLifecycle) -> None:
+    failure = RuntimeError("service shutdown failed")
+    lifecycle_module.close_services_async.side_effect = failure
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="service shutdown failed") as caught:
+            await runtime.shutdown_async()
+        assert caught.value is failure
+        assert runtime.is_stopping
+        lifecycle_module.close_services_async.assert_awaited_once()
 
 
 async def test_success_preflights_then_replaces_idle_runtime(runtime: RuntimeLifecycle) -> None:
@@ -149,6 +166,24 @@ async def test_active_work_rejects_apply_without_stopping_or_mutating(runtime: R
     assert runtime.state == "ready"
     lifecycle_module.close_services_async.assert_not_awaited()
     assert not hasattr(service, "request_stop") or not service.request_stop.called
+
+
+async def test_admitted_manual_send_blocks_reinitialization_without_an_http_request_async(
+    runtime: RuntimeLifecycle,
+) -> None:
+    get_manual_send_scheduler.cache_clear()
+    try:
+        scheduler = get_manual_send_scheduler()
+        with scheduler.reserve(conversation_id="accepted-send"):
+            assert not runtime.operations
+            await apply_async(runtime)
+            assert runtime.outcome == "busy"
+            assert runtime.generation == "original"
+            lifecycle_module.close_services_async.assert_not_awaited()
+        await apply_async(runtime)
+        assert runtime.generation != "original"
+    finally:
+        get_manual_send_scheduler.cache_clear()
 
 
 async def test_second_idle_check_closes_admission_race(runtime: RuntimeLifecycle) -> None:
@@ -334,9 +369,9 @@ async def test_shutdown_drains_disconnected_requests_before_closing_async(
                     lifecycle_module.close_services_async.assert_not_awaited()
             release.set()
             if child_fails:
-                with pytest.raises(BaseExceptionGroup) as error:
+                with pytest.raises(ValueError, match="retained request failed") as error:
                     await asyncio.wait_for(shutdown, timeout=5)
-                assert error.value.exceptions == (failure,)
+                assert error.value is failure
             elif cancel_shutdown:
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(shutdown, timeout=5)
@@ -429,9 +464,9 @@ async def test_shutdown_drains_sibling_after_request_failure_async(runtime: Runt
             assert len(runtime.operations) == 1
             lifecycle_module.close_services_async.assert_not_awaited()
             release[1].set()
-            with pytest.raises(ExceptionGroup) as error:
+            with pytest.raises(ValueError, match="first request failed") as error:
                 await asyncio.wait_for(shutdown, timeout=5)
-            assert error.value.exceptions == (failure,)
+            assert error.value is failure
             assert all(task.done() for task in children)
             lifecycle_module.close_services_async.assert_awaited_once()
         finally:
