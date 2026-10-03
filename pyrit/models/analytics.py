@@ -61,7 +61,9 @@ class AttackAnalyticsDimensionName(str, Enum):
     """
     Supported dimensions from saved result metadata, not current registry state.
 
-    Target and scenario keys are persisted identities, not their display names.
+    Objective-target keys use a persisted, versioned evaluation identity so
+    deployment details do not split equivalent configurations. Scenario keys
+    identify saved runs, not their possibly repeated display names.
     Harm categories describe the attack's intended coverage, not detected harms.
     Converter membership describes recorded usage, not an ordered per-turn pipeline.
     """
@@ -366,7 +368,7 @@ class AttackAnalyticsCell(_AnalyticsModel):
 
 
 class AttackAnalyticsResultRow(_AnalyticsModel):
-    """A result projection without conversation, score, or media hydration."""
+    """A lightweight result projection retaining the exact target content hash for inspection."""
 
     attack_result_id: str
     objective_preview: str
