@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "path_rules": [
+    {"prefix": "frontend/", "topic": "Frontend", "surface": "GUI"},
+    {"prefix": "pyrit/backend/", "topic": "GUI backend", "surface": "GUI"},
+    {"prefix": "pyrit/executor/", "topic": "Attacks and executors", "surface": "Python framework"},
+    {"prefix": "pyrit/scenario/", "topic": "Scenarios", "surface": "Python framework"},
+    {"prefix": "pyrit/converter/", "topic": "Converters", "surface": "Python framework"},
+    {"prefix": "pyrit/prompt_target/", "topic": "Targets", "surface": "Python framework"},
+    {"prefix": "pyrit/score/", "topic": "Scorers", "surface": "Python framework"},
+    {"prefix": "pyrit/memory/", "topic": "Memory", "surface": "Python framework"},
+    {"prefix": "pyrit/datasets/", "topic": "Datasets", "surface": "Python framework"},
+    {"prefix": "pyrit/models/", "topic": "Models", "surface": "Python framework"},
+    {"prefix": "pyrit/setup/", "topic": "Setup and registry", "surface": "Python framework"},
+    {"prefix": "pyrit/registry/", "topic": "Setup and registry", "surface": "Python framework"},
+    {"prefix": "pyrit/cli/", "topic": "CLI", "surface": "Python framework"},
+    {"prefix": "pyrit/output/", "topic": "Output", "surface": "Python framework"},
+    {"prefix": "pyrit/analytics/", "topic": "Analytics", "surface": "Python framework"},
+    {"prefix": "pyrit/common/", "topic": "Shared utilities", "surface": "Python framework"},
+    {"prefix": "pyrit/auth/", "topic": "Authentication", "surface": "Python framework"},
+    {"prefix": ".github/", "topic": "Build and CI", "surface": "Tooling and infrastructure"},
+    {"prefix": ".azuredevops/", "topic": "Build and CI", "surface": "Tooling and infrastructure"},
+    {"prefix": "build_scripts/", "topic": "Build and CI", "surface": "Tooling and infrastructure"},
+    {"prefix": "infra/", "topic": "Infrastructure", "surface": "Tooling and infrastructure"},
+    {"prefix": "docker/", "topic": "Infrastructure", "surface": "Tooling and infrastructure"},
+    {"prefix": "doc/", "topic": "Documentation", "surface": "Documentation"}
+  ],
+  "topic_labels": {
+    "gui": "Frontend",
+    "converters": "Converters",
+    "datasets": "Datasets",
+    "documentation": "Documentation",
+    "docker": "Infrastructure",
+    "github_actions": "Build and CI",
+    "dependencies": "Build and CI",
+    "pre_commit": "Build and CI"
+  },
+  "topic_keywords": {
+    "Frontend": ["gui", "frontend", "copyrit"],
+    "GUI backend": ["backend"],
+    "Converters": ["converter", "converters", "conversion"],
+    "Targets": ["target", "targets"],
+    "Scorers": ["scorer", "scorers", "scoring"],
+    "Memory": ["memory", "alembic"],
+    "Datasets": ["dataset", "datasets"],
+    "Scenarios": ["scenario", "scenarios"],
+    "Attacks and executors": ["executor", "executors", "crescendo", "tap"],
+    "CLI": ["cli", "scanner", "shell"],
+    "Documentation": ["documentation", "docs", "notebook", "notebooks"],
+    "Build and CI": ["ci", "build", "builds", "release", "dependencies"],
+    "Authentication": ["authentication", "auth"]
+  },
+  "intent_aliases": {
+    "FIX": "FIX", "BUG": "FIX",
+    "FEAT": "FEAT", "FEATURE": "FEAT", "ENH": "FEAT",
+    "MAINT": "MAINT", "CHORE": "MAINT",
+    "REFACTOR": "REFACTOR", "DOC": "DOCS", "DOCS": "DOCS",
+    "TEST": "TEST", "TESTS": "TEST", "PERF": "PERF",
+    "BUILD": "BUILD/CI", "CI": "BUILD/CI"
+  },
+  "intent_labels": {
+    "bug": "FIX",
+    "bug: triage": "FIX",
+    "enhancement": "FEAT",
+    "feature-request": "FEAT",
+    "documentation": "DOCS",
+    "dependencies": "MAINT",
+    "github_actions": "BUILD/CI"
+  }
+}
