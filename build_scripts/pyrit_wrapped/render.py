@@ -113,20 +113,24 @@ class MarkdownReport:
 
     def render_songs(self) -> str:
         lines = [
-            "# Song candidates",
+            "# Song selections and suggestions",
             "",
-            "These are ideas to audition, not selections or license claims. No recordings are downloaded or bundled.",
+            (
+                "Selected tracks reflect the user's choices; suggested tracks remain undecided. "
+                "Selection does not mean a recording is supplied or licensed. No audio is downloaded or bundled."
+            ),
             (
                 "A roughly 10-second cue can match each slide. Supply and usage rights remain a user decision; "
                 "short duration alone does not grant permission."
             ),
             "",
-            "| Slide | Candidate | Why it fits |",
-            "|---|---|---|",
+            "| Slide | Status | Track | Why it fits |",
+            "|---|---|---|---|",
         ]
         for slide in self.story.slides:
             lines.extend(
-                f"| {escape_text(slide.title)} | {escape_text(candidate.title)} - "
+                f"| {escape_text(slide.title)} | {'Selected' if candidate.selected else 'Suggested'} | "
+                f"{escape_text(candidate.title)} - "
                 f"{escape_text(candidate.artist)} | {escape_text(candidate.rationale)} |"
                 for candidate in slide.song_candidates
             )
@@ -222,7 +226,8 @@ class MarkdownReport:
                 "",
                 (
                     "Review the attribution, topic groups, summaries, and omitted types before building HTML. "
-                    "Candidate tracks are in songs.md; final song selections and recording supply remain undecided."
+                    "Track selections and undecided suggestions are in songs.md; "
+                    "recording supply and rights remain separate."
                 ),
             ]
         )

@@ -56,7 +56,7 @@ def test_export_round_trip_and_complete_lists(*, snapshot: Snapshot, item: WorkI
     assert "FIX converter behavior" in activity
     assert "Converters (1)" in activity
     assert "[activity.md](activity.md)" in summary
-    assert "final song selections and recording supply remain undecided" in summary
+    assert "recording supply and rights remain separate" in summary
     assert "Daft Punk" in (destination / "songs.md").read_text(encoding="utf-8")
     with pytest.raises(WrappedError, match="already exists"):
         write_reports(snapshot=snapshot, stats=stats, story=story, output_dir=destination)

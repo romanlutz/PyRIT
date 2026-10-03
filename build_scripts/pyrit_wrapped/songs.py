@@ -5,44 +5,61 @@ from build_scripts.pyrit_wrapped.models import SongCandidate
 
 
 class SongCatalog:
+    _SELECTIONS = {
+        "overview": ("Celebration", "Kool & the Gang"),
+        "prs": ("Work", "Ava Max"),
+        "reviews_people": ("With a Little Help from My Friends", "The Beatles"),
+        "busiest": ("Don't Stop Me Now", "Queen"),
+        "loc": ("Changes", "David Bowie"),
+        "recap": ("Bottle Up", "Backstreet Boys"),
+    }
     _TRACKS = {
         "overview": [
-            ("The Final Countdown", "Europe", "A recognizable opening for a release or year reveal."),
-            ("Celebration", "Kool & the Gang", "A warmer opening focused on the collective milestone."),
+            ("Celebration", "Kool & the Gang", "Selected for the opening and collective milestone."),
         ],
         "prs": [
-            ("Workin' for the Weekend", "Loverboy", "Playful momentum for the opened/closed/landed pipeline."),
-            ("Harder, Better, Faster, Stronger", "Daft Punk", "Fits iterative work and repeated improvements."),
+            ("Work", "Ava Max", "Selected for the opened/closed/landed PR pipeline."),
         ],
         "reviews_people": [
-            ("With a Little Help from My Friends", "The Beatles", "Reviews and merges are collaborative work."),
-            ("Lean on Me", "Bill Withers", "A supportive alternative for the people behind the release."),
+            ("With a Little Help from My Friends", "The Beatles", "Selected for the people helping work land."),
         ],
         "issues": [
-            ("Fix You", "Coldplay", "A literal match for reported problems and fixes."),
-            ("Under Pressure", "Queen & David Bowie", "A more energetic take on the issue backlog."),
+            ("Break My Stride", "Matthew Wilder", "Recommended: upbeat resilience and forward motion after obstacles."),
+            (
+                "Problem",
+                "Ariana Grande feat. Iggy Azalea",
+                "A punchier, literal problem-count cue; less about resolution.",
+            ),
+            ("We Can Work It Out", "The Beatles", "The most literal collaboration-and-resolution match."),
         ],
         "topics": [
-            ("Around the World", "Daft Punk", "A tour through the areas touched."),
-            ("Come Together", "The Beatles", "Works for multiple components converging in one release."),
+            (
+                "Purple Hat",
+                "SOFI TUKKER",
+                "Recommended: a colorful, playful groove for a montage of different topic areas.",
+            ),
+            ("Technologic", "Daft Punk", "A more literal technology cue for the component and language tour."),
+            ("Focus", "Ariana Grande", "A direct spotlight cue for the areas that dominated."),
         ],
         "busiest": [
-            ("Don't Stop Me Now", "Queen", "A burst of energy for the peak month, week, and day."),
-            ("Pump Up the Jam", "Technotronic", "A rhythmic alternative for the activity peaks."),
+            ("Don't Stop Me Now", "Queen", "Selected for the peak month, week, and day."),
         ],
         "loc": [
-            ("Changes", "David Bowie", "Fits additions, deletions, and language changes without implying quality."),
-            ("Technologic", "Daft Punk", "A technical, playful cue for the code and language breakdown."),
+            ("Changes", "David Bowie", "Selected for additions, deletions, and language changes."),
         ],
         "recap": [
-            ("We Are the Champions", "Queen", "A recognizable closing cue, not a contributor ranking."),
-            ("Celebration", "Kool & the Gang", "A collective thank-you rather than a competitive finale."),
+            ("Bottle Up", "Backstreet Boys", "Selected for preserving the milestone feeling in the recap."),
         ],
     }
 
     @classmethod
     def candidates(cls, slide_type: str) -> list[SongCandidate]:
         return [
-            SongCandidate(title=title, artist=artist, rationale=reason)
+            SongCandidate(
+                title=title,
+                artist=artist,
+                rationale=reason,
+                selected=cls._SELECTIONS.get(slide_type) == (title, artist),
+            )
             for title, artist, reason in cls._TRACKS[slide_type]
         ]

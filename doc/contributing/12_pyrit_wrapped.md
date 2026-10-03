@@ -210,9 +210,12 @@ or reviewed activity still fails explicitly.
 
 Review the counts, topic groups, narrative, and omitted slide types before
 implementing the local browser form or self-contained HTML story.
-`songs.md` proposes two candidates per emitted slide, such as "Changes" for
-LOC and "With a Little Help from My Friends" for reviews/people.
-These are references to audition, not final selections or license claims.
+`songs.md` distinguishes selected tracks from undecided suggestions. The current
+selections are "Celebration" for the opening, Ava Max's "Work" for PRs,
+"With a Little Help from My Friends" for reviews/people, "Don't Stop Me Now"
+for activity peaks, "Changes" for LOC, and Backstreet Boys' "Bottle Up" for the
+recap. "Break My Stride" and "Purple Hat" lead the suggestions for the two
+undecided slides. Selection is not a claim that recordings are supplied or licensed.
 Roughly 10-second cues are the intended format, but short duration does not
 itself grant usage rights. Song selection, permissions, and how recordings will
 be supplied remain user decisions. No recordings or music service are included.

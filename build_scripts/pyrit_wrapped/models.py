@@ -438,6 +438,7 @@ class SongCandidate(Model):
     title: str
     artist: str
     rationale: str
+    selected: bool = False
 
 
 class Slide(Model):
