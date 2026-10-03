@@ -51,6 +51,7 @@ from pyrit.memory.analytics_sql import (
     JsonIsArray,
     JsonObjectAggregate,
     JsonScalar,
+    UnicodeLower,
 )
 from pyrit.memory.memory_models import (
     AtomicAttackIdentifierEntry,
@@ -91,7 +92,8 @@ class _Source:
     ``value`` is a scalar key or serialized JSON array; ``label`` is the scalar's
     display text (array labels come from members). ``converters`` permits legacy
     converter objects and distinguishes [] from missing metadata. ``insensitive``
-    folds membership keys with the database's LOWER, never their display labels.
+    lowercases membership keys with the backend's Unicode-aware operation,
+    never their display labels.
     """
 
     value: ColumnElement[Any]
@@ -518,7 +520,7 @@ class AttackAnalyticsQueryCompiler:
     @staticmethod
     def _search_condition(*, label: ColumnElement[Any], search: str) -> ColumnElement[bool]:
         """
-        Match literal display-text substrings with the backend's LOWER semantics.
+        Match literal display-text substrings with Unicode-aware lowercase semantics.
 
         Escape LIKE wildcards and its escape character, including SQL Server's
         bracket character classes. The bound pattern remains data, never SQL text.
@@ -527,7 +529,7 @@ class AttackAnalyticsQueryCompiler:
             ColumnElement[bool]: A case-insensitive substring predicate.
         """
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("[", "\\[")
-        return func.lower(label).like(func.lower(literal(f"%{escaped}%", UnicodeText())), escape="\\")
+        return UnicodeLower(label).like(UnicodeLower(literal(f"%{escaped}%", UnicodeText())), escape="\\")
 
     def results(self, *, limit: int, after: DecodedKeysetCursor | None = None) -> Select[*tuple[Any, ...]]:
         """
@@ -887,8 +889,8 @@ class AttackAnalyticsQueryCompiler:
                 else:
                     requested = self._filter_values(values=values, index=index)
                     expected = cast(requested.c.value, UnicodeText())
-                    expected = func.lower(expected) if source.insensitive else expected
-                    actual = func.lower(source.value) if source.insensitive else source.value
+                    expected = UnicodeLower(expected) if source.insensitive else expected
+                    actual = UnicodeLower(source.value) if source.insensitive else source.value
                     matches.append(
                         select(1)
                         .select_from(requested)
@@ -896,9 +898,18 @@ class AttackAnalyticsQueryCompiler:
                         .exists()
                     )
             return or_(*matches)
-        items = JsonArrayItems(source.value).table_valued(column("key"), column("value"), column("type"))
+        raw = source.value
+        if self.dialect == "mssql" and (missing or no_converters):
+            self._from, projected = self._grouping_projection(
+                origin=self._from,
+                values=[raw.label(f"filter_source_{index}")],
+                name=f"filter_source_{index}",
+                force=True,
+            )
+            raw = projected[0]
+        items = JsonArrayItems(raw).table_valued(column("key"), column("value"), column("type"))
         items = items.alias(f"filter_items_{index}")
-        kind, value, _ = self._array_key(source=source, raw=source.value, items=items)
+        kind, value, _ = self._array_key(source=source, raw=raw, items=items)
         matches: list[ColumnElement[bool]] = []
         if values:
             requested = self._filter_values(values=values, index=index)
@@ -925,14 +936,14 @@ class AttackAnalyticsQueryCompiler:
         if missing:
             matches.append(
                 or_(
-                    source.value.is_(None),
-                    source.value == "null",
-                    JsonArrayEmpty(source.value) == true() if not source.converters else literal(False),
+                    raw.is_(None),
+                    raw == "null",
+                    JsonArrayEmpty(raw) == true() if not source.converters else literal(False),
                     select(1).select_from(items).where(kind == "missing").exists(),
                 )
             )
         if no_converters:
-            matches.append(JsonArrayEmpty(source.value) == true())
+            matches.append(JsonArrayEmpty(raw) == true())
         return and_(*matches) if predicate.match_mode is AttackAnalyticsMatchMode.ALL else or_(*matches)
 
     @staticmethod
@@ -967,7 +978,7 @@ class AttackAnalyticsQueryCompiler:
                 no-converters keys with literal ``Unknown``, blank, or display-label text.
         """
         if source.insensitive:
-            expected = func.lower(expected)
+            expected = UnicodeLower(expected)
         return and_(kind == "value", self._collate(value) == self._collate(expected))
 
     def _collate(self, value: ColumnElement[Any]) -> ColumnElement[Any]:
@@ -975,8 +986,8 @@ class AttackAnalyticsQueryCompiler:
         Make key equality independent of a database's default case-insensitive collation.
 
         Returns:
-            ColumnElement[Any]: A binary-collated expression. Deliberate case folding
-                happens separately, with the engine's LOWER semantics.
+            ColumnElement[Any]: A binary-collated expression. Deliberate lowercasing
+                happens separately through ``UnicodeLower``.
         """
         text_value = cast(value, UnicodeText()) if isinstance(value.type, JSON) else value
         return text_value.collate("BINARY" if self.dialect == "sqlite" else "Latin1_General_100_BIN2")
@@ -1315,7 +1326,7 @@ class AttackAnalyticsQueryCompiler:
                 binary-collated key text, and display label. Only SQL NULL is missing:
                 an actual blank string or literal ``Unknown`` remains a value.
         """
-        key = func.lower(value) if insensitive else value
+        key = UnicodeLower(value) if insensitive else value
         return case((value.is_(None), "missing"), else_="value"), self._collate(func.coalesce(key, "")), label
 
     def _array_key(
@@ -1331,6 +1342,8 @@ class AttackAnalyticsQueryCompiler:
         no-converters. Wrong array shapes or outer member types receive an invalid
         kind that the reader rejects. Legacy object properties are expected to
         satisfy the identifier contract (a string or missing class_name).
+        SQL Server's fixed OPENJSON object type code is literalized because
+        repeated filtered memberships would otherwise exhaust its bind budget.
 
         Args:
             source (_Source): Array rules and case-folding policy.
@@ -1344,7 +1357,7 @@ class AttackAnalyticsQueryCompiler:
                 binary key text, and binary-collated display text. Absence keys use
                 empty text internally but remain disjoint from real blank values.
         """
-        object_type = "object" if self.dialect == "sqlite" else 5
+        object_type = "object" if self.dialect == "sqlite" else literal(5, literal_execute=True)
         string_type = "text" if self.dialect == "sqlite" else 1
         label = cast(items.c.value, UnicodeText())
         if source.converters:
@@ -1363,7 +1376,7 @@ class AttackAnalyticsQueryCompiler:
             (~items.c.type.in_(valid_types), "invalid"),
             else_="value",
         )
-        value = func.lower(label) if source.insensitive else label
+        value = UnicodeLower(label) if source.insensitive else label
         value = func.coalesce(value, "")
         return kind, self._collate(value), self._collate(label)
 

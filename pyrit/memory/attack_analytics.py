@@ -552,6 +552,13 @@ class AttackAnalyticsReader:
                 kind=kind,
                 value=record[f"value{index}"] if kind is AttackAnalyticsValueKind.VALUE else None,
             )
+        except ValidationError as error:
+            if any(issue["type"] == "string_too_long" for issue in error.errors()):
+                raise AnalyticsDataException(
+                    f"Stored attack metadata exceeds the {AttackAnalyticsValue.MAX_VALUE_LENGTH:,}-character "
+                    "analytics key limit. Choose another dimension or inspect the saved result."
+                ) from error
+            raise AnalyticsDataException("Stored attack metadata contains an invalid dimension value.") from error
         except ValueError as error:
             raise AnalyticsDataException("Stored attack metadata contains an invalid dimension value.") from error
         return RawAnalyticsOption(key=key, label=record[f"label{index}"])

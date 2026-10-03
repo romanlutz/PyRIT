@@ -13,7 +13,7 @@ JSON_QUERY, and STRING_AGG rather than requiring newer native JSON functions.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy import Boolean, String, UnicodeText
 from sqlalchemy.exc import CompileError
@@ -38,6 +38,38 @@ class JsonScalar(FunctionElement[str]):
 
     type = UnicodeText()
     inherit_cache = True
+
+
+class UnicodeLower(FunctionElement[str]):
+    """Fold analytics text with Unicode-aware SQLite lowercasing or SQL Server LOWER."""
+
+    SQLITE_FUNCTION_NAME: ClassVar[str] = "pyrit_analytics_lower"
+    type = UnicodeText()
+    inherit_cache = True
+
+
+@compiles(UnicodeLower, "sqlite")
+def _sqlite_unicode_lower(element: UnicodeLower, compiler: Any, **kwargs: Any) -> str:
+    """
+    Compile the SQLite function registered on each memory connection.
+
+    Returns:
+        str: A Unicode-aware lowercase expression.
+    """
+    value = _arguments(element, compiler, **kwargs)[0]
+    return f"{UnicodeLower.SQLITE_FUNCTION_NAME}({value})"
+
+
+@compiles(UnicodeLower, "mssql")
+def _mssql_unicode_lower(element: UnicodeLower, compiler: Any, **kwargs: Any) -> str:
+    """
+    Use SQL Server's Unicode-aware LOWER operation.
+
+    Returns:
+        str: A native lowercase expression.
+    """
+    value = _arguments(element, compiler, **kwargs)[0]
+    return f"LOWER({value})"
 
 
 class JsonClassNamePresent(FunctionElement[bool]):

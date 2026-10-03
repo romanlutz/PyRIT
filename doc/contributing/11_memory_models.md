@@ -137,6 +137,19 @@ separate predicates, including repeated dimensions. Missing metadata, recorded
 empty converter pipelines, and real empty strings retain different typed keys.
 Request and response converter membership remains separate. Repeated members
 contribute once per result to a group or cell; different groups may overlap.
+Attack types, converter names, and harm categories use Unicode-aware lowercase
+keys on SQLite memory connections and SQL Server's `LOWER` for grouping and
+matching. Display text and case-sensitive dimensions retain their recorded
+spelling.
+
+Analytics keys and requested values are limited to 4,096 characters. Older or
+custom results may contain longer metadata: they stay stored, contribute to
+totals and unrelated groupings, and appear unchanged in result pages. Grouping
+or opening a facet with an oversized key raises an explicit
+`AnalyticsDataException` instead of truncating it or returning incomplete
+counts. Use another dimension or inspect the saved result; long keys are not
+supported for exact analytics drill-down.
+
 Canonical identifier tables and supported legacy JSON layouts remain queryable.
 Where a converter pipeline is retained in identifier JSON, that recorded list
 takes precedence over normalized edges: the published identifier backfill can
@@ -151,8 +164,10 @@ SQL Server uses full-width `OPENJSON` scalar projections before grouping, preser
 the shared 4096-character metadata contract. Derived scalar facet keys are
 projected once before `GROUP BY`, so repeated positional parameters cannot
 change the grouped expression. Filter values use bound sets rather than one
-copied metadata expression per choice; accepted requests stay under SQL Server's
-2,100-parameter limit without dropping or sampling values.
+copied metadata expression per choice. Array sources with missing or empty
+pipeline options are projected once before their membership checks, keeping
+accepted requests under SQL Server's 2,100-parameter limit without dropping or
+sampling values.
 
 A raw report and its first result page share a short consistent read transaction.
 Later pages and facets use fresh reads. Cursors are bound to the current filters

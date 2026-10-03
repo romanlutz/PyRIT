@@ -26,7 +26,13 @@ from sqlalchemy.sql.functions import Function
 
 from pyrit.exceptions.analytics_exception import AnalyticsDataException, AnalyticsTimeoutException
 from pyrit.memory import MemoryInterface, SQLiteMemory
-from pyrit.memory.analytics_sql import JsonArrayEmpty, JsonIsArray, JsonScalar, ResolvedAttackIdentifierHash
+from pyrit.memory.analytics_sql import (
+    JsonArrayEmpty,
+    JsonIsArray,
+    JsonScalar,
+    ResolvedAttackIdentifierHash,
+    UnicodeLower,
+)
 from pyrit.memory.attack_analytics import AttackAnalyticsReader
 from pyrit.memory.attack_analytics_query import AttackAnalyticsQueryCompiler
 from pyrit.memory.memory_models import AttackIdentifierEntry, AttackResultEntry, Base, TargetIdentifierEntry
@@ -63,6 +69,7 @@ def make_result(
     converters: list[str] | None = None,
     response_converters: list[str] | None = None,
     labels: dict[str, str] | None = None,
+    attack_class_name: str = "ProbeAttack",
 ) -> AttackResult:
     return AttackResult(
         attack_result_id=str(uuid.UUID(int=index)),
@@ -76,7 +83,7 @@ def make_result(
         timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=index),
         atomic_attack_identifier=AtomicAttackIdentifier.build(
             attack_identifier=AttackIdentifier(
-                class_name="ProbeAttack",
+                class_name=attack_class_name,
                 class_module="tests",
                 objective_target=TargetIdentifier(class_name="MockTarget", class_module="tests", model_name="model-a"),
                 request_converters=[
@@ -152,6 +159,52 @@ async def test_case_variants_within_one_result_have_one_membership(sqlite_instan
     assert report.cells[0].counts == {"success": 1}
     assert report.cells[0].option.key.value == "privacy"
     assert report.cells[0].column.key.value == "alpha"
+
+
+async def test_non_ascii_case_variants_share_group_filter_and_facet_keys(sqlite_instance: SQLiteMemory) -> None:
+    await sqlite_instance.add_attack_results_to_memory_async(
+        attack_results=[
+            make_result(categories=["\u00c9COLE"], converters=["\u00d6mega"], attack_class_name="\u00c9cho"),
+            make_result(index=2, categories=["\u00e9cole"], converters=["\u00f6mega"], attack_class_name="\u00e9cho"),
+        ]
+    )
+    reader = AttackAnalyticsReader(memory=sqlite_instance)
+    category = AttackAnalyticsDimension(name="targeted_harm_category")
+    converter = AttackAnalyticsDimension(name="converter_type")
+    report = await reader.report_async(
+        query=AttackAnalyticsQuery(group_by=category, compare_by=converter), control=control()
+    )
+    assert report.counts == {"success": 2}
+    assert len(report.cells) == 1
+    assert report.cells[0].counts == {"success": 2}
+    assert (report.cells[0].option.key.value, report.cells[0].column.key.value) == ("\u00e9cole", "\u00f6mega")
+    attack = AttackAnalyticsDimension(name="attack_type")
+    attack_report = await reader.report_async(query=AttackAnalyticsQuery(group_by=attack), control=control())
+    assert [(group.option.key.value, group.counts) for group in attack_report.groups] == [("\u00e9cho", {"success": 2})]
+
+    filters = AttackAnalyticsFilters(
+        dimensions=[
+            AttackAnalyticsFilter(dimension=category, values=[AttackAnalyticsValue(value="\u00e9cole")]),
+            AttackAnalyticsFilter(dimension=converter, values=[AttackAnalyticsValue(value="\u00f6mega")]),
+            AttackAnalyticsFilter(dimension=attack, values=[AttackAnalyticsValue(value="\u00e9cho")]),
+        ]
+    )
+    filtered = await reader.report_async(query=AttackAnalyticsQuery(filters=filters), control=control())
+    assert filtered.counts == {"success": 2}
+    assert len(filtered.results.items) == 2
+    facet = await reader.facets_async(
+        query=AttackAnalyticsFacetQuery(dimension=category, search="\u00e9co"), control=control()
+    )
+    assert [item.key.value for item in facet.items] == ["\u00e9cole"]
+    attack_facet = await reader.facets_async(
+        query=AttackAnalyticsFacetQuery(dimension=attack, search="\u00c9c"), control=control()
+    )
+    assert [item.key.value for item in attack_facet.items] == ["\u00e9cho"]
+
+    with sqlite_instance.engine.connect() as connection:
+        assert connection.execute(select(UnicodeLower(literal("\u00c9COLE")))).scalar_one() == "\u00e9cole"
+    async with sqlite_instance._get_async_engine().connect() as connection:
+        assert (await connection.execute(select(UnicodeLower(literal("\u00c9COLE"))))).scalar_one() == "\u00e9cole"
 
 
 async def test_whitespace_empty_category_array_matches_missing_filter(sqlite_instance: SQLiteMemory) -> None:
@@ -749,6 +802,50 @@ def test_mssql_accepted_filter_budget_stays_below_2100_positional_parameters(fil
         assert len(rendered.positiontup or []) <= 2100
 
 
+@pytest.mark.parametrize("absence_kinds", [("missing",), ("missing", "no_converters")])
+def test_mssql_absence_filters_stay_below_2100_positional_parameters(absence_kinds: tuple[str, ...]) -> None:
+    filters = AttackAnalyticsFilters.model_validate(
+        {
+            "updated_after": "2026-01-01T00:00:00Z",
+            "updated_before": "2026-09-01T00:00:00Z",
+            "dimensions": [
+                {
+                    "dimension": {
+                        "name": "converter_type",
+                        "converter_direction": "request" if index % 2 == 0 else "response",
+                    },
+                    "values": [
+                        {"value": f"Value_{index}_{number}"}
+                        for number in range(31 - len(absence_kinds) + (4 if index == 0 else 0))
+                    ]
+                    + [{"kind": kind} for kind in absence_kinds],
+                    "match_mode": "all" if index % 2 == 0 else "any",
+                }
+                for index in range(16)
+            ],
+        }
+    )
+    assert sum(len(predicate.values) for predicate in filters.dimensions) == filters.MAX_VALUES
+    query = AttackAnalyticsQuery(
+        filters=filters,
+        group_by=AttackAnalyticsDimension(name="converter_type"),
+        compare_by=AttackAnalyticsDimension(name="converter_type", converter_direction="response"),
+    )
+    facet = AttackAnalyticsFacetQuery(filters=filters, dimension=AttackAnalyticsDimension(name="operation"))
+    statements = (
+        lambda compiler: compiler.totals(),
+        lambda compiler: compiler.groups(query),
+        lambda compiler: compiler.matrix(query),
+        lambda compiler: compiler.facet(facet),
+        lambda compiler: compiler.results(limit=100),
+    )
+    dialect = mssql.dialect(paramstyle="qmark", deprecate_large_types=True)
+    for make_statement in statements:
+        compiler = AttackAnalyticsQueryCompiler(dialect="mssql", filters=filters)
+        rendered = make_statement(compiler).compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+        assert len(rendered.positiontup or []) <= 2100
+
+
 @pytest.mark.parametrize("cap", ["MAX_COMPACT_PROFILES", "MAX_COMPACT_VALUE_LENGTH", "MAX_COMPACT_TOTAL_LENGTH"])
 async def test_profile_caps_fall_back_without_returning_partial_counts(
     *, sqlite_instance: SQLiteMemory, cap: str
@@ -947,6 +1044,12 @@ def test_mssql_scalar_paths_are_safely_literalized_at_execution() -> None:
     assert """WITH ([value] nvarchar(max) '$."team''s.label"')""" in str(rendered)
 
 
+def test_mssql_unicode_lower_uses_native_function() -> None:
+    sql = str(select(UnicodeLower(literal("\u00c9COLE"))).compile(dialect=mssql.dialect()))
+    assert "LOWER(" in sql
+    assert UnicodeLower.SQLITE_FUNCTION_NAME not in sql
+
+
 def test_mssql_scalar_projection_rejects_nonliteral_column_paths() -> None:
     with pytest.raises(CompileError, match="bound string"):
         select(JsonScalar(column("document"), column("dynamic_path"))).compile(dialect=mssql.dialect())
@@ -1099,6 +1202,23 @@ async def test_sqlite_wide_labels_keep_filter_group_and_facet_semantics(
         query=AttackAnalyticsFacetQuery(filters=filters, dimension=dimension), control=control()
     )
     assert {option.key.value for option in facet.items} == {value, "short"}
+
+
+async def test_oversized_saved_label_is_explicitly_outside_group_and_facet_contract(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    long_label = "x" * (AttackAnalyticsValue.MAX_VALUE_LENGTH + 1)
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[make_result(labels={"team": long_label})])
+    reader = AttackAnalyticsReader(memory=sqlite_instance)
+    other_axis = await reader.report_async(query=AttackAnalyticsQuery(), control=control())
+    assert other_axis.counts == {"success": 1}
+    assert other_axis.results.items[0].labels["team"] == long_label
+
+    axis = AttackAnalyticsDimension(name="label", label_key="team")
+    with pytest.raises(AnalyticsDataException, match="4,096-character analytics key limit"):
+        await reader.report_async(query=AttackAnalyticsQuery(group_by=axis), control=control())
+    with pytest.raises(AnalyticsDataException, match="4,096-character analytics key limit"):
+        await reader.facets_async(query=AttackAnalyticsFacetQuery(dimension=axis), control=control())
 
 
 async def test_canonical_and_legacy_identifiers_preserve_the_complete_cohort(sqlite_instance: SQLiteMemory) -> None:

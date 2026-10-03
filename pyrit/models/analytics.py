@@ -151,8 +151,10 @@ class AttackAnalyticsValue(_AnalyticsModel):
     user metadata; an absent identifier is different from a known empty pipeline.
     """
 
+    MAX_VALUE_LENGTH: ClassVar[int] = 4096
+
     kind: AttackAnalyticsValueKind = AttackAnalyticsValueKind.VALUE
-    value: str | None = Field(default=None, max_length=4096)
+    value: str | None = Field(default=None, max_length=MAX_VALUE_LENGTH)
 
     @model_validator(mode="after")
     def _validate_value(self) -> Self:
