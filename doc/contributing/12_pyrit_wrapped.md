@@ -212,10 +212,11 @@ Review the counts, topic groups, narrative, and omitted slide types before
 implementing the local browser form or self-contained HTML story.
 `songs.md` distinguishes selected tracks from undecided suggestions. The current
 selections are "Celebration" for the opening, Ava Max's "Work" for PRs,
-"With a Little Help from My Friends" for reviews/people, "Don't Stop Me Now"
-for activity peaks, "Changes" for LOC, and Backstreet Boys' "Bottle Up" for the
-recap. "Break My Stride" and "Purple Hat" lead the suggestions for the two
-undecided slides. Selection is not a claim that recordings are supplied or licensed.
+"With a Little Help from My Friends" for reviews/people, Ariana Grande's
+"Problem" for questions/resolutions, SOFI TUKKER's "Purple Hat" for topic focus,
+"Don't Stop Me Now" for activity peaks, "Changes" for LOC, and Backstreet Boys'
+"Bottle Up" for the recap. All eight slide types now have a selected track.
+Selection is not a claim that recordings are supplied or licensed.
 Roughly 10-second cues are the intended format, but short duration does not
-itself grant usage rights. Song selection, permissions, and how recordings will
-be supplied remain user decisions. No recordings or music service are included.
+itself grant usage rights. Permissions and how recordings will be supplied
+remain user decisions. No recordings or music service are included.

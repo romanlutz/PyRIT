@@ -9,6 +9,8 @@ class SongCatalog:
         "overview": ("Celebration", "Kool & the Gang"),
         "prs": ("Work", "Ava Max"),
         "reviews_people": ("With a Little Help from My Friends", "The Beatles"),
+        "issues": ("Problem", "Ariana Grande feat. Iggy Azalea"),
+        "topics": ("Purple Hat", "SOFI TUKKER"),
         "busiest": ("Don't Stop Me Now", "Queen"),
         "loc": ("Changes", "David Bowie"),
         "recap": ("Bottle Up", "Backstreet Boys"),
@@ -24,22 +26,18 @@ class SongCatalog:
             ("With a Little Help from My Friends", "The Beatles", "Selected for the people helping work land."),
         ],
         "issues": [
-            ("Break My Stride", "Matthew Wilder", "Recommended: upbeat resilience and forward motion after obstacles."),
             (
                 "Problem",
                 "Ariana Grande feat. Iggy Azalea",
-                "A punchier, literal problem-count cue; less about resolution.",
+                "Selected for questions, reported problems, and resolutions.",
             ),
-            ("We Can Work It Out", "The Beatles", "The most literal collaboration-and-resolution match."),
         ],
         "topics": [
             (
                 "Purple Hat",
                 "SOFI TUKKER",
-                "Recommended: a colorful, playful groove for a montage of different topic areas.",
+                "Selected for the colorful montage of topic areas and work focus.",
             ),
-            ("Technologic", "Daft Punk", "A more literal technology cue for the component and language tour."),
-            ("Focus", "Ariana Grande", "A direct spotlight cue for the areas that dominated."),
         ],
         "busiest": [
             ("Don't Stop Me Now", "Queen", "Selected for the peak month, week, and day."),

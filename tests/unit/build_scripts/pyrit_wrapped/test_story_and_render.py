@@ -57,7 +57,9 @@ def test_export_round_trip_and_complete_lists(*, snapshot: Snapshot, item: WorkI
     assert "Converters (1)" in activity
     assert "[activity.md](activity.md)" in summary
     assert "recording supply and rights remain separate" in summary
-    assert "Daft Punk" in (destination / "songs.md").read_text(encoding="utf-8")
+    songs = (destination / "songs.md").read_text(encoding="utf-8")
+    assert "SOFI TUKKER" in songs and "Ariana Grande" in songs
+    assert "| Suggested |" not in songs
     with pytest.raises(WrappedError, match="already exists"):
         write_reports(snapshot=snapshot, stats=stats, story=story, output_dir=destination)
 
