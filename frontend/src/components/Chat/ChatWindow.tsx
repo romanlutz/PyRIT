@@ -158,7 +158,7 @@ interface SendIssue {
   draft?: PendingSend
 }
 
-function isSendFinished(progress: MessageSendStatus): boolean {
+function isSendFinished(progress: MessageSendConversation): boolean {
   return ['completed', 'failed', 'interrupted'].includes(progress.state)
 }
 
@@ -693,7 +693,8 @@ export default function ChatWindow({
     setPanelRefreshKey((key) => key + 1)
   }
   const retireSend = (operation: PendingSend): void => {
-    if (isCurrentSend(operation) && !operation.needsRefresh) {
+    if (isCurrentSend(operation) && !operation.needsRefresh
+      && operation.progress?.failure_stage !== 'preparation') {
       pendingSendsRef.current.delete(operation.conversationId)
     }
   }
@@ -820,7 +821,12 @@ export default function ChatWindow({
   const trackSend = async (operation: PendingSend): Promise<ChatSendOutcome> => {
     try {
       if (!operation.attackResultId) { throw new Error('The send has no attack ID.') }
-      while (operation.progress && !isSendFinished(operation.progress)) {
+      while (operation.progress) {
+        const repeatProgress = operation.repeatGroup?.progress
+        // The last conversation can release ownership before the operation publishes its final summary.
+        const awaitingSummary = repeatProgress && !isSendFinished(repeatProgress)
+          && repeatProgress.conversations?.length && repeatProgress.conversations.every(isSendFinished)
+        if (isSendFinished(operation.progress) && !awaitingSummary) break
         let progress: MessageSendStatus | undefined
         try {
           progress = await readSendProgress(operation)
@@ -861,7 +867,7 @@ export default function ChatWindow({
           draft: operation,
         }
         : undefined)
-      operation.needsRefresh = progress.failure_stage === 'preparation'
+      operation.needsRefresh = false
       return outcome
     } catch (err) {
       if (isCurrentSend(operation)) {

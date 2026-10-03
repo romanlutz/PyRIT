@@ -831,6 +831,24 @@ describe("ChatWindow Integration", () => {
         expect(screen.queryByRole("region", { name: "Repeated send progress" })).not.toBeInTheDocument();
       });
 
+      it.each([false, true])("reads the final summary when conversations finish first, read failure %s", async (readFails) => {
+        const user = userEvent.setup();
+        const complete = repeatedProgress(["completed", "completed"]);
+        mockedAttacksApi.submitMessageSend.mockResolvedValue({ ...queued, count: 2 });
+        mockedAttacksApi.getMessageSend.mockResolvedValueOnce({ ...complete, state: "sending" });
+        if (readFails) mockedAttacksApi.getMessageSend.mockRejectedValueOnce(readError);
+        mockedAttacksApi.getMessageSend.mockResolvedValue(complete);
+        mockedAttacksApi.getMessages.mockResolvedValueOnce(empty).mockResolvedValue(reply);
+        render(<TestWrapper><ChatWindow {...props} /></TestWrapper>);
+        await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
+        await chooseCount(user, 2);
+        await sendDraft(user);
+        if (readFails) await user.click(await screen.findByRole("button", { name: "Refresh progress" }));
+        expect(await screen.findByRole("button", { name: "Dismiss repeat progress" })).toBeInTheDocument();
+        expect(mockedAttacksApi.getMessageSend).toHaveBeenCalledTimes(readFails ? 3 : 2);
+        expect(mockedAttacksApi.submitMessageSend).toHaveBeenCalledTimes(1);
+      });
+
       it.each(["preparation", "sending"] as const)("preserves a %s failure draft and attachment on a copied conversation", async (stage) => {
         const user = userEvent.setup();
         const failed = repeatedProgress(["completed", "failed"]);
@@ -865,6 +883,8 @@ describe("ChatWindow Integration", () => {
         expect(screen.getByText(/retained.png/)).toBeInTheDocument();
         expect(mockedAttacksApi.submitMessageSend).toHaveBeenCalledTimes(1);
         expect(screen.getByRole("button", { name: "Repetitions: 1" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Refresh progress" })).not.toBeInTheDocument();
+        expect(screen.queryByText(/Progress or saved messages could not be loaded/)).not.toBeInTheDocument();
       });
 
       it("keeps a failed preparation editable when no copies were committed", async () => {
