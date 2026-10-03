@@ -118,6 +118,49 @@ describe("MessageList", () => {
     expect(screen.getByText("Assistant message test")).toBeInTheDocument();
   });
 
+  it("renders ordered calls and correlated tool replies read-only, even with Markdown enabled", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant", content: "", timestamp: "2026-01-01T00:00:00Z",
+        displayPieces: [
+          { type: "text", pieceId: "text", pieceIndex: 0, content: "Original mixed message." },
+          { type: "tool_call", pieceId: "call-one", pieceIndex: 1, content: "",
+            callId: "one", functionName: "echo", arguments: '{"value":1}' },
+          { type: "tool_call", pieceId: "call-two", pieceIndex: 2, content: "",
+            callId: "two", functionName: "echo", arguments: '{"value":2}' },
+        ],
+      },
+      {
+        role: "tool", content: "", timestamp: "2026-01-01T00:00:00Z",
+        displayPieces: [{
+          type: "tool_result", pieceId: "result", pieceIndex: 0, content: "",
+          callId: "two", functionName: "echo", output: '<script>not executable</script>', isError: true,
+        }],
+      },
+    ];
+    render(<TestWrapper><MessageList messages={messages} globalMarkdown /></TestWrapper>);
+    expect(screen.getByText("Original mixed message.")).toBeInTheDocument();
+    expect(screen.getAllByText("Tool call: echo")).toHaveLength(2);
+    expect(screen.getAllByLabelText("Tool arguments").map((node) => node.textContent)).toEqual([
+      '{\n  "value": 1\n}', '{\n  "value": 2\n}',
+    ]);
+    expect(screen.getByText("Tool result (error): echo")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tool output")).toHaveTextContent("<script>not executable</script>");
+    expect(screen.getAllByText("Call ID: two")).toHaveLength(2);
+    expect(screen.getByText("tool")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("message-actions-0")).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("shows a retained malformed tool call without inventing its identity", () => {
+    render(<TestWrapper><MessageList messages={[{
+      role: "assistant", content: "", timestamp: "2026-01-01T00:00:00Z",
+      displayPieces: [{ type: "tool_call", pieceId: "malformed", pieceIndex: 0, content: "{not valid" }],
+    }]} /></TestWrapper>);
+    expect(screen.getByText("Call ID unavailable in the retained message")).toBeInTheDocument();
+    expect(screen.getByLabelText("Tool arguments")).toHaveTextContent("{not valid");
+  });
+
   it("should show persisted scores on a redacted processing error", async () => {
     const user = userEvent.setup();
     const backendMessage: BackendMessage = {

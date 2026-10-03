@@ -30,10 +30,21 @@ from inspect_ai.log import (
     read_eval_log,
     write_eval_log,
 )
-from inspect_ai.model import ChatMessageUser, ContentImage, ContentText, GenerateConfig, ModelOutput
+from inspect_ai.model import (
+    ChatMessageAssistant,
+    ChatMessageSystem,
+    ChatMessageTool,
+    ChatMessageUser,
+    ContentImage,
+    ContentText,
+    GenerateConfig,
+    ModelOutput,
+)
 from inspect_ai.scorer import Score
+from inspect_ai.tool import ToolCall, ToolCallError
 from sqlalchemy import func, select
 
+from pyrit.executor.benchmark.inspect_eval_projection import InspectProjectionVersion, project_inspect_sample
 from pyrit.executor.benchmark.inspect_eval_source import (
     EvalSourceFactory,
     ResolvedOriginalInspectTask,
@@ -64,6 +75,7 @@ from pyrit.models import (
     HarnessProfileRef,
     ModelRouteRef,
     ScoreStatus,
+    config_hash,
 )
 
 if TYPE_CHECKING:
@@ -184,6 +196,197 @@ def cancelled_offline_eval() -> tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunR
         success_threshold=0.5,
     )
     return log, cases, run, policy
+
+
+@pytest.fixture
+def recorded_tool_log(
+    cancelled_offline_eval: tuple[EvalLog, tuple[EvalCaseRef, ...], EvalRunRef, InspectOriginalScorePolicy],
+) -> EvalLog:
+    log, _, _, _ = cancelled_offline_eval
+    assert log.samples
+    sample = log.samples[0].model_copy(
+        update={
+            "messages": [
+                ChatMessageSystem(id="system-source", content="Only inspect recorded harmless values."),
+                ChatMessageUser(id="user-source", content="Read the recorded tool evidence."),
+                ChatMessageAssistant(
+                    id="calls-source",
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="call-one", function="echo", arguments={"value": "one"}),
+                        ToolCall(id="call-two", function="echo", arguments={"value": {"number": 2}}),
+                    ],
+                ),
+                ChatMessageTool(
+                    id="reply-two-source", tool_call_id="call-two", function="echo", content='{"number":2}'
+                ),
+                ChatMessageTool(
+                    id="reply-one-source",
+                    tool_call_id="call-one",
+                    function="echo",
+                    content="",
+                    error=ToolCallError(type="permission", message="This harmless fixture denies the request."),
+                ),
+                ChatMessageAssistant(
+                    id="mixed-source",
+                    content="The original calls are recorded.",
+                    tool_calls=[ToolCall(id="call-three", function="echo", arguments={"value": "three"})],
+                ),
+                ChatMessageTool(
+                    id="reply-three-source",
+                    tool_call_id="call-three",
+                    function="echo",
+                    content=[ContentText(text="first"), ContentText(text="second")],
+                ),
+            ]
+        }
+    )
+    return log.model_copy(
+        update={
+            "status": "success",
+            "samples": [sample],
+            "eval": log.eval.model_copy(update={"dataset": EvalDataset(samples=1, sample_ids=[str(sample.id)])}),
+        }
+    )
+
+
+@pytest.mark.usefixtures("patch_central_database")
+def test_tool_projection_preserves_calls_mixed_parts_ids_results_and_errors(recorded_tool_log: EvalLog) -> None:
+    assert recorded_tool_log.samples
+    sample = recorded_tool_log.samples[0]
+    original = sample.model_dump(mode="json")
+    projected = project_inspect_sample(
+        sample=sample,
+        log_run_id=recorded_tool_log.eval.run_id,
+        eval_id=recorded_tool_log.eval.eval_id,
+        archive_sha256="a" * 64,
+        sample_index=1,
+        start_sequence=1,
+        conversation_id=str(uuid.uuid4()),
+    )
+    pieces = projected.message_pieces
+    assert len(pieces) == 10 and projected.unprojected_messages == 0
+    calls = [piece for piece in pieces if piece.original_value_data_type == "function_call"]
+    replies = [piece for piece in pieces if piece.original_value_data_type == "function_call_output"]
+    assert [json.loads(piece.original_value)["call_id"] for piece in calls] == ["call-one", "call-two", "call-three"]
+    assert [json.loads(piece.original_value)["call_id"] for piece in replies] == [
+        "call-two",
+        "call-one",
+        "call-three",
+        "call-three",
+    ]
+    assert json.loads(json.loads(calls[1].original_value)["arguments"]) == {"value": {"number": 2}}
+    assert [piece.sequence for piece in pieces] == [0, 1, 2, 2, 3, 4, 5, 5, 6, 6]
+    assert [piece.prompt_metadata["inspect_part_index"] for piece in pieces] == [0, 0, 1, 2, 0, 0, 0, 1, 0, 1]
+    assert calls[0].prompt_metadata["inspect_message_id"] == "calls-source"
+    assert replies[1].response_error == "unknown"
+    assert replies[1].prompt_metadata["inspect_tool_error_message"] == "This harmless fixture denies the request."
+    assert json.loads(replies[1].original_value)["output"] == ""
+    assert len(projected.request_ids) == 2 and len(projected.response_ids) == 1
+    assert len(projected.tool_request_ids) == 3
+    assert len(projected.tool_result_ids) == 4
+    assert sample.model_dump(mode="json") == original
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_new_tool_schema_does_not_mutate_sealed_text_only_import(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, recorded_tool_log: EvalLog
+) -> None:
+    archive = tmp_path / "public-recorded-tools.eval"
+    await asyncio.to_thread(write_eval_log, recorded_tool_log, location=archive, format="eval")
+    before = archive.read_bytes()
+    legacy_importer = InspectOriginalEvalImporter(
+        memory=sqlite_instance, projection_version=InspectProjectionVersion.TEXT_ONLY
+    )
+    legacy = await legacy_importer.import_eval_log_async(path=archive)
+    legacy_dump = legacy.episode.model_dump(mode="json")
+    legacy_conversation_id = legacy.case_results[0].attack_result.conversation_id
+    legacy_pieces = sqlite_instance.get_message_pieces(conversation_id=legacy_conversation_id)
+    legacy_piece_dump = [piece.model_dump(mode="json") for piece in legacy_pieces]
+    assert legacy.message_piece_count == 7 and legacy.episode.run.binding_version == "1"
+    assert legacy.episode.run.run_id == "inspect-import-" + config_hash(
+        {
+            "archive_sha256": legacy.archive_sha256,
+            "case_run_ids": (),
+            "score_policy": None,
+            "schema": 2,
+        }
+    )
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    current = await importer.import_eval_log_async(path=archive)
+    assert current.message_piece_count == 10 and current.episode.run.binding_version == "2"
+    assert current.episode.run.run_id != legacy.episode.run.run_id
+    assert current.case_results[0].score.id != legacy.case_results[0].score.id
+    assert (
+        current.case_results[0].attack_result.attack_result_id != legacy.case_results[0].attack_result.attack_result_id
+    )
+    assert current.case_results[0].score.status is ScoreStatus.COMPLETE
+    assert current.case_results[0].score.score_value == legacy.case_results[0].score.score_value == "1.0"
+    assert current.case_results[0].attack_result.outcome is AttackOutcome.UNDETERMINED
+    assert (await importer.import_eval_log_async(path=archive)).case_results == current.case_results
+    assert (await legacy_importer.import_eval_log_async(path=archive)).episode.model_dump(mode="json") == legacy_dump
+    assert [
+        piece.model_dump(mode="json")
+        for piece in sqlite_instance.get_message_pieces(conversation_id=legacy_conversation_id)
+    ] == legacy_piece_dump
+    assert archive.read_bytes() == before
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("version", [True, 1, 2, 3, "3"])
+def test_importer_requires_an_explicit_projection_enum(sqlite_instance: SQLiteMemory, version: object) -> None:
+    with pytest.raises(TypeError, match="InspectProjectionVersion"):
+        InspectOriginalEvalImporter(memory=sqlite_instance, projection_version=version)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("patch_central_database")
+def test_projection_retains_empty_content_calls_and_does_not_fabricate_missing_call_ids(
+    recorded_tool_log: EvalLog,
+) -> None:
+    assert recorded_tool_log.samples
+    sample = recorded_tool_log.samples[0].model_copy(
+        update={
+            "messages": [
+                ChatMessageAssistant(
+                    content=[], tool_calls=[ToolCall(id="recorded-id", function="echo", arguments={})]
+                ),
+                ChatMessageTool(content="Original reply without an ID."),
+                ChatMessageAssistant(
+                    content="", tool_calls=[ToolCall(id="custom-id", function="custom", arguments={}, type="custom")]
+                ),
+            ]
+        }
+    )
+    projection = project_inspect_sample(
+        sample=sample,
+        log_run_id=recorded_tool_log.eval.run_id,
+        eval_id=recorded_tool_log.eval.eval_id,
+        archive_sha256="a" * 64,
+        sample_index=1,
+        start_sequence=1,
+        conversation_id=str(uuid.uuid4()),
+    )
+    assert len(projection.message_pieces) == 1
+    assert json.loads(projection.message_pieces[0].original_value)["call_id"] == "recorded-id"
+    assert projection.tool_result_ids == ()
+    assert projection.unprojected_messages == 2
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_sealed_tool_projection_cannot_be_relabelled_as_legacy(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, recorded_tool_log: EvalLog
+) -> None:
+    archive = tmp_path / "public-tools-version.eval"
+    await asyncio.to_thread(write_eval_log, recorded_tool_log, location=archive, format="eval")
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    imported = await importer.import_eval_log_async(path=archive)
+    with sqlite_instance.get_session() as session:
+        episode = session.get(NativeCyberEpisodeEntry, imported.episode.run.run_id)
+        assert episode is not None
+        episode.binding_version = "1"
+        session.commit()
+    with pytest.raises(ValueError, match="differs from its typed source"):
+        await importer.import_eval_log_async(path=archive)
 
 
 @pytest.mark.usefixtures("patch_central_database")

@@ -19,7 +19,11 @@ from zipfile import BadZipFile, ZipFile
 from inspect_ai.event import ScoreEvent, ToolEvent
 from inspect_ai.log import EvalLog, read_eval_log
 
-from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event, project_inspect_sample
+from pyrit.executor.benchmark.inspect_eval_projection import (
+    InspectProjectionVersion,
+    final_original_score_event,
+    project_inspect_sample,
+)
 from pyrit.models import (
     AttackOutcome,
     AttackResult,
@@ -155,10 +159,23 @@ class InspectOriginalEvalImporter:
         observed_source_id="inspect-resolved-eval-log",
     )
 
-    def __init__(self, *, memory: MemoryInterface) -> None:
-        """Bind a trusted PyRIT memory backend; the import never loads task code."""
+    def __init__(
+        self,
+        *,
+        memory: MemoryInterface,
+        projection_version: InspectProjectionVersion = InspectProjectionVersion.TOOL_CALLS,
+    ) -> None:
+        """
+        Bind memory and an explicit projection schema without loading Task code.
+
+        Raises:
+            TypeError: If the schema is not an explicit supported projection version.
+        """
+        if not isinstance(projection_version, InspectProjectionVersion):
+            raise TypeError("Original Inspect import requires an InspectProjectionVersion.")
         self._memory = memory
         self._capture = memory.native_cyber_evidence
+        self._projection_version = projection_version
 
     async def import_eval_log_async(
         self,
@@ -206,7 +223,7 @@ class InspectOriginalEvalImporter:
                     "archive_sha256": archive_sha,
                     "case_run_ids": case_run_ids,
                     "score_policy": asdict(score_policy) if score_policy is not None else None,
-                    "schema": 2,
+                    "schema": self._projection_version.value,
                 }
             )
         )
@@ -337,7 +354,12 @@ class InspectOriginalEvalImporter:
                 relogged_samples=relogged_samples,
             )
         if live_run_id is not None:
-            if existing is None or existing.finalized_at is not None or existing.run.binding_name != "inspect-original":
+            if (
+                existing is None
+                or existing.finalized_at is not None
+                or existing.run.binding_name != "inspect-original"
+                or existing.run.binding_version != self._projection_version.binding_version
+            ):
                 raise ValueError("The original Inspect live capture is absent or already finalized.")
             if existing.run.raw_byte_limit - existing.stored_raw_bytes < len(archive) + len(resolved):
                 self._capture.mark_capture_gap(run_id=episode_id, reason="Original Inspect archive exceeds live quota.")
@@ -350,7 +372,7 @@ class InspectOriginalEvalImporter:
                 start=NativeCyberEpisodeStart(
                     run_id=episode_id,
                     binding_name="inspect-original",
-                    binding_version="1",
+                    binding_version=self._projection_version.binding_version,
                     task_id=log.eval.task,
                     task_version=str(log.eval.task_version),
                     started_at=created,
@@ -444,6 +466,7 @@ class InspectOriginalEvalImporter:
                 start_sequence=sequence,
                 conversation_id=conversation_id,
                 case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
+                projection_version=self._projection_version,
             )
             self._memory.add_conversation_to_memory(conversation=Conversation(conversation_id=conversation_id))
             self._memory.add_message_pieces_to_memory(message_pieces=projection.message_pieces)
@@ -477,6 +500,7 @@ class InspectOriginalEvalImporter:
                         sample.completed_at, fallback=sample.started_at or log.eval.created
                     ),
                     response_piece_ids=projection.response_ids,
+                    tool_request_piece_ids=projection.tool_request_ids,
                     tool_result_piece_ids=projection.tool_result_ids,
                     observed_event_count=len(projection.events),
                     source_complete=not sample_gaps,
@@ -903,6 +927,7 @@ class InspectOriginalEvalImporter:
                     sample_index=sample_index,
                 ),
                 case_run_id=case_run_ids[sample_index - 1] if case_run_ids else None,
+                projection_version=InspectProjectionVersion.from_binding_version(snapshot.run.binding_version),
             )
             turn = snapshot.turns[sample_index - 1]
             source_id = sample.uuid if sample.uuid and sample.uuid not in seen_sample_uuids else None
@@ -1009,7 +1034,10 @@ class InspectOriginalEvalImporter:
                 for sample in samples
             ),
             message_piece_count=sum(
-                len(turn.request_piece_ids) + len(turn.response_piece_ids) + len(turn.tool_result_piece_ids)
+                len(turn.request_piece_ids)
+                + len(turn.response_piece_ids)
+                + len(turn.tool_request_piece_ids)
+                + len(turn.tool_result_piece_ids)
                 for turn in snapshot.turns
             ),
             tool_event_count=sum(cls._tool_count(sample=sample) for sample in samples),

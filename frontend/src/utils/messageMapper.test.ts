@@ -190,6 +190,72 @@ describe("messageMapper", () => {
   });
 
   describe("backendMessageToFrontend", () => {
+    it.each([
+      JSON.stringify({ type: "function_call", call_id: "call-public", name: "echo", arguments: '{"value":2}' }),
+      JSON.stringify({ type: "function", id: "call-public", function: { name: "echo", arguments: '{"value":2}' } }),
+    ])("preserves a canonical tool call next to text", (payload: string) => {
+      const msg: BackendMessage = {
+        turn_number: 2,
+        role: "assistant",
+        created_at: "2026-01-01T00:00:00Z",
+        message_pieces: [
+          { id: "text", original_value_data_type: "text", converted_value_data_type: "text",
+            original_value: "Observed", converted_value: "Observed", scores: [], response_error: "none" },
+          { id: "call", original_value_data_type: "function_call", converted_value_data_type: "function_call",
+            original_value: payload, converted_value: payload, scores: [], response_error: "none" },
+        ],
+      };
+      const mapped = backendMessageToFrontend(msg);
+      expect(mapped.role).toBe("assistant");
+      expect(mapped.displayPieces).toEqual([
+        expect.objectContaining({ type: "text", content: "Observed" }),
+        expect.objectContaining({
+          type: "tool_call", callId: "call-public", functionName: "echo", arguments: '{"value":2}', pieceIndex: 1,
+        }),
+      ]);
+    });
+
+    it("keeps tool result identity, structured output and original errors", () => {
+      const value = JSON.stringify({ type: "function_call_output", call_id: "call-public", output: '{"value":2}' });
+      const mapped = backendMessageToFrontend({
+        turn_number: 3, role: "tool", created_at: "2026-01-01T00:00:00Z",
+        message_pieces: [{
+          id: "result", original_value_data_type: "function_call_output", converted_value_data_type: "function_call_output",
+          original_value: value, converted_value: value, scores: [], response_error: "unknown",
+          prompt_metadata: { inspect_tool_function: "echo", inspect_tool_error_message: "Harmless original failure." },
+        }],
+      });
+      expect(mapped.role).toBe("tool");
+      expect(mapped.error?.description).toBe("Harmless original failure.");
+      expect(mapped.displayPieces?.[0]).toEqual(expect.objectContaining({
+        type: "tool_result", callId: "call-public", functionName: "echo", output: '{"value":2}', isError: true,
+      }));
+    });
+
+    it("preserves old plain-text tool output without inventing an ID", () => {
+      const mapped = backendMessageToFrontend({
+        turn_number: 3, role: "tool", created_at: "2026-01-01T00:00:00Z",
+        message_pieces: [{
+          id: "legacy", original_value_data_type: "function_call_output", converted_value_data_type: "function_call_output",
+          original_value: "Original output", converted_value: "Original output", scores: [], response_error: "none",
+          prompt_metadata: { inspect_tool_call_id: "legacy-call" },
+        }],
+      });
+      expect(mapped.role).toBe("tool");
+      expect(mapped.displayPieces?.[0]).toEqual(expect.objectContaining({
+        type: "tool_result", callId: "legacy-call", output: "Original output",
+      }));
+      expect(backendMessageToFrontend({
+        turn_number: 3, role: "assistant", created_at: "2026-01-01T00:00:00Z",
+        message_pieces: [{
+          id: "malformed", original_value_data_type: "function_call", converted_value_data_type: "function_call",
+          converted_value: "{not valid", scores: [], response_error: "none",
+        }],
+      }).displayPieces?.[0]).toEqual(expect.objectContaining({
+        type: "tool_call", content: "{not valid", callId: undefined,
+      }));
+    });
+
     it("should convert a text message", () => {
       const msg: BackendMessage = {
         turn_number: 1,

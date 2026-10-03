@@ -154,18 +154,33 @@ imported = await InspectOriginalEvalImporter(memory=CentralMemory.get_memory_ins
 
 The importer stores the **exact original `.eval` bytes and SHA256** plus a
 separately resolved typed `EvalLog` (including attachments) in owner-controlled,
-sensitive PyRIT raw streams. It projects original `EvalSample.messages` text to
+sensitive PyRIT raw streams. It projects original `EvalSample.messages` text and
+assistant function calls/tool replies to
 MessagePieces with a **distinct conversation per Sample/epoch**, and stores
 typed Inspect events in original retry-attempt and sample order with observed
 UUIDs when present. Original model/tool/score events, errors, intermediate
 scores and final `EvalSample.scores` remain source evidence, not synthetic
 PyRIT attack turns. ModelEvent output is not inserted a second time as an
-assistant message. Non-text messages stay in the resolved log and are reported
-as a projection gap. The original `.eval` is the only source of truth for
+assistant message. Calls use the existing `function_call` convention, and
+replies use `function_call_output` with the exact original call ID. Mixed text
+and multiple calls retain their original message/part order; tool errors retain
+their original source metadata. CoPyRIT labels calls and replies separately and
+renders their arguments/output as read-only data, not executable content.
+Unsupported content and calls without source IDs stay in the resolved log and
+are reported as a projection gap. The original `.eval` is the only source of truth for
 offline imports; `EvalSourceFactory` and task materialization are **not**
 required. A caller can supply a matching `EvalCaseRef` inventory and
 `EvalRunRef` to label source case-run identities, but this does not qualify an
 external scorer.
+
+New imports use projection schema 3 (native binding version `2`), which is part
+of the import identity. Existing sealed schema-2 imports (binding version `1`)
+remain readable using their original text-only projection, including the old
+Score/AttackResult IDs. `InspectProjectionVersion.TEXT_ONLY` explicitly selects
+that historical import schema. Reimporting the same archive with the new
+default creates a distinct projection; it never backfills or changes an old
+sealed episode, conversation, source archive or result pair. No database
+schema or Alembic revision changes are required.
 
 An ungraded `inspect-original` episode is sealed only after DB byte/digest,
 sample, event-order and MessagePiece-link checks. `coverage_complete` says

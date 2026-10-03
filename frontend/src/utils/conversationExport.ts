@@ -20,6 +20,7 @@ const ROLE_LABELS: Record<Message['role'], string> = {
   assistant: 'Assistant',
   simulated_assistant: 'Simulated Assistant',
   system: 'System',
+  tool: 'Tool',
 }
 
 /** Friendly label per attachment type, matching the API's media preview wording. */
@@ -726,6 +727,15 @@ function renderBody(message: Message, resolved: ResolvedAttachment[]): string[] 
       }
       continue
     }
+    if (piece.type === 'tool_call' || piece.type === 'tool_result') {
+      flushText()
+      const label = piece.type === 'tool_call' ? 'Tool call' : 'Tool result'
+      parts.push(`<p>${label}${piece.functionName ? `: ${escapeHtml(piece.functionName)}` : ''}</p>`)
+      if (piece.callId) parts.push(`<p>Call ID: ${escapeHtml(piece.callId)}</p>`)
+      parts.push(renderText((piece.type === 'tool_call' ? piece.arguments : piece.output) ?? piece.content))
+      continue
+    }
+    if (piece.type !== 'media') continue
     // A scores-only media piece has no bytes to show.
     if (!piece.attachment) {
       continue

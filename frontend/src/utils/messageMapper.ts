@@ -8,7 +8,8 @@ import type {
   MessageDisplayPiece,
   MessageError,
   MessagePieceRequest,
-} from '../types'
+  MessageToolDisplayPiece,
+} from '@/types'
 
 /**
  * Read a File or Blob and return its contents as a base64-encoded string (no data URI prefix).
@@ -251,10 +252,55 @@ function pieceToError(piece: BackendMessagePiece): MessageError | undefined {
     }
     return {
       type: piece.response_error,
-      description: piece.response_error_description || fallbackDescriptions[piece.response_error],
+      description: piece.response_error_description
+        || stringValue(piece.prompt_metadata?.inspect_tool_error_message)
+        || fallbackDescriptions[piece.response_error],
     }
   }
   return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function toolDisplayPiece(piece: BackendMessagePiece, pieceIndex: number): MessageToolDisplayPiece {
+  const isCall = piece.converted_value_data_type === 'function_call'
+  const result: MessageToolDisplayPiece = {
+    type: isCall ? 'tool_call' : 'tool_result',
+    pieceId: piece.id,
+    pieceIndex,
+    content: piece.converted_value,
+    callId: stringValue(piece.prompt_metadata?.inspect_tool_call_id),
+    functionName: stringValue(piece.prompt_metadata?.inspect_tool_function),
+    parseError: stringValue(piece.prompt_metadata?.inspect_tool_parse_error),
+    isError: piece.response_error !== 'none',
+  }
+  // Schema-2 replies are plain text with the call ID retained in source metadata.
+  if (!isCall) result.output = piece.converted_value
+  try {
+    const payload: unknown = JSON.parse(piece.converted_value)
+    if (!isRecord(payload)) return result
+    if (isCall && payload.type === 'function_call') {
+      result.callId = stringValue(payload.call_id)
+      result.functionName = stringValue(payload.name)
+      result.arguments = stringValue(payload.arguments)
+    } else if (isCall && payload.type === 'function' && isRecord(payload.function)) {
+      result.callId = stringValue(payload.id)
+      result.functionName = stringValue(payload.function.name)
+      result.arguments = stringValue(payload.function.arguments)
+    } else if (!isCall && payload.type === 'function_call_output') {
+      result.callId = stringValue(payload.call_id)
+      result.output = typeof payload.output === 'string' ? payload.output : JSON.stringify(payload.output)
+    }
+  } catch {
+    // Retain the exact legacy or malformed payload rather than inventing call metadata.
+  }
+  return result
 }
 
 /**
@@ -305,7 +351,12 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
         .map((score) => scoreWithProvenance(score, { piece, pieceIndex }))
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       if (piece.converted_value || scores.length > 0) {
-        displayPieces.push({
+        const isTool = piece.converted_value_data_type === 'function_call'
+          || piece.converted_value_data_type === 'function_call_output'
+        displayPieces.push(isTool ? {
+          ...toolDisplayPiece(piece, pieceIndex),
+          scores: scores.length > 0 ? scores : undefined,
+        } : {
           type: 'text',
           pieceId: piece.id,
           pieceIndex,
@@ -352,7 +403,8 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     }
   }
 
-  const role = ['simulated_assistant', 'assistant', 'system'].includes(msg.role)
+  const role: Message['role'] = msg.role === 'assistant' || msg.role === 'simulated_assistant'
+    || msg.role === 'system' || msg.role === 'tool'
     ? msg.role
     : msg.role === 'developer' ? 'system' : 'user'
 
@@ -365,7 +417,7 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
     JSON.stringify(originalAttachments.map(a => a.url)) !== JSON.stringify(attachments.map(a => a.url))
 
   return {
-    role: role as Message['role'],
+    role,
     content: convertedContent,
     timestamp: msg.created_at,
     attachments: attachments.length > 0 ? attachments : undefined,

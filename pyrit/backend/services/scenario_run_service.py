@@ -2563,7 +2563,11 @@ class ScenarioRunService:
         """
         from inspect_ai.log import read_eval_log
 
-        from pyrit.executor.benchmark.inspect_eval_projection import final_original_score_event, project_inspect_sample
+        from pyrit.executor.benchmark.inspect_eval_projection import (
+            InspectProjectionVersion,
+            final_original_score_event,
+            project_inspect_sample,
+        )
         from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
 
         try:
@@ -2637,6 +2641,7 @@ class ScenarioRunService:
                 start_sequence=1,
                 conversation_id=attack.conversation_id,
                 case_run_id=imported.case_run_id,
+                projection_version=InspectProjectionVersion.from_binding_version(episode.run.binding_version),
             )
             cls._verify_original_inspect_message_pieces(
                 memory=memory,
@@ -2676,7 +2681,12 @@ class ScenarioRunService:
     ) -> None:
         """Match the retained conversation to the text and provenance projected from the typed Sample."""
         turn = episode.turns[0]
-        retained_ids = (*turn.request_piece_ids, *turn.response_piece_ids, *turn.tool_result_piece_ids)
+        retained_ids = (
+            *turn.request_piece_ids,
+            *turn.response_piece_ids,
+            *turn.tool_request_piece_ids,
+            *turn.tool_result_piece_ids,
+        )
         stored = memory.get_message_pieces(conversation_id=conversation_id)
         if (
             not retained_ids

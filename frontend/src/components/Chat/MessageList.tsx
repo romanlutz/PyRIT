@@ -38,7 +38,8 @@ import type {
   Message,
   MessageAttachment,
   MessageDisplayPiece,
-} from '../../types'
+  MessageToolDisplayPiece,
+} from '@/types'
 import { useMessageListStyles } from './MessageList.styles'
 
 interface ProcessingErrorRecovery {
@@ -565,6 +566,32 @@ function getRenderMessagePieces(message: Message, messageIndex: number): RenderM
   return pieces
 }
 
+function ToolMessagePiece({ piece }: { piece: MessageToolDisplayPiece }) {
+  const styles = useMessageListStyles()
+  const isCall = piece.type === 'tool_call'
+  const value = (isCall ? piece.arguments : piece.output) ?? piece.content
+  return (
+    <div className={styles.pieceRow}>
+      <Text weight="semibold">
+        {isCall ? 'Tool call' : piece.isError ? 'Tool result (error)' : 'Tool result'}
+        {piece.functionName ? `: ${piece.functionName}` : ''}
+      </Text>
+      <Text size={200} className={styles.messageText}>
+        {piece.callId ? `Call ID: ${piece.callId}` : 'Call ID unavailable in the retained message'}
+      </Text>
+      {piece.parseError && (
+        <MessageBar intent="warning">
+          <MessageBarBody>Original argument parsing error: {piece.parseError}</MessageBarBody>
+        </MessageBar>
+      )}
+      <Text size={200} weight="semibold">{isCall ? 'Arguments' : 'Output'}</Text>
+      <pre className={styles.messageJsonBlock} aria-label={isCall ? 'Tool arguments' : 'Tool output'}>
+        {tryFormatJson(value) ?? value}
+      </pre>
+    </div>
+  )
+}
+
 export default function MessageList({ messages, onCopyToInput, onCopyToNewConversation, onBranchConversation, onBranchAttack, isLoading, isSingleTurn, isOperatorLocked, isCrossTarget, noTargetSelected, globalMarkdown = false, processingErrorRecovery }: MessageListProps) {
   const styles = useMessageListStyles()
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -616,9 +643,10 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
       {messages.map((message, index) => {
         if (message.role === 'system') return null
         const isUser = message.role === 'user'
+        const isTool = message.role === 'tool'
         const isSimulated = message.role === 'simulated_assistant'
         const timestamp = new Date(message.timestamp).toLocaleTimeString()
-        const avatarName = isUser ? 'User' : isSimulated ? 'Simulated' : 'Assistant'
+        const avatarName = isUser ? 'User' : isTool ? 'Tool' : isSimulated ? 'Simulated' : 'Assistant'
         const canRecoverProcessingError = message.error?.type === 'processing'
           && processingErrorRecovery?.messageIndex === index
         const renderPieces = getRenderMessagePieces(message, index)
@@ -751,6 +779,22 @@ export default function MessageList({ messages, onCopyToInput, onCopyToNewConver
                       )
                     }
 
+                    if (piece.type === 'tool_call' || piece.type === 'tool_result') {
+                      return (
+                        <div
+                          key={piece.pieceId}
+                          className={styles.pieceRow}
+                          data-testid={`message-piece-${index}-${piece.pieceIndex}`}
+                        >
+                          <ToolMessagePiece piece={piece} />
+                          {piece.scores && piece.scores.length > 0 && (
+                            <MessageScores scores={piece.scores} groupId={groupId} />
+                          )}
+                        </div>
+                      )
+                    }
+
+                    if (piece.type !== 'media') return null
                     const att = piece.attachment
                     return (
                       <div

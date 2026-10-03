@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from inspect_ai import eval_async
 
+from pyrit.executor.benchmark.inspect_eval_projection import InspectProjectionVersion
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter, InspectOriginalImport
 from pyrit.models import EvalCaseRef, EvalRunRef
@@ -74,7 +75,7 @@ async def run_original_inert_eval_async(
         start=NativeCyberEpisodeStart(
             run_id=episode_id,
             binding_name="inspect-original",
-            binding_version="1",
+            binding_version=InspectProjectionVersion.TOOL_CALLS.binding_version,
             task_id=source.case.task_name,
             task_version=source.case.task_version,
             started_at=datetime.now(UTC),

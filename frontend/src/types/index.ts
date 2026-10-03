@@ -116,10 +116,24 @@ export interface MessageMediaDisplayPiece {
   scores?: DisplayScore[]
 }
 
-export type MessageDisplayPiece = MessageTextDisplayPiece | MessageMediaDisplayPiece
+export interface MessageToolDisplayPiece {
+  type: 'tool_call' | 'tool_result'
+  pieceId: string
+  pieceIndex: number
+  content: string
+  callId?: string
+  functionName?: string
+  arguments?: string
+  output?: string
+  parseError?: string
+  isError?: boolean
+  scores?: DisplayScore[]
+}
+
+export type MessageDisplayPiece = MessageTextDisplayPiece | MessageMediaDisplayPiece | MessageToolDisplayPiece
 
 export interface Message {
-  role: 'user' | 'assistant' | 'simulated_assistant' | 'system'
+  role: 'user' | 'assistant' | 'simulated_assistant' | 'system' | 'tool'
   content: string
   timestamp: string
   /**
