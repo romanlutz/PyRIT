@@ -11,10 +11,12 @@ import ScenarioCatalog from './ScenarioCatalog'
 jest.mock('@/services/api', () => ({
   scenariosApi: {
     listCatalog: jest.fn(),
+    getScenario: jest.fn(),
   },
 }))
 
 const mockListCatalog = scenariosApi.listCatalog as jest.Mock
+const mockGetScenario = scenariosApi.getScenario as jest.Mock
 
 const REMOVED_NORMAL_ESTIMATE_LABELS = new RegExp(
   [
@@ -84,6 +86,7 @@ function makeScenario(overrides: Partial<RegisteredScenario> & { scenario_name: 
 describe('ScenarioCatalog', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockGetScenario.mockRejectedValue({ isAxiosError: true, response: { status: 404 } })
   })
 
   it('shows a loading state while fetching', () => {
@@ -382,6 +385,34 @@ describe('ScenarioCatalog', () => {
       'href',
       '/scanner/benchmark.inspect_original_inert',
     )
+  })
+
+  it('shows a separate ACL-verified original runner link when ordinary catalog introspection fails', async () => {
+    mockListCatalog.mockRejectedValueOnce(new Error('Generic catalog unavailable'))
+    mockGetScenario.mockResolvedValueOnce(makeScenario({
+      scenario_name: 'benchmark.approved_original',
+      original_run_admission: {
+        profile_ref: 'approved_public_fixture',
+        model_role: 'evaluated',
+        status: 'ready',
+        unmet_conditions: [],
+      },
+    }))
+
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    expect(await screen.findByRole('link', { name: 'Open server-approved original evaluation' }))
+      .toHaveAttribute('href', '/scanner/benchmark.approved_original')
+    expect(mockGetScenario).toHaveBeenCalledWith('benchmark.approved_original')
+  })
+
+  it('does not advertise an external original runner when the server has no ACL admission', async () => {
+    mockListCatalog.mockRejectedValueOnce(new Error('Generic catalog unavailable'))
+    render(<TestWrapper><ScenarioCatalog /></TestWrapper>)
+
+    expect(await screen.findByTestId('error-state')).toBeInTheDocument()
+    await waitFor(() => expect(mockGetScenario).toHaveBeenCalledWith('benchmark.approved_original'))
+    expect(screen.queryByRole('link', { name: 'Open server-approved original evaluation' })).not.toBeInTheDocument()
   })
 
   it('automatically displays the approved Task when it is in the Scenario registry catalog', async () => {

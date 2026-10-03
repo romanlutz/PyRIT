@@ -70,6 +70,7 @@ import {
 
 import AttackExecutionTable from './AttackExecutionTable'
 import { ORIGINAL_INERT_SCENARIO_TYPE } from './originalInspectInert'
+import { APPROVED_ORIGINAL_SCENARIO_NAME, formatOriginalRunReason, formatOriginalRunStatus } from './originalRunAdmission'
 import { ObjectiveDetailsDialog, TechniqueDetailsDialog } from './ScenarioRunDialogs'
 import { useScenarioRunPageStyles } from './ScenarioRunPage.styles'
 import ScenarioQueue from './ScenarioQueue'
@@ -276,6 +277,8 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
 
   const run = state.run
   const isOriginalInert = run.scenario_name === ORIGINAL_INERT_SCENARIO_TYPE
+  const isApprovedOriginal = run.scenario_registry_name === APPROVED_ORIGINAL_SCENARIO_NAME
+    && Boolean(run.original_run_admission)
   const {
     overall,
     objective_scorer: objectiveScorer,
@@ -431,7 +434,7 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
           </MessageBar>
         )}
 
-        {run.status === 'FAILED' && (
+        {run.status === 'FAILED' && !isApprovedOriginal && (
           <MessageBar intent="error">
             <MessageBarBody>
               This run ended before all planned executable units completed. Finished executions remain available below.
@@ -510,6 +513,56 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
                   : run.status === 'FAILED' || run.status === 'CANCELLED'
                     ? 'The original Inspect import did not complete. Reconcile any retained log before retrying.'
                     : 'Awaiting the original Task and its .eval import. No projected Score is available yet.'}
+              </Text>
+            )}
+          </section>
+        ) : isApprovedOriginal ? (
+          <section className={styles.section} aria-label="Approved original source status">
+            <Text as="h2" size={500} weight="semibold">Original source result</Text>
+            {(run.status === 'FAILED' || run.status === 'CANCELLED') && run.failure_reason && (
+              <MessageBar intent={run.status === 'FAILED' ? 'error' : 'warning'}>
+                <MessageBarBody role="alert">{formatOriginalRunReason(run.failure_reason)}</MessageBarBody>
+              </MessageBar>
+            )}
+            {run.original_source_result ? (
+              <>
+                <Text>{overall.completed} of {overall.planned ?? 1} approved original case completed.</Text>
+                <MessageBar intent={run.original_source_result.status === 'completed' ? 'info' : 'warning'}>
+                  <MessageBarBody>
+                    {formatOriginalRunStatus(run.original_source_result.status)}.
+                    {' '}The original grade is source evidence, not a PyRIT attack-success verdict.
+                    {' '}Cleanup is {run.original_source_result.cleanup_state === 'proved'
+                      ? 'verified separately' : 'not verified'}.
+                  </MessageBarBody>
+                </MessageBar>
+                <div className={styles.summaryGrid}>
+                  <ConfigurationItem label="Approved profile" value={run.original_source_result.profile_ref} />
+                  <ConfigurationItem label="Model role" value={run.original_source_result.model_role} />
+                  <ConfigurationItem
+                    label="Original source score"
+                    value={run.original_source_result.original_score ?? 'No verified original grade'}
+                  />
+                  <ConfigurationItem
+                    label="Source coverage"
+                    value={run.original_source_result.source_coverage_complete ? 'Complete' : 'Incomplete'}
+                  />
+                  <ConfigurationItem
+                    label="PyRIT Score mapping"
+                    value={run.original_source_result.pyrit_score_status ?? 'No imported Score'}
+                  />
+                  <ConfigurationItem
+                    label="Attack outcome"
+                    value={run.original_source_result.pyrit_outcome
+                      ? 'Undetermined (no approved success rule)' : 'No source outcome'}
+                  />
+                  <ConfigurationItem label="Cleanup" value={run.original_source_result.cleanup_state} />
+                </div>
+              </>
+            ) : (
+              <Text>
+                {run.status === 'FAILED' || run.status === 'CANCELLED'
+                  ? 'No original source result was verified. Reconcile source evidence and owned cleanup before retrying.'
+                  : 'Waiting for the approved original Task, source evidence and cleanup receipt.'}
               </Text>
             )}
           </section>

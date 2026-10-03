@@ -61,6 +61,7 @@ import {
   ORIGINAL_INERT_SCENARIO_TYPE,
   ORIGINAL_INERT_TASK_ID,
 } from './originalInspectInert'
+import { APPROVED_ORIGINAL_SCENARIO_NAME, formatOriginalRunReason, formatOriginalRunStatus } from './originalRunAdmission'
 import { ScenarioRunEstimateDetails } from './ScenarioRunEstimate'
 import { normalizeScenarioMarkdown } from './scenarioMarkdown'
 import { mapScenarioRunEstimate } from './scenarioRunEstimateAdapter'
@@ -475,6 +476,12 @@ function ScenarioDetailContent({
   }, [decodedScenarioName, refetchCount])
 
   useEffect(() => {
+    if (
+      decodedScenarioName === ORIGINAL_INERT_SCENARIO_NAME
+      || decodedScenarioName === APPROVED_ORIGINAL_SCENARIO_NAME
+    ) {
+      return
+    }
     let cancelled = false
     fetchAllPages(
       (cursor) => targetsApi.listTargets(TARGET_PAGE_SIZE, cursor),
@@ -494,7 +501,7 @@ function ScenarioDetailContent({
     return () => {
       cancelled = true
     }
-  }, [refetchCount])
+  }, [decodedScenarioName, refetchCount])
 
   const handleRetry = (): void => {
     setScenarioStatus('loading')
@@ -506,8 +513,9 @@ function ScenarioDetailContent({
 
   const isOriginalInert = scenario?.scenario_name === ORIGINAL_INERT_SCENARIO_NAME
     && scenario.scenario_type === ORIGINAL_INERT_SCENARIO_TYPE
+  const isApprovedOriginal = scenario?.scenario_name === APPROVED_ORIGINAL_SCENARIO_NAME
 
-  if (scenarioStatus === 'loading' || (!isOriginalInert && targets === null)) {
+  if (scenarioStatus === 'loading' || (!isOriginalInert && !isApprovedOriginal && targets === null)) {
     return (
       <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
         <div className={styles.centeredState}>
@@ -533,7 +541,7 @@ function ScenarioDetailContent({
     )
   }
 
-  if (scenarioStatus === 'error' || (!isOriginalInert && targetsError)) {
+  if (scenarioStatus === 'error' || (!isOriginalInert && !isApprovedOriginal && targetsError)) {
     return (
       <section className={styles.root} data-testid="scenario-detail" aria-label="Scenario detail">
         <div className={styles.content}>
@@ -566,6 +574,10 @@ function ScenarioDetailContent({
 
   if (isOriginalInert) {
     return <OriginalInspectInertLaunch scenario={scenario} />
+  }
+
+  if (isApprovedOriginal) {
+    return <ServerApprovedOriginalLaunch scenario={scenario} />
   }
 
   if (targets === null) {
@@ -667,6 +679,91 @@ function OriginalInspectInertLaunch({ scenario }: OriginalInspectInertLaunchProp
             onClick={() => void handleLaunch()}
           >
             {submitting ? 'Starting original Inspect Task...' : 'Run original Inspect Task'}
+          </Button>
+        </section>
+      </div>
+    </section>
+  )
+}
+
+interface ServerApprovedOriginalLaunchProps {
+  scenario: RegisteredScenario
+}
+
+function ServerApprovedOriginalLaunch({ scenario }: ServerApprovedOriginalLaunchProps) {
+  const styles = useScenarioDetailStyles()
+  const navigate = useNavigate()
+  const [submitting, setSubmitting] = useState(false)
+  const [apiError, setApiError] = useState<string | null>(null)
+  const submittingRef = useRef(false)
+  const admission = scenario.original_run_admission
+  const admitted = admission?.status === 'ready'
+    && admission.model_role === 'evaluated'
+    && Boolean(admission.admission_ref)
+
+  const handleLaunch = async (): Promise<void> => {
+    if (submittingRef.current || !admitted || !admission?.admission_ref) {
+      return
+    }
+    submittingRef.current = true
+    setSubmitting(true)
+    setApiError(null)
+    try {
+      const summary = await scenariosApi.startRun({
+        scenario_name: APPROVED_ORIGINAL_SCENARIO_NAME,
+        original_admission_ref: admission.admission_ref,
+      })
+      navigate(scenarioRunRoutePath(summary.scenario_result_id), {
+        state: { scenarioName: APPROVED_ORIGINAL_SCENARIO_NAME },
+      })
+    } catch (error: unknown) {
+      setApiError(formatOriginalRunReason(toApiError(error).detail))
+    } finally {
+      submittingRef.current = false
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section className={styles.root} data-testid="scenario-detail" aria-labelledby="scenario-detail-title">
+      <div className={styles.content}>
+        <Link to="/scanner" className={styles.backLink}>
+          <ArrowLeftRegular /> Back to scanners
+        </Link>
+        <div className={styles.headerText}>
+          <Text id="scenario-detail-title" as="h1" size={600} weight="semibold">
+            Approved original evaluation
+          </Text>
+        </div>
+        <section className={styles.section} aria-label="Approved original run admission">
+          <Text>Profile reference: <code>{admission?.profile_ref ?? 'Not admitted'}</code></Text>
+          <Text>Model role: evaluated (resolved by the host)</Text>
+          <MessageBar intent="info">
+            <MessageBarBody>
+              The approved server runner owns the unchanged original Task, source score, evidence and cleanup.
+              {' '}PyRIT does not replace its scorer or infer attack success from the original grade.
+            </MessageBarBody>
+          </MessageBar>
+          {!admitted && (
+            <MessageBar intent="warning">
+              <MessageBarBody role="alert">
+                {admission ? formatOriginalRunStatus(admission.status) : 'Runner not admitted'}.
+                {' '}{admission?.unmet_conditions.length
+                  ? admission.unmet_conditions.map(formatOriginalRunReason).join(' ')
+                  : 'No one-time admission was issued.'}
+              </MessageBarBody>
+            </MessageBar>
+          )}
+          {apiError && (
+            <MessageBar intent="error"><MessageBarBody role="alert">{apiError}</MessageBarBody></MessageBar>
+          )}
+          <Button
+            className={styles.launchButton}
+            appearance="primary"
+            disabled={!admitted || submitting}
+            onClick={() => void handleLaunch()}
+          >
+            {submitting ? 'Starting approved original Task...' : 'Run approved original Task'}
           </Button>
         </section>
       </div>

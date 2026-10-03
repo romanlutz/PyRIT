@@ -38,6 +38,7 @@ from pyrit.backend.services.attack_service import (
     AttackSourceImmutableError,
     get_attack_service,
 )
+from pyrit.backend.services.original_run_admission import OriginalAdmissionError
 from pyrit.common.deprecation import print_deprecation_message
 
 logger = logging.getLogger(__name__)
@@ -142,21 +143,24 @@ async def list_attacks(  # pyrit-async-suffix-exempt
     if attack_types is not None:
         attack_types = [a for a in attack_types if a]
     service = get_attack_service()
-    return await service.list_attacks_async(
-        attack_types=attack_types,
-        converter_types=converter_types,
-        converter_types_match=converter_types_match,
-        has_converters=has_converters,
-        include_scenario_attacks=include_scenario_attacks,
-        outcome=outcome,
-        operator=operator,
-        operation=operation,
-        labels=labels or None,
-        min_turns=min_turns,
-        max_turns=max_turns,
-        limit=limit,
-        cursor=cursor,
-    )
+    try:
+        return await service.list_attacks_async(
+            attack_types=attack_types,
+            converter_types=converter_types,
+            converter_types_match=converter_types_match,
+            has_converters=has_converters,
+            include_scenario_attacks=include_scenario_attacks,
+            outcome=outcome,
+            operator=operator,
+            operation=operation,
+            labels=labels or None,
+            min_turns=min_turns,
+            max_turns=max_turns,
+            limit=limit,
+            cursor=cursor,
+        )
+    except OriginalAdmissionError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
 
 
 @router.get(
@@ -246,7 +250,10 @@ async def get_attack(attack_result_id: str) -> AttackSummary:  # pyrit-async-suf
     """
     service = get_attack_service()
 
-    attack = await service.get_attack_async(attack_result_id=attack_result_id)
+    try:
+        attack = await service.get_attack_async(attack_result_id=attack_result_id)
+    except OriginalAdmissionError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
     if not attack:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -344,6 +351,8 @@ async def get_conversation_messages(  # pyrit-async-suffix-exempt
             attack_result_id=attack_result_id,
             conversation_id=conversation_id,
         )
+    except OriginalAdmissionError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -378,7 +387,10 @@ async def get_conversations(attack_result_id: str) -> AttackConversationsRespons
     """
     service = get_attack_service()
 
-    result = await service.get_conversations_async(attack_result_id=attack_result_id)
+    try:
+        result = await service.get_conversations_async(attack_result_id=attack_result_id)
+    except OriginalAdmissionError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
     if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

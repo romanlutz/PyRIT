@@ -4834,6 +4834,21 @@ class MemoryInterface(abc.ABC):
             entry = session.query(ScenarioResultEntry).filter_by(id=scenario_result_id).first()
             return entry.get_scenario_result() if entry is not None else None
 
+    def get_scenario_result_headers(self, *, scenario_result_ids: Sequence[str]) -> dict[str, ScenarioResult]:
+        """
+        Read bounded run headers so history can enforce operator ACLs before building its response.
+
+        Returns:
+            dict[str, ScenarioResult]: Existing headers keyed by ID, without linked AttackResults.
+        """
+        if not scenario_result_ids:
+            return {}
+        with closing(self.get_session()) as session:
+            entries = session.scalars(
+                select(ScenarioResultEntry).where(ScenarioResultEntry.id.in_(scenario_result_ids))
+            ).all()
+            return {str(entry.id): entry.get_scenario_result() for entry in entries}
+
     def get_original_inspect_result_links(
         self, *, scenario_name: str, attack_result_ids: Sequence[str]
     ) -> dict[str, ScenarioResult]:

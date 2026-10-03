@@ -32,6 +32,7 @@ import { fetchAllPages } from '@/utils/fetchAllPages'
 
 import { useScenarioCatalogStyles } from './ScenarioCatalog.styles'
 import { ORIGINAL_INERT_SCENARIO_NAME } from './originalInspectInert'
+import { APPROVED_ORIGINAL_SCENARIO_NAME } from './originalRunAdmission'
 import {
   ScenarioRunEstimateSummary,
 } from './ScenarioRunEstimate'
@@ -300,6 +301,7 @@ export default function ScenarioCatalog() {
   const [estimatesLoading, setEstimatesLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [estimateError, setEstimateError] = useState<string | null>(null)
+  const [approvedOriginalFallback, setApprovedOriginalFallback] = useState(false)
   const [query, setQuery] = useState('')
   const [refetchCount, setRefetchCount] = useState(0)
 
@@ -346,6 +348,12 @@ export default function ScenarioCatalog() {
         setError(toApiError(err).detail)
         setLoading(false)
         setEstimatesLoading(false)
+        try {
+          const approved = await scenariosApi.getScenario(APPROVED_ORIGINAL_SCENARIO_NAME)
+          if (!cancelled) setApprovedOriginalFallback(Boolean(approved?.original_run_admission))
+        } catch {
+          if (!cancelled) setApprovedOriginalFallback(false)
+        }
       }
     }
 
@@ -361,6 +369,7 @@ export default function ScenarioCatalog() {
     setEstimatesLoading(true)
     setError(null)
     setEstimateError(null)
+    setApprovedOriginalFallback(false)
     setRefetchCount((count) => count + 1)
   }, [])
 
@@ -430,6 +439,11 @@ export default function ScenarioCatalog() {
           <Link to={`/scanner/${encodeURIComponent(ORIGINAL_INERT_SCENARIO_NAME)}`}>
             Open approved original Inspect Task
           </Link>
+          {approvedOriginalFallback && (
+            <Link to={`/scanner/${encodeURIComponent(APPROVED_ORIGINAL_SCENARIO_NAME)}`}>
+              Open server-approved original evaluation
+            </Link>
+          )}
           <Button
             className={styles.touchTarget}
             appearance="primary"

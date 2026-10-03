@@ -632,10 +632,12 @@ class AttackService:
             ValueError: If an original import has no verifiable Scenario/evidence link.
             AttackSourceImmutableError: If a caller tries to change imported evidence.
         """
+        from pyrit.backend.services.original_run_admission import OriginalAdmissionError, OriginalRunBinding
         from pyrit.backend.services.scenario_run_service import (
             _ORIGINAL_INSPECT_SCENARIO_NAME,
             ScenarioRunService,
         )
+        from pyrit.models.catalog.scenario import OriginalRunReason
 
         try:
             links = self._memory.get_original_inspect_result_links(
@@ -647,12 +649,30 @@ class AttackService:
 
         for result in results:
             scenario = links.get(result.attack_result_id)
+            parent = (
+                self._memory.get_scenario_result_header(scenario_result_id=result.attribution_parent_id)
+                if result.attribution_parent_id is not None
+                else None
+            )
+            if any(
+                header is not None
+                and (
+                    OriginalRunBinding.METADATA_KEY in (getattr(header, "metadata", None) or {})
+                    or ScenarioRunService._requires_original_run_binding(scenario_result=header)
+                )
+                for header in (scenario, parent)
+            ):
+                if mutating:
+                    raise AttackSourceImmutableError("Server-approved original results cannot be edited here.")
+                raise OriginalAdmissionError(reason=OriginalRunReason.OPERATOR_NOT_AUTHORIZED)
             if scenario is None:
                 if self._has_unbound_original_inspect_evidence(result=result):
                     if mutating:
                         raise AttackSourceImmutableError("Imported original Inspect results cannot be edited.")
                     raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
                 continue
+            if scenario.scenario_name != _ORIGINAL_INSPECT_SCENARIO_NAME:
+                raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
             if mutating:
                 raise AttackSourceImmutableError("Imported original Inspect results cannot be edited.")
             if scenario.scenario_run_state is not ScenarioRunState.COMPLETED:

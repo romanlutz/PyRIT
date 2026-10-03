@@ -48,6 +48,7 @@ class TaskOwnedScenario(Scenario):
     """Base for a Scenario whose selected Eval cases own execution and original evidence."""
 
     TASK_OWNED: ClassVar[bool] = True
+    SERVER_ADMISSION_REQUIRED: ClassVar[bool] = False
     BASELINE_ATTACK_POLICY: ClassVar[BaselineAttackPolicy] = BaselineAttackPolicy.Forbidden
 
     @classmethod
@@ -192,6 +193,8 @@ class TaskOwnedScenario(Scenario):
             "model_route_sha256": spec.model_route.config_sha256,
             "case_set_sha256": config_hash({"case_ids": sorted(work.case.case_id for work in attacks)}),
         }
+        if self.SERVER_ADMISSION_REQUIRED:
+            params["server_admission_required"] = True
         if variant is not None:
             params["input_variant_sha256"] = variant.content_sha256
             params["input_surface_id"] = variant.surface_id

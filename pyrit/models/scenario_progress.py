@@ -11,6 +11,8 @@ from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from pyrit.models.catalog.scenario import (  # noqa: TC001
     OriginalInspectImportSummary,
+    OriginalRunAdmission,
+    OriginalSourceResult,
     ScenarioOverloadSummary,
     ScenarioTargetSummary,
 )
@@ -127,6 +129,8 @@ class ScenarioProgressHeader(BaseModel):
     active_scenario_result_id: str | None = None
     overload_summaries: list["ScenarioOverloadSummary"] = Field(default_factory=list)
     original_inspect_import: "OriginalInspectImportSummary | None" = None
+    original_run_admission: "OriginalRunAdmission | None" = None
+    original_source_result: "OriginalSourceResult | None" = None
     failure_reason: str | None = None
 
 

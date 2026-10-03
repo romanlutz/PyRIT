@@ -194,6 +194,52 @@ describe('ScenarioHistory', () => {
     expect(within(row).queryByText('0/0')).not.toBeInTheDocument()
   })
 
+  it('shows original raw grade, coverage and cleanup independently of attack success', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        status: 'FAILED',
+        completed_attacks: 0,
+        total_attacks: 1,
+        successful_attacks: 0,
+        objective_achieved_rate: null,
+        target: null,
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'cleanup_uncertain',
+          unmet_conditions: ['cleanup_pending'],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'cleanup_uncertain',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score: 'C',
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'uncontained',
+          case_count: 1,
+          reason: 'cleanup_pending',
+        },
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    const row = await screen.findByTestId('scenario-history-row-run-1')
+    expect(within(row).getByText('0/1 original cases')).toBeInTheDocument()
+    expect(within(row).getByText('Original C · outcome undetermined')).toBeInTheDocument()
+    expect(within(row).getByText('Cleanup not verified')).toBeInTheDocument()
+    expect(within(row).getByText('Coverage complete · Cleanup uncontained')).toBeInTheDocument()
+    expect(within(row).getByText('Task-owned (evaluated model role)')).toBeInTheDocument()
+    expect(within(row).queryByText('0/0')).not.toBeInTheDocument()
+  })
+
   it('renders safe fallbacks when optional run metadata is unavailable', async () => {
     jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:30Z'))
     mockedScenariosApi.listRuns.mockResolvedValue({

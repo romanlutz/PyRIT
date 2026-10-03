@@ -29,8 +29,18 @@ from zipfile import BadZipFile
 
 from pydantic import TypeAdapter, ValidationError
 
+from pyrit.backend.middleware.auth import AuthenticatedUser
 from pyrit.backend.models.common import PaginationInfo, filter_sensitive_fields
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
+from pyrit.backend.services.original_run_admission import (
+    APPROVED_ORIGINAL_SCENARIO,
+    OriginalAdmissionError,
+    OriginalCleanupReceipt,
+    OriginalRunBinding,
+    OriginalRunGrant,
+    OriginalWorkerJob,
+    get_original_run_gateway,
+)
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
     encode_keyset_cursor,
@@ -56,16 +66,24 @@ from pyrit.models import (
     EvalPackageRef,
     EvalSourceKind,
     MessagePiece,
+    ScenarioAtomicGroupProgress,
     ScenarioAttackResultDelta,
+    ScenarioDisplayGroupProgress,
+    ScenarioExecutionOwner,
     ScenarioIdentifier,
+    ScenarioProgressCounts,
     ScenarioProgressHeader,
+    ScenarioProgressSummary,
     ScenarioQueueEntry,
     ScenarioQueueSnapshot,
     ScenarioResult,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
+    ScenarioRunPlanSeedGroup,
     ScenarioRunProgress,
     ScenarioRunState,
+    ScenarioSeedGroupProgress,
+    ScenarioTechniqueProgress,
     ScoreStatus,
     TargetIdentifier,
     config_hash,
@@ -74,6 +92,11 @@ from pyrit.models.catalog.scenario import (
     AttackErrorSummary,
     AttackRetrySummary,
     OriginalInspectImportSummary,
+    OriginalRunAdmission,
+    OriginalRunEvidenceLink,
+    OriginalRunReason,
+    OriginalRunStatus,
+    OriginalSourceResult,
     RunScenarioRequest,
     ScenarioOverloadSummary,
     ScenarioRunListItem,
@@ -151,6 +174,8 @@ class _ActiveTask:
     cancellation_reason: str = _USER_CANCELLATION_REASON
     cancellation_error_type: str = "CancelledError"
     retain_error_on_terminalization: bool = False
+    original_grant: OriginalRunGrant | None = None
+    original_job: OriginalWorkerJob | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,12 +230,15 @@ class ScenarioRunService:
         self._active_scenario_result_id: str | None = None
         self._queued_runs: deque[_ActiveTask] = deque()
         self._handoff_retry_tasks: set[asyncio.Task[None]] = set()
+        self._original_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._scheduler_lock = asyncio.Lock()
         self._launch_lock = asyncio.Lock()
         self._queue_revision = 0
         self._stopping = False
 
-    async def start_run_async(self, *, request: RunScenarioRequest) -> ScenarioRunSummary:
+    async def start_run_async(
+        self, *, request: RunScenarioRequest, operator: AuthenticatedUser | None = None
+    ) -> ScenarioRunSummary:
         """
         Initialize and schedule a scenario run.
 
@@ -221,6 +249,7 @@ class ScenarioRunService:
 
         Args:
             request: The run request with scenario name, target, and options.
+            operator: Authenticated operator required for a protected original runner.
 
         Returns:
             ScenarioRunSummary with a stable ID and current active or queued state.
@@ -231,6 +260,10 @@ class ScenarioRunService:
         async with self._launch_lock:
             if self._stopping:
                 raise RuntimeError("Scenario run scheduling is stopping.")
+            if request.scenario_name == APPROVED_ORIGINAL_SCENARIO:
+                return await self._start_approved_original_run_async(request=request, operator=operator)
+            if request.original_admission_ref is not None:
+                raise OriginalAdmissionError(reason=OriginalRunReason.PROFILE_NOT_ADMITTED)
             resumed_from_cancelled = self._is_run_cancelled(scenario_result_id=request.scenario_result_id)
             prepare_task = asyncio.get_running_loop().run_in_executor(
                 self._prepare_executor,
@@ -263,6 +296,7 @@ class ScenarioRunService:
                     active_error=None,
                     queue_position=None,
                     active_scenario_result_id=self._active_scenario_result_id,
+                    operator=operator,
                 )
                 if response is None:
                     raise RuntimeError(
@@ -275,6 +309,7 @@ class ScenarioRunService:
                     active_error=None,
                     queue_position=None,
                     active_scenario_result_id=self._active_scenario_result_id,
+                    operator=operator,
                 )
                 is None
             ):
@@ -291,17 +326,155 @@ class ScenarioRunService:
             )
             await self._enqueue_run_async(scheduled=scheduled)
 
-        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
+        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id, operator=operator)
         response = await asyncio.to_thread(
             self.get_run_from_storage,
             scenario_result_id=scenario_result_id,
             active_error=snapshot.error,
             queue_position=snapshot.queue_position,
             active_scenario_result_id=snapshot.active_scenario_result_id,
+            operator=operator,
         )
         if response is None:
             raise RuntimeError(f"Scenario run {scenario_result_id} was not found in the database after initialization.")
         return response
+
+    async def _start_approved_original_run_async(
+        self, *, request: RunScenarioRequest, operator: AuthenticatedUser | None
+    ) -> ScenarioRunSummary:
+        """
+        Reserve an opaque job and schedule it without resolving or importing a private Scenario.
+
+        Returns:
+            ScenarioRunSummary: The projected server-owned job, not a worker Scenario result.
+        """
+        if request.model_extra or request.model_fields_set != {"scenario_name", "original_admission_ref"}:
+            raise OriginalAdmissionError(reason=OriginalRunReason.PROFILE_NOT_ADMITTED)
+        if request.original_admission_ref is None:
+            raise OriginalAdmissionError(reason=OriginalRunReason.ADMISSION_EXPIRED)
+        gateway = get_original_run_gateway()
+        if gateway is None:
+            raise OriginalAdmissionError(reason=OriginalRunReason.RUNNER_NOT_CONFIGURED)
+        grant = await gateway.claim_async(operator=operator, admission_ref=request.original_admission_ref)
+        job: OriginalWorkerJob | None = None
+        try:
+            binding = OriginalRunBinding(profile_ref=grant.profile_ref, operator_oid=grant.operator_oid)
+            job = OriginalWorkerJob(app_run_id=uuid.uuid4(), job_ref=uuid.uuid4())
+            envelope = ScenarioResult(
+                id=job.app_run_id,
+                scenario_identifier=ScenarioIdentifier(
+                    class_name="ServerApprovedOriginalScenario",
+                    class_module="pyrit.backend.services.original_run_admission",
+                    params={"execution_owner": ScenarioExecutionOwner.APPROVED_ORIGINAL.value},
+                    version=1,
+                    techniques=[],
+                    datasets=[],
+                ),
+                scenario_description="Server-approved original Task",
+                attack_results={},
+                metadata={
+                    _SCHEDULER_METADATA_KEY: _SCHEDULER_METADATA_VALUE,
+                    OriginalRunBinding.METADATA_KEY: binding.model_dump(mode="json"),
+                    OriginalWorkerJob.METADATA_KEY: job.model_dump(mode="json"),
+                },
+            )
+        except Exception as error:
+            logger.error("Approved original job envelope is invalid (%s).", type(error).__name__)
+            await self._release_original_grant_async(grant=grant, job=job, cancelled=True)
+            raise OriginalAdmissionError(reason=OriginalRunReason.PROVIDER_UNQUALIFIED) from error
+
+        async def prepare_async() -> None:
+            await asyncio.to_thread(self._memory.add_scenario_results_to_memory, scenario_results=[envelope])
+            await gateway.runner.prepare_worker_async(grant=grant, job=job, binding=binding)
+
+        preparation = asyncio.create_task(prepare_async())
+        try:
+            await asyncio.shield(preparation)
+        except asyncio.CancelledError:
+            cleanup_task = asyncio.create_task(
+                self._release_abandoned_original_job_async(grant=grant, job=job, preparation=preparation)
+            )
+            self._original_cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self._original_cleanup_tasks.discard)
+            raise
+        except Exception as error:
+            logger.error("Original worker preparation failed (%s).", type(error).__name__)
+            cleanup = await self._release_original_grant_async(grant=grant, job=job, cancelled=True)
+            await self._terminalize_original_job_async(
+                job=job, binding=binding, cleanup=cleanup, state=ScenarioRunState.FAILED
+            )
+            raise OriginalAdmissionError(reason=OriginalRunReason.PROVIDER_UNQUALIFIED) from error
+
+        scheduled = _ActiveTask(
+            scenario_result_id=str(job.app_run_id),
+            scenario_name="ServerApprovedOriginalScenario",
+            scenario_registry_name=APPROVED_ORIGINAL_SCENARIO,
+            created_at=envelope.creation_time,
+            enqueued_at=datetime.now(UTC),
+            original_grant=grant,
+            original_job=job,
+        )
+        enqueue_task = asyncio.create_task(self._enqueue_run_async(scheduled=scheduled))
+        try:
+            await asyncio.shield(enqueue_task)
+        except asyncio.CancelledError:
+            cleanup_task = asyncio.create_task(
+                self._cancel_abandoned_original_enqueue_async(
+                    grant=grant, job=job, binding=binding, enqueue_task=enqueue_task, operator=operator
+                )
+            )
+            self._original_cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self._original_cleanup_tasks.discard)
+            raise
+        except Exception as error:
+            cleanup = await self._release_original_grant_async(grant=grant, job=job, cancelled=True)
+            await self._terminalize_original_job_async(
+                job=job, binding=binding, cleanup=cleanup, state=ScenarioRunState.FAILED
+            )
+            raise OriginalAdmissionError(reason=OriginalRunReason.PROVIDER_UNQUALIFIED) from error
+        snapshot = self.snapshot_active_run(scenario_result_id=str(job.app_run_id), operator=operator)
+        response = await asyncio.to_thread(
+            self.get_run_from_storage,
+            scenario_result_id=str(job.app_run_id),
+            active_error=snapshot.error,
+            queue_position=snapshot.queue_position,
+            active_scenario_result_id=snapshot.active_scenario_result_id,
+            operator=operator,
+        )
+        if response is None:
+            raise RuntimeError("Persisted approved original job could not be read back.")
+        return response
+
+    async def _cancel_abandoned_original_enqueue_async(
+        self,
+        *,
+        grant: OriginalRunGrant,
+        job: OriginalWorkerJob,
+        binding: OriginalRunBinding,
+        enqueue_task: asyncio.Task[None],
+        operator: AuthenticatedUser | None,
+    ) -> None:
+        """Finish an in-flight scheduler admission before aborting the exact job."""
+        try:
+            await enqueue_task
+        except Exception as error:
+            logger.error("Original worker enqueue failed after cancellation (%s).", type(error).__name__)
+            cleanup = await self._release_original_grant_async(grant=grant, job=job, cancelled=True)
+            await self._terminalize_original_job_async(
+                job=job,
+                binding=binding,
+                cleanup=cleanup,
+                state=ScenarioRunState.CANCELLED if cleanup.proved else ScenarioRunState.FAILED,
+            )
+        else:
+            try:
+                await self.cancel_run_async(scenario_result_id=str(job.app_run_id), operator=operator)
+            except ValueError:
+                header = await asyncio.to_thread(
+                    self._memory.get_scenario_result_header, scenario_result_id=str(job.app_run_id)
+                )
+                if header is None or not self._is_terminal_state(header.scenario_run_state):
+                    raise
 
     def _is_run_cancelled(self, *, scenario_result_id: str | None) -> bool:
         """
@@ -453,6 +626,8 @@ class ScenarioRunService:
             ValueError: If scenario, target, initializer, or technique cannot be found.
         """
         scenario_class = self._configuration_resolver.resolve_scenario_class(scenario_name=request.scenario_name)
+        if isinstance(scenario_class, type) and getattr(scenario_class, "SERVER_ADMISSION_REQUIRED", False):
+            raise OriginalAdmissionError(reason=OriginalRunReason.PROFILE_NOT_ADMITTED)
         scenario_class.validate_run_request(request=request)
         task_owned = getattr(scenario_class, "TASK_OWNED", False) is True
         if task_owned and request.target_name is not None:
@@ -481,22 +656,107 @@ class ScenarioRunService:
         )
         return await self._initialize_scenario_async(request=request, init_kwargs=init_kwargs)
 
-    def get_run(self, *, scenario_result_id: str) -> ScenarioRunSummary | None:
+    async def _release_original_grant_async(
+        self, *, grant: OriginalRunGrant, job: OriginalWorkerJob | None, cancelled: bool
+    ) -> OriginalCleanupReceipt:
+        """
+        Release a reservation and treat absent owned cleanup proof as explicitly uncontained.
+
+        Returns:
+            OriginalCleanupReceipt: Exact proof or explicit uncontained cleanup.
+        """
+        gateway = get_original_run_gateway()
+        if gateway is None:
+            logger.error("Original runner disappeared before releasing its reservation.")
+            return OriginalCleanupReceipt(state="uncontained")
+        try:
+            return await gateway.runner.release_async(grant=grant, job=job, cancelled=cancelled)
+        except Exception as error:
+            logger.error("Original run cleanup could not be verified (%s).", type(error).__name__)
+            return OriginalCleanupReceipt(state="uncontained")
+
+    async def _release_abandoned_original_job_async(
+        self, *, grant: OriginalRunGrant, job: OriginalWorkerJob, preparation: asyncio.Task[None]
+    ) -> None:
+        """Wait for an abandoned worker preparation, then close only its owned reservation."""
+        try:
+            await preparation
+        except Exception as error:
+            logger.error("Abandoned original worker preparation failed (%s).", type(error).__name__)
+        cleanup = await self._release_original_grant_async(grant=grant, job=job, cancelled=True)
+        await self._terminalize_original_job_async(
+            job=job,
+            binding=OriginalRunBinding(profile_ref=grant.profile_ref, operator_oid=grant.operator_oid),
+            cleanup=cleanup,
+            state=ScenarioRunState.CANCELLED if cleanup.proved else ScenarioRunState.FAILED,
+        )
+
+    async def _terminalize_original_job_async(
+        self,
+        *,
+        job: OriginalWorkerJob,
+        binding: OriginalRunBinding,
+        cleanup: OriginalCleanupReceipt,
+        state: ScenarioRunState,
+    ) -> None:
+        """Persist an ungraded, physically proved or uncertain job without private evidence."""
+        result = OriginalSourceResult(
+            profile_ref=binding.profile_ref,
+            status=OriginalRunStatus.FAILED_UNGRADED if cleanup.proved else OriginalRunStatus.CLEANUP_UNCERTAIN,
+            source_state="cancelled" if state is ScenarioRunState.CANCELLED else "error",
+            source_coverage_complete=False,
+            cleanup_state=cleanup.state,
+            reason=OriginalRunReason.SOURCE_UNVERIFIED if cleanup.proved else OriginalRunReason.CLEANUP_PENDING,
+        )
+        header = await asyncio.to_thread(
+            self._memory.get_scenario_result_header, scenario_result_id=str(job.app_run_id)
+        )
+        if header is None:
+            logger.error("Approved original job was not persisted before its reservation ended.")
+            return
+        await asyncio.to_thread(
+            self._memory.update_scenario_metadata_fields,
+            scenario_result_id=str(job.app_run_id),
+            fields={
+                OriginalCleanupReceipt.METADATA_KEY: cleanup.model_dump(mode="json"),
+                OriginalSourceResult.METADATA_KEY: result.model_dump(mode="json"),
+            },
+        )
+        await asyncio.to_thread(
+            self._memory.try_update_scenario_run_state,
+            scenario_result_id=str(job.app_run_id),
+            expected_states={ScenarioRunState.CREATED, ScenarioRunState.QUEUED, ScenarioRunState.IN_PROGRESS},
+            scenario_run_state=state,
+            error_message=(
+                None
+                if state is ScenarioRunState.CANCELLED
+                else OriginalRunReason.SOURCE_UNVERIFIED.value
+                if cleanup.proved
+                else OriginalRunReason.CLEANUP_PENDING.value
+            ),
+            error_type=None if state is ScenarioRunState.CANCELLED else "OriginalAdmissionError",
+        )
+
+    def get_run(
+        self, *, scenario_result_id: str, operator: AuthenticatedUser | None = None
+    ) -> ScenarioRunSummary | None:
         """
         Get the current status of a scenario run by querying the database.
 
         Args:
             scenario_result_id: The scenario result ID.
+            operator: Authenticated operator when reading a protected original result.
 
         Returns:
             ScenarioRunSummary if found, None otherwise.
         """
-        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
+        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id, operator=operator)
         return self.get_run_from_storage(
             scenario_result_id=scenario_result_id,
             active_error=snapshot.error,
             queue_position=snapshot.queue_position,
             active_scenario_result_id=snapshot.active_scenario_result_id,
+            operator=operator,
         )
 
     def get_run_from_storage(
@@ -506,6 +766,7 @@ class ScenarioRunService:
         active_error: str | None,
         queue_position: int | None = None,
         active_scenario_result_id: str | None = None,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunSummary | None:
         """
         Build a run summary using database state plus an event-loop snapshot.
@@ -515,6 +776,7 @@ class ScenarioRunService:
             active_error: Error copied from the active asyncio task, if any.
             queue_position: Current 1-based waiting position, if queued.
             active_scenario_result_id: Currently executing scenario result ID.
+            operator: Authenticated operator when reading a protected original result.
 
         Returns:
             ScenarioRunSummary | None: The run summary when found.
@@ -524,6 +786,7 @@ class ScenarioRunService:
             active_error=active_error,
             queue_position=queue_position,
             active_scenario_result_id=active_scenario_result_id,
+            operator=operator,
         )
 
     def list_runs(
@@ -534,6 +797,7 @@ class ScenarioRunService:
         labels: Mapping[str, str | Sequence[str]] | None = None,
         limit: int = 100,
         cursor: str | None = None,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunListResponse:
         """
         List scenario runs by querying the database (most recent first).
@@ -544,11 +808,21 @@ class ScenarioRunService:
             labels: Labels with OR-within-key and AND-across-key semantics.
             limit: Maximum number of runs to return.
             cursor: Opaque cursor from the previous page.
+            operator: Authenticated operator needed to read protected original history.
 
         Returns:
             ScenarioRunListResponse with runs.
         """
         normalized_names = sorted({name.strip() for name in scenario_names or [] if name.strip()})
+        query_names = list(normalized_names)
+        original_aliases = {APPROVED_ORIGINAL_SCENARIO, "ServerApprovedOriginalScenario"}
+        if original_aliases.intersection(normalized_names):
+            gateway = get_original_run_gateway()
+            if gateway is None or not gateway.authorized(operator=operator):
+                raise OriginalAdmissionError(reason=OriginalRunReason.OPERATOR_NOT_AUTHORIZED)
+            query_names = [
+                "ServerApprovedOriginalScenario" if name in original_aliases else name for name in normalized_names
+            ]
         normalized_statuses = sorted(
             {
                 status.value if isinstance(status, ScenarioRunState) else str(status).strip().upper()
@@ -574,12 +848,19 @@ class ScenarioRunService:
             else None
         )
         records, aggregates, has_more = self._memory.get_scenario_run_history_page(
-            scenario_names=normalized_names,
+            scenario_names=query_names,
             statuses=normalized_statuses,
             labels=normalized_labels,
             cursor=after,
             limit=limit,
         )
+        headers = self._memory.get_scenario_result_headers(
+            scenario_result_ids=[record.scenario_result_id for record in records]
+        )
+        for header in headers.values():
+            self._reject_unbound_original_run(scenario_result=header)
+            if OriginalRunBinding.METADATA_KEY in (getattr(header, "metadata", None) or {}):
+                self._original_run_binding(scenario_result=header, operator=operator)
         plans = {record.scenario_result_id: self._parse_history_plan(record=record) for record in records}
         # Memory resolves units against every persisted plan. Runs whose plan this service
         # rejects must fall back to legacy unit identity, which needs a plan-free aggregate.
@@ -601,16 +882,27 @@ class ScenarioRunService:
             if original_ids
             else {}
         )
-        items = [
-            self._build_history_summary(
-                record=record,
-                atomic_groups=plans[record.scenario_result_id],
-                aggregate=aggregates.get(record.scenario_result_id)
-                or ScenarioHistoryAggregate.empty(scenario_result_id=record.scenario_result_id),
-                original_result=original_results.get(record.scenario_result_id),
-            )
-            for record in records
-        ]
+        items: list[ScenarioRunListItem] = []
+        for record in records:
+            header = headers.get(record.scenario_result_id)
+            if header is not None and OriginalRunBinding.METADATA_KEY in (getattr(header, "metadata", None) or {}):
+                safe_summary = self._original_run_summary(
+                    scenario_result=header,
+                    operator=operator,
+                    queue_position=None,
+                    active_scenario_result_id=None,
+                )
+                items.append(ScenarioRunListItem.model_validate(safe_summary.model_dump(mode="json")))
+            else:
+                items.append(
+                    self._build_history_summary(
+                        record=record,
+                        atomic_groups=plans[record.scenario_result_id],
+                        aggregate=aggregates.get(record.scenario_result_id)
+                        or ScenarioHistoryAggregate.empty(scenario_result_id=record.scenario_result_id),
+                        original_result=original_results.get(record.scenario_result_id),
+                    )
+                )
         next_cursor = (
             encode_keyset_cursor(
                 timestamp=records[-1].created_at,
@@ -630,12 +922,15 @@ class ScenarioRunService:
             ),
         )
 
-    async def cancel_run_async(self, *, scenario_result_id: str) -> ScenarioRunSummary | None:
+    async def cancel_run_async(
+        self, *, scenario_result_id: str, operator: AuthenticatedUser | None = None
+    ) -> ScenarioRunSummary | None:
         """
         Cancel a running scenario.
 
         Args:
             scenario_result_id: The scenario result ID.
+            operator: Authenticated operator needed before cancelling a protected original run.
 
         Returns:
             Updated ScenarioRunSummary if found, None if not found.
@@ -650,25 +945,31 @@ class ScenarioRunService:
         if not results:
             return None
 
+        self._reject_unbound_original_run(scenario_result=results[0])
+        if OriginalRunBinding.METADATA_KEY in (getattr(results[0], "metadata", None) or {}):
+            await asyncio.to_thread(self._original_run_binding, scenario_result=results[0], operator=operator)
         db_status = results[0].scenario_run_state
         if self._is_terminal_state(db_status):
             raise ValueError(f"Cannot cancel run in '{db_status}' state.")
 
         task: asyncio.Task[None] | None = None
+        queued_original: _ActiveTask | None = None
         async with self._scheduler_lock:
             queued = next(
                 (run for run in self._queued_runs if run.scenario_result_id == scenario_result_id),
                 None,
             )
             if queued is not None:
-                await asyncio.to_thread(
-                    self._memory.try_update_scenario_run_state,
-                    scenario_result_id=scenario_result_id,
-                    expected_states={ScenarioRunState.CREATED, ScenarioRunState.QUEUED},
-                    scenario_run_state=ScenarioRunState.CANCELLED,
-                    error_message=_USER_CANCELLATION_REASON,
-                    error_type="CancelledError",
-                )
+                queued_original = queued if queued.original_grant is not None else None
+                if queued_original is None:
+                    await asyncio.to_thread(
+                        self._memory.try_update_scenario_run_state,
+                        scenario_result_id=scenario_result_id,
+                        expected_states={ScenarioRunState.CREATED, ScenarioRunState.QUEUED},
+                        scenario_run_state=ScenarioRunState.CANCELLED,
+                        error_message=_USER_CANCELLATION_REASON,
+                        error_type="CancelledError",
+                    )
                 self._queued_runs.remove(queued)
                 self._queue_revision += 1
             elif self._active_scenario_result_id == scenario_result_id:
@@ -678,6 +979,8 @@ class ScenarioRunService:
                 active.cancellation_error_type = "CancelledError"
                 task = active.task
             else:
+                if OriginalRunBinding.METADATA_KEY in (getattr(results[0], "metadata", None) or {}):
+                    raise OriginalAdmissionError(reason=OriginalRunReason.CLEANUP_PENDING)
                 latest = await asyncio.to_thread(
                     self._memory.get_scenario_results,
                     scenario_result_ids=[scenario_result_id],
@@ -697,24 +1000,54 @@ class ScenarioRunService:
                     error_type="CancelledError",
                 )
 
+        if queued_original is not None:
+            assert queued_original.original_grant is not None and queued_original.original_job is not None
+            cleanup_task = asyncio.create_task(
+                self._release_original_grant_async(
+                    grant=queued_original.original_grant, job=queued_original.original_job, cancelled=True
+                )
+            )
+            cancelled_during_cleanup = False
+            try:
+                cleanup = await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                cleanup = await cleanup_task
+                cancelled_during_cleanup = True
+            await self._terminalize_original_job_async(
+                job=queued_original.original_job,
+                binding=OriginalRunBinding(
+                    profile_ref=queued_original.original_grant.profile_ref,
+                    operator_oid=queued_original.original_grant.operator_oid,
+                ),
+                cleanup=cleanup,
+                state=ScenarioRunState.CANCELLED if cleanup.proved else ScenarioRunState.FAILED,
+            )
+            if cancelled_during_cleanup:
+                raise asyncio.CancelledError
+
         if task is not None and not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
+        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id, operator=operator)
         result = await asyncio.to_thread(
             self.get_run_from_storage,
             scenario_result_id=scenario_result_id,
             active_error=snapshot.error,
             queue_position=snapshot.queue_position,
             active_scenario_result_id=snapshot.active_scenario_result_id,
+            operator=operator,
         )
-        if result is not None and result.status != ScenarioRunState.CANCELLED:
+        if (
+            result is not None
+            and result.status != ScenarioRunState.CANCELLED
+            and not (result.original_run_admission is not None and result.status is ScenarioRunState.FAILED)
+        ):
             raise ValueError(f"Cannot cancel run in '{result.status}' state.")
         return result
 
-    def get_queue_snapshot(self) -> ScenarioQueueSnapshot:
+    def get_queue_snapshot(self, *, operator: AuthenticatedUser | None = None) -> ScenarioQueueSnapshot:
         """
         Return the current in-process FIFO scheduler state.
 
@@ -722,14 +1055,32 @@ class ScenarioRunService:
             ScenarioQueueSnapshot: Active run and ordered waiting runs.
         """
         snapshot_at = datetime.now(UTC)
+        gateway = get_original_run_gateway()
+
+        def visible(run: _ActiveTask) -> bool:
+            """
+            Hide other operators' private Scenario reservations from the queue.
+
+            Returns:
+                bool: Whether this operator may see the queued or active entry.
+            """
+            grant = run.original_grant
+            return grant is None or (
+                gateway is not None
+                and gateway.authorized(operator=operator)
+                and operator is not None
+                and operator.oid == grant.operator_oid
+            )
+
         active = None
         if self._active_scenario_result_id is not None:
             active_run = self._active_tasks.get(self._active_scenario_result_id)
-            if active_run is not None:
+            if active_run is not None and visible(active_run):
                 active = self._build_queue_entry(run=active_run, state=ScenarioRunState.IN_PROGRESS)
         queued = [
             self._build_queue_entry(run=run, state=ScenarioRunState.QUEUED, position=position)
             for position, run in enumerate(self._queued_runs, start=1)
+            if visible(run)
         ]
         return ScenarioQueueSnapshot(
             revision=self._queue_revision,
@@ -773,6 +1124,46 @@ class ScenarioRunService:
                 )
                 if header is None or header.metadata.get(_SCHEDULER_METADATA_KEY) != _SCHEDULER_METADATA_VALUE:
                     continue
+                if self._requires_original_run_binding(scenario_result=header):
+                    try:
+                        if header.scenario_identifier.params.get("execution_owner") != (
+                            ScenarioExecutionOwner.APPROVED_ORIGINAL.value
+                        ):
+                            raise ValueError("A protected private Scenario cannot be reconciled in the web process.")
+                        binding = OriginalRunBinding.model_validate(header.metadata[OriginalRunBinding.METADATA_KEY])
+                        job = OriginalWorkerJob.model_validate(header.metadata[OriginalWorkerJob.METADATA_KEY])
+                        if job.app_run_id != header.id:
+                            raise ValueError("Original job identity differs from the stored run.")
+                    except (KeyError, ValidationError, ValueError) as error:
+                        logger.error("Interrupted protected job has no valid app binding (%s).", type(error).__name__)
+                        await asyncio.to_thread(
+                            self._memory.update_scenario_run_state,
+                            scenario_result_id=result.scenario_result_id,
+                            scenario_run_state=ScenarioRunState.FAILED,
+                            error_message=OriginalRunReason.SOURCE_UNVERIFIED.value,
+                            error_type=_INTERRUPTED_ERROR_TYPE,
+                        )
+                        reconciled += 1
+                        continue
+                    await asyncio.to_thread(
+                        self._memory.update_scenario_run_state_and_metadata_fields,
+                        scenario_result_id=result.scenario_result_id,
+                        scenario_run_state=ScenarioRunState.FAILED,
+                        error_message=OriginalRunReason.CLEANUP_PENDING.value,
+                        error_type=_INTERRUPTED_ERROR_TYPE,
+                        metadata_fields={
+                            OriginalSourceResult.METADATA_KEY: OriginalSourceResult(
+                                profile_ref=binding.profile_ref,
+                                status=OriginalRunStatus.CLEANUP_UNCERTAIN,
+                                source_state="error",
+                                source_coverage_complete=False,
+                                cleanup_state="uncontained",
+                                reason=OriginalRunReason.CLEANUP_PENDING,
+                            ).model_dump(mode="json")
+                        },
+                    )
+                    reconciled += 1
+                    continue
                 await asyncio.to_thread(
                     self._memory.update_scenario_run_state,
                     scenario_result_id=result.scenario_result_id,
@@ -803,6 +1194,8 @@ class ScenarioRunService:
                 if queued:
                     self._queue_revision += 1
                 for run in queued:
+                    if run.original_grant is not None:
+                        continue
                     try:
                         await asyncio.to_thread(
                             self._memory.update_scenario_run_state,
@@ -833,7 +1226,28 @@ class ScenarioRunService:
                         self._active_scenario_result_id = None
                         self._release_completed_task(scenario_result_id=active.scenario_result_id)
                         self._queue_revision += 1
+        for run in queued:
+            if run.original_grant is None:
+                continue
+            assert run.original_job is not None
+            cleanup = await self._release_original_grant_async(
+                grant=run.original_grant, job=run.original_job, cancelled=True
+            )
+            try:
+                await self._terminalize_original_job_async(
+                    job=run.original_job,
+                    binding=OriginalRunBinding(
+                        profile_ref=run.original_grant.profile_ref, operator_oid=run.original_grant.operator_oid
+                    ),
+                    cleanup=cleanup,
+                    state=ScenarioRunState.FAILED,
+                )
+            except Exception as error:
+                errors.append(error)
         await asyncio.to_thread(self._prepare_executor.shutdown, wait=True)
+        if self._original_cleanup_tasks:
+            cleanup_outcomes = await asyncio.gather(*self._original_cleanup_tasks, return_exceptions=True)
+            errors.extend(error for error in cleanup_outcomes if isinstance(error, Exception))
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -1024,7 +1438,7 @@ class ScenarioRunService:
             raise RuntimeError(f"Scenario run '{run.scenario_result_id}' has incomplete queue timestamps.")
         return ScenarioQueueEntry(
             scenario_result_id=run.scenario_result_id,
-            scenario_name=run.scenario_name,
+            scenario_name="ServerApprovedOriginalScenario" if run.original_grant is not None else run.scenario_name,
             scenario_registry_name=run.scenario_registry_name,
             created_at=run.created_at,
             enqueued_at=run.enqueued_at,
@@ -1102,6 +1516,9 @@ class ScenarioRunService:
             scenario_result_id: The scenario result ID for this run.
         """
         active = self._active_tasks[scenario_result_id]
+        if active.original_grant is not None:
+            await self._execute_original_run_async(active=active)
+            return
         assert active.scenario is not None
         handoff_ready = True
 
@@ -1152,6 +1569,127 @@ class ScenarioRunService:
             if handoff_ready:
                 await self._complete_handoff_async(scenario_result_id=scenario_result_id)
 
+    async def _execute_original_run_async(self, *, active: _ActiveTask) -> None:
+        """Wait on one isolated worker job, then publish only broker-verified source and cleanup."""
+        assert active.original_grant is not None and active.original_job is not None
+        gateway = get_original_run_gateway()
+        grant = active.original_grant
+        job = active.original_job
+        succeeded = False
+        cancelled = False
+        if gateway is None:
+            logger.error("Original runner disappeared before its admitted worker started.")
+        else:
+            try:
+                await gateway.runner.start_worker_async(grant=grant, job=job)
+                await gateway.runner.wait_worker_async(grant=grant, job=job)
+                succeeded = True
+            except asyncio.CancelledError:
+                cancelled = True
+                try:
+                    await gateway.runner.abort_worker_async(grant=grant, job=job)
+                except Exception as error:
+                    logger.error("Original worker abort could not be verified (%s).", type(error).__name__)
+            except Exception as error:
+                logger.error("An isolated original worker failed (%s).", type(error).__name__)
+
+        cleanup = await self._release_original_grant_async(grant=grant, job=job, cancelled=cancelled or not succeeded)
+        reason = OriginalRunReason.CLEANUP_PENDING if not cleanup.proved else OriginalRunReason.SOURCE_UNVERIFIED
+        source_result: OriginalSourceResult | None = None
+        evidence_link: OriginalRunEvidenceLink | None = None
+        try:
+            header = await asyncio.to_thread(
+                self._memory.get_scenario_result_header, scenario_result_id=active.scenario_result_id
+            )
+            if header is None or gateway is None:
+                raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+            source_result, evidence_link = await asyncio.to_thread(
+                gateway.verify_result,
+                scenario_result=header,
+                job=job,
+                binding=OriginalRunBinding(profile_ref=grant.profile_ref, operator_oid=grant.operator_oid),
+                cleanup=cleanup,
+            )
+            if not succeeded and source_result.status is OriginalRunStatus.COMPLETED:
+                source_result = OriginalSourceResult.model_validate(
+                    {
+                        **source_result.model_dump(mode="json"),
+                        "status": OriginalRunStatus.FAILED_SOURCE_VERIFIED.value,
+                        "reason": OriginalRunReason.SOURCE_UNVERIFIED.value,
+                    }
+                )
+            if cancelled and evidence_link is None:
+                source_result = source_result.model_copy(update={"source_state": "cancelled"})
+            fields = {
+                OriginalCleanupReceipt.METADATA_KEY: cleanup.model_dump(mode="json"),
+                OriginalSourceResult.METADATA_KEY: source_result.model_dump(mode="json"),
+            }
+            if evidence_link is not None:
+                fields[OriginalRunEvidenceLink.METADATA_KEY] = evidence_link.model_dump(mode="json")
+            await asyncio.to_thread(
+                self._memory.update_scenario_metadata_fields,
+                scenario_result_id=active.scenario_result_id,
+                fields=fields,
+            )
+        except OriginalAdmissionError as error:
+            reason = error.reason
+            logger.error("Admitted original run lacks a verified source result (%s).", reason.value)
+        except Exception as error:
+            reason = OriginalRunReason.SOURCE_UNVERIFIED
+            logger.error("Original source proof could not be retained (%s).", type(error).__name__)
+
+        if source_result is None:
+            active.error = reason.value
+            active.retain_error_on_terminalization = True
+            try:
+                await self._terminalize_original_job_async(
+                    job=job,
+                    binding=OriginalRunBinding(profile_ref=grant.profile_ref, operator_oid=grant.operator_oid),
+                    cleanup=cleanup,
+                    state=ScenarioRunState.FAILED,
+                )
+            finally:
+                await self._complete_handoff_async(scenario_result_id=active.scenario_result_id)
+            return
+
+        completed = (
+            succeeded
+            and cleanup.proved
+            and source_result is not None
+            and source_result.status is OriginalRunStatus.COMPLETED
+        )
+        state = (
+            ScenarioRunState.COMPLETED
+            if completed
+            else ScenarioRunState.CANCELLED
+            if cancelled and cleanup.proved and active.cancellation_state is not ScenarioRunState.FAILED
+            else ScenarioRunState.FAILED
+        )
+        if state is ScenarioRunState.COMPLETED:
+            active.error = None
+        elif state is ScenarioRunState.FAILED:
+            active.error = reason.value
+            active.retain_error_on_terminalization = True
+        try:
+            updated = await asyncio.to_thread(
+                self._memory.try_update_scenario_run_state,
+                scenario_result_id=active.scenario_result_id,
+                expected_states={
+                    ScenarioRunState.CREATED,
+                    ScenarioRunState.IN_PROGRESS,
+                    ScenarioRunState.COMPLETED,
+                    ScenarioRunState.FAILED,
+                    ScenarioRunState.CANCELLED,
+                },
+                scenario_run_state=state,
+                error_message=reason.value if state is ScenarioRunState.FAILED else None,
+                error_type="OriginalAdmissionError" if state is ScenarioRunState.FAILED else None,
+            )
+            if not updated:
+                logger.error("Original Scenario %s could not publish a terminal state.", active.scenario_result_id)
+        finally:
+            await self._complete_handoff_async(scenario_result_id=active.scenario_result_id)
+
     def _build_response(
         self,
         *,
@@ -1159,6 +1697,7 @@ class ScenarioRunService:
         active_error: str | None,
         queue_position: int | None,
         active_scenario_result_id: str | None,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunSummary | None:
         """
         Build a ScenarioRunResponse by querying the database and merging active task state.
@@ -1168,6 +1707,7 @@ class ScenarioRunService:
             active_error: Error copied from the active asyncio task, if any.
             queue_position: Current 1-based waiting position, if queued.
             active_scenario_result_id: Currently executing scenario result ID.
+            operator: Authenticated operator when building a protected original response.
 
         Returns:
             ScenarioRunResponse if found in the database, None otherwise.
@@ -1180,6 +1720,7 @@ class ScenarioRunService:
             active_error=active_error,
             queue_position=queue_position,
             active_scenario_result_id=active_scenario_result_id,
+            operator=operator,
         )
 
     def _build_response_from_db(
@@ -1189,6 +1730,7 @@ class ScenarioRunService:
         active_error: str | None = None,
         queue_position: int | None = None,
         active_scenario_result_id: str | None = None,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunSummary:
         """
         Build a ScenarioRunResponse from a database ScenarioResult, merged with active task info.
@@ -1198,10 +1740,19 @@ class ScenarioRunService:
             active_error: Error copied from the active asyncio task, if any.
             queue_position: Current 1-based waiting position, if queued.
             active_scenario_result_id: Currently executing scenario result ID.
+            operator: Authenticated operator when building a protected original response.
 
         Returns:
             The API response model.
         """
+        self._reject_unbound_original_run(scenario_result=scenario_result)
+        if OriginalRunBinding.METADATA_KEY in (getattr(scenario_result, "metadata", None) or {}):
+            return self._original_run_summary(
+                scenario_result=scenario_result,
+                operator=operator,
+                queue_position=queue_position,
+                active_scenario_result_id=active_scenario_result_id,
+            )
         scenario_result_id = str(scenario_result.id)
 
         # Primary source: DB-persisted error fields
@@ -1354,6 +1905,179 @@ class ScenarioRunService:
             active_scenario_result_id=active_scenario_result_id,
             overload_summaries=self._build_overload_summaries(retry_events=overload_events),
             original_inspect_import=original_inspect_import,
+        )
+
+    def _original_run_binding(
+        self, *, scenario_result: ScenarioResult, operator: AuthenticatedUser | None
+    ) -> tuple[OriginalRunBinding, OriginalSourceResult | None]:
+        """
+        Recheck the host ACL and typed source/cleanup receipts without exposing private Scenario metadata.
+
+        Returns:
+            tuple[OriginalRunBinding, OriginalSourceResult | None]: The authorized binding and safe result.
+
+        Raises:
+            OriginalAdmissionError: If authorization or persisted source proof is missing.
+        """
+        gateway = get_original_run_gateway()
+        if gateway is None:
+            raise OriginalAdmissionError(reason=OriginalRunReason.RUNNER_NOT_CONFIGURED)
+        metadata = scenario_result.metadata or {}
+        try:
+            binding = OriginalRunBinding.model_validate(metadata.get(OriginalRunBinding.METADATA_KEY))
+            job = OriginalWorkerJob.model_validate(metadata.get(OriginalWorkerJob.METADATA_KEY))
+        except ValidationError as error:
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED) from error
+        if (
+            not gateway.authorized(operator=operator)
+            or operator is None
+            or operator.oid != binding.operator_oid
+            or binding.profile_ref != gateway.runner.profile_ref
+        ):
+            raise OriginalAdmissionError(reason=OriginalRunReason.OPERATOR_NOT_AUTHORIZED)
+        if job.app_run_id != scenario_result.id:
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+        raw_cleanup = metadata.get(OriginalCleanupReceipt.METADATA_KEY)
+        try:
+            cleanup = OriginalCleanupReceipt.model_validate(raw_cleanup) if raw_cleanup is not None else None
+            raw_published = metadata.get(OriginalSourceResult.METADATA_KEY)
+            published = OriginalSourceResult.model_validate(raw_published) if raw_published is not None else None
+            raw_link = metadata.get(OriginalRunEvidenceLink.METADATA_KEY)
+            retained_link = OriginalRunEvidenceLink.model_validate(raw_link) if raw_link is not None else None
+        except ValidationError as error:
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED) from error
+        if scenario_result.scenario_run_state in (ScenarioRunState.FAILED, ScenarioRunState.CANCELLED) and (
+            published is None or (cleanup is None and published.status is not OriginalRunStatus.CLEANUP_UNCERTAIN)
+        ):
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+        if (
+            cleanup is None
+            and published is None
+            and retained_link is None
+            and scenario_result.scenario_run_state
+            not in (
+                ScenarioRunState.COMPLETED,
+                ScenarioRunState.FAILED,
+                ScenarioRunState.CANCELLED,
+            )
+        ):
+            return binding, None
+        verified, verified_link = gateway.verify_result(
+            scenario_result=scenario_result, job=job, binding=binding, cleanup=cleanup
+        )
+        if (
+            published != verified
+            or retained_link != verified_link
+            or (
+                scenario_result.scenario_run_state is ScenarioRunState.COMPLETED
+                and verified.status is not OriginalRunStatus.COMPLETED
+            )
+        ):
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+        return binding, verified
+
+    @staticmethod
+    def _requires_original_run_binding(*, scenario_result: ScenarioResult) -> bool:
+        """
+        Detect protected TaskOwnedScenario identity even if its metadata binding was removed.
+
+        Returns:
+            bool: True only for Scenario identities that opted into server admission.
+        """
+        identifier = getattr(scenario_result, "scenario_identifier", None)
+        return isinstance(identifier, ScenarioIdentifier) and (
+            identifier.class_name == "ServerApprovedOriginalScenario"
+            or identifier.params.get("execution_owner") == ScenarioExecutionOwner.APPROVED_ORIGINAL.value
+            or identifier.params.get("server_admission_required") is True
+        )
+
+    @classmethod
+    def _reject_unbound_original_run(cls, *, scenario_result: ScenarioResult) -> None:
+        """
+        Refuse a protected result whose independent admission binding has vanished.
+
+        Raises:
+            OriginalAdmissionError: If a protected run could otherwise fall through to generic output.
+        """
+        protected = cls._requires_original_run_binding(scenario_result=scenario_result)
+        if protected and OriginalRunBinding.METADATA_KEY not in (getattr(scenario_result, "metadata", None) or {}):
+            raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+
+    def _original_run_summary(
+        self,
+        *,
+        scenario_result: ScenarioResult,
+        operator: AuthenticatedUser | None,
+        queue_position: int | None,
+        active_scenario_result_id: str | None,
+    ) -> ScenarioRunSummary:
+        """
+        Present only approved source grade, completion and cleanup; never a private source identifier.
+
+        Returns:
+            ScenarioRunSummary: The sanitized operator-facing run state.
+        """
+        binding, result = self._original_run_binding(scenario_result=scenario_result, operator=operator)
+        status = scenario_result.scenario_run_state
+        if result is not None and result.status is OriginalRunStatus.CLEANUP_UNCERTAIN:
+            readiness = OriginalRunStatus.CLEANUP_UNCERTAIN
+        elif status is ScenarioRunState.COMPLETED:
+            readiness = OriginalRunStatus.COMPLETED
+        elif status is ScenarioRunState.IN_PROGRESS:
+            readiness = OriginalRunStatus.RUNNING
+        elif status in (ScenarioRunState.CREATED, ScenarioRunState.QUEUED):
+            readiness = OriginalRunStatus.ADMISSION_PENDING
+        else:
+            readiness = OriginalRunStatus.FAILED_UNGRADED
+        safe_error = scenario_result.error_message
+        stored_reason = next((reason for reason in OriginalRunReason if reason.value == safe_error), None)
+        failure_reason = (
+            result.reason
+            if result is not None and result.reason is not None
+            else (stored_reason or OriginalRunReason.SOURCE_UNVERIFIED if status is ScenarioRunState.FAILED else None)
+        )
+        admission = OriginalRunAdmission(
+            profile_ref=binding.profile_ref,
+            status=readiness,
+            unmet_conditions=[failure_reason] if failure_reason is not None else [],
+        )
+        terminal = status in (ScenarioRunState.COMPLETED, ScenarioRunState.FAILED, ScenarioRunState.CANCELLED)
+        return ScenarioRunSummary(
+            scenario_result_id=str(scenario_result.id),
+            scenario_name="ServerApprovedOriginalScenario",
+            scenario_registry_name=APPROVED_ORIGINAL_SCENARIO,
+            scenario_version=1,
+            status=status,
+            created_at=scenario_result.creation_time,
+            started_at=self._load_started_at(scenario_result=scenario_result),
+            updated_at=(
+                scenario_result.completion_time
+                if terminal and scenario_result.completion_time is not None
+                else scenario_result.creation_time
+            ),
+            error=failure_reason.value if failure_reason is not None else None,
+            error_type=None,
+            techniques_used=["original_task"],
+            total_attacks=1,
+            completed_attacks=int(status is ScenarioRunState.COMPLETED),
+            objective_achieved_rate=None,
+            failed_attacks=[],
+            attack_retries=[],
+            total_retries=0,
+            labels={},
+            completed_at=scenario_result.completion_time if terminal else None,
+            pyrit_version=scenario_result.pyrit_version,
+            target=None,
+            datasets_used=[],
+            scenario_parameters={"profile_ref": binding.profile_ref, "model_role": "evaluated"},
+            planned_total_available=True,
+            successful_attacks=0,
+            error_attacks=0,
+            attack_details_available=False,
+            queue_position=queue_position,
+            active_scenario_result_id=active_scenario_result_id,
+            original_run_admission=admission,
+            original_source_result=result,
         )
 
     @staticmethod
@@ -2176,7 +2900,9 @@ class ScenarioRunService:
             return None
         return active
 
-    def snapshot_active_run(self, *, scenario_result_id: str) -> _ActiveRunSnapshot:
+    def snapshot_active_run(
+        self, *, scenario_result_id: str, operator: AuthenticatedUser | None = None
+    ) -> _ActiveRunSnapshot:
         """
         Copy asyncio-owned run state for use by database-only worker-thread methods.
 
@@ -2184,6 +2910,16 @@ class ScenarioRunService:
             _ActiveRunSnapshot: An immutable copy of the active state.
         """
         active_scenario_result_id = self._active_scenario_result_id
+        current = self._active_tasks.get(active_scenario_result_id) if active_scenario_result_id is not None else None
+        if current is not None and current.original_grant is not None:
+            gateway = get_original_run_gateway()
+            if (
+                gateway is None
+                or not gateway.authorized(operator=operator)
+                or operator is None
+                or operator.oid != current.original_grant.operator_oid
+            ):
+                active_scenario_result_id = None
         queue_position = next(
             (
                 position
@@ -2322,11 +3058,22 @@ class ScenarioRunService:
         active_group_ids: Sequence[str],
         queue_position: int | None = None,
         active_scenario_result_id: str | None = None,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunProgress | None:
         """Return compact database progress using a previously captured live-state snapshot."""
         header_result = self._memory.get_scenario_result_header(scenario_result_id=scenario_result_id)
         if header_result is None:
             return None
+        self._reject_unbound_original_run(scenario_result=header_result)
+        if OriginalRunBinding.METADATA_KEY in (getattr(header_result, "metadata", None) or {}):
+            if since is not None:
+                raise ValueError("Approved original runs have no PyRIT attack-attempt cursor.")
+            return self._original_run_progress(
+                scenario_result=header_result,
+                operator=operator,
+                queue_position=queue_position,
+                active_scenario_result_id=active_scenario_result_id,
+            )
 
         try:
             plan = self._load_run_plan(scenario_result=header_result)
@@ -2417,6 +3164,122 @@ class ScenarioRunService:
             plan_complete=plan_complete,
         )
 
+    def _original_run_progress(
+        self,
+        *,
+        scenario_result: ScenarioResult,
+        operator: AuthenticatedUser | None,
+        queue_position: int | None,
+        active_scenario_result_id: str | None,
+    ) -> ScenarioRunProgress:
+        """
+        Return a redacted one-case plan with source completion and no invented attack attempt.
+
+        Returns:
+            ScenarioRunProgress: Safe original-run coverage, grade and cleanup status.
+        """
+        summary = self._original_run_summary(
+            scenario_result=scenario_result,
+            operator=operator,
+            queue_position=queue_position,
+            active_scenario_result_id=active_scenario_result_id,
+        )
+        assert summary.original_run_admission is not None
+        case_id = f"approved-case-{scenario_result.id.hex}"
+        group_id = config_hash({"original_run": str(scenario_result.id), "schema": 1})
+        objective = "Approved original case"
+        plan = ScenarioRunPlan(
+            scenario_registry_name=APPROVED_ORIGINAL_SCENARIO,
+            atomic_groups=[
+                ScenarioRunPlanAtomicGroup(
+                    id=group_id,
+                    atomic_attack_name="original_task",
+                    display_group="Original Task",
+                    technique_name="original_task",
+                    technique_eval_hash=config_hash({"profile_ref": summary.original_run_admission.profile_ref}),
+                    seed_group_ids=[case_id],
+                )
+            ],
+            seed_groups=[
+                ScenarioRunPlanSeedGroup(
+                    id=case_id,
+                    objective=objective,
+                    objective_sha256=to_sha256(objective),
+                )
+            ],
+        )
+        counts = ScenarioProgressCounts(
+            completed=summary.completed_attacks,
+            planned=1,
+            succeeded=0,
+            success_percentage=None,
+            errors=int(summary.status is ScenarioRunState.FAILED),
+            retries=0,
+        )
+        group_status = (
+            "COMPLETED"
+            if summary.status is ScenarioRunState.COMPLETED
+            else "RUNNING"
+            if summary.status is ScenarioRunState.IN_PROGRESS
+            else "INCOMPLETE"
+            if summary.status in (ScenarioRunState.FAILED, ScenarioRunState.CANCELLED)
+            else "PENDING"
+        )
+        return ScenarioRunProgress(
+            run=ScenarioProgressHeader(
+                scenario_result_id=summary.scenario_result_id,
+                scenario_name=summary.scenario_name,
+                scenario_registry_name=summary.scenario_registry_name,
+                scenario_version=summary.scenario_version,
+                status=summary.status,
+                created_at=summary.created_at,
+                started_at=summary.started_at,
+                completed_at=summary.completed_at,
+                pyrit_version=summary.pyrit_version,
+                techniques_used=summary.techniques_used,
+                scenario_parameters=summary.scenario_parameters,
+                queue_position=summary.queue_position,
+                active_scenario_result_id=summary.active_scenario_result_id,
+                original_run_admission=summary.original_run_admission,
+                original_source_result=summary.original_source_result,
+                failure_reason=summary.error,
+            ),
+            plan=plan,
+            results=[],
+            summary=ScenarioProgressSummary(
+                overall=counts,
+                display_groups=[
+                    ScenarioDisplayGroupProgress(
+                        **counts.model_dump(),
+                        id="original_task",
+                        display_group="Original Task",
+                        atomic_attack_names=["original_task"],
+                        atomic_group_ids=[group_id],
+                    )
+                ],
+                techniques=[
+                    ScenarioTechniqueProgress(
+                        **counts.model_dump(),
+                        id="original_task",
+                        display_group="Original Task",
+                        atomic_attack_names=["original_task"],
+                        atomic_group_ids=[group_id],
+                    )
+                ],
+                seed_groups=[ScenarioSeedGroupProgress(**counts.model_dump(), id=case_id, objective=None)],
+                atomic_groups=[
+                    ScenarioAtomicGroupProgress(
+                        **counts.model_dump(),
+                        id=group_id,
+                        atomic_attack_name="original_task",
+                        display_group="Original Task",
+                        status=group_status,
+                    )
+                ],
+            ),
+            plan_complete=True,
+        )
+
     @staticmethod
     def _encode_progress_cursor(*, scenario_result_id: str, delta: ScenarioAttackResultDelta) -> str:
         payload = {
@@ -2453,12 +3316,15 @@ class ScenarioRunService:
             raise ValueError("Cursor timestamp must include a timezone.")
         return AttackResultKeysetCursor(timestamp=timestamp, attack_result_id=attack_result_id)
 
-    def get_run_results(self, *, scenario_result_id: str) -> ScenarioResult | None:
+    def get_run_results(
+        self, *, scenario_result_id: str, operator: AuthenticatedUser | None = None
+    ) -> ScenarioResult | None:
         """
         Get the ScenarioResult for a completed scenario run.
 
         Args:
             scenario_result_id: The scenario result ID.
+            operator: Authenticated operator for protected original runs.
 
         Returns:
             ScenarioResult if the run is completed and results exist, None if not found.
@@ -2471,6 +3337,10 @@ class ScenarioRunService:
             return None
 
         scenario_result = results[0]
+        self._reject_unbound_original_run(scenario_result=scenario_result)
+        if OriginalRunBinding.METADATA_KEY in (getattr(scenario_result, "metadata", None) or {}):
+            self._original_run_binding(scenario_result=scenario_result, operator=operator)
+            raise ValueError("Raw original evidence is not available from the Scenario results API.")
         run_response = self._build_response_from_db(scenario_result=scenario_result)
 
         if run_response.status != ScenarioRunState.COMPLETED:

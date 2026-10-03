@@ -30,6 +30,7 @@ import {
   ORIGINAL_INERT_SCENARIO_NAME,
   ORIGINAL_INERT_SCENARIO_TYPE,
 } from '@/components/Scenarios/originalInspectInert'
+import { APPROVED_ORIGINAL_SCENARIO_NAME } from '@/components/Scenarios/originalRunAdmission'
 import { useScenarioQueue } from '@/hooks/useScenarioQueue'
 import { labelsApi, scenariosApi } from '@/services/api'
 import { toApiError } from '@/services/errors'
@@ -453,14 +454,17 @@ function ScenarioHistoryTable({ runs, queueSnapshot, onOpenRun, now }: ScenarioH
                     </Text>
                   </div>
                 </Tooltip>
-              ) : isOriginalInspectInert(run) ? 'Task-owned (no external target)' : 'Unavailable'}
+              ) : isOriginalInspectInert(run) ? 'Task-owned (no external target)'
+                : isApprovedOriginalRun(run) ? 'Task-owned (evaluated model role)' : 'Unavailable'}
             </TableCell>
             <TableCell className={styles.nowrap}>{formatTimestamp(run.created_at)}</TableCell>
             <TableCell className={styles.nowrap}>
               {formatRuntime(run, now)}
             </TableCell>
             <TableCell className={styles.nowrap}>
-              {isOriginalInspectInert(run) && run.status === 'COMPLETED'
+              {isApprovedOriginalRun(run)
+                ? `${run.completed_attacks}/${run.total_attacks ?? 1} original cases`
+                : isOriginalInspectInert(run) && run.status === 'COMPLETED'
                 ? 'Original log imported'
                 : run.planned_total_available !== false && run.total_attacks !== null
                   ? `${run.completed_attacks}/${run.total_attacks}`
@@ -469,7 +473,11 @@ function ScenarioHistoryTable({ runs, queueSnapshot, onOpenRun, now }: ScenarioH
             <TableCell className={styles.nowrap}>
               {formatSuccess(run)}
             </TableCell>
-            <TableCell className={styles.nowrap}>{run.error_attacks} / {run.total_retries}</TableCell>
+            <TableCell className={styles.nowrap}>
+              {isApprovedOriginalRun(run)
+                ? `Coverage ${run.original_source_result?.source_coverage_complete ? 'complete' : 'unverified'} · Cleanup ${run.original_source_result?.cleanup_state ?? 'pending'}`
+                : `${run.error_attacks} / ${run.total_retries}`}
+            </TableCell>
             <TableCell>
               <div className={styles.badges}>
                 {Object.entries(run.labels).map(([key, value]) => (
@@ -489,6 +497,9 @@ function formatState(value: string): string {
 }
 
 function formatHistoryState(run: ScenarioRunListItem, queueSnapshot: ScenarioQueueSnapshot | null): string {
+  if (isApprovedOriginalRun(run) && run.original_source_result?.status === 'cleanup_uncertain') {
+    return 'Cleanup not verified'
+  }
   if (isTerminal(run.status)) {
     return formatState(run.status)
   }
@@ -550,6 +561,11 @@ function isTerminal(status: ScenarioRunState): boolean {
 }
 
 function formatSuccess(run: ScenarioRunListItem): string {
+  if (isApprovedOriginalRun(run)) {
+    return run.original_source_result?.original_score
+      ? `Original ${run.original_source_result.original_score} · outcome undetermined`
+      : 'Original score not verified'
+  }
   if (isOriginalInspectInert(run) && run.status === 'COMPLETED') {
     return 'Undetermined (original Inspect scorer)'
   }
@@ -569,4 +585,9 @@ function formatSuccess(run: ScenarioRunListItem): string {
 function isOriginalInspectInert(run: ScenarioRunListItem): boolean {
   return run.scenario_name === ORIGINAL_INERT_SCENARIO_TYPE
     && run.scenario_registry_name === ORIGINAL_INERT_SCENARIO_NAME
+}
+
+function isApprovedOriginalRun(run: ScenarioRunListItem): boolean {
+  return run.scenario_registry_name === APPROVED_ORIGINAL_SCENARIO_NAME
+    && Boolean(run.original_run_admission)
 }

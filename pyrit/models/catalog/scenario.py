@@ -49,6 +49,128 @@ class OriginalInspectTaskId(str, Enum):
     INERT = "inspect_original_inert"
 
 
+class OriginalRunStatus(str, Enum):
+    """Safe operator-visible state of a server-admitted original Task run."""
+
+    UNAVAILABLE = "unavailable"
+    ADMISSION_PENDING = "admission_pending"
+    READY = "ready"
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    COMPLETED = "completed"
+    FAILED_UNGRADED = "failed_ungraded"
+    FAILED_SOURCE_VERIFIED = "failed_source_verified"
+    CLEANUP_UNCERTAIN = "cleanup_uncertain"
+
+
+class OriginalRunReason(str, Enum):
+    """Finite reasons for refusing an original run without disclosing host configuration."""
+
+    RUNNER_NOT_CONFIGURED = "runner_not_configured"
+    OPERATOR_NOT_AUTHORIZED = "operator_not_authorized"
+    PROFILE_NOT_ADMITTED = "profile_not_admitted"
+    ADMISSION_EXPIRED = "admission_expired"
+    MODEL_ROUTE_UNVERIFIED = "model_route_unverified"
+    CAPACITY_BUSY = "capacity_busy"
+    PROVIDER_UNQUALIFIED = "provider_unqualified"
+    CLEANUP_PENDING = "cleanup_pending"
+    SOURCE_UNVERIFIED = "source_unverified"
+
+
+class OriginalRunAdmission(BaseModel):
+    """Browser-safe admission/profile/model-role references, never runtime credentials."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_ref: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    model_role: Literal["evaluated"] = "evaluated"
+    status: OriginalRunStatus
+    unmet_conditions: list[OriginalRunReason] = Field(default_factory=list)
+    admission_ref: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{32,96}$")
+
+    @model_validator(mode="after")
+    def _validate_offer(self) -> "OriginalRunAdmission":
+        """
+        Prevent a disabled capability from carrying a runnable reference.
+
+        Returns:
+            OriginalRunAdmission: The validated safe offer.
+
+        Raises:
+            ValueError: If a runnable offer is not ready or has unsatisfied conditions.
+        """
+        if self.admission_ref is not None and (self.status is not OriginalRunStatus.READY or self.unmet_conditions):
+            raise ValueError("Only a ready original run may carry a one-time admission reference.")
+        return self
+
+
+class OriginalSourceResult(BaseModel):
+    """Sanitized original grade and independently proven cleanup, not attack success."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    METADATA_KEY: ClassVar[str] = "approved_original_source_result"
+
+    profile_ref: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    model_role: Literal["evaluated"] = "evaluated"
+    status: OriginalRunStatus
+    source_state: Literal["success", "error", "cancelled"]
+    source_coverage_complete: bool
+    original_score: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._+-]{1,64}$")
+    pyrit_score_status: ScoreStatus | None = None
+    pyrit_outcome: Literal[AttackOutcome.UNDETERMINED] | None = None
+    cleanup_state: Literal["proved", "uncontained", "pending"]
+    case_count: int = Field(1, ge=1, le=1)
+    reason: OriginalRunReason | None = None
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "OriginalSourceResult":
+        """
+        Keep original grade, completion and cleanup as separate claims.
+
+        Returns:
+            OriginalSourceResult: The validated source-only projection.
+
+        Raises:
+            ValueError: If a completed result lacks grade, coverage or cleanup proof.
+        """
+        if self.status is OriginalRunStatus.COMPLETED and (
+            self.source_state != "success"
+            or not self.source_coverage_complete
+            or self.original_score is None
+            or self.pyrit_score_status is None
+            or self.pyrit_outcome is not AttackOutcome.UNDETERMINED
+            or self.cleanup_state != "proved"
+            or self.reason is not None
+        ):
+            raise ValueError("Completed original runs require verified source grade, coverage and cleanup.")
+        if self.status not in {
+            OriginalRunStatus.COMPLETED,
+            OriginalRunStatus.FAILED_UNGRADED,
+            OriginalRunStatus.FAILED_SOURCE_VERIFIED,
+            OriginalRunStatus.CLEANUP_UNCERTAIN,
+        }:
+            raise ValueError("Only terminal original results can be persisted.")
+        if self.status is OriginalRunStatus.FAILED_SOURCE_VERIFIED and (
+            self.original_score is None
+            or not self.source_coverage_complete
+            or self.pyrit_score_status is None
+            or self.pyrit_outcome is not AttackOutcome.UNDETERMINED
+            or self.cleanup_state != "proved"
+        ):
+            raise ValueError("A failed run can show a retained source grade only with verified import and cleanup.")
+        return self
+
+
+class OriginalRunEvidenceLink(BaseModel):
+    """Server-only reference to the broker's authenticated proof, not its raw worker SQLite."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    METADATA_KEY: ClassVar[str] = "approved_original_evidence_link"
+
+    job_ref: UUID
+    proof_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _validate_dataset_filter_mapping(
     value: dict[str, list[str]] | None,
 ) -> dict[str, list[str]] | None:
@@ -207,6 +329,9 @@ class RegisteredScenario(BaseModel):
         default_factory=ScenarioRunSizeEstimate.unavailable,
         description="Scenario-owned structured estimate of the default planned execution units",
     )
+    original_run_admission: OriginalRunAdmission | None = Field(
+        default=None, description="Server-owned, operator-scoped admission for an original Task runner"
+    )
 
 
 class ScenarioRunSizeEstimateRequest(BaseModel):
@@ -292,6 +417,11 @@ class RunScenarioRequest(BaseModel):
         None,
         description="Optional ID of an existing ScenarioResult to resume. "
         "If provided, the scenario will resume from prior progress instead of starting fresh.",
+    )
+    original_admission_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]{32,96}$",
+        description="Short-lived server-issued admission reference for the approved original-run facade only",
     )
 
     @field_validator("dataset_filters")
@@ -440,6 +570,8 @@ class ScenarioRunSummary(BaseModel):
     original_inspect_import: OriginalInspectImportSummary | None = Field(
         None, description="Exact archive and linked offline Score/AttackResult; outcome remains undetermined"
     )
+    original_run_admission: OriginalRunAdmission | None = None
+    original_source_result: OriginalSourceResult | None = None
 
 
 class ScenarioRunListItem(BaseModel):
@@ -481,6 +613,8 @@ class ScenarioRunListItem(BaseModel):
         True,
         description="Whether failed_attacks and attack_retries contain per-attempt details",
     )
+    original_run_admission: OriginalRunAdmission | None = None
+    original_source_result: OriginalSourceResult | None = None
 
 
 class ScenarioTargetSummary(BaseModel):

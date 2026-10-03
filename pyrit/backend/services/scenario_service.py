@@ -10,17 +10,25 @@ import logging
 from collections import OrderedDict
 from functools import lru_cache
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.scenarios import ListRegisteredScenariosResponse
+from pyrit.backend.services.original_run_admission import APPROVED_ORIGINAL_SCENARIO, get_original_run_gateway
 from pyrit.backend.services.scenario_configuration_resolver import ScenarioConfigurationResolver
 from pyrit.models.catalog.scenario import (
+    OriginalRunAdmission,
+    OriginalRunStatus,
     RegisteredScenario,
+    ScenarioRunSizeComponent,
     ScenarioRunSizeEstimate,
     ScenarioRunSizeEstimateRequest,
 )
 from pyrit.registry import ScenarioMetadata, ScenarioRegistry
 from pyrit.scenario.core.dataset_configuration import read_only_dataset_resolution
+
+if TYPE_CHECKING:
+    from pyrit.backend.middleware.auth import AuthenticatedUser
 
 logger = logging.getLogger(__name__)
 _ESTIMATE_CACHE_SIZE = 128
@@ -87,6 +95,7 @@ class ScenarioService:
         limit: int = 50,
         cursor: str | None = None,
         include_estimates: bool = True,
+        operator: AuthenticatedUser | None = None,
     ) -> ListRegisteredScenariosResponse:
         """
         List scenarios with optional default estimates and cursor pagination.
@@ -95,12 +104,23 @@ class ScenarioService:
             limit: Maximum number of scenarios to return.
             cursor: Scenario name after which the page starts.
             include_estimates: Whether to wait for default run-size estimates.
+            operator: Authenticated operator needed to expose a server-approved original profile.
 
         Returns:
             ListRegisteredScenariosResponse: The requested catalog page.
         """
-        all_metadata = self._registry.get_all_registered_class_metadata()
+        all_metadata = [
+            metadata
+            for metadata in self._registry.get_all_registered_class_metadata()
+            if not self._is_protected_class(scenario_name=metadata.registry_name)
+        ]
         all_summaries = [_metadata_to_registered_scenario(metadata=metadata) for metadata in all_metadata]
+        gateway = get_original_run_gateway()
+        if gateway is not None:
+            offer = await gateway.offer_async(operator=operator, issue_reference=False)
+            if offer is not None:
+                all_summaries.append(self._original_catalog_entry(offer=offer))
+                all_summaries.sort(key=lambda item: item.scenario_name)
 
         page, has_more = self._paginate(items=all_summaries, cursor=cursor, limit=limit)
         if include_estimates:
@@ -108,6 +128,8 @@ class ScenarioService:
             estimates = await asyncio.gather(
                 *(
                     self._get_default_run_size_estimate_async(metadata=metadata_by_name[item.scenario_name])
+                    if item.scenario_name != APPROVED_ORIGINAL_SCENARIO
+                    else asyncio.sleep(0, result=self._original_estimate(offer=item.original_run_admission))
                     for item in page
                 )
             )
@@ -130,13 +152,19 @@ class ScenarioService:
             ),
         )
 
-    async def get_scenario_async(self, *, scenario_name: str) -> RegisteredScenario | None:
+    async def get_scenario_async(
+        self, *, scenario_name: str, operator: AuthenticatedUser | None = None
+    ) -> RegisteredScenario | None:
         """
         Get one scenario and its cached default estimate.
 
         Returns:
             RegisteredScenario | None: The catalog entry, or None when it is not registered.
         """
+        if scenario_name == APPROVED_ORIGINAL_SCENARIO:
+            gateway = get_original_run_gateway()
+            offer = await gateway.offer_async(operator=operator, issue_reference=True) if gateway is not None else None
+            return self._original_catalog_entry(offer=offer) if offer is not None else None
         metadata = self._get_metadata(scenario_name=scenario_name)
         if metadata is not None:
             estimate = await self._get_default_run_size_estimate_async(metadata=metadata)
@@ -148,6 +176,7 @@ class ScenarioService:
         *,
         scenario_name: str,
         request: ScenarioRunSizeEstimateRequest,
+        operator: AuthenticatedUser | None = None,
     ) -> ScenarioRunSizeEstimate | None:
         """
         Estimate one configured scenario without creating a run.
@@ -155,10 +184,30 @@ class ScenarioService:
         Args:
             scenario_name: Registered scenario name.
             request: Request-specific techniques, datasets, baseline, and parameters.
+            operator: Authenticated operator needed to estimate an approved original profile.
 
         Returns:
             ScenarioRunSizeEstimate | None: Estimate, or ``None`` when the scenario is unknown.
         """
+        if scenario_name == APPROVED_ORIGINAL_SCENARIO:
+            gateway = get_original_run_gateway()
+            offer = await gateway.offer_async(operator=operator, issue_reference=False) if gateway is not None else None
+            if offer is None:
+                return None
+            if any(
+                value is not None
+                for value in (
+                    request.target_name,
+                    request.techniques,
+                    request.dataset_names,
+                    request.max_dataset_size,
+                    request.dataset_filters,
+                    request.include_baseline,
+                    request.scenario_params,
+                )
+            ):
+                raise ValueError("Approved original runs do not accept caller-selected targets or execution settings.")
+            return self._original_estimate(offer=offer)
         metadata = self._get_metadata(scenario_name=scenario_name)
         if metadata is None:
             return None
@@ -180,6 +229,8 @@ class ScenarioService:
         Returns:
             ScenarioMetadata | None: Registered metadata for the selected Scenario.
         """
+        if self._is_protected_class(scenario_name=scenario_name):
+            return None
         if scenario_name == "benchmark.inspect_original_inert":
             try:
                 scenario_class = self._registry.get_class(scenario_name)
@@ -187,6 +238,59 @@ class ScenarioService:
                 return None
             return self._registry.get_class_metadata(scenario_class)
         return self._registry.get_registered_class_metadata(scenario_name)
+
+    def _is_protected_class(self, *, scenario_name: str) -> bool:
+        """
+        Exclude explicitly protected classes even if server code registered them in the registry.
+
+        Returns:
+            bool: Whether the class requires a separate server admission.
+        """
+        try:
+            scenario_class = self._registry.get_class(scenario_name)
+        except KeyError:
+            return False
+        return bool(isinstance(scenario_class, type) and getattr(scenario_class, "SERVER_ADMISSION_REQUIRED", False))
+
+    @staticmethod
+    def _original_estimate(*, offer: OriginalRunAdmission | None) -> ScenarioRunSizeEstimate:
+        """
+        Estimate the one approved synthetic case only when admission is ready.
+
+        Returns:
+            ScenarioRunSizeEstimate: One safe case or an explicitly unavailable estimate.
+        """
+        if offer is None or offer.status is not OriginalRunStatus.READY:
+            return ScenarioRunSizeEstimate.unavailable(note="Original run admission is not ready.")
+        return ScenarioRunSizeEstimate(
+            estimated_attack_count=1,
+            components=[ScenarioRunSizeComponent(label="Approved original case", count=1)],
+            note="One original Task, no PyRIT replacement scorer or inferred success threshold.",
+        )
+
+    @classmethod
+    def _original_catalog_entry(cls, *, offer: OriginalRunAdmission) -> RegisteredScenario:
+        """
+        Publish only safe profile/role/readiness data, never the private Scenario's identity.
+
+        Returns:
+            RegisteredScenario: A generic, operator-scoped one-click catalog entry.
+        """
+        return RegisteredScenario(
+            scenario_name=APPROVED_ORIGINAL_SCENARIO,
+            scenario_type="ServerApprovedOriginalScenario",
+            description="Approved original evaluation with server-owned source and evaluated-model role.",
+            description_markdown="Run one approved original Task unchanged when host admission is ready.",
+            default_technique="original_task",
+            default_techniques=["original_task"],
+            aggregate_techniques=[],
+            all_techniques=["original_task"],
+            default_datasets=[],
+            baseline_policy="forbidden",
+            include_baseline_by_default=False,
+            default_run_size=cls._original_estimate(offer=offer),
+            original_run_admission=offer,
+        )
 
     async def _get_default_run_size_estimate_async(self, *, metadata: ScenarioMetadata) -> ScenarioRunSizeEstimate:
         """Return a cached, cancellation-safe scenario-owned estimate."""

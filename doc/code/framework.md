@@ -187,6 +187,13 @@ verified original scorer into a source-attributed PyRIT `Score` and
 result IDs. There is no reviewed success threshold for this Task, so its
 `AttackOutcome` remains UNDETERMINED even when the source Score is COMPLETE;
 the Scenario does not create a second, synthetic attack result or grade.
+An external original Task requires separate, default-off backend admission.
+The web process stores only an opaque actor-bound job, never imports the
+private `TaskOwnedScenario` or connects to its raw worker SQLite. A qualified
+host broker binds an approved operator/profile to a separately isolated
+worker, authenticates its typed source proof and separately verifies physical
+cleanup; the browser sees only a redacted grade and cleanup status, not
+private Task configuration or inferred attack success.
 Source case IDs and stable public configuration fingerprints are separate from the
 fresh run-instance ID, so identical reruns remain distinct. V1 task-owned runs do
 not automatically retry or resume after an ambiguous post-score persistence failure.

@@ -28,6 +28,7 @@ class ScenarioExecutionOwner(str, Enum):
     """Which component owns the target and grade for this Scenario run."""
 
     TASK_OWNED = "task_owned"
+    APPROVED_ORIGINAL = "approved_original"
 
 
 class ScenarioIdentifier(ComponentIdentifier):
@@ -67,6 +68,7 @@ class ScenarioIdentifier(ComponentIdentifier):
             "model_route_name",
             "model_route_sha256",
             "case_set_sha256",
+            "server_admission_required",
             "input_variant_sha256",
             "input_surface_id",
             "version",
@@ -102,6 +104,18 @@ class ScenarioIdentifier(ComponentIdentifier):
         Raises:
             ValueError: If a task-owned identity supplies a target, scorer, or unsafe reference.
         """
+        if self.params.get("execution_owner") == ScenarioExecutionOwner.APPROVED_ORIGINAL.value:
+            if (
+                self.class_name != "ServerApprovedOriginalScenario"
+                or self.objective_target is not None
+                or self.objective_scorer is not None
+                or set(self.params) != {"execution_owner", "version", "techniques", "datasets"}
+                or self.version != 1
+                or self.techniques
+                or self.datasets
+            ):
+                raise ValueError("Approved original job identities may contain only the server-owned reference.")
+            return self
         if self.params.get("execution_owner") != ScenarioExecutionOwner.TASK_OWNED.value:
             return self
         if self.objective_target is not None or self.objective_scorer is not None:
@@ -109,6 +123,8 @@ class ScenarioIdentifier(ComponentIdentifier):
         unknown = set(self.params) - self.TASK_OWNED_PARAM_NAMES
         if unknown:
             raise ValueError(f"Task-owned Scenario identifiers contain unsupported parameters: {sorted(unknown)}")
+        if "server_admission_required" in self.params and self.params["server_admission_required"] is not True:
+            raise ValueError("A server-admitted Task must declare an explicit protected Scenario identity")
         if self.params.get("source_kind") not in {kind.value for kind in EvalSourceKind}:
             raise ValueError("Task-owned Scenario identifiers require a known source_kind")
         for name in ("eval_spec_sha256", "source_sha256", "harness_sha256", "model_route_sha256", "case_set_sha256"):

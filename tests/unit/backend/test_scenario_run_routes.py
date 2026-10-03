@@ -10,7 +10,7 @@ from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import status
+from fastapi import Request, status
 from fastapi.testclient import TestClient
 
 import pyrit.backend.services.scenario_run_service as _svc_mod
@@ -250,6 +250,7 @@ class TestListScenarioRunsRoute:
             labels={"operator": ["alice", "bob"], "team": ["safety"]},
             limit=10,
             cursor="opaque",
+            operator=None,
         )
 
 
@@ -422,6 +423,7 @@ class TestGetScenarioRunRoute:
             active_group_ids=("active-group",),
             queue_position=None,
             active_scenario_result_id="test-run-id",
+            operator=None,
         )
         assert snapshot_thread[0] != storage_thread[0]
 
@@ -463,6 +465,7 @@ class TestGetScenarioRunRoute:
 
             result = await get_scenario_run_progress(
                 scenario_result_id="test-run-id",
+                http_request=Request({"type": "http", "state": {}}),
                 since=None,
                 limit=25,
             )
@@ -475,6 +478,7 @@ class TestGetScenarioRunRoute:
             active_group_ids=(),
             queue_position=None,
             active_scenario_result_id="test-run-id",
+            operator=None,
         )
 
 

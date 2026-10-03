@@ -1165,4 +1165,98 @@ describe('ScenarioDetail', () => {
     expect(screen.getByRole('button', { name: 'Run original Inspect Task' })).toBeEnabled()
     expect(mockNavigate).not.toHaveBeenCalled()
   })
+
+  it('launches a server-admitted original profile with only its one-use reference', async () => {
+    const user = userEvent.setup()
+    mockGetScenario.mockResolvedValueOnce(makeScenario({
+      scenario_name: 'benchmark.approved_original',
+      scenario_type: 'ServerApprovedOriginalScenario',
+      original_run_admission: {
+        profile_ref: 'approved_public_fixture',
+        model_role: 'evaluated',
+        status: 'ready',
+        unmet_conditions: [],
+        admission_ref: 'safeOneUseAdmissionReferenceValue12345',
+      },
+    }))
+    mockListTargets.mockRejectedValueOnce(new Error('No target registry configured'))
+    renderDetail('/scanner/benchmark.approved_original')
+
+    const launch = await screen.findByRole('button', { name: 'Run approved original Task' })
+    expect(screen.getByText(/Profile reference:/)).toHaveTextContent('approved_public_fixture')
+    expect(screen.getByText(/Model role:/)).toHaveTextContent('evaluated')
+    expect(screen.queryByTestId('scenario-target-select')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(mockListTargets).not.toHaveBeenCalled()
+    await user.click(launch)
+
+    await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith({
+      scenario_name: 'benchmark.approved_original',
+      original_admission_ref: 'safeOneUseAdmissionReferenceValue12345',
+    }))
+    expect(mockNavigate).toHaveBeenCalledWith('/scanner-history/sr-default', {
+      state: { scenarioName: 'benchmark.approved_original' },
+    })
+  })
+
+  it('disables an unqualified original profile and shows only finite admission reasons', async () => {
+    mockGetScenario.mockResolvedValueOnce(makeScenario({
+      scenario_name: 'benchmark.approved_original',
+      scenario_type: 'ServerApprovedOriginalScenario',
+      original_run_admission: {
+        profile_ref: 'approved_public_fixture',
+        model_role: 'evaluated',
+        status: 'admission_pending',
+        unmet_conditions: ['provider_unqualified', 'cleanup_pending'],
+      },
+    }))
+    renderDetail('/scanner/benchmark.approved_original')
+
+    expect(await screen.findByRole('button', { name: 'Run approved original Task' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('The original runner or host is not qualified yet.')
+    expect(screen.getByRole('alert')).toHaveTextContent('The original worker has no verified cleanup receipt.')
+    expect(mockStartRun).not.toHaveBeenCalled()
+  })
+
+  it('fails closed if a ready profile has no server-issued admission reference', async () => {
+    mockGetScenario.mockResolvedValueOnce(makeScenario({
+      scenario_name: 'benchmark.approved_original',
+      original_run_admission: {
+        profile_ref: 'approved_public_fixture',
+        model_role: 'evaluated',
+        status: 'ready',
+        unmet_conditions: [],
+        admission_ref: null,
+      },
+    }))
+    renderDetail('/scanner/benchmark.approved_original')
+
+    expect(await screen.findByRole('button', { name: 'Run approved original Task' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('No one-time admission was issued.')
+    expect(mockStartRun).not.toHaveBeenCalled()
+  })
+
+  it('does not display unexpected provider error details on rejected admission', async () => {
+    const user = userEvent.setup()
+    mockGetScenario.mockResolvedValueOnce(makeScenario({
+      scenario_name: 'benchmark.approved_original',
+      original_run_admission: {
+        profile_ref: 'approved_public_fixture',
+        model_role: 'evaluated',
+        status: 'ready',
+        unmet_conditions: [],
+        admission_ref: 'safeOneUseAdmissionReferenceValue12345',
+      },
+    }))
+    mockStartRun.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 409, data: { detail: 'secret=do-not-render https://host.example/internal' } },
+    })
+    renderDetail('/scanner/benchmark.approved_original')
+    await user.click(await screen.findByRole('button', { name: 'Run approved original Task' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The original run is unavailable.')
+    expect(screen.queryByText(/secret=do-not-render/)).not.toBeInTheDocument()
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
 })

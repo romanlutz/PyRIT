@@ -338,7 +338,84 @@ Scenarios retain their numeric rate. A rejected `.eval` leaves the planned
 case incomplete. Detail, history and the progress header expose only a vetted
 failure diagnosis (or a safe generic failure message), while full exception
 details remain in backend logs for reconciliation.
-Internal/private Tasks, arbitrary Python and cyber Evals are not selectable.
+Without separate server admission, internal/private Tasks, arbitrary Python
+and cyber Evals are not selectable.
+
+### Server-admitted original runner (disabled by default)
+
+The public repository installs **no** external original runner. Its optional
+`benchmark.approved_original` catalog facade returns 404 until trusted backend
+startup calls `install_trusted_original_runner` with an approved
+**separate-process broker**. A private `TaskOwnedScenario` is registered and
+initialized only inside that worker, after its isolated roots are established
+and before its private imports. It is never registered in, imported by or
+executed in the web process. Explicitly protected Scenario classes are also
+excluded from public registry discovery, and direct requests for their
+registry names are rejected before initializers run. No browser request,
+environment variable, Python path, URL or model deployment can install
+or configure the broker.
+
+For an authenticated operator whom the host runner explicitly admits, the
+facade returns only a safe profile reference, the fixed `evaluated` model
+role, readiness and finite unmet-condition codes. When ready, its detail
+page gets a short-lived, single-use, server-issued `admission_ref`, bound to
+that operator and the approved profile. A request contains exactly:
+
+```json
+{
+  "scenario_name": "benchmark.approved_original",
+  "original_admission_ref": "<server-issued-one-use-reference>"
+}
+```
+
+The backend consumes that reference before allocation and asks the broker to
+recheck ACL, profile qualification, process isolation and capacity. It stores
+only an opaque, actor-bound job envelope in its **projected** SQLite; no raw
+worker evidence, Score, AttackResult or storage root is accessible from the
+web process. The broker prepares, starts, waits for and aborts one fixed
+worker executable. Its private Task-owned work invokes the unchanged Task
+and original scorer and verifies the exact typed `.eval`, final ScoreEvent,
+one source-attributed Score/AttackResult and a separate terminal-operation
+receipt ID plus digest bound to the app job and source case
+**inside the worker**. A separate authenticated physical-closure receipt
+may prove cleanup even if no Sample or ScoreEvent was produced. The broker's
+release is idempotent observation, not another destructive cleanup command.
+The web process rechecks the broker's job-bound, authenticated proof and
+independent cleanup receipt against its persisted proof digest on later
+reads; it never opens the worker's SQLite. The browser gets an original
+scalar grade only when the broker's reviewed display policy permits that
+value. It never invents a numeric grade, replaces the original scorer or
+maps a categorical value such as `C` into attack success.
+
+Detail, progress and history return a redacted `original_source_result`
+with an allowlisted scalar original grade, coverage, PyRIT Score status,
+undetermined attack outcome and **separate** cleanup status. The raw private
+Scenario result, its original case plan and its attack-conversation routes
+are not browser endpoints. A source grade without proven cleanup is
+`cleanup_uncertain` and 0/1 completed; no Sample or source score despite
+proved physical closure is `failed_ungraded`, also 0/1. A cancelled run
+requires an exact job abort and closure observation; lack of either proof
+fails visibly, never as a completed evaluation. Physical absence alone
+does **not** imply that the original Task reached its final scorer.
+An authenticated original grade retained after incomplete execution is
+`failed_source_verified` with 0/1 completed, not a success claim.
+After a web-process interruption, the projected job is marked failed with
+cleanup unverified; a later conflicting broker proof requires explicit
+reconciliation rather than retroactively assuming completion.
+Receipt IDs, Task names, case IDs, private paths, endpoints and
+credentials remain on the host.
+
+This is an admission **contract with an out-of-process public inert-fixture
+HTTP/SQLite test**, not a deployed or qualified private broker. The test
+worker establishes fresh local app-data, Inspect, temp and SQLite roots
+before imports, runs the SHA-pinned harmless Task, and verifies the
+source-linked Score/AttackResult inside its own process. The production
+broker must additionally qualify its fixed executable, deadline, transport,
+private host relay, authenticated job-bound proof, operation-terminal
+receipt and exact resource cleanup independently before issuing a ready
+admission. In particular, a physical cleanup receipt after a failed
+pre-Sample attempt is not a source grade. The public default makes no
+resource or model call.
 
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
 into a bounded run-scoped stream before the final `.eval` is read. Inspect

@@ -302,6 +302,15 @@ class Registry(ABC, Generic[T, MetadataT]):
         """
         return True
 
+    def _should_build_metadata(self, cls: type[T]) -> bool:
+        """
+        Decide whether a registered class belongs in the public metadata catalog.
+
+        Returns:
+            bool: True for ordinary registered classes.
+        """
+        return True
+
     def _discover(self) -> None:
         """
         Populate the catalog with every concrete subclass of the domain base.
@@ -610,7 +619,11 @@ class Registry(ABC, Generic[T, MetadataT]):
                     classes_snapshot = dict(self._classes)
                     version = self._catalog_version
 
-                built = {name: self._build_metadata(name, cls) for name, cls in sorted(classes_snapshot.items())}
+                built = {
+                    name: self._build_metadata(name, cls)
+                    for name, cls in sorted(classes_snapshot.items())
+                    if self._should_build_metadata(cls)
+                }
 
                 with self._catalog_lock:
                     if self._metadata_cache is not None:

@@ -3,7 +3,7 @@
 
 """Tests for ScenarioRegistry._build_metadata and create_and_initialize_async."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -72,6 +72,24 @@ class _MarkdownMetadataScenario(_MetadataScenario):
 
     <script>alert("untrusted")</script>
     """
+
+
+class _ProtectedMetadataScenario(_MetadataScenario):
+    """A server-admitted class that must not be built by public catalog introspection."""
+
+    SERVER_ADMISSION_REQUIRED = True
+
+
+def test_catalog_does_not_construct_protected_scenario_metadata() -> None:
+    """An explicitly registered private class remains absent before any ACL-backed admission."""
+    registry = ScenarioRegistry()
+    registry._discovered = True
+    registry._classes = {"ordinary": _MetadataScenario, "protected": _ProtectedMetadataScenario}
+    with patch.object(_ProtectedMetadataScenario, "__init__", side_effect=AssertionError("private constructor ran")):
+        public = registry.get_all_registered_class_metadata()
+
+    assert [metadata.registry_name for metadata in public] == ["ordinary"]
+    assert registry.get_registered_class_metadata("protected") is None
 
 
 def test_build_metadata_raises_when_scenario_requires_constructor_args() -> None:

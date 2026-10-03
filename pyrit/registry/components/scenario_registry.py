@@ -87,6 +87,24 @@ class ScenarioRegistry(ParamBagRegistry["Scenario", ScenarioMetadata]):
 
     _DISCOVERY_PACKAGE = "pyrit.scenario.scenarios"
 
+    def _should_register_discovered_class(self, cls: type[Scenario]) -> bool:
+        """
+        Keep server-admitted original Task classes out of automatic public discovery.
+
+        Returns:
+            bool: True for ordinarily discoverable Scenarios only.
+        """
+        return not getattr(cls, "SERVER_ADMISSION_REQUIRED", False)
+
+    def _should_build_metadata(self, cls: type[Scenario]) -> bool:
+        """
+        Avoid constructing server-admitted Task classes during anonymous catalog introspection.
+
+        Returns:
+            bool: True only for public Scenario classes.
+        """
+        return not getattr(cls, "SERVER_ADMISSION_REQUIRED", False)
+
     def _discover(self) -> None:
         """Materialize every built-in scenario before subclass discovery."""
         from pyrit.scenario.scenarios import _materialize_scenarios

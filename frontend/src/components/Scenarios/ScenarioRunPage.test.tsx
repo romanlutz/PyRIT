@@ -407,6 +407,196 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByText(/Attack success/)).not.toBeInTheDocument()
   })
 
+  it('shows a categorical original grade with undetermined PyRIT mapping and verified cleanup', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        scenario_version: 1,
+        status: 'COMPLETED',
+        created_at: '2026-01-01T00:00:00Z',
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          unmet_conditions: [],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score: 'C',
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'proved',
+          case_count: 1,
+        },
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: { completed: 1, planned: 1, succeeded: 0, success_percentage: null, errors: 0, retries: 0 },
+      },
+    }))
+
+    renderPage()
+
+    const section = screen.getByRole('region', { name: 'Approved original source status' })
+    expect(within(section).getByText('1 of 1 approved original case completed.')).toBeInTheDocument()
+    expect(within(section).getByText('C')).toBeInTheDocument()
+    expect(within(section).getByText('Complete')).toBeInTheDocument()
+    expect(within(section).getByText('proved')).toBeInTheDocument()
+    expect(within(section).getByText('Undetermined (no approved success rule)')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'View projected PyRIT AttackResult' })).not.toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  it('keeps the original score visible when owned cleanup is unverified', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        scenario_version: 1,
+        status: 'FAILED',
+        created_at: '2026-01-01T00:00:00Z',
+        failure_reason: 'cleanup_pending',
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'cleanup_uncertain',
+          unmet_conditions: ['cleanup_pending'],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'cleanup_uncertain',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score: 'C',
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'uncontained',
+          case_count: 1,
+          reason: 'cleanup_pending',
+        },
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: { completed: 0, planned: 1, succeeded: 0, success_percentage: null, errors: 1, retries: 0 },
+      },
+    }))
+
+    renderPage()
+
+    const section = screen.getByRole('region', { name: 'Approved original source status' })
+    expect(within(section).getByRole('alert')).toHaveTextContent('no verified cleanup receipt')
+    expect(within(section).getByText('C')).toBeInTheDocument()
+    expect(within(section).getByText('uncontained')).toBeInTheDocument()
+    expect(within(section).getByText('0 of 1 approved original case completed.')).toBeInTheDocument()
+    expect(screen.queryByText(/Finished executions remain available below/i)).not.toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  it('shows no score or attack outcome after a pre-sample failure with proved physical cleanup', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        scenario_version: 1,
+        status: 'FAILED',
+        created_at: '2026-01-01T00:00:00Z',
+        failure_reason: 'source_unverified',
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'failed_ungraded',
+          unmet_conditions: ['source_unverified'],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'failed_ungraded',
+          source_state: 'error',
+          source_coverage_complete: false,
+          original_score: null,
+          pyrit_score_status: null,
+          pyrit_outcome: null,
+          cleanup_state: 'proved',
+          case_count: 1,
+          reason: 'source_unverified',
+        },
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: { completed: 0, planned: 1, succeeded: 0, success_percentage: null, errors: 1, retries: 0 },
+      },
+    }))
+
+    renderPage()
+
+    const section = screen.getByRole('region', { name: 'Approved original source status' })
+    expect(within(section).getByText('No verified original grade')).toBeInTheDocument()
+    expect(within(section).getByText('No imported Score')).toBeInTheDocument()
+    expect(within(section).getByText('No source outcome')).toBeInTheDocument()
+    expect(within(section).getByText('proved')).toBeInTheDocument()
+    expect(within(section).getByRole('alert')).toHaveTextContent('original score or evidence could not be verified')
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
+  it('keeps a verified source grade separate from incomplete execution', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        scenario_version: 1,
+        status: 'FAILED',
+        created_at: '2026-01-01T00:00:00Z',
+        failure_reason: 'source_unverified',
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'failed_source_verified',
+          unmet_conditions: ['source_unverified'],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'failed_source_verified',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score: 'C',
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'proved',
+          case_count: 1,
+          reason: 'source_unverified',
+        },
+      },
+      results: [],
+      summary: {
+        ...SUMMARY,
+        overall: { completed: 0, planned: 1, succeeded: 0, success_percentage: null, errors: 1, retries: 0 },
+      },
+    }))
+
+    renderPage()
+
+    const section = screen.getByRole('region', { name: 'Approved original source status' })
+    expect(within(section).getByText(/Execution incomplete; original grade retained/)).toBeInTheDocument()
+    expect(within(section).getByText('C')).toBeInTheDocument()
+    expect(within(section).getByText('proved')).toBeInTheDocument()
+    expect(within(section).getByText('0 of 1 approved original case completed.')).toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
   it('shows the sanitized persisted reason when the original .eval projection fails', () => {
     mockHookState(makeState({
       run: {

@@ -11,7 +11,7 @@ from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import status
+from fastapi import Request, status
 from fastapi.testclient import TestClient
 
 from pyrit.backend.main import app
@@ -763,6 +763,7 @@ class TestScenarioRoutes:
                 limit=10,
                 cursor="test.scenario_1",
                 include_estimates=True,
+                operator=None,
             )
 
     def test_list_scenarios_can_skip_estimates(self, client: TestClient) -> None:
@@ -784,6 +785,7 @@ class TestScenarioRoutes:
             limit=50,
             cursor=None,
             include_estimates=False,
+            operator=None,
         )
 
     def test_get_scenario_returns_200(self, client: TestClient) -> None:
@@ -884,12 +886,14 @@ class TestScenarioRoutes:
             result = await estimate_scenario_run_size(
                 scenario_name="test.scenario",
                 request=request,
+                http_request=Request({"type": "http", "state": {}}),
             )
 
         assert result == estimate
         mock_service.estimate_scenario_run_size_async.assert_awaited_once_with(
             scenario_name="test.scenario",
             request=request,
+            operator=None,
         )
 
     def test_estimate_scenario_returns_400_for_invalid_configuration(self, client: TestClient) -> None:
@@ -941,7 +945,7 @@ class TestScenarioRoutes:
             response = client.get("/api/scenarios/catalog/garak.encoding")
 
             assert response.status_code == status.HTTP_200_OK
-            mock_service.get_scenario_async.assert_called_once_with(scenario_name="garak.encoding")
+            mock_service.get_scenario_async.assert_called_once_with(scenario_name="garak.encoding", operator=None)
 
 
 # ============================================================================

@@ -2154,17 +2154,18 @@ class ScenarioResultEntry(Base):
         # Keep target-based legacy rows unchanged. A task-owned run deliberately has
         # no target; the existing NOT NULL JSON column stores JSON null, not SQL NULL.
         target_identifier = entry.objective_target_identifier
-        is_task_owned = (
-            entry.scenario_identifier.params.get("execution_owner") == ScenarioExecutionOwner.TASK_OWNED.value
-        )
-        if target_identifier is None and not is_task_owned:
+        is_source_owned = entry.scenario_identifier.params.get("execution_owner") in {
+            ScenarioExecutionOwner.TASK_OWNED.value,
+            ScenarioExecutionOwner.APPROVED_ORIGINAL.value,
+        }
+        if target_identifier is None and not is_source_owned:
             raise ValueError(
                 "objective_target_identifier is required to persist a ScenarioResult. "
                 f"Scenario '{entry.scenario_name}' produced a result with no objective target; "
                 "a scenario must declare and resolve objective_target before its result is stored."
             )
-        if is_task_owned and (target_identifier is not None or entry.objective_scorer_identifier is not None):
-            raise ValueError("Task-owned ScenarioResult cannot have an external objective target or scorer")
+        if is_source_owned and (target_identifier is not None or entry.objective_scorer_identifier is not None):
+            raise ValueError("Source-owned ScenarioResult cannot have an external objective target or scorer")
         self.objective_target_identifier = target_identifier.model_dump() if target_identifier else None
         # Always recompute eval_hash before dumping so the stored JSON carries the
         # freshly computed value for DB-level filtering (never a value from storage).

@@ -632,6 +632,50 @@ export interface ChangeMainConversationResponse {
 
 // --- Scenarios ---
 
+export type OriginalRunStatus =
+  | 'unavailable'
+  | 'admission_pending'
+  | 'ready'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed_ungraded'
+  | 'failed_source_verified'
+  | 'cleanup_uncertain'
+
+export type OriginalRunReason =
+  | 'runner_not_configured'
+  | 'operator_not_authorized'
+  | 'profile_not_admitted'
+  | 'admission_expired'
+  | 'model_route_unverified'
+  | 'capacity_busy'
+  | 'provider_unqualified'
+  | 'cleanup_pending'
+  | 'source_unverified'
+
+export interface OriginalRunAdmission {
+  profile_ref: string
+  model_role: 'evaluated'
+  status: OriginalRunStatus
+  unmet_conditions: OriginalRunReason[]
+  admission_ref?: string | null
+}
+
+export interface OriginalSourceResult {
+  profile_ref: string
+  model_role: 'evaluated'
+  status: OriginalRunStatus
+  source_state: 'success' | 'error' | 'cancelled'
+  source_coverage_complete: boolean
+  original_score?: string | null
+  pyrit_score_status?: 'complete' | 'undetermined' | null
+  pyrit_outcome?: 'undetermined' | null
+  cleanup_state: 'proved' | 'uncontained' | 'pending'
+  case_count: number
+  reason?: OriginalRunReason | null
+}
+
 export interface RegisteredScenario {
   scenario_name: string
   scenario_type: string
@@ -649,6 +693,7 @@ export interface RegisteredScenario {
   include_baseline_by_default: boolean
   supported_parameters: Parameter[]
   default_run_size: ScenarioRunSizeEstimateResponse
+  original_run_admission?: OriginalRunAdmission | null
 }
 
 export interface ScenarioTechniqueSummary {
@@ -664,6 +709,7 @@ export interface ListRegisteredScenariosResponse {
 
 export interface RunScenarioRequest {
   scenario_name: string
+  original_admission_ref?: string | null
   target_name?: string | null
   initializers?: string[] | null
   techniques?: string[] | null
@@ -889,6 +935,8 @@ export interface ScenarioRunSummary {
   active_scenario_result_id?: string | null
   overload_summaries?: ScenarioOverloadSummary[]
   original_inspect_import?: OriginalInspectImportSummary | null
+  original_run_admission?: OriginalRunAdmission | null
+  original_source_result?: OriginalSourceResult | null
 }
 
 export interface ScenarioTargetSummary {
@@ -924,6 +972,8 @@ export interface ScenarioRunListItem {
   successful_attacks: number
   error_attacks: number
   attack_details_available: boolean
+  original_run_admission?: OriginalRunAdmission | null
+  original_source_result?: OriginalSourceResult | null
 }
 
 export interface ScenarioRunListResponse {
@@ -951,6 +1001,8 @@ export interface ScenarioProgressHeader {
   active_scenario_result_id?: string | null
   overload_summaries?: ScenarioOverloadSummary[]
   original_inspect_import?: OriginalInspectImportSummary | null
+  original_run_admission?: OriginalRunAdmission | null
+  original_source_result?: OriginalSourceResult | null
   failure_reason?: string | null
 }
 

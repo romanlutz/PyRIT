@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     from pyrit.models.catalog.scenario import (
         AttackErrorSummary,
         AttackRetrySummary,
+        OriginalRunAdmission,
+        OriginalRunReason,
+        OriginalRunStatus,
+        OriginalSourceResult,
         RegisteredScenario,
         RunScenarioRequest,
         ScenarioDatasetSizeCap,
@@ -39,6 +43,10 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS: dict[str, str] = {
     "AttackErrorSummary": "pyrit.models.catalog.scenario",
     "AttackRetrySummary": "pyrit.models.catalog.scenario",
+    "OriginalRunAdmission": "pyrit.models.catalog.scenario",
+    "OriginalRunReason": "pyrit.models.catalog.scenario",
+    "OriginalRunStatus": "pyrit.models.catalog.scenario",
+    "OriginalSourceResult": "pyrit.models.catalog.scenario",
     "RegisteredInitializer": "pyrit.models.catalog.initializer",
     "RegisteredScenario": "pyrit.models.catalog.scenario",
     "RunScenarioRequest": "pyrit.models.catalog.scenario",
