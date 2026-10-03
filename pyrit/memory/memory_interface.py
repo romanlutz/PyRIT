@@ -4728,6 +4728,7 @@ class MemoryInterface(abc.ABC):
         scenario_run_state: ScenarioRunState,
         error_message: str | None = None,
         error_type: str | None = None,
+        metadata_fields: Mapping[str, Any] | None = None,
     ) -> bool:
         """
         Update the run state only when the stored state is one of ``expected_states``.
@@ -4743,6 +4744,7 @@ class MemoryInterface(abc.ABC):
             scenario_run_state (ScenarioRunState): The new state for the scenario.
             error_message (str | None): Optional scenario-level error message.
             error_type (str | None): Optional exception class name.
+            metadata_fields (Mapping[str, Any] | None): Metadata published atomically with the state transition.
 
         Returns:
             bool: True if the row was updated, False if it was missing or in another state.
@@ -4766,6 +4768,14 @@ class MemoryInterface(abc.ABC):
             values["completion_time"] = datetime.now(tz=UTC)
 
         with closing(self.get_session()) as session:
+            if metadata_fields:
+                entry = session.query(ScenarioResultEntry).filter_by(id=scenario_result_id).first()
+                if entry is None:
+                    return False
+                values[ScenarioResultEntry.scenario_metadata] = {
+                    **(entry.scenario_metadata or {}),
+                    **metadata_fields,
+                }
             updated_rows = (
                 session.query(ScenarioResultEntry)
                 .filter(
@@ -4861,12 +4871,32 @@ class MemoryInterface(abc.ABC):
         Raises:
             ValueError: If multiple Scenario runs reference the same imported result.
         """
-        if not attack_result_ids:
-            return {}
         from pyrit.models.catalog.scenario import OriginalInspectImportSummary
 
+        return self.get_scenario_import_result_links(
+            scenario_name=scenario_name,
+            metadata_key=OriginalInspectImportSummary.METADATA_KEY,
+            attack_result_ids=attack_result_ids,
+        )
+
+    def get_scenario_import_result_links(
+        self, *, scenario_name: str, metadata_key: str, attack_result_ids: Sequence[str]
+    ) -> dict[str, ScenarioResult]:
+        """
+        Select exact source-result references from an independently persisted Scenario header.
+
+        Returns:
+            dict[str, ScenarioResult]: Unique source references keyed by result ID.
+
+        Raises:
+            ValueError: If the metadata key or a referenced result is ambiguous.
+        """
+        if not attack_result_ids:
+            return {}
+        if not metadata_key.isidentifier() or len(metadata_key) > 128:
+            raise ValueError("Scenario import metadata requires a bounded identifier key.")
         ids = set(attack_result_ids)
-        path = f"$.{OriginalInspectImportSummary.METADATA_KEY}.attack_result_id"
+        path = f"$.{metadata_key}.attack_result_id"
         match = or_(
             *(
                 self._get_condition_json_property_match(
@@ -4890,7 +4920,7 @@ class MemoryInterface(abc.ABC):
             )
             links: dict[str, ScenarioResult] = {}
             for row in rows:
-                reference = (row.scenario_metadata or {}).get(OriginalInspectImportSummary.METADATA_KEY)
+                reference = (row.scenario_metadata or {}).get(metadata_key)
                 attack_id = reference.get("attack_result_id") if isinstance(reference, dict) else None
                 if not isinstance(attack_id, str) or attack_id not in ids or attack_id in links:
                     raise ValueError("Original Inspect result has an ambiguous persisted Scenario reference.")

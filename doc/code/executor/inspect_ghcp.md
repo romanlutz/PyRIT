@@ -432,6 +432,75 @@ admission. In particular, a physical cleanup receipt after a failed
 pre-Sample attempt is not a source grade. The public default makes no
 resource or model call.
 
+### Authenticated retained-evidence intake and read-only viewing
+
+A separately approved host adapter may install
+`install_original_evidence_provider(provider=...)` at trusted backend startup.
+This capability is **absent by default** and is independent of runner/catalog
+admission: retaining an already completed case does not authorize another
+Task, model call, lease or deployment. The web process never imports the
+private Scenario, Task or scorer. It accepts an explicitly authorized copy of
+the original evidence, not a worker SQLite file or a private filesystem handle.
+
+The worker-only endpoint is `POST /api/internal/original-evidence/{job_ref}`.
+It requires a distinct short-lived upload bearer, a base64url JSON
+`X-PyRIT-Original-Envelope` header and an `application/octet-stream` body
+containing the **exact** original `.eval`. A legitimate pre-Sample startup
+failure has an empty body and no fabricated archive/Score identifiers.
+The envelope binds the app job, operator, approved profile, original generated
+run-instance UUID, pinned source/worker manifest, original Scenario snapshot,
+evaluated model-role receipt, final ScoreEvent and **distinct**
+terminal-operation and physical-closure receipts. The original run UUID is
+not an app-job or provider-lease UUID. The adapter must authenticate these
+receipts independently, atomically consume the actor/job/source-bound
+capability across backend processes, and permit only exact immutable replays.
+Body-supplied hashes are not authority. The upload token is never forwarded
+to Graph, and this header is not part of the browser CORS allowlist.
+
+The backend checks archive length/SHA, typed Task/Sample/epoch, final original
+ScoreEvent and the server-resolved source/scoring policy. Its event digest is
+`config_hash({"event": final_event.model_dump(mode="json", exclude_none=True)})`;
+the envelope digest is
+`config_hash({"original_evidence": envelope.model_dump(mode="json", exclude_none=True)})`.
+No success threshold is admitted. Only source completion, a unique final
+original score, authenticated operation-terminal proof and independently
+proved physical closure permit the canonical grade import. Otherwise
+`capture_only=True` retains the archive/messages under a distinct import
+identity with **zero** Score/AttackResult rows. Physical cleanup can be proved
+while execution is `failed_ungraded`; unproved containment is
+`cleanup_uncertain`, not a fabricated grade.
+
+The configured **backend-owned** `MemoryInterface` imports the original bytes
+and derives its own canonical Score/AttackResult IDs. Worker IDs are provenance
+only. An independent persisted Scenario reference binds the exact pair,
+original archive/event digests and projected messages. Publication is staged
+with `persistence_verified=False`, checked by exact readback, and finalized
+only after the persisted source agrees. Provisional, ambiguous or tampered
+imports remain unreadable and require explicit reconciliation, not reexecution.
+For Azure SQL, a separate provisioner runs migrations; the backend DML identity
+opens with `skip_schema_migration=True` and checks
+`check_schema_migrations(engine=memory.engine)` before serving. No new ORM
+columns or Alembic revisions are needed; no SQL credentials reach the worker.
+
+Existing attack detail/messages/conversations and Scenario history/progress
+routes recheck the authenticated actor and source binding. Stored provenance
+and raw evidence remain intact, while API views expose only approved
+correlation metadata and an allowlisted scalar display value. Unsupported
+categorical/structured source scores remain exact in the archive and map to
+UNDETERMINED rather than numeric success. An original score whose scalar is
+not approved for display is shown as recorded, not as missing or ungraded.
+CoPyRIT marks the source conversation read-only, renders original function
+calls/results with their source IDs, and disables editing, manual scoring,
+branching and sends even if another usable target is selected. Viewing or
+exporting does not rerun the evaluation.
+
+This public contract and harmless HTTP/SQLite fixtures do not supply or
+qualify a private production admission provider, shared OS/credential
+boundary, SQL deployment or live execution. A local owner-authorized retained
+view is not Entra/SFI certification or fresh launch authority. Hosted adapters
+must supply their own reviewed authentication, isolation and durable receipt
+verification.
+
 The runner optionally captures `Hooks.on_sample_event` and `on_sample_end`
 into a bounded run-scoped stream before the final `.eval` is read. Inspect
 emits these callbacks only for completed events, and hook exceptions are

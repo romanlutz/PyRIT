@@ -12,6 +12,7 @@ authorization.
 
 import logging
 import os
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from hashlib import sha256
@@ -49,6 +50,17 @@ class AuthenticatedUser:
     is_admin: bool = False
 
 
+def get_authenticated_operator(request: Request) -> AuthenticatedUser | None:
+    """
+    Read server-authenticated identity without treating disabled auth as source-view approval.
+
+    Returns:
+        AuthenticatedUser | None: The request's authenticated operator, when present.
+    """
+    user = getattr(request.state, "user", None)
+    return user if isinstance(user, AuthenticatedUser) else None
+
+
 def require_admin(request: Request) -> None:
     """Require an administrator when authentication is enabled."""
     user = getattr(request.state, "user", None)
@@ -72,6 +84,10 @@ class EntraAuthMiddleware(BaseHTTPMiddleware):
         "/api/auth/config",
         "/api/media",
     }
+    _WORKER_EVIDENCE_PATH: ClassVar[re.Pattern[str]] = re.compile(
+        r"^/api/internal/original-evidence/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
 
     _GRAPH_ME_URL: ClassVar[str] = "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName"
     _GRAPH_CHECK_MEMBER_GROUPS_URL: ClassVar[str] = "https://graph.microsoft.com/v1.0/me/checkMemberGroups"
@@ -130,6 +146,10 @@ class EntraAuthMiddleware(BaseHTTPMiddleware):
         """
         # Skip auth for public paths and static files
         path = request.url.path
+        # This exact worker route authenticates a separate one-use capability.
+        # Never forward its token to Graph or accept it as a browser/model token.
+        if request.method == "POST" and self._WORKER_EVIDENCE_PATH.fullmatch(path):
+            return await call_next(request)
         if not self._enabled or path in self._PUBLIC_PATHS or not path.startswith("/api"):
             return await call_next(request)
 

@@ -428,6 +428,32 @@ describe("ChatWindow Integration", () => {
     expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
+  it("keeps original evidence read-only even when a usable target is selected", async () => {
+    mockedAttacksApi.getMessages.mockResolvedValue({ messages: [] });
+    mockedMapper.backendMessagesToFrontend.mockReturnValue([]);
+
+    render(
+      <TestWrapper>
+        <ChatWindow
+          {...defaultProps}
+          attackResultId="retained-source-result"
+          conversationId="retained-conversation"
+          activeConversationId="retained-conversation"
+          objective="Approved original case"
+          outcome="undetermined"
+          lastResponseMessagePieceId="original-response"
+          sourceReadOnly
+        />
+      </TestWrapper>
+    );
+
+    await waitFor(() => expect(mockedAttacksApi.getMessages).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /mark.*success|mark.*failure/i })).not.toBeInTheDocument();
+    expect(mockedAttacksApi.addMessage).not.toHaveBeenCalled();
+    expect(mockedScoresApi.createManualScore).not.toHaveBeenCalled();
+  });
+
   it("should attach an updated human score to the latest response", async () => {
     const user = userEvent.setup();
     const onHumanScoreChange = jest.fn();

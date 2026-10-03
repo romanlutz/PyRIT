@@ -454,6 +454,47 @@ describe('ScenarioRunPage', () => {
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
   })
 
+  it('distinguishes a verified original grade whose display scalar is not approved', () => {
+    mockHookState(makeState({
+      run: {
+        scenario_result_id: SCENARIO_RESULT_ID,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        scenario_version: 1,
+        status: 'COMPLETED',
+        created_at: '2026-01-01T00:00:00Z',
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          unmet_conditions: [],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score_available: true,
+          original_score: null,
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'proved',
+          case_count: 1,
+        },
+      },
+      results: [],
+    }))
+
+    renderPage()
+
+    const section = screen.getByRole('region', { name: 'Approved original source status' })
+    expect(within(section).getByText('Recorded; display value not approved')).toBeInTheDocument()
+    expect(within(section).queryByText('No verified original grade')).not.toBeInTheDocument()
+    expect(within(section).getByText('proved')).toBeInTheDocument()
+    expect(screen.queryByText('0%')).not.toBeInTheDocument()
+  })
+
   it('keeps the original score visible when owned cleanup is unverified', () => {
     mockHookState(makeState({
       run: {

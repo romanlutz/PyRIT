@@ -228,6 +228,7 @@ class AttackSummary(AttackResult):
     last_message_preview: str | None = Field(default=None, description="Preview of the last message")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Attack creation timestamp")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), description="Last update timestamp")
+    source_read_only: bool = Field(False, description="Original evidence cannot be edited, rescored or replayed here")
 
     @computed_field  # type: ignore[prop-decorator]
     @property

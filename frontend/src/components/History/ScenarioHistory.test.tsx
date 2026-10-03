@@ -240,6 +240,46 @@ describe('ScenarioHistory', () => {
     expect(within(row).queryByText('0/0')).not.toBeInTheDocument()
   })
 
+  it('keeps a recorded hidden grade distinct from an ungraded original failure', async () => {
+    mockedScenariosApi.listRuns.mockResolvedValue({
+      items: [{
+        ...RUN,
+        scenario_name: 'ServerApprovedOriginalScenario',
+        scenario_registry_name: 'benchmark.approved_original',
+        target: null,
+        total_attacks: 1,
+        completed_attacks: 1,
+        objective_achieved_rate: null,
+        original_run_admission: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          unmet_conditions: [],
+        },
+        original_source_result: {
+          profile_ref: 'approved_public_fixture',
+          model_role: 'evaluated',
+          status: 'completed',
+          source_state: 'success',
+          source_coverage_complete: true,
+          original_score_available: true,
+          original_score: null,
+          pyrit_score_status: 'undetermined',
+          pyrit_outcome: 'undetermined',
+          cleanup_state: 'proved',
+          case_count: 1,
+        },
+      }],
+      pagination: { limit: 25, has_more: false },
+    })
+
+    renderHistory()
+
+    const row = await screen.findByTestId('scenario-history-row-run-1')
+    expect(within(row).getByText(/recorded; display value not approved/i)).toBeInTheDocument()
+    expect(within(row).queryByText(/No verified original grade/)).not.toBeInTheDocument()
+  })
+
   it('renders safe fallbacks when optional run metadata is unavailable', async () => {
     jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-01-01T00:00:30Z'))
     mockedScenariosApi.listRuns.mockResolvedValue({

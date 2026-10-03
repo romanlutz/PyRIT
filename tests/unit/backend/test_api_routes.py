@@ -140,6 +140,7 @@ class TestAttackRoutes:
                 max_turns=None,
                 limit=10,
                 cursor=None,
+                authenticated_user=None,
             )
 
     def test_list_attacks_multi_attack_types(self, client: TestClient) -> None:
@@ -1635,6 +1636,7 @@ class TestScoreRoutes:
                 )
             ]
             memory.get_original_inspect_result_links.return_value = {}
+            memory.get_scenario_import_result_links.return_value = {}
             mock_scorer = mock_manual_scorer_class.return_value
             mock_scorer.score_async = AsyncMock(return_value=[score])
 
@@ -1689,6 +1691,7 @@ class TestScoreRoutes:
                 )
             ]
             memory.get_original_inspect_result_links.return_value = {}
+            memory.get_scenario_import_result_links.return_value = {}
             memory.update_attack_result_by_id.return_value = True
             mock_scorer = mock_manual_scorer_class.return_value
             mock_scorer.score_async = AsyncMock(return_value=[score])
@@ -1744,6 +1747,7 @@ class TestScoreRoutes:
                 )
             ]
             memory.get_original_inspect_result_links.return_value = {}
+            memory.get_scenario_import_result_links.return_value = {}
             mock_manual_scorer_class.return_value.score_async = AsyncMock(return_value=[score])
 
             response = client.post(
@@ -1786,6 +1790,7 @@ class TestScoreRoutes:
                 )
             ]
             memory.get_original_inspect_result_links.return_value = {}
+            memory.get_scenario_import_result_links.return_value = {}
             memory.update_attack_result_by_id.return_value = True
             mock_manual_scorer_class.return_value.score_async = AsyncMock(return_value=[score])
 

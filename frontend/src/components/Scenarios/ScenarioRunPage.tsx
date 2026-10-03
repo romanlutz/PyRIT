@@ -540,7 +540,9 @@ function ScenarioRunPageContent({ scenarioResultId, attackResultId }: ScenarioRu
                   <ConfigurationItem label="Model role" value={run.original_source_result.model_role} />
                   <ConfigurationItem
                     label="Original source score"
-                    value={run.original_source_result.original_score ?? 'No verified original grade'}
+                    value={run.original_source_result.original_score
+                      ?? (run.original_source_result.original_score_available
+                        ? 'Recorded; display value not approved' : 'No verified original grade')}
                   />
                   <ConfigurationItem
                     label="Source coverage"

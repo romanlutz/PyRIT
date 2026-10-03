@@ -30,6 +30,7 @@ from pyrit.backend.mappers import (
     request_piece_to_pyrit_message_piece,
     request_to_pyrit_message,
 )
+from pyrit.backend.middleware.auth import AuthenticatedUser
 from pyrit.backend.models.attacks import (
     AddMessageRequest,
     AddMessageResponse,
@@ -44,6 +45,7 @@ from pyrit.backend.models.attacks import (
     CreateConversationRequest,
     CreateConversationResponse,
     MessagePieceRequest,
+    MessagePieceView,
     MessageView,
     PrependedMessageRequest,
     TargetResponseStatus,
@@ -54,6 +56,11 @@ from pyrit.backend.models.attacks import (
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.services.converter_service import get_converter_service
 from pyrit.backend.services.media_persistence import persist_media_value_async
+from pyrit.backend.services.original_evidence_service import (
+    OriginalEvidenceReadback,
+    OriginalEvidenceRecord,
+    get_original_evidence_service,
+)
 from pyrit.backend.services.pagination import (
     decode_keyset_cursor,
     encode_keyset_cursor,
@@ -146,6 +153,7 @@ class AttackService:
         max_turns: int | None = None,
         limit: int = 20,
         cursor: str | None = None,
+        authenticated_user: AuthenticatedUser | None = None,
     ) -> AttackListResponse:
         """
         List attacks with optional filtering and pagination.
@@ -180,6 +188,7 @@ class AttackService:
             limit: Maximum items to return.
             cursor: Opaque pagination token from a previous response's ``next_cursor``.
                 Omit (or pass ``None``) to fetch the first page.
+            authenticated_user: Server-authenticated actor for approved original evidence.
 
         Returns:
             AttackListResponse with filtered and paginated attack summaries.
@@ -256,7 +265,9 @@ class AttackService:
 
         # Phase 2: Lightweight DB aggregation for the page only.
         # Collect conversation IDs we care about (main + pruned, not adversarial).
-        await self._guard_original_inspect_attacks_async(results=page_results, mutating=False)
+        sources = await self._guard_original_inspect_attacks_async(
+            results=page_results, mutating=False, authenticated_user=authenticated_user
+        )
         all_conv_ids: set[str] = set()
         for ar in page_results:
             all_conv_ids.update(ar.get_active_conversation_ids())
@@ -283,7 +294,9 @@ class AttackService:
                 labels=conv_labels,
             )
 
-            page.append(await attack_result_to_summary_async(ar, stats=merged))
+            summary = await attack_result_to_summary_async(ar, stats=merged)
+            source = sources.get(ar.attack_result_id)
+            page.append(self._safe_original_summary(summary=summary, source=source) if source is not None else summary)
 
         return AttackListResponse(
             items=page,
@@ -314,7 +327,9 @@ class AttackService:
         """
         return self._memory.get_unique_converter_class_names()
 
-    async def get_attack_async(self, *, attack_result_id: str) -> AttackSummary | None:
+    async def get_attack_async(
+        self, *, attack_result_id: str, authenticated_user: AuthenticatedUser | None = None
+    ) -> AttackSummary | None:
         """
         Get attack details (high-level metadata, no messages).
 
@@ -331,16 +346,21 @@ class AttackService:
             return None
 
         ar = results[0]
-        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
+        sources = await self._guard_original_inspect_attacks_async(
+            results=[ar], mutating=False, authenticated_user=authenticated_user
+        )
         stats_map = self._memory.get_conversation_stats(conversation_ids=[ar.conversation_id])
         stats = stats_map.get(ar.conversation_id, ConversationStats(message_count=0))
-        return await attack_result_to_summary_async(ar, stats=stats)
+        summary = await attack_result_to_summary_async(ar, stats=stats)
+        source = sources.get(ar.attack_result_id)
+        return self._safe_original_summary(summary=summary, source=source) if source is not None else summary
 
     async def get_conversation_messages_async(
         self,
         *,
         attack_result_id: str,
         conversation_id: str,
+        authenticated_user: AuthenticatedUser | None = None,
     ) -> ConversationMessagesResponse | None:
         """
         Get all messages for a conversation belonging to an attack.
@@ -348,6 +368,7 @@ class AttackService:
         Args:
             attack_result_id: The AttackResult's primary key (used to verify existence).
             conversation_id: The conversation whose messages to return.
+            authenticated_user: Server-authenticated actor for approved original evidence.
 
         Returns:
             ConversationMessagesResponse if attack found, None otherwise.
@@ -362,7 +383,9 @@ class AttackService:
 
         # Verify the conversation belongs to this attack
         ar = results[0]
-        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
+        sources = await self._guard_original_inspect_attacks_async(
+            results=[ar], mutating=False, authenticated_user=authenticated_user
+        )
         if conversation_id not in ar.get_active_conversation_ids():
             raise ValueError(f"Conversation '{conversation_id}' is not part of attack '{attack_result_id}'")
 
@@ -372,6 +395,13 @@ class AttackService:
             list(pyrit_messages),
             objective_score_id=ar.last_score.id if ar.last_score else None,
         )
+        if ar.attack_result_id in sources:
+            backend_messages = [
+                message.model_copy(
+                    update={"message_pieces": [self._safe_original_piece(piece) for piece in message.message_pieces]}
+                )
+                for message in backend_messages
+            ]
 
         return ConversationMessagesResponse(
             conversation_id=conversation_id,
@@ -555,7 +585,9 @@ class AttackService:
 
         return await self.get_attack_async(attack_result_id=attack_result_id)
 
-    async def get_conversations_async(self, *, attack_result_id: str) -> AttackConversationsResponse | None:
+    async def get_conversations_async(
+        self, *, attack_result_id: str, authenticated_user: AuthenticatedUser | None = None
+    ) -> AttackConversationsResponse | None:
         """
         Get all conversations belonging to an attack.
 
@@ -572,7 +604,9 @@ class AttackService:
 
         # attack_result_id is a unique primary key, so at most one result is returned.
         ar = results[0]
-        await self._guard_original_inspect_attacks_async(results=[ar], mutating=False)
+        await self._guard_original_inspect_attacks_async(
+            results=[ar], mutating=False, authenticated_user=authenticated_user
+        )
 
         # Collect all conversation IDs (main + PRUNED related) and fetch stats in one query.
         active_conv_ids = list(ar.get_active_conversation_ids())
@@ -619,14 +653,40 @@ class AttackService:
         """
         await self._guard_original_inspect_attacks_async(results=[result], mutating=True)
 
-    async def _guard_original_inspect_attacks_async(self, *, results: Sequence[AttackResult], mutating: bool) -> None:
-        """Run bounded persisted-import checks off the event loop."""
-        if results:
-            await asyncio.to_thread(self._guard_original_inspect_attacks, results=results, mutating=mutating)
+    async def _guard_original_inspect_attacks_async(
+        self,
+        *,
+        results: Sequence[AttackResult],
+        mutating: bool,
+        authenticated_user: AuthenticatedUser | None = None,
+    ) -> dict[str, OriginalEvidenceReadback]:
+        """
+        Run bounded persisted-import checks off the event loop.
 
-    def _guard_original_inspect_attacks(self, *, results: Sequence[AttackResult], mutating: bool) -> None:
+        Returns:
+            dict[str, OriginalEvidenceReadback]: Authorized durable source projections.
+        """
+        if results:
+            return await asyncio.to_thread(
+                self._guard_original_inspect_attacks,
+                results=results,
+                mutating=mutating,
+                authenticated_user=authenticated_user,
+            )
+        return {}
+
+    def _guard_original_inspect_attacks(
+        self,
+        *,
+        results: Sequence[AttackResult],
+        mutating: bool,
+        authenticated_user: AuthenticatedUser | None = None,
+    ) -> dict[str, OriginalEvidenceReadback]:
         """
         Bind source-attributed results to their independent persisted Scenario import.
+
+        Returns:
+            dict[str, OriginalEvidenceReadback]: Authorized durable source projections.
 
         Raises:
             ValueError: If an original import has no verifiable Scenario/evidence link.
@@ -644,10 +704,27 @@ class AttackService:
                 scenario_name=_ORIGINAL_INSPECT_SCENARIO_NAME,
                 attack_result_ids=[result.attack_result_id for result in results],
             )
+            durable = self._memory.get_scenario_import_result_links(
+                scenario_name="ServerApprovedOriginalScenario",
+                metadata_key=OriginalEvidenceRecord.METADATA_KEY,
+                attack_result_ids=[result.attack_result_id for result in results],
+            )
         except ValueError as error:
             raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK) from error
 
+        verified: dict[str, OriginalEvidenceReadback] = {}
         for result in results:
+            durable_scenario = durable.get(result.attack_result_id)
+            if durable_scenario is not None:
+                if mutating:
+                    raise AttackSourceImmutableError("Imported original evidence cannot be edited or replayed.")
+                source = get_original_evidence_service().read(
+                    scenario_result=durable_scenario, operator=authenticated_user
+                )
+                if str(source.record.attack_result_id) != result.attack_result_id:
+                    raise OriginalAdmissionError(reason=OriginalRunReason.SOURCE_UNVERIFIED)
+                verified[result.attack_result_id] = source
+                continue
             scenario = links.get(result.attack_result_id)
             parent = (
                 self._memory.get_scenario_result_header(scenario_result_id=result.attribution_parent_id)
@@ -687,6 +764,78 @@ class AttackService:
                     raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK)
             except (KeyError, ValueError) as error:
                 raise ValueError(_INVALID_ORIGINAL_INSPECT_ATTACK) from error
+        return verified
+
+    @staticmethod
+    def _safe_original_piece(piece: MessagePieceView) -> MessagePieceView:
+        """
+        Allow original tool correlation metadata, not source case/configuration or scorer details.
+
+        Returns:
+            MessagePieceView: The approved text/tool data and opaque source-message references.
+        """
+        safe_keys = {
+            "inspect_archive_sha256",
+            "inspect_message_id",
+            "inspect_message_source",
+            "inspect_part_index",
+            "inspect_tool_call_id",
+            "inspect_tool_function",
+            "inspect_tool_parse_error",
+            "inspect_tool_error_type",
+            "inspect_tool_error_message",
+        }
+        return piece.model_copy(
+            update={
+                "prompt_metadata": {key: value for key, value in piece.prompt_metadata.items() if key in safe_keys},
+                "scores": [],
+            }
+        )
+
+    @staticmethod
+    def _safe_original_summary(*, summary: AttackSummary, source: OriginalEvidenceReadback) -> AttackSummary:
+        """
+        Keep source fingerprints and canonical IDs while hiding source configuration and unapproved grades.
+
+        Returns:
+            AttackSummary: A read-only view without private Task configuration.
+        """
+        record = source.record
+        score = summary.automated_score
+        safe_metadata = {
+            "inspect_source": "original_eval_log",
+            "inspect_archive_sha256": record.envelope.archive_sha256,
+            "inspect_case_run_id": record.envelope.case_run_id,
+            "inspect_final_score_event_sha256": record.envelope.final_score_event_sha256,
+        }
+        if score is not None:
+            score = (
+                score.model_copy(
+                    update={
+                        "score_metadata": safe_metadata,
+                        "score_rationale": None,
+                        "score_category": None,
+                        "score_value_description": None,
+                    }
+                )
+                if source.record.source_result.original_score is not None
+                else None
+            )
+        return summary.model_copy(
+            update={
+                "objective": "Approved original case",
+                "metadata": safe_metadata,
+                "automated_score": score,
+                "last_response": (
+                    AttackService._safe_original_piece(summary.last_response)
+                    if summary.last_response is not None
+                    else None
+                ),
+                "source_read_only": True,
+                "operator": None,
+                "operation": None,
+            }
+        )
 
     @staticmethod
     def _has_unbound_original_inspect_evidence(*, result: AttackResult) -> bool:

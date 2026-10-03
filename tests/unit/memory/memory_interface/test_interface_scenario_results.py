@@ -959,6 +959,65 @@ def test_try_update_scenario_run_state_preserves_a_terminal_state(
     assert hydrated.error_type == "CancelledError"
 
 
+def test_state_and_source_metadata_publish_together_without_overwriting_terminal_receipts(
+    sqlite_instance: MemoryInterface,
+) -> None:
+    scenario = create_scenario_result(name="Receipt CAS", attack_results={"original": []})
+    scenario.metadata = {"existing": "retained"}
+    sqlite_instance.add_scenario_results_to_memory(scenario_results=[scenario])
+    sid = str(scenario.id)
+    sqlite_instance.update_scenario_run_state(scenario_result_id=sid, scenario_run_state=ScenarioRunState.IN_PROGRESS)
+    assert sqlite_instance.try_update_scenario_run_state(
+        scenario_result_id=sid,
+        expected_states={ScenarioRunState.IN_PROGRESS},
+        scenario_run_state=ScenarioRunState.COMPLETED,
+        metadata_fields={"receipt": {"persistence_verified": True}},
+    )
+    stored = sqlite_instance.get_scenario_result_header(scenario_result_id=sid)
+    assert stored is not None
+    assert stored.metadata == {"existing": "retained", "receipt": {"persistence_verified": True}}
+    assert not sqlite_instance.try_update_scenario_run_state(
+        scenario_result_id=sid,
+        expected_states={ScenarioRunState.IN_PROGRESS},
+        scenario_run_state=ScenarioRunState.FAILED,
+        metadata_fields={"receipt": {"persistence_verified": False}},
+    )
+    final = sqlite_instance.get_scenario_result_header(scenario_result_id=sid)
+    assert final is not None
+    assert final.metadata == stored.metadata and final.scenario_run_state is ScenarioRunState.COMPLETED
+
+
+def test_generic_source_result_reference_lookup_is_exact_and_refuses_ambiguity(
+    sqlite_instance: MemoryInterface,
+) -> None:
+    result_id = str(uuid4())
+    key = "source_result_reference"
+    source = create_scenario_result(name="Imported Source", attack_results={})
+    source.metadata = {key: {"attack_result_id": result_id}}
+    sqlite_instance.add_scenario_results_to_memory(scenario_results=[source])
+    links = sqlite_instance.get_scenario_import_result_links(
+        scenario_name=source.scenario_name, metadata_key=key, attack_result_ids=[result_id]
+    )
+    assert links[result_id].id == source.id
+    assert (
+        sqlite_instance.get_scenario_import_result_links(
+            scenario_name="Different Source", metadata_key=key, attack_result_ids=[result_id]
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="bounded identifier"):
+        sqlite_instance.get_scenario_import_result_links(
+            scenario_name=source.scenario_name, metadata_key="key].other", attack_result_ids=[result_id]
+        )
+    duplicate = create_scenario_result(name="Imported Source", attack_results={})
+    duplicate.metadata = source.metadata
+    sqlite_instance.add_scenario_results_to_memory(scenario_results=[duplicate])
+    with pytest.raises(ValueError, match="ambiguous"):
+        sqlite_instance.get_scenario_import_result_links(
+            scenario_name=source.scenario_name, metadata_key=key, attack_result_ids=[result_id]
+        )
+
+
 def test_try_update_scenario_run_state_reports_a_missing_row(
     sqlite_instance: MemoryInterface,
 ):

@@ -289,6 +289,55 @@ def test_tool_projection_preserves_calls_mixed_parts_ids_results_and_errors(reco
 
 
 @pytest.mark.usefixtures("patch_central_database")
+async def test_binary_import_matches_file_identity_without_loading_or_rerunning_the_task(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, recorded_tool_log: EvalLog
+) -> None:
+    archive = tmp_path / "public-binary.eval"
+    await asyncio.to_thread(write_eval_log, recorded_tool_log, location=archive, format="eval")
+    content = await asyncio.to_thread(archive.read_bytes)
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    binary = await importer.import_eval_bytes_async(content=content)
+    file = await importer.import_eval_log_async(path=archive)
+    assert binary.episode.model_dump(mode="json") == file.episode.model_dump(mode="json")
+    assert binary.case_results == file.case_results
+    assert binary.archive_sha256 == hashlib.sha256(content).hexdigest()
+    assert binary.message_piece_count == 10
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count()).select_from(ScoreEntry)) == 1
+        assert session.scalar(select(func.count()).select_from(AttackResultEntry)) == 1
+    assert await asyncio.to_thread(archive.read_bytes) == content
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_capture_only_retains_original_calls_and_grade_but_persists_no_result_pair(
+    tmp_path: Path, sqlite_instance: SQLiteMemory, recorded_tool_log: EvalLog
+) -> None:
+    archive = tmp_path / "public-capture-only.eval"
+    await asyncio.to_thread(write_eval_log, recorded_tool_log, location=archive, format="eval")
+    content = await asyncio.to_thread(archive.read_bytes)
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance, capture_only=True)
+    captured = await importer.import_eval_bytes_async(content=content)
+    assert captured.case_results == () and captured.message_piece_count == 10
+    assert captured.archive_sha256 == hashlib.sha256(content).hexdigest()
+    assert (await importer.import_eval_bytes_async(content=content)).episode == captured.episode
+    with sqlite_instance.get_session() as session:
+        assert session.scalar(select(func.count()).select_from(ScoreEntry)) == 0
+        assert session.scalar(select(func.count()).select_from(AttackResultEntry)) == 0
+    projected = await InspectOriginalEvalImporter(memory=sqlite_instance).import_eval_bytes_async(content=content)
+    assert projected.episode.run.run_id != captured.episode.run.run_id
+    assert projected.case_results[0].score.status is ScoreStatus.COMPLETE
+    assert projected.case_results[0].attack_result.outcome is AttackOutcome.UNDETERMINED
+    assert (await importer.import_eval_bytes_async(content=content)).case_results == ()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("capture_only", [1, "true", None])
+def test_capture_only_requires_an_exact_boolean(sqlite_instance: SQLiteMemory, capture_only: object) -> None:
+    with pytest.raises(TypeError, match="explicit boolean"):
+        InspectOriginalEvalImporter(memory=sqlite_instance, capture_only=capture_only)  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("patch_central_database")
 async def test_new_tool_schema_does_not_mutate_sealed_text_only_import(
     tmp_path: Path, sqlite_instance: SQLiteMemory, recorded_tool_log: EvalLog
 ) -> None:

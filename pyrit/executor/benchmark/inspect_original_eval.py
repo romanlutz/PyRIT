@@ -164,6 +164,7 @@ class InspectOriginalEvalImporter:
         *,
         memory: MemoryInterface,
         projection_version: InspectProjectionVersion = InspectProjectionVersion.TOOL_CALLS,
+        capture_only: bool = False,
     ) -> None:
         """
         Bind memory and an explicit projection schema without loading Task code.
@@ -173,9 +174,12 @@ class InspectOriginalEvalImporter:
         """
         if not isinstance(projection_version, InspectProjectionVersion):
             raise TypeError("Original Inspect import requires an InspectProjectionVersion.")
+        if type(capture_only) is not bool:
+            raise TypeError("Original Inspect capture_only must be an explicit boolean.")
         self._memory = memory
         self._capture = memory.native_cyber_evidence
         self._projection_version = projection_version
+        self._capture_only = capture_only
 
     async def import_eval_log_async(
         self,
@@ -196,6 +200,36 @@ class InspectOriginalEvalImporter:
         """
         return await self._import_async(path=path, cases=cases, run=run, live_observer=None, score_policy=score_policy)
 
+    async def import_eval_bytes_async(
+        self,
+        *,
+        content: bytes,
+        cases: tuple[EvalCaseRef, ...] | None = None,
+        run: EvalRunRef | None = None,
+        score_policy: InspectOriginalScorePolicy | None = None,
+    ) -> InspectOriginalImport:
+        """
+        Import bounded original binary evidence without a caller-selected filesystem path.
+
+        Returns:
+            InspectOriginalImport: The same canonical import used for retained local files.
+
+        Raises:
+            TypeError: If the original binary archive is not bytes.
+            ValueError: If the original archive, case or policy is invalid.
+        """
+        if not isinstance(content, bytes):
+            raise TypeError("Original Inspect binary evidence must be bytes.")
+        relogged_samples = await asyncio.to_thread(self._validate_archive_bytes, content=content)
+        return await self._import_content_async(
+            archive=content,
+            relogged_samples=relogged_samples,
+            cases=cases,
+            run=run,
+            live_observer=None,
+            score_policy=score_policy,
+        )
+
     async def _import_async(
         self,
         *,
@@ -207,6 +241,27 @@ class InspectOriginalEvalImporter:
         score_policy: InspectOriginalScorePolicy | None = None,
     ) -> InspectOriginalImport:
         archive, relogged_samples = await asyncio.to_thread(self._read_archive, path=path)
+        return await self._import_content_async(
+            archive=archive,
+            relogged_samples=relogged_samples,
+            cases=cases,
+            run=run,
+            live_observer=live_observer,
+            require_no_model_calls=require_no_model_calls,
+            score_policy=score_policy,
+        )
+
+    async def _import_content_async(
+        self,
+        *,
+        archive: bytes,
+        relogged_samples: bool,
+        cases: tuple[EvalCaseRef, ...] | None,
+        run: EvalRunRef | None,
+        live_observer: InspectLiveObserver | None,
+        require_no_model_calls: bool = False,
+        score_policy: InspectOriginalScorePolicy | None = None,
+    ) -> InspectOriginalImport:
         log = await asyncio.to_thread(read_eval_log, io.BytesIO(archive), resolve_attachments="full", format="eval")
         resolved = log.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
         if len(resolved) > self.MAX_RESOLVED_BYTES:
@@ -224,6 +279,7 @@ class InspectOriginalEvalImporter:
                     "case_run_ids": case_run_ids,
                     "score_policy": asdict(score_policy) if score_policy is not None else None,
                     "schema": self._projection_version.value,
+                    **({"capture_only": True} if self._capture_only else {}),
                 }
             )
         )
@@ -261,6 +317,10 @@ class InspectOriginalEvalImporter:
             raise ValueError("Original Inspect import requires one explicit, regular `.eval` file.")
         with path.open("rb") as source:
             content = source.read(cls.MAX_ARCHIVE_BYTES + 1)
+        return content, cls._validate_archive_bytes(content=content)
+
+    @classmethod
+    def _validate_archive_bytes(cls, *, content: bytes) -> bool:
         if not content or len(content) > cls.MAX_ARCHIVE_BYTES:
             raise ValueError("Original Inspect archive is empty or exceeds its bounded byte quota.")
         try:
@@ -280,7 +340,7 @@ class InspectOriginalEvalImporter:
             for member in members
             if member.filename.startswith("samples/") and member.filename.endswith(".json")
         ]
-        return content, len(sample_names) != len(set(sample_names))
+        return len(sample_names) != len(set(sample_names))
 
     @staticmethod
     def _validate_log(*, log: EvalLog, cases: tuple[EvalCaseRef, ...] | None, run: EvalRunRef | None) -> None:
@@ -415,7 +475,7 @@ class InspectOriginalEvalImporter:
                 required_source_gaps=source_gaps,
                 persist=True,
             )
-            if live_run_id is None
+            if live_run_id is None and not self._capture_only
             else ()
         )
         return self._result(
@@ -620,14 +680,18 @@ class InspectOriginalEvalImporter:
             case_run_ids=case_run_ids,
             required_source_gaps=source_gaps,
         )
-        case_results = self._ensure_case_results(
-            log=log,
-            snapshot=snapshot,
-            archive_sha=archive_sha,
-            case_run_ids=case_run_ids,
-            score_policy=score_policy,
-            required_source_gaps=source_gaps,
-            persist=False,
+        case_results = (
+            self._ensure_case_results(
+                log=log,
+                snapshot=snapshot,
+                archive_sha=archive_sha,
+                case_run_ids=case_run_ids,
+                score_policy=score_policy,
+                required_source_gaps=source_gaps,
+                persist=False,
+            )
+            if not self._capture_only
+            else ()
         )
         return self._result(
             log=log,

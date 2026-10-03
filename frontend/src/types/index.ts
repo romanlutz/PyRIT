@@ -449,6 +449,7 @@ export interface AttackSummary {
   labels: Record<string, string>
   created_at: string
   updated_at: string
+  source_read_only?: boolean
 }
 
 export interface CreateAttackRequest {
@@ -683,6 +684,7 @@ export interface OriginalSourceResult {
   source_state: 'success' | 'error' | 'cancelled'
   source_coverage_complete: boolean
   original_score?: string | null
+  original_score_available?: boolean
   pyrit_score_status?: 'complete' | 'undetermined' | null
   pyrit_outcome?: 'undetermined' | null
   cleanup_state: 'proved' | 'uncontained' | 'pending'

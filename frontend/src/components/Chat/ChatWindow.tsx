@@ -11,6 +11,8 @@ import {
   MenuList,
   MenuPopover,
   MenuTrigger,
+  MessageBar,
+  MessageBarBody,
   mergeClasses,
   Spinner,
   Switch,
@@ -235,6 +237,7 @@ interface ChatWindowProps {
   lastResponseMessagePieceId?: string | null
   /** Validated scenario-run provenance for attacks opened from a run dashboard. */
   scenarioResultId?: string | null
+  sourceReadOnly?: boolean
 }
 
 export default function ChatWindow({
@@ -263,6 +266,7 @@ export default function ChatWindow({
   humanScore,
   lastResponseMessagePieceId,
   scenarioResultId,
+  sourceReadOnly = false,
 }: ChatWindowProps) {
   const styles = useChatWindowStyles()
   const restoreFocusTargetAttributes = useRestoreFocusTarget()
@@ -394,7 +398,7 @@ export default function ChatWindow({
     && !targetInfoMatchesTarget(attackTarget, activeTarget),
   )
   // Any failed invariant keeps all mutation controls and handlers read-only.
-  const isMutationLocked = isOperatorLocked || isCrossTargetLocked || isTargetResolutionLocked
+  const isMutationLocked = sourceReadOnly || isOperatorLocked || isCrossTargetLocked || isTargetResolutionLocked
 
   // Clear internal messages when attack state is reset (e.g. New Attack).
   // Uses the "adjust state during render" pattern (see React docs:
@@ -1003,7 +1007,7 @@ export default function ChatWindow({
 
   /** 4. Branch into a brand-new attack (clone up to clicked message with new labels) */
   const handleBranchAttack = useCallback(async (messageIndex: number) => {
-    if (!activeTarget || !activeConversationId) { return }
+    if (!activeTarget || !activeConversationId || sourceReadOnly) { return }
 
     try {
       const createResponse = await attacksApi.createAttack({
@@ -1021,7 +1025,7 @@ export default function ChatWindow({
     } catch (err) {
       console.error('Failed to branch into new attack:', err)
     }
-  }, [activeTarget, activeConversationId, labels, markConversationLoaded, onConversationCreated])
+  }, [activeTarget, activeConversationId, sourceReadOnly, labels, markConversationLoaded, onConversationCreated])
 
   const handleChangeMainConversation = useCallback(async (convId: string) => {
     if (
@@ -1092,6 +1096,7 @@ export default function ChatWindow({
   ])
 
   const handleAddObjective = useCallback(async (newObjective: string): Promise<void> => {
+    if (sourceReadOnly) return
     if (!attackResultId) {
       setPendingObjective(newObjective)
       return
@@ -1099,7 +1104,7 @@ export default function ChatWindow({
 
     const updatedAttack = await attacksApi.updateAttack(attackResultId, { objective: newObjective })
     onObjectiveChange?.(updatedAttack.objective)
-  }, [attackResultId, onObjectiveChange])
+  }, [attackResultId, sourceReadOnly, onObjectiveChange])
 
   const singleTurnLimitReached = activeTarget?.capabilities?.supports_multi_turn === false && messages.some(m => m.role === 'user')
   const recoverableProcessingErrorIndex = recoverableSend?.conversationId === viewedConversationId
@@ -1112,7 +1117,7 @@ export default function ChatWindow({
 
   // "Continue with your target" — clone the current conversation into a new attack
   const handleUseAsTemplate = useCallback(async () => {
-    if (!attackResultId || !activeTarget || !activeConversationId) { return }
+    if (!attackResultId || !activeTarget || !activeConversationId || sourceReadOnly) { return }
 
     // Find the last non-loading message index to use as cutoff
     const lastIndex = messages.reduce(
@@ -1142,6 +1147,7 @@ export default function ChatWindow({
     activeConversationId,
     activeTarget,
     attackResultId,
+    sourceReadOnly,
     labels,
     markConversationLoaded,
     messages,
@@ -1290,6 +1296,11 @@ export default function ChatWindow({
             </Tooltip>
           </div>
         </div>
+        {sourceReadOnly && (
+          <MessageBar intent="info">
+            <MessageBarBody>Original evaluation evidence is read-only. Viewing and export do not rerun the evaluation.</MessageBarBody>
+          </MessageBar>
+        )}
         <ObjectiveHeader
           key={`${attackResultId ?? 'new'}-${objective}-${pendingObjective}`}
           objective={objective || pendingObjective}
@@ -1320,10 +1331,10 @@ export default function ChatWindow({
         {systemMessage && <SystemPromptBanner content={systemMessage.content} />}
         <MessageList
           messages={messages}
-          onCopyToInput={handleCopyToInput}
-          onCopyToNewConversation={attackResultId ? handleCopyToNewConversation : undefined}
-          onBranchConversation={attackResultId && activeConversationId ? handleBranchConversation : undefined}
-          onBranchAttack={activeTarget && activeConversationId ? handleBranchAttack : undefined}
+          onCopyToInput={sourceReadOnly ? undefined : handleCopyToInput}
+          onCopyToNewConversation={!sourceReadOnly && attackResultId ? handleCopyToNewConversation : undefined}
+          onBranchConversation={!sourceReadOnly && attackResultId && activeConversationId ? handleBranchConversation : undefined}
+          onBranchAttack={!sourceReadOnly && activeTarget && activeConversationId ? handleBranchAttack : undefined}
           isLoading={isLoadingAttack || isLoadingMessages || awaitingConversationLoad}
           isSingleTurn={activeTarget?.capabilities?.supports_multi_turn === false}
           isOperatorLocked={isOperatorLocked}
@@ -1364,12 +1375,12 @@ export default function ChatWindow({
           singleTurnLimitReached={singleTurnLimitReached}
           onNewConversation={handleNewConversation}
           operatorLocked={isOperatorLocked}
-          crossTargetLocked={isCrossTargetLocked}
-          targetResolutionStatus={targetResolutionStatus}
+          crossTargetLocked={!sourceReadOnly && isCrossTargetLocked}
+          targetResolutionStatus={sourceReadOnly ? undefined : targetResolutionStatus}
           onRetryTargetResolution={onRetryTargetResolution}
           onUseAsTemplate={handleUseAsTemplate}
           attackOperator={isOperatorLocked ? attackOperator ?? undefined : undefined}
-          noTargetSelected={!activeTarget}
+          noTargetSelected={!activeTarget && !sourceReadOnly}
           onConfigureTarget={() => onNavigate?.('registry')}
           onToggleConverterPanel={() => setIsConverterPanelOpen(prev => !prev)}
           isConverterPanelOpen={isConverterPanelOpen}
@@ -1420,7 +1431,8 @@ export default function ChatWindow({
           onChangeMainConversation={handleChangeMainConversation}
           onClose={() => setIsPanelOpen(false)}
           lockedReason={
-            !activeTarget ? 'Configure a target to enable this action.'
+            sourceReadOnly ? 'Original evaluation evidence is read-only.'
+            : !activeTarget ? 'Configure a target to enable this action.'
             : isOperatorLocked ? 'Cannot modify — attack belongs to a different operator.'
             : isCrossTargetLocked ? 'Cannot modify — attack was created with a different target.'
             : isTargetResolutionLocked ? 'Cannot modify — the attack target could not be safely resolved.'

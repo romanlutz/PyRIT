@@ -116,6 +116,7 @@ class OriginalSourceResult(BaseModel):
     source_state: Literal["success", "error", "cancelled"]
     source_coverage_complete: bool
     original_score: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._+-]{1,64}$")
+    original_score_available: bool = Field(False, strict=True)
     pyrit_score_status: ScoreStatus | None = None
     pyrit_outcome: Literal[AttackOutcome.UNDETERMINED] | None = None
     cleanup_state: Literal["proved", "uncontained", "pending"]
@@ -136,7 +137,7 @@ class OriginalSourceResult(BaseModel):
         if self.status is OriginalRunStatus.COMPLETED and (
             self.source_state != "success"
             or not self.source_coverage_complete
-            or self.original_score is None
+            or (self.original_score is None and not self.original_score_available)
             or self.pyrit_score_status is None
             or self.pyrit_outcome is not AttackOutcome.UNDETERMINED
             or self.cleanup_state != "proved"

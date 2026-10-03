@@ -564,7 +564,9 @@ function formatSuccess(run: ScenarioRunListItem): string {
   if (isApprovedOriginalRun(run)) {
     return run.original_source_result?.original_score
       ? `Original ${run.original_source_result.original_score} · outcome undetermined`
-      : 'Original score not verified'
+      : run.original_source_result?.original_score_available
+        ? 'Original score recorded; display value not approved'
+        : 'Original score not verified'
   }
   if (isOriginalInspectInert(run) && run.status === 'COMPLETED') {
     return 'Undetermined (original Inspect scorer)'

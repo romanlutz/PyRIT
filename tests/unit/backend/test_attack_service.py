@@ -66,6 +66,7 @@ def mock_memory():
     memory._get_conversation.return_value = None
     memory.get_prompt_scores.return_value = []
     memory.get_original_inspect_result_links.return_value = {}
+    memory.get_scenario_import_result_links.return_value = {}
 
     return memory
 

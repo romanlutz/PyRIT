@@ -73,6 +73,8 @@ from pyrit.models import (
     ScenarioIdentifier,
     ScenarioProgressCounts,
     ScenarioProgressHeader,
+    ScenarioProgressResult,
+    ScenarioProgressScore,
     ScenarioProgressSummary,
     ScenarioQueueEntry,
     ScenarioQueueSnapshot,
@@ -1919,10 +1921,18 @@ class ScenarioRunService:
         Raises:
             OriginalAdmissionError: If authorization or persisted source proof is missing.
         """
+        metadata = scenario_result.metadata or {}
+        from pyrit.backend.services.original_evidence_service import (
+            OriginalEvidenceRecord,
+            get_original_evidence_service,
+        )
+
+        if OriginalEvidenceRecord.METADATA_KEY in metadata:
+            source = get_original_evidence_service().read(scenario_result=scenario_result, operator=operator)
+            return source.record.envelope.binding, source.record.source_result
         gateway = get_original_run_gateway()
         if gateway is None:
             raise OriginalAdmissionError(reason=OriginalRunReason.RUNNER_NOT_CONFIGURED)
-        metadata = scenario_result.metadata or {}
         try:
             binding = OriginalRunBinding.model_validate(metadata.get(OriginalRunBinding.METADATA_KEY))
             job = OriginalWorkerJob.model_validate(metadata.get(OriginalWorkerJob.METADATA_KEY))
@@ -3226,6 +3236,35 @@ class ScenarioRunService:
             errors=int(summary.status is ScenarioRunState.FAILED),
             retries=0,
         )
+        results: list[ScenarioProgressResult] = []
+        from pyrit.backend.services.original_evidence_service import (
+            OriginalEvidenceRecord,
+            get_original_evidence_service,
+        )
+
+        if OriginalEvidenceRecord.METADATA_KEY in scenario_result.metadata:
+            source = get_original_evidence_service().read(scenario_result=scenario_result, operator=operator)
+            if source.imported is not None and source.record.attack_result_id is not None:
+                original = source.imported.case_results[0].attack_result
+                score = source.imported.case_results[0].score
+                results.append(
+                    ScenarioProgressResult(
+                        attack_result_id=original.attack_result_id,
+                        conversation_id=original.conversation_id,
+                        atomic_group_id=group_id,
+                        atomic_attack_name="original_task",
+                        seed_group_id=case_id,
+                        outcome=original.outcome,
+                        execution_time_ms=original.execution_time_ms,
+                        timestamp=original.timestamp,
+                        score=ScenarioProgressScore(
+                            scorer_name="Original Inspect scorer",
+                            score_type=score.score_type,
+                            status=score.status,
+                            score_value=source.record.source_result.original_score,
+                        ),
+                    )
+                )
         group_status = (
             "COMPLETED"
             if summary.status is ScenarioRunState.COMPLETED
@@ -3255,7 +3294,7 @@ class ScenarioRunService:
                 failure_reason=summary.error,
             ),
             plan=plan,
-            results=[],
+            results=results,
             summary=ScenarioProgressSummary(
                 overall=counts,
                 display_groups=[

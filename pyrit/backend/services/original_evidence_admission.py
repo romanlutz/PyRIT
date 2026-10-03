@@ -128,7 +128,18 @@ class TrustedOriginalEvidenceProvider(Protocol):
     async def authorize_intake_async(
         self, *, capability: str, envelope: OriginalEvidenceEnvelope
     ) -> OriginalEvidenceAdmission:
-        """Atomically consume a short-lived job/actor/source-bound capability, or verify an exact replay."""
+        """
+        Atomically consume a short-lived job/actor/source-bound capability, or verify an exact replay.
+
+        The host authenticates the pinned worker manifest, exact Scenario snapshot,
+        evaluated-role receipt and distinct terminal-operation receipt, including
+        original scoring before teardown. Body-supplied IDs and digests are not
+        independent authority. Replays must bind the same app job, actor and
+        immutable envelope; admission/concurrency must work across backend processes.
+
+        Returns:
+            OriginalEvidenceAdmission: The authenticated fixed source and display policy.
+        """
         ...
 
     async def verify_cleanup_async(

@@ -11,9 +11,10 @@ This is the attack-centric API design.
 import logging
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import Field
 
+from pyrit.backend.middleware.auth import get_authenticated_operator
 from pyrit.backend.models.attacks import (
     AddMessageRequest,
     AddMessageResponse,
@@ -51,6 +52,7 @@ router = APIRouter(prefix="/attacks", tags=["attacks"])
     response_model=AttackListResponse,
 )
 async def list_attacks(  # pyrit-async-suffix-exempt
+    request: Request,
     attack_types: list[str] | None = Query(
         None,
         description="Filter by attack type names. May be specified multiple times to OR-match "
@@ -158,6 +160,7 @@ async def list_attacks(  # pyrit-async-suffix-exempt
             max_turns=max_turns,
             limit=limit,
             cursor=cursor,
+            authenticated_user=get_authenticated_operator(request),
         )
     except OriginalAdmissionError as error:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
@@ -239,7 +242,9 @@ async def create_attack(request: CreateAttackRequest) -> CreateAttackResponse:  
         404: {"model": ProblemDetail, "description": "Attack not found"},
     },
 )
-async def get_attack(attack_result_id: str) -> AttackSummary:  # pyrit-async-suffix-exempt
+async def get_attack(  # pyrit-async-suffix-exempt
+    attack_result_id: str, request: Request
+) -> AttackSummary:
     """
     Get attack details.
 
@@ -251,7 +256,9 @@ async def get_attack(attack_result_id: str) -> AttackSummary:  # pyrit-async-suf
     service = get_attack_service()
 
     try:
-        attack = await service.get_attack_async(attack_result_id=attack_result_id)
+        attack = await service.get_attack_async(
+            attack_result_id=attack_result_id, authenticated_user=get_authenticated_operator(request)
+        )
     except OriginalAdmissionError as error:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
     if not attack:
@@ -334,6 +341,7 @@ async def remove_human_score(attack_result_id: str) -> AttackSummary:  # pyrit-a
 )
 async def get_conversation_messages(  # pyrit-async-suffix-exempt
     attack_result_id: str,
+    request: Request,
     conversation_id: str = Query(..., description="The conversation_id whose messages to return"),
 ) -> ConversationMessagesResponse:
     """
@@ -350,6 +358,7 @@ async def get_conversation_messages(  # pyrit-async-suffix-exempt
         messages = await service.get_conversation_messages_async(
             attack_result_id=attack_result_id,
             conversation_id=conversation_id,
+            authenticated_user=get_authenticated_operator(request),
         )
     except OriginalAdmissionError as error:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
@@ -375,7 +384,9 @@ async def get_conversation_messages(  # pyrit-async-suffix-exempt
         404: {"model": ProblemDetail, "description": "Attack not found"},
     },
 )
-async def get_conversations(attack_result_id: str) -> AttackConversationsResponse:  # pyrit-async-suffix-exempt
+async def get_conversations(  # pyrit-async-suffix-exempt
+    attack_result_id: str, request: Request
+) -> AttackConversationsResponse:
     """
     Get all conversations belonging to an attack.
 
@@ -388,7 +399,9 @@ async def get_conversations(attack_result_id: str) -> AttackConversationsRespons
     service = get_attack_service()
 
     try:
-        result = await service.get_conversations_async(attack_result_id=attack_result_id)
+        result = await service.get_conversations_async(
+            attack_result_id=attack_result_id, authenticated_user=get_authenticated_operator(request)
+        )
     except OriginalAdmissionError as error:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.reason.value) from error
     if not result:

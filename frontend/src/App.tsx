@@ -123,6 +123,7 @@ interface LoadedAttack {
   automatedScore: BackendScore | null
   humanScore: BackendScore | null
   lastResponseMessagePieceId: string | null
+  sourceReadOnly: boolean
   status: AttackLoadStatus
 }
 
@@ -337,6 +338,7 @@ function App() {
       automatedScore: null,
       humanScore: null,
       lastResponseMessagePieceId: null,
+      sourceReadOnly: false,
     })
     attacksApi
       .getAttack(routeAttackId)
@@ -360,6 +362,7 @@ function App() {
           automatedScore: attack.automated_score ?? null,
           humanScore: attack.human_score ?? null,
           lastResponseMessagePieceId: attack.last_response?.id ?? null,
+          sourceReadOnly: attack.source_read_only === true,
           status: 'success',
         })
       })
@@ -384,6 +387,7 @@ function App() {
           automatedScore: null,
           humanScore: null,
           lastResponseMessagePieceId: null,
+          sourceReadOnly: false,
         })
       })
     // Drop a stale response once the route has moved on to another attack.
@@ -478,6 +482,7 @@ function App() {
       automatedScore: null,
       humanScore: null,
       lastResponseMessagePieceId: null,
+      sourceReadOnly: false,
       status: 'success',
     })
     // Replace when promoting an empty /chat to its attack url (first message);
@@ -503,6 +508,7 @@ function App() {
             automatedScore: attack.automated_score ?? null,
             humanScore: attack.human_score ?? null,
             lastResponseMessagePieceId: attack.last_response?.id ?? null,
+            sourceReadOnly: attack.source_read_only === true,
           }
         : current
     ))
@@ -559,6 +565,7 @@ function App() {
       automatedScore={readyAttack?.automatedScore}
       humanScore={readyAttack?.humanScore}
       lastResponseMessagePieceId={readyAttack?.lastResponseMessagePieceId}
+      sourceReadOnly={readyAttack?.sourceReadOnly}
       scenarioResultId={readyAttack ? scenarioResultId : null}
     />
   )
