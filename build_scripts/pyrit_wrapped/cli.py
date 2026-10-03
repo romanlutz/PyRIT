@@ -50,7 +50,7 @@ def _parser() -> argparse.ArgumentParser:
         "--refresh", action="store_true", help="Bypass cached requests and refresh live GitHub data."
     )
     summarize.add_argument("--taxonomy", type=Path, help="Custom versioned taxonomy JSON, for live collection.")
-    preview = commands.add_parser("preview", help="Serve one generated HTML report locally for YouTube playback.")
+    preview = commands.add_parser("preview", help="Serve one generated HTML report locally.")
     preview.add_argument("--report-dir", type=Path, required=True)
     preview.add_argument("--port", type=int, default=8879)
     return parser
@@ -191,7 +191,5 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PyRIT Wrapped: {error}", file=sys.stderr)
         return 1
     print(f"Summaries written to {destination}")
-    print(
-        "Open index.html for the deck. Use preview for visible YouTube playback; music starts only after enabling it."
-    )
+    print("Open index.html for the animated deck and recording cues. Music is controlled separately.")
     return 0

@@ -21,16 +21,18 @@ are available under the ignored `results/wrapped` directory.
 
 ## Capabilities and constraints
 
-The user requested manual slide navigation and the eight selected tracks.
-Assumption after the structured question could not be answered: use one
-visible YouTube player, with an explicit Enable music action and automatic
-track switching only while the player is visible. Never hide or obscure it.
-The data report works offline; YouTube requires internet and an HTTP origin.
-No recordings are extracted, downloaded, or bundled.
+The user requested manual Spotify playback alongside a recording-friendly
+deck after embedded YouTube playback proved unreliable. The page shows song
+cues and optional automatic slide timing, not automatic music. A countdown,
+pause/resume, completed-take timestamps, and a cue-sheet export assist a screen
+recording performed with the user's own software. Spotify search links are
+manually opened; no service APIs, credentials, streams, or audio capture exist.
+The complete deck works offline.
 
 ## Brand and accessibility
 
-Preserve PyRIT's name and the incumbent Fluent-style system typography and
-light interface. Keep this separate from the existing GUI shell.
-Keyboard navigation, clear focus, reduced motion, readable charts, explicit
-playback errors, and a transcript are required.
+User-directed replacement of the formal report: celebratory, simple, animated,
+and rooted in PyRIT's pirate/raccoon identity. Use the existing Roakey and parrot
+artwork, oversized facts, sunset colors, and falling confetti. Keep this separate
+from the existing GUI shell. Keyboard navigation, clear focus, pauseable
+decoration, reduced motion, readable charts, and a transcript are required.

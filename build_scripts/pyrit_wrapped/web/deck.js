@@ -8,177 +8,180 @@
   const chapters = Array.from(document.querySelectorAll('.chapter-button'))
   const previous = document.getElementById('previous-slide')
   const next = document.getElementById('next-slide')
-  const toggle = document.getElementById('music-toggle')
-  const replay = document.getElementById('replay-cue')
-  const surface = document.getElementById('player-surface')
-  const placeholder = document.getElementById('player-placeholder')
-  const status = document.getElementById('music-status')
-  let index = 0
-  let ratio = 0
-  let apiPromise = null
-  let controller
+  const start = document.getElementById('start-take')
+  const pause = document.getElementById('pause-take')
+  const finish = document.getElementById('finish-take')
+  const duration = document.getElementById('cue-duration')
+  const advance = document.getElementById('auto-advance')
+  const status = document.getElementById('recording-status')
+  const motion = document.getElementById('motion-toggle')
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+  let displayed = -1
+  let recording
 
-  function loadYouTube() {
-    if (window.YT && window.YT.Player) return Promise.resolve()
-    if (apiPromise) return apiPromise
-    apiPromise = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        apiPromise = null
-        script.remove()
-        reject(new Error('YouTube did not load. Check your connection and press Enable music again.'))
-      }, 15000)
-      const script = document.createElement('script')
-      script.src = 'https://www.youtube.com/iframe_api'
-      script.onerror = () => {
-        clearTimeout(timeout)
-        apiPromise = null
-        script.remove()
-        reject(new Error('The YouTube API could not load. Check your network or content blocker.'))
-      }
-      window.onYouTubeIframeAPIReady = () => {
-        clearTimeout(timeout)
-        resolve()
-      }
-      document.head.appendChild(script)
-    })
-    return apiPromise
-  }
-
-  async function createPlayer() {
-    if (!/^https?:$/.test(window.location.protocol)) {
-      throw new Error('YouTube needs the local HTTP preview. The slide deck still works from this file.')
-    }
-    await loadYouTube()
-    return new Promise((resolve, reject) => {
-      let ready = false
-      function destroy() {
-        clearTimeout(timeout)
-        player.destroy()
-        if (!document.getElementById('youtube-player')) {
-          const replacement = document.createElement('div')
-          replacement.id = 'youtube-player'
-          surface.appendChild(replacement)
-        }
-        placeholder.hidden = false
-        replay.disabled = true
-      }
-      const timeout = setTimeout(() => {
-        if (!ready) {
-          destroy()
-          reject(new Error('The YouTube player did not become ready. Press Enable music to retry.'))
-        }
-      }, 15000)
-      const player = new YT.Player('youtube-player', {
-        width: '100%',
-        height: '100%',
-        playerVars: { autoplay: 0, controls: 1, playsinline: 1, origin: window.location.origin },
-        events: {
-          onReady: () => {
-            ready = true
-            clearTimeout(timeout)
-            placeholder.hidden = true
-            const frame = player.getIframe()
-            frame.title = 'YouTube music video for the current chapter'
-            frame.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture')
-            replay.disabled = false
-            resolve({
-              load: track => player.loadVideoById({
-                videoId: track.youtube_id,
-                startSeconds: track.start_seconds,
-                endSeconds: track.end_seconds,
-              }),
-              play: () => player.playVideo(),
-              pause: () => player.pauseVideo(),
-              destroy,
-            })
-          },
-          onStateChange: event => controller.playerState(event.data),
-          onAutoplayBlocked: () => controller.blocked(),
-          onError: event => {
-            if (!ready) {
-              clearTimeout(timeout)
-              destroy()
-              reject(new Error(`YouTube player startup failed (${event.data}). Try the Watch on YouTube link.`))
-            } else controller.failed(event.data)
-          },
-        },
-      })
-    })
-  }
-
-  controller = new WrappedPlayback.PlaybackController({
-    createPlayer,
-    status: (state, message) => {
-      status.textContent = message
-      status.classList.toggle('error', state === 'error')
-      toggle.textContent = controller.enabled ? 'Disable music' : 'Enable music'
-      toggle.setAttribute('aria-pressed', String(controller.enabled))
-    },
-  })
-
-  function observeVisibility() {
-    const bounds = surface.getBoundingClientRect()
-    controller.setVisibility({
-      ratio, width: bounds.width, height: bounds.height,
-      pageVisible: document.visibilityState === 'visible',
-    })
-  }
-
-  function showSlide(value, focus) {
-    index = WrappedPlayback.clampSlide(value, sections.length)
+  function showSlide(index, focus = false) {
+    const changed = index !== displayed
+    displayed = index
     sections.forEach((section, position) => { section.hidden = position !== index })
     chapters.forEach((button, position) => {
       if (position === index) button.setAttribute('aria-current', 'step')
       else button.removeAttribute('aria-current')
     })
-    previous.disabled = index === 0
-    next.textContent = index === sections.length - 1 ? 'Restart' : 'Next \u2192'
     document.getElementById('chapter-position').textContent = `${index + 1} / ${sections.length}`
-    const track = data.slides[index].track
-    document.getElementById('track-title').textContent = track ? track.title : 'No selected track'
-    document.getElementById('track-artist').textContent = track ? track.artist : ''
-    document.getElementById('watch-video').href = track && track.youtube_id
-      ? `https://www.youtube.com/watch?v=${track.youtube_id}` : 'https://www.youtube.com/'
-    controller.setTrack(track)
-    history.replaceState(null, '', `#slide-${index + 1}`)
+    document.body.dataset.chapter = data.slides[index].type
+    if (changed) {
+      const track = data.slides[index].track
+      document.getElementById('track-title').textContent = track ? track.title : 'No selected track'
+      document.getElementById('track-artist').textContent = track ? track.artist : ''
+      const link = document.getElementById('spotify-link')
+      link.hidden = !track
+      if (track) link.href = `https://open.spotify.com/search/${encodeURIComponent(`${track.title} ${track.artist}`)}`
+      history.replaceState(null, '', `#slide-${index + 1}`)
+    }
     if (focus) sections[index].querySelector('h1').focus({ preventScroll: true })
   }
 
-  previous.addEventListener('click', () => showSlide(index - 1, true))
-  next.addEventListener('click', () => showSlide(index === sections.length - 1 ? 0 : index + 1, true))
-  chapters.forEach((button, position) => button.addEventListener('click', () => showSlide(position, true)))
+  function update(view) {
+    const active = ['countdown', 'running', 'paused'].includes(view.state)
+    document.body.classList.toggle('recording', active)
+    showSlide(view.index)
+    start.disabled = active
+    duration.disabled = active
+    advance.disabled = active
+    pause.disabled = !['running', 'paused'].includes(view.state) || view.remaining === 0
+    pause.textContent = view.state === 'paused' ? 'Resume' : 'Pause'
+    finish.disabled = !active
+    previous.disabled = view.index === 0 || view.state === 'countdown'
+    next.disabled = view.state === 'countdown'
+    next.textContent = view.index === sections.length - 1 ? (active ? 'Finish take' : 'Restart') : 'Next \u2192'
+    chapters.forEach(button => { button.disabled = view.state === 'countdown' })
+    const clock = document.getElementById('cue-clock')
+    clock.textContent = view.state === 'countdown' ? String(view.countdown)
+      : active ? `${view.remaining}s` : 'Ready'
+    const overlay = document.getElementById('countdown')
+    overlay.hidden = view.state !== 'countdown'
+    document.getElementById('countdown-number').textContent = String(view.countdown)
+    const messages = {
+      idle: view.reason === 'countdown-cancelled' ? 'Countdown cancelled. Start a new take when ready.'
+        : 'Queue the songs in Spotify. You control the music; this page only times the slides.',
+      countdown: 'Get ready. The first slide starts after the countdown.',
+      running: 'Take running. Change songs manually in Spotify at each chapter.',
+      paused: view.reason === 'background' ? 'Paused because the tab was hidden. Resume when ready.'
+        : view.reason === 'cue-complete' ? 'Cue complete. Change the song, then choose Next.'
+        : 'Take paused. Spotify is not paused by this page.',
+      finished: 'Take finished. Download the cue sheet for the actual slide timestamps.',
+    }
+    if (status.textContent !== messages[view.state]) status.textContent = messages[view.state]
+  }
+
+  recording = new WrappedRecording.RecordingController({
+    count: sections.length, now: () => performance.now(), update,
+  })
+  recording.index = WrappedRecording.slideFromHash(window.location.hash, sections.length)
+  recording.notify()
+  const timer = window.setInterval(() => {
+    if (recording.state === 'running' || recording.state === 'countdown') recording.tick()
+  }, 100)
+  window.addEventListener('pagehide', () => window.clearInterval(timer))
+
+  function navigate(index) {
+    recording.goTo(index)
+    showSlide(recording.index, true)
+  }
+
+  previous.addEventListener('click', () => navigate(recording.index - 1))
+  next.addEventListener('click', () => {
+    if (recording.index === sections.length - 1) {
+      if (['running', 'paused'].includes(recording.state)) recording.finish()
+      else navigate(0)
+    } else navigate(recording.index + 1)
+  })
+  chapters.forEach((button, index) => button.addEventListener('click', () => navigate(index)))
   document.querySelector('.wordmark').addEventListener('click', event => {
     event.preventDefault()
-    showSlide(0, true)
+    navigate(0)
   })
   document.addEventListener('keydown', event => {
-    if (/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName) || event.target.isContentEditable) return
+    if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|SUMMARY)$/.test(event.target.tagName) || event.target.isContentEditable) return
     if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
       event.preventDefault()
-      showSlide(index + (event.key === 'ArrowRight' ? 1 : -1), true)
+      navigate(recording.index + (event.key === 'ArrowRight' ? 1 : -1))
+    } else if (event.code === 'Space' && ['running', 'paused'].includes(recording.state)) {
+      event.preventDefault()
+      if (recording.state === 'paused') recording.resume()
+      else recording.pause()
     }
   })
-  toggle.addEventListener('click', () => {
-    const enabling = !controller.enabled
-    controller.setEnabled(enabling)
-    toggle.textContent = enabling ? 'Disable music' : 'Enable music'
-    toggle.setAttribute('aria-pressed', String(enabling))
-    if (enabling) surface.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+  start.addEventListener('click', () => {
+    if (!duration.reportValidity()) return
+    recording.start({ seconds: Number(duration.value), autoAdvance: advance.checked })
+    document.getElementById('slide-content').scrollIntoView({ block: 'start' })
   })
-  replay.addEventListener('click', () => controller.replay())
+  pause.addEventListener('click', () => {
+    if (recording.state === 'paused') recording.resume()
+    else recording.pause()
+  })
+  finish.addEventListener('click', () => recording.finish())
+  document.addEventListener('visibilitychange', () => {
+    document.body.classList.toggle('page-hidden', document.hidden)
+    if (document.hidden) recording.pause('background')
+  })
+  window.addEventListener('hashchange', () => {
+    navigate(WrappedRecording.slideFromHash(window.location.hash, sections.length))
+    history.replaceState(null, '', `#slide-${recording.index + 1}`)
+  })
+
+  function setMotion(enabled) {
+    document.body.classList.toggle('motion-disabled', !enabled)
+    motion.setAttribute('aria-pressed', String(enabled))
+    motion.textContent = enabled ? 'Pause animation' : 'Resume animation'
+  }
+  setMotion(!reducedMotion.matches)
+  motion.addEventListener('click', () => {
+    setMotion(motion.getAttribute('aria-pressed') !== 'true')
+  })
+  reducedMotion.addEventListener('change', event => setMotion(!event.matches))
+  const confetti = document.getElementById('confetti')
+  for (let i = 0; i < 24; i += 1) {
+    const piece = document.createElement('span')
+    piece.style.cssText = `--x:${(i * 43) % 100}%;--delay:${-(i % 8)}s;--duration:${5 + i % 4}s;--spin:${180 + i * 31}deg`
+    confetti.appendChild(piece)
+  }
   if ('IntersectionObserver' in window) {
     new IntersectionObserver(entries => {
-      ratio = entries[0].intersectionRatio
-      observeVisibility()
-    }, { threshold: [0, 0.5, 0.51, 1] }).observe(surface)
-  } else {
-    toggle.disabled = true
-    status.textContent = 'This browser cannot verify player visibility. Use Watch on YouTube for music.'
+      document.getElementById('slide-content').classList.toggle('offscreen', !entries[0].isIntersecting)
+    }).observe(document.getElementById('slide-content'))
   }
-  document.addEventListener('visibilitychange', observeVisibility)
-  window.addEventListener('resize', observeVisibility)
-  window.addEventListener('hashchange', () => {
-    showSlide(WrappedPlayback.slideFromHash(window.location.hash, sections.length), false)
+  document.getElementById('fullscreen-toggle').addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+      else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen()
+      else status.textContent = 'Fullscreen is unavailable here. Open this page in your browser for recording.'
+    } catch (error) {
+      status.textContent = `Fullscreen could not start: ${error.message}. Use your browser's fullscreen control.`
+    }
   })
-  showSlide(WrappedPlayback.slideFromHash(window.location.hash, sections.length), false)
+  document.addEventListener('fullscreenchange', () => {
+    document.getElementById('fullscreen-toggle').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'
+  })
+  document.getElementById('download-cues').addEventListener('click', () => {
+    const seconds = Number(duration.value)
+    if (!duration.reportValidity()) return
+    const sheet = {
+      title: data.title,
+      music_control: 'manual; no audio is captured or played by the deck',
+      timeline: 'Actual timestamps are relative to countdown completion and include pauses.',
+      planned: data.slides.map((slide, index) => ({
+        slide: index + 1, title: slide.title, track: slide.track,
+        start_seconds: index * seconds, duration_seconds: seconds,
+      })),
+      actual: recording.entries,
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(sheet, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'pyrit-wrapped-cues.json'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  })
 })()

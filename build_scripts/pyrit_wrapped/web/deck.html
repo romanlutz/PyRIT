@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
-THESIS: Eight evidence-backed chapters, not a dashboard or a productivity leaderboard.
-OWN-WORLD: PyRIT's Fluent-style light neutrals, blue ink, Segoe/system typography, direct charts.
-STORY: Read one insight, inspect its evidence, navigate, optionally enable visible YouTube cues.
-FIRST VIEWPORT: Report identity and chapter navigation above the facts; the soundtrack dock below.
-FORM: User-pinned click-through deck and bottom player; inherited system, no concept roll.
+THESIS: A pirate-raccoon party for real contributions, not a formal analytics dashboard.
+OWN-WORLD: Sunset-gold stage, sea-dark ink, chunky Trebuchet lettering, Roakey and his parrot.
+STORY: Celebrate the haul, sail through eight chapters, record a take with manually controlled music.
+FIRST VIEWPORT: Huge headline and facts left; swaying Roakey right; falling confetti above; song cue below.
+FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no concept roll.
 -->
 <html lang="en">
 <head>
@@ -19,7 +19,8 @@ FORM: User-pinned click-through deck and bottom player; inherited system, no con
   <header class="report-header">
     <a class="wordmark" href="#slide-1" aria-label="PyRIT Wrapped, first chapter">PyRIT <span>Wrapped</span></a>
     <div class="report-identity">{{ title }}</div>
-    <a class="quiet-link" href="summary.md" target="_blank" rel="noopener">Transcript</a>
+    <button id="motion-toggle" type="button" aria-pressed="true">Pause animation</button>
+    <button id="fullscreen-toggle" type="button">Fullscreen</button>
   </header>
   <main class="deck-shell">
     <nav class="chapter-nav" aria-label="Chapters">
@@ -31,6 +32,8 @@ FORM: User-pinned click-through deck and bottom player; inherited system, no con
       <span id="chapter-position" aria-live="polite">1 / {{ sections | length }}</span>
     </nav>
     <div id="slide-content" class="stage">
+      <div id="confetti" class="confetti" aria-hidden="true"></div>
+      <div class="slide-stack">
       {% for section in sections %}
       <section class="slide slide-{{ section.type }}" id="slide-{{ loop.index }}"
                aria-labelledby="title-{{ loop.index }}" {% if not loop.first %}hidden{% endif %}>
@@ -81,35 +84,46 @@ FORM: User-pinned click-through deck and bottom player; inherited system, no con
         <details class="full-summary"><summary>Full summary and context</summary><p>{{ section.full_summary }}</p></details>
       </section>
       {% endfor %}
+      </div>
+      <aside class="mascot" aria-label="Roakey, PyRIT's pirate raccoon, and his parrot">
+        <img src="{{ mascot }}" alt="Roakey the pirate raccoon with his colorful parrot" width="1024" height="1024">
+        <p>Small paws.<br>Big adventures.</p>
+      </aside>
+      <div id="countdown" class="countdown" hidden>
+        <p>All aboard in</p><strong id="countdown-number">3</strong>
+        <p>Start your screen recorder. Music stays manual.</p>
+      </div>
     </div>
     <div class="slide-controls">
       <button id="previous-slide" type="button" disabled>&larr; Previous</button>
-      <span class="keyboard-hint">Arrow keys to navigate</span>
+      <span class="keyboard-hint">Arrow keys to sail &middot; Space to pause a take</span>
       <button id="next-slide" type="button">Next &rarr;</button>
     </div>
     <section class="soundtrack" aria-labelledby="soundtrack-heading">
       <div class="soundtrack-info">
-        <h2 id="soundtrack-heading">The soundtrack</h2>
+        <h2 id="soundtrack-heading">Your next song cue</h2>
         <p id="track-title" class="track-title"></p>
         <p id="track-artist" class="track-artist"></p>
-        <div class="music-controls">
-          <button id="music-toggle" type="button" aria-pressed="false">Enable music</button>
-          <button id="replay-cue" type="button" disabled>Replay cue</button>
-        </div>
-        <p id="music-status" class="music-status" role="status" aria-live="polite">Music is off. YouTube loads only after you enable it.</p>
-        <a id="watch-video" href="https://www.youtube.com/" target="_blank" rel="noopener">Watch on YouTube</a>
-        <p class="youtube-notice">Enabling music contacts YouTube. Videos may contain ads or be unavailable in your region.
-          <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube terms</a>
-          &middot; <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Google privacy</a>.
-          One visible player, approximately ten seconds per cue.</p>
+        <a id="spotify-link" target="_blank" rel="noopener noreferrer">Find this song on Spotify</a>
+        <details class="cue-list">
+          <summary>All songs, in slide order</summary>
+          <ol>{% for track in tracks %}<li>{% if track %}{{ track.title }} &middot; {{ track.artist }}{% else %}No selected track{% endif %}</li>{% endfor %}</ol>
+        </details>
       </div>
-      <div id="player-surface" class="player-surface">
-        <div id="player-placeholder" class="player-placeholder">
-          <span class="play-symbol" aria-hidden="true">&#9654;</span>
-          <p>Optional YouTube video</p>
-          <p>Player stays visible while music plays.</p>
+      <div class="recording-tools">
+        <div class="take-heading"><h2>Ready for a take?</h2><span id="cue-clock" class="cue-clock" aria-label="Slide timer">Ready</span></div>
+        <div class="take-settings">
+          <label>Seconds per slide <input id="cue-duration" type="number" min="5" max="120" value="10" required></label>
+          <label><input id="auto-advance" type="checkbox"> Auto-advance slides</label>
         </div>
-        <div id="youtube-player"></div>
+        <div class="take-actions">
+          <button id="start-take" type="button">Start recording mode</button>
+          <button id="pause-take" type="button" disabled>Pause</button>
+          <button id="finish-take" type="button" disabled>Finish take</button>
+        </div>
+        <p id="recording-status" role="status" aria-live="polite"></p>
+        <button id="download-cues" type="button">Download cue sheet</button>
+        <p class="recording-note">This times slides, not music. Start your own screen recorder and control Spotify separately.</p>
       </div>
     </section>
     <details class="provenance">
@@ -122,10 +136,11 @@ FORM: User-pinned click-through deck and bottom player; inherited system, no con
         <a href="activity.md" target="_blank" rel="noopener">Complete activity evidence</a>
         <a href="stats.json" target="_blank" rel="noopener">Auditable facts</a>
         <a href="songs.md" target="_blank" rel="noopener">Selected tracks</a>
+        <a href="summary.md" target="_blank" rel="noopener">Transcript</a>
       </div>
     </details>
   </main>
-  <noscript><p class="noscript">JavaScript is needed for slide navigation and music. <a href="summary.md">Read the transcript instead.</a></p></noscript>
+  <noscript><p class="noscript">JavaScript is needed for navigation and recording cues. <a href="summary.md">Read the transcript instead.</a></p></noscript>
   <script id="wrapped-data" type="application/json">{{ payload | safe }}</script>
   <script>{{ controller | safe }}</script>
   <script>{{ script | safe }}</script>

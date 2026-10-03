@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC
 from pathlib import Path
@@ -51,6 +52,17 @@ class DeckSection(Model):
 
 class HtmlDeck:
     _WEB = Path(__file__).with_name("web")
+    _MASCOT = Path(__file__).resolve().parents[2] / "doc" / "roakey.png"
+    _HEADLINES = {
+        "overview": "Look at that haul!",
+        "prs": "All hands on deck.",
+        "reviews_people": "One mighty crew.",
+        "issues": "Questions aboard!",
+        "topics": "X marks your focus.",
+        "busiest": "Full sail. No brakes.",
+        "loc": "Making waves in the code.",
+        "recap": "That's a wrap, crew!",
+    }
 
     def __init__(self, *, stats: Stats, story: Story) -> None:
         if stats.period != story.period or stats.contributor != story.contributor or stats.release != story.release:
@@ -82,13 +94,14 @@ class HtmlDeck:
             else "PyRIT Wrapped"
         )
         payload = {
+            "title": title,
             "slides": [
                 {
                     "type": slide.type,
                     "title": slide.title,
                     "track": next(
                         (
-                            candidate.model_dump(mode="json")
+                            {"title": candidate.title, "artist": candidate.artist}
                             for candidate in slide.song_candidates
                             if candidate.selected
                         ),
@@ -103,9 +116,13 @@ class HtmlDeck:
             title=title,
             sections=sections,
             css=(self._WEB / "deck.css").read_text(encoding="utf-8"),
-            controller=(self._WEB / "playback.js").read_text(encoding="utf-8"),
+            controller=(self._WEB / "recording.js").read_text(encoding="utf-8"),
             script=(self._WEB / "deck.js").read_text(encoding="utf-8"),
             payload=script_json(payload),
+            tracks=[
+                next((song for song in slide.song_candidates if song.selected), None) for slide in self.story.slides
+            ],
+            mascot="data:image/png;base64," + base64.b64encode(self._MASCOT.read_bytes()).decode("ascii"),
             period=self.stats.period,
             warnings=self.stats.warnings,
             source_time=self.stats.earliest_response_at.astimezone(UTC).isoformat(),
@@ -120,7 +137,7 @@ class HtmlDeck:
         return DeckSection.model_validate(
             {
                 "type": slide.type,
-                "title": slide.title,
+                "title": self._HEADLINES[slide.type],
                 "description": description,
                 "metrics": metrics,
                 "full_summary": slide.summary,

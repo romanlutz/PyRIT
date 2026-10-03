@@ -30,7 +30,7 @@ never overwritten. Each report contains:
 | `activity.md` | Complete topic-grouped activity lists with GitHub source links |
 | `story.json` | Supported slide types, facts, evidence references, and omission reasons |
 | `songs.md` | Track/artist candidates and rationale for each emitted slide type |
-| `index.html` | Self-contained click-through deck with charts and optional visible YouTube playback |
+| `index.html` | Self-contained animated pirate/raccoon deck, charts, manual song cues, and recording timer |
 
 Eight reusable types cover overview, PR pipeline, reviews/people, issues,
 focus areas, activity peaks, LOC/languages, and recap. Review and peak slides
@@ -41,33 +41,48 @@ described honestly, not turned into achievements.
 
 Open the generated `index.html` to review the stats offline. Previous/Next,
 chapter buttons, arrow keys, and Restart navigate the same compact story.
-The transcript and full evidence remain available separately.
+The transcript and full evidence remain available separately. Roakey and his
+parrot join the celebration with falling confetti, a gentle sway, and animated
+chart bars. **Pause animation** stops decorative motion. The operating
+system's reduced-motion preference removes animations entirely. Motion also
+pauses when the deck is off-screen or the tab is hidden.
 
-For YouTube music, serve the generated report over local HTTP:
+You can open `index.html` directly, or serve the report over local HTTP:
 
 ```powershell
 uv run python -m build_scripts.pyrit_wrapped preview --report-dir .\results\wrapped\your-report --port 8879
 ```
 
-Open `http://127.0.0.1:8879/`, then choose **Enable music**. No YouTube script
-or iframe is loaded before that action. One visible player at the bottom
-switches to the selected track on navigation and plays approximately ten
-seconds. Replay cue restarts it; Disable music removes the player.
+Open `http://127.0.0.1:8879/`. The exported page embeds the repository's existing
+Roakey artwork, so offline viewing needs no external fonts, images, or scripts.
+The earlier YouTube player has been replaced with manual soundtrack cues.
 
-The player is at least 200 by 200 pixels. Scripted playback requires more
-than half of it to be visible and the document to be in the foreground.
-Scrolling it off-screen or backgrounding the page pauses playback. It is not
-hidden, moved below the viewport for background audio, or covered by overlays.
-Private use does not waive [YouTube's embed requirements](https://developers.google.com/youtube/terms/required-minimum-functionality).
-The preview preserves the required referrer; `file://` is for silent review,
-not reliable YouTube playback.
+## Record a take with manual music
 
-Browsers may block autoplay even after initial consent. The page reports that
-and keeps the native YouTube Play controls available. Owner-disabled embeds,
-regional restrictions, network failures, and missing referrers are reported
-explicitly, with a Watch on YouTube link. The tool does not bypass restrictions
-or extract audio. Official audio/Topic uploads can be used when a music video
-does not permit embedding, without changing the selected song.
+Open **All songs, in slide order** and queue the selected tracks in your
+Spotify app yourself. **Find this song on Spotify** opens a search only when
+clicked; it does not select a recording, connect an account, or start playback.
+The deck never controls Spotify, requests Spotify credentials, or captures audio.
+
+Start your own screen recorder, choose 5-120 seconds per slide (default 10),
+then select **Start recording mode**. A three-second countdown returns to the
+first slide and begins timing. At the end of each cue, the default manual mode
+waits for you to change the song and choose **Next**. Optional **Auto-advance
+slides** moves to the next chapter automatically, but music is still manual.
+The final automatic cue finishes the take without looping.
+
+**Pause/Resume**, Space when focus is outside a control, and **Finish take**
+control the timer. Hiding the tab pauses the take; it never silently resumes or
+skips unseen chapters. A hidden-tab countdown is cancelled. Fullscreen is
+optional and may require opening the page in a normal browser rather than an
+embedded preview.
+
+**Download cue sheet** exports JSON with planned song/slide timings and completed
+actual slide visits for the current take. Actual timestamps start at countdown
+completion and include paused time; `active_seconds` excludes pauses. They are
+not timestamps extracted from a video or audio recording. A new take clears the
+previous actual visits, so download the previous take first. Recording mode
+times a presentation; it does not perform screen recording or supply music rights.
 
 The preview binds only to `127.0.0.1`, serves an explicit allowlist of generated
 report files, rejects non-loopback Host headers and escaping symlinks, and
@@ -256,6 +271,6 @@ selections are "Celebration" for the opening, Ava Max's "Work" for PRs,
 "Don't Stop Me Now" for activity peaks, "Changes" for LOC, and Backstreet Boys'
 "Bottle Up" for the recap. All eight slide types now have a selected track.
 Selection is not a claim that recordings are supplied or licensed.
-Roughly 10-second cues are the intended format, but short duration does not
-itself grant usage rights. The optional player streams from YouTube under its
-embed rules; no recordings are downloaded or bundled.
+Roughly 10-second cues are the default format, but short duration does not
+itself grant usage rights. Music is manually controlled outside the deck;
+no recordings are downloaded, captured, or bundled.

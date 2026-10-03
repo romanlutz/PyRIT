@@ -71,9 +71,8 @@ def make_handler(files: PreviewFiles) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; script-src 'unsafe-inline' https://www.youtube.com https://s.ytimg.com; "
-                "style-src 'unsafe-inline'; frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
-                "img-src data:; connect-src https://www.youtube.com; base-uri 'none'; form-action 'none'",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'",
             )
             self.end_headers()
             if not head:

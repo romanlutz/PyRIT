@@ -26,11 +26,18 @@ def test_deck_has_navigation_selected_tracks_and_inline_assets(snapshot: Snapsho
     story = StoryBuilder(stats).build()
     output = HtmlDeck(stats=stats, story=story).render()
     assert "Previous" in output and "Next" in output
-    assert "Enable music" in output
+    assert "Start recording mode" in output
+    assert "Find this song on Spotify" in output
+    assert "Download cue sheet" in output
     assert "With A Little Help" not in output
-    assert "wrapped-data" in output and "WrappedPlayback" in output
+    assert "wrapped-data" in output and "WrappedRecording" in output
     assert "<iframe" not in output
-    assert "min-height: 200px" in output
+    assert "iframe_api" not in output
+    assert "data:image/png;base64," in output
+    assert "confetti-fall" in output
+    assert "prefers-reduced-motion" in output
+    assert output.count('id="countdown"') == 1
+    assert output.count('<aside class="mascot"') == 1
     assert "strict-origin-when-cross-origin" in output
     assert "transcript" in output.lower()
 
@@ -98,6 +105,7 @@ def test_preview_is_readonly_local_and_preserves_referrer(tmp_path: Path) -> Non
             assert response.status == 200
             assert response.getheader("Referrer-Policy") == "strict-origin-when-cross-origin"
             assert response.getheader("Access-Control-Allow-Origin") is None
+            assert "connect-src 'none'" in (response.getheader("Content-Security-Policy") or "")
             assert response.read() == b"Deck"
             connection.request("GET", "/", headers={"Host": "evil.example"})
             response = connection.getresponse()
@@ -117,6 +125,6 @@ def test_javascript_controller_behaviors() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is required for the actual JavaScript behavior tests.")
-    script = Path(__file__).with_name("playback.test.cjs")
+    script = Path(__file__).with_name("recording.test.cjs")
     result = subprocess.run([node, "--test", str(script)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
