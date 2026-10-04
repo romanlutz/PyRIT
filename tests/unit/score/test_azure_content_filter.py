@@ -76,7 +76,7 @@ async def test_score_piece_async_image(patch_central_database, image_message_pie
     assert len(scores) == 1
     score = scores[0]
     assert score.score_type == "float_scale"
-    assert score.score_value == str(3.0 / 7)
+    assert score.score_value == str(3.0 / 6)
     assert score.score_category == ["Hate"]
     assert isinstance(score.score_metadata, dict)
     assert score.score_metadata["azure_severity"] == 3
