@@ -31,6 +31,14 @@ from pyrit.models import SeedDatasetSummary
 logger = logging.getLogger(__name__)
 
 
+class DatasetNotFoundError(ValueError):
+    """Raised when a syntactically valid named selection is not loaded in Memory."""
+
+
+class InvalidDatasetSelectionError(ValueError):
+    """Raised when a dataset selection key has an invalid format."""
+
+
 class DatasetService:
     """Service for listing seed datasets."""
 
@@ -120,7 +128,7 @@ class DatasetService:
         Returns:
             SeedExampleListResponse: The selected logical examples and pagination metadata.
         """
-        scope = self._selection_scope(selection_key)
+        scope = await self._resolve_browsing_selection_async(selection_key=selection_key)
         page = self._memory.get_seed_example_page(
             dataset_scope=scope,
             limit=limit,
@@ -139,11 +147,12 @@ class DatasetService:
                 next_cursor=page.next_cursor,
                 prev_cursor=cursor,
             ),
+            total=page.total,
         )
 
     async def get_seed_example_async(self, *, selection_key: str, example_id: str) -> SeedExampleDetailResponse:
         """Return one complete logical seed example without materializing seed models."""
-        scope = self._selection_scope(selection_key)
+        scope = await self._resolve_browsing_selection_async(selection_key=selection_key)
         try:
             logical_id = UUID(example_id)
         except ValueError as exc:
@@ -164,6 +173,24 @@ class DatasetService:
             members=[self._member(member) for member in item.members],
         )
 
+    async def _resolve_browsing_selection_async(self, *, selection_key: str) -> SeedExampleDatasetScope:
+        """
+        Resolve a browse selection from persisted dataset identities only.
+
+        Returns:
+            SeedExampleDatasetScope: The validated named or unnamed scope.
+
+        Raises:
+            DatasetNotFoundError: If a named dataset is not represented in Memory.
+            InvalidDatasetSelectionError: If the selection key is malformed.
+        """
+        scope = self._selection_scope(selection_key)
+        if scope.kind == "named":
+            summaries = self._memory.get_seed_dataset_summaries()
+            if not any(summary.dataset_name == scope.name for summary in summaries):
+                raise DatasetNotFoundError(f"Dataset not found: {selection_key}")
+        return scope
+
     @staticmethod
     def _selection_scope(selection_key: str) -> SeedExampleDatasetScope:
         """
@@ -177,7 +204,7 @@ class DatasetService:
         prefix = "dataset:named:"
         if selection_key.startswith(prefix) and selection_key[len(prefix) :]:
             return SeedExampleDatasetScope.named(selection_key[len(prefix) :])
-        raise ValueError(f"Invalid dataset selection key: {selection_key}")
+        raise InvalidDatasetSelectionError(f"Invalid dataset selection key: {selection_key}")
 
     @classmethod
     def _summary(cls, item: object) -> SeedExampleSummary:
@@ -189,6 +216,8 @@ class DatasetService:
             name=next((member.name for member in members if member.name), None),
             preview=preview,
             preview_truncated=truncated,
+            is_template=cls._template_status(members),
+            parameters=cls._template_parameters(members),
             seed_ids=item.seed_ids,  # type: ignore[attr-defined]
             modalities=item.modalities,  # type: ignore[attr-defined]
             seed_types=item.seed_types,  # type: ignore[attr-defined]
@@ -197,6 +226,30 @@ class DatasetService:
             harm_categories=item.harm_categories,  # type: ignore[attr-defined]
             has_unlabeled_harm=item.has_unlabeled_harm,  # type: ignore[attr-defined]
         )
+
+    @staticmethod
+    def _template_status(members: Sequence[object]) -> bool | None:
+        """
+        Aggregate nullable template status without treating unknown as false.
+
+        Returns:
+            bool | None: True if any member is a template, None if the status is unknown,
+                otherwise False.
+        """
+        statuses = [member.is_jinja_template for member in members]
+        if any(status is True for status in statuses):
+            return True
+        if any(status is None for status in statuses):
+            return None
+        return False
+
+    @staticmethod
+    def _template_parameters(members: Sequence[object]) -> list[str] | None:
+        """Return persisted parameters for known template members only."""
+        for member in members:
+            if member.is_jinja_template is True:
+                return member.parameters
+        return None
 
     @staticmethod
     def _preview(members: Sequence[object]) -> tuple[str, bool]:

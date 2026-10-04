@@ -20,6 +20,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pyrit.backend.main import app
+from pyrit.backend.services.dataset_service import get_dataset_service
+from pyrit.datasets import SeedDatasetProvider
 from pyrit.models import SeedObjective, SeedPrompt, SeedSimulatedConversation
 
 if TYPE_CHECKING:
@@ -34,7 +36,14 @@ UNNAMED_KEY = "dataset:unnamed"
 @pytest.fixture
 def client(patch_central_database) -> TestClient:
     """Use the real SQLite memory fixture behind the API application."""
-    return TestClient(app)
+    # DatasetService is globally cached in production. Each test gets a fresh
+    # fixture-owned SQLiteMemory, so do not retain a service bound to a previous
+    # test's in-memory engine after that fixture disposes it.
+    get_dataset_service.cache_clear()
+    try:
+        yield TestClient(app)
+    finally:
+        get_dataset_service.cache_clear()
 
 
 async def _add(memory: MemoryInterface, *seeds: SeedPrompt | SeedObjective | SeedSimulatedConversation) -> None:
@@ -56,7 +65,7 @@ def _items(response):
 
 class TestEmptyAndDatasetSelection:
     async def test_empty_dataset_is_a_valid_empty_page(self, client, sqlite_instance: MemoryInterface):
-        response = _list(client)
+        response = _list(client, UNNAMED_KEY)
         assert response.status_code == 200
         body = response.json()
         assert body["items"] == []
@@ -250,6 +259,26 @@ class TestFilters:
 
 
 class TestTextSearchAndSafety:
+    async def test_browsing_selection_validation_does_not_discover_providers_or_read_files(
+        self, client, sqlite_instance
+    ):
+        seed = SeedPrompt(value="stored", dataset_name=DATASET)
+        await _add(sqlite_instance, seed)
+        with (
+            patch.object(
+                SeedDatasetProvider,
+                "get_all_dataset_names_async",
+                side_effect=AssertionError("provider metadata discovery"),
+            ),
+            patch.object(SeedDatasetProvider, "_parse_metadata_async", side_effect=AssertionError("metadata parse")),
+            patch("pathlib.Path.read_text", side_effect=AssertionError("provider file read")),
+        ):
+            listed = _list(client)
+            assert listed.status_code == 200
+            example_id = listed.json()["items"][0]["example_id"]
+            detail = _detail(client, example_id)
+        assert detail.status_code == 200
+
     async def test_text_search_is_literal_case_insensitive_and_text_only(self, client, sqlite_instance, tmp_path):
         image_path = tmp_path / "media-path.png"
         image_path.write_bytes(b"local test image")
@@ -461,7 +490,7 @@ class TestDatabaseBoundsAndSideEffects:
             ),
             patch.object(sqlite_instance, "add_seeds_to_memory_async", side_effect=AssertionError("write")) as write,
         ):
-            response = _list(client)
+            response = _list(client, UNNAMED_KEY)
         assert response.status_code == 200
         assert write.call_count == 0
 

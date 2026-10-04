@@ -82,6 +82,8 @@ class SeedExampleSummary(BaseModel):
     name: str | None = None
     preview: str
     preview_truncated: bool
+    is_template: bool | None = None
+    parameters: list[str] | None = None
     seed_ids: list[UUID]
     modalities: list[str]
     seed_types: list[str]
@@ -96,6 +98,7 @@ class SeedExampleListResponse(BaseModel):
 
     items: list[SeedExampleSummary]
     pagination: PaginationInfo
+    total: int
 
 
 class SeedExampleDetailResponse(BaseModel):
