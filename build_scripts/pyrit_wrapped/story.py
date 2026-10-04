@@ -8,7 +8,18 @@ from build_scripts.pyrit_wrapped.songs import SongCatalog
 
 
 class StoryBuilder:
-    _ORDER = ("overview", "prs", "reviews_people", "issues", "topics", "busiest", "loc", "recap")
+    _ORDER = (
+        "cover",
+        "overview",
+        "contributors",
+        "prs",
+        "reviews_people",
+        "issues",
+        "topics",
+        "busiest",
+        "loc",
+        "recap",
+    )
 
     def __init__(self, stats: Stats) -> None:
         self.stats = stats
@@ -16,7 +27,9 @@ class StoryBuilder:
         self.omitted: dict[str, OmittedSlide] = {}
 
     def build(self) -> Story:
+        self._add(key="cover", title="PyRIT Wrapped", summary=self.stats.identity, roles=[])
         self._overview()
+        self._contributors()
         self._prs()
         self._reviews_people()
         self._issues()
@@ -27,49 +40,71 @@ class StoryBuilder:
             key="recap",
             title="The recap",
             summary=self._count_summary(),
-            roles=[Activity.AUTHORED, Activity.MERGED, Activity.ISSUES, Activity.REVIEWED],
+            roles=[Activity.AUTHORED, Activity.LANDED, Activity.ISSUES, Activity.REVIEWS],
         )
         return Story(
             contributor=self.stats.contributor,
             release=self.stats.release,
             period=self.stats.period,
+            repository_year=self.stats.repository_year,
             slides=[self.slides[key] for key in self._ORDER if key in self.slides],
             omitted=[self.omitted[key] for key in self._ORDER if key in self.omitted],
         )
 
     def _overview(self) -> None:
-        if self.stats.release is not None:
-            title = f"PyRIT release wrapped: {self.stats.release.head.tag}"
-            summary = (
-                f"{self.stats.release.label}. All contributors' activity between publication dates; "
-                f"{self._value(Activity.SHIPPED)} PR merge commits are in the pinned tag range."
+        people = [row for row in self.stats.contributions if row.actor.type == "User" and row.merged_prs]
+        summary = self._count_summary()
+        if self.stats.contributor is None:
+            summary += f" {len(people)} human authors of merged PRs."
+        if self.stats.release:
+            summary += f" Collaboration window: {self.stats.release.label}, between publication dates."
+        self._add(
+            key="overview", title="The merged-PR haul", summary=summary, roles=[Activity.AUTHORED, Activity.LANDED]
+        )
+
+    def _contributors(self) -> None:
+        if self.stats.contributor is not None:
+            self.omitted["contributors"] = OmittedSlide(
+                type="contributors", reason="People credit is a repository-wide slide."
             )
-            roles = [Activity.SHIPPED, Activity.AUTHORED, Activity.MERGED]
-        else:
-            title = f"@{self.stats.contributor.login}'s PyRIT Wrapped" if self.stats.contributor else "PyRIT Wrapped"
-            suffix = " (year to date)" if self.stats.period.year_to_date else ""
-            summary = f"{self.stats.period.year}{suffix}. {self._count_summary()}"
-            roles = [Activity.AUTHORED, Activity.LANDED, Activity.MERGED]
-        self._add(key="overview", title=title, summary=summary, roles=roles)
+            return
+        summaries = []
+        for group, label in (("maintainers", "Maintainers"), ("contributors", "Other contributors"), ("bots", "Bots")):
+            rows = [row for row in self.stats.contributions if row.group == group]
+            summaries.append(
+                label
+                + ": "
+                + (
+                    "; ".join(
+                        f"@{row.actor.login}: {row.merged_prs} merged PRs, {row.submitted_reviews} submitted reviews"
+                        for row in rows
+                    )
+                    or "no recorded activity"
+                )
+            )
+        self._add(
+            key="contributors",
+            title="The people and bots behind it",
+            summary=". ".join(summaries) + ". Counts use recorded authors and actors, not inferred AI assistance.",
+            roles=[Activity.LANDED, Activity.REVIEWS],
+        )
 
     def _prs(self) -> None:
         summary = (
-            f"{self._value(Activity.AUTHORED)} PRs opened; {self._value(Activity.PR_CLOSED)} closed "
-            f"(including merges); {self._value(Activity.LANDED)} authored PRs landed. "
+            f"{self._value(Activity.AUTHORED)} PRs newly opened; {self._value(Activity.LANDED)} PRs merged "
+            "during the reporting window. "
         )
-        if self.stats.release is not None:
-            summary += f"{self._value(Activity.SHIPPED)} PRs have a merge commit in the release range. "
-        else:
-            summary += "These are your own PRs, not every PR you merged. "
-        role = Activity.SHIPPED if self.stats.release else Activity.AUTHORED
+        if self.stats.contributor is not None:
+            summary += "These are your authored PRs, not merge credit for other authors' work. "
+        role = Activity.LANDED
         breakdown = self.stats.breakdowns.get(role)
         if breakdown:
-            summary += "Change intent: " + self._distribution(breakdown.intents) + "."
+            summary += "Change intent of merged PRs: " + self._distribution(breakdown.intents) + "."
         self._add(
             key="prs",
             title="The PR pipeline",
             summary=summary,
-            roles=[Activity.AUTHORED, Activity.PR_CLOSED, Activity.LANDED, Activity.SHIPPED],
+            roles=[Activity.AUTHORED, Activity.LANDED],
         )
 
     def _reviews_people(self) -> None:
@@ -89,13 +124,14 @@ class StoryBuilder:
         summary = (
             f"{self._value(Activity.REVIEWED)} distinct PRs reviewed "
             f"in {self._value(Activity.REVIEWS)} submitted reviews; "
-            f"{self._value(Activity.MERGED)} PRs merged. "
         )
+        if self.stats.contributor is not None:
+            summary += f"{self._value(Activity.MERGED)} PRs credited to you as the merger, across all authors. "
         summary += (
             f"{self._value(Activity.INLINE)} inline comments, {self._value(Activity.REVIEW_BODIES)} review summaries, "
             f"{self._value(Activity.PR_COMMENTS)} PR discussion comments. "
         )
-        if self.stats.release is None:
+        if self.stats.contributor is not None:
             summary += f"Work reviewed from {len(self.stats.reviewed_authors)} other identifiable human authors. "
         else:
             for role in ("authors", "reviewers", "mergers"):
@@ -120,7 +156,7 @@ class StoryBuilder:
         )
 
     def _topics(self) -> None:
-        role = Activity.SHIPPED if self.stats.release else Activity.AUTHORED
+        role = Activity.LANDED
         breakdown = self.stats.breakdowns.get(role)
         if self.stats.release is not None:
             summary = "Top changed-file areas between tags: " + self._top(self.stats.release_file_topics) + ". "
@@ -144,6 +180,15 @@ class StoryBuilder:
                     tags[artifact] = tags.get(artifact, 0) + 1
             summary += (
                 "PRs touching artifacts (overlapping): " + self._top(tags) + ". Full breakdowns are in the evidence."
+            )
+        if self.stats.loc.by_topic:
+            lines = sorted(
+                self.stats.loc.by_topic.items(), key=lambda row: (-(row[1].additions + row[1].deletions), row[0])
+            )
+            summary += (
+                " LOC by area: "
+                + "; ".join(f"{name}: +{value.additions:,} / -{value.deletions:,}" for name, value in lines)
+                + "."
             )
         self._add(key="topics", title="Where the work focused", summary=summary, roles=[role])
 
@@ -170,7 +215,11 @@ class StoryBuilder:
             summary = loc.reason or "Complete LOC data is unavailable; recollect this snapshot."
             facts = {}
         else:
-            label = "Net tag-to-tag tree diff" if self.stats.release else "Sum of your landed PR diffs"
+            label = (
+                "Net tag-to-tag tree diff"
+                if self.stats.release
+                else ("Sum of all merged PR diffs" if self.stats.repository_year else "Sum of your merged PR diffs")
+            )
             summary = (
                 f"{label}: +{loc.totals.additions:,} / -{loc.totals.deletions:,} text lines. "
                 + "; ".join(
@@ -190,8 +239,8 @@ class StoryBuilder:
 
     def _count_summary(self) -> str:
         return (
-            f"{self._value(Activity.AUTHORED)} PRs opened, {self._value(Activity.PR_CLOSED)} closed, "
-            f"{self._value(Activity.MERGED)} merged; {self._value(Activity.REVIEWED)} PRs reviewed; "
+            f"{self._value(Activity.AUTHORED)} PRs newly opened, "
+            f"{self._value(Activity.LANDED)} PRs merged; {self._value(Activity.REVIEWS)} submitted reviews; "
             f"{self._value(Activity.ISSUES)} issues opened, {self._value(Activity.ISSUES_CLOSED)} closed."
         )
 

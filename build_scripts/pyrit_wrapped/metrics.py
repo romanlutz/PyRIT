@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 
 from build_scripts.pyrit_wrapped.churn import summarize_churn
+from build_scripts.pyrit_wrapped.contributors import ContributorCredits
 from build_scripts.pyrit_wrapped.models import (
     Activity,
     Actor,
@@ -14,7 +15,9 @@ from build_scripts.pyrit_wrapped.models import (
     Capability,
     CommentKind,
     Evidence,
+    FileChange,
     ItemKind,
+    LineTotals,
     LocReport,
     LocScope,
     Peak,
@@ -37,7 +40,6 @@ class Metrics:
         Activity.INLINE,
         Activity.PR_COMMENTS,
         Activity.ISSUE_COMMENTS,
-        Activity.PR_CLOSED,
         Activity.ISSUES_CLOSED,
     }
 
@@ -62,6 +64,10 @@ class Metrics:
             [Activity.INLINE, Activity.REVIEW_BODIES, Activity.PR_COMMENTS]
         )
         monthly, distinct_events = self._monthly_activity()
+        credit_builder = ContributorCredits(snapshot=self.snapshot, activities=self.activities)
+        contributions, unknown_contributions = credit_builder.calculate()
+        loc = self._loc()
+        files = self._code_files()
         unavailable = {Activity.SHIPPED} if self.snapshot.release is None else set()
         if Capability.CLOSURES not in self.snapshot.capabilities:
             unavailable.update({Activity.PR_CLOSED, Activity.ISSUES_CLOSED})
@@ -105,9 +111,19 @@ class Metrics:
             },
             warnings=warnings,
             release=self.snapshot.release,
-            loc=self._loc(),
+            loc=loc,
             peaks=self._peaks(),
             participants=self._participants(),
+            repository_year=self.snapshot.repository_year,
+            distinct_daily_events=self._daily_activity(),
+            contributions=contributions,
+            unknown_contributions=unknown_contributions,
+            maintainer_logins=list(ContributorCredits.MAINTAINERS),
+            code_file_topics=dict(
+                sorted(Counter(self.taxonomy.classify_file(file.path).primary_topic for file in files).items())
+            )
+            if loc.complete
+            else {},
             release_file_topics=(
                 dict(
                     sorted(
@@ -295,30 +311,59 @@ class Metrics:
             )
         return result
 
+    def _daily_activity(self) -> dict[str, int]:
+        days: dict[str, set[str]] = {day.date().isoformat(): set() for day in self._days()}
+        for role in self._EVENT_ROLES:
+            for record in self.activities[role]:
+                days[record.event_at.astimezone(UTC).date().isoformat()].add(
+                    self._event_key(activity=role, record=record)
+                )
+        return {day: len(events) for day, events in days.items()}
+
+    def _code_files(self) -> list[FileChange]:
+        if self.snapshot.release:
+            return self.snapshot.release.files
+        merged = {record.item_ref for record in self.activities[Activity.LANDED]}
+        return [file for item in self.snapshot.items if item.ref in merged for file in item.file_changes]
+
+    def _topic_churn(self, loc: LocReport) -> LocReport:
+        if not loc.complete:
+            return loc
+        topics: dict[str, LineTotals] = defaultdict(LineTotals)
+        for file in self._code_files():
+            if file.binary is True:
+                continue
+            topics[self.taxonomy.classify_file(file.path).primary_topic].additions += file.additions
+            topics[
+                self.taxonomy.classify_file(file.previous_path or file.path).primary_topic
+            ].deletions += file.deletions
+        loc.by_topic = dict(sorted(topics.items()))
+        return loc
+
     def _loc(self) -> LocReport:
         if self.snapshot.release is not None:
-            return summarize_churn(files=self.snapshot.release.files, scope=LocScope.RELEASE_DIFF, complete=True)
+            return self._topic_churn(
+                summarize_churn(files=self.snapshot.release.files, scope=LocScope.RELEASE_DIFF, complete=True)
+            )
         landed = {record.item_ref for record in self.activities[Activity.LANDED]}
         items = [item for item in self.snapshot.items if item.ref in landed]
         complete = Capability.LOC in self.snapshot.capabilities and all(item.loc_complete for item in items)
-        return summarize_churn(
-            files=[file for item in items for file in item.file_changes],
-            scope=LocScope.LANDED_PRS,
-            complete=complete,
-            reason=None
-            if complete
-            else "Complete landed-PR file additions/deletions were not collected; LOC is unavailable.",
+        return self._topic_churn(
+            summarize_churn(
+                files=[file for item in items for file in item.file_changes],
+                scope=LocScope.REPOSITORY_PRS if self.snapshot.repository_year else LocScope.LANDED_PRS,
+                complete=complete,
+                reason=None
+                if complete
+                else "Complete landed-PR file additions/deletions were not collected; LOC is unavailable.",
+            )
         )
 
     def _participants(self) -> dict[str, list[Actor]]:
         result: dict[str, dict[str, Actor]] = {
             role: {} for role in ("authors", "reviewers", "mergers", "issue_authors", "commenters")
         }
-        author_refs = {
-            record.item_ref
-            for role in (Activity.AUTHORED, Activity.LANDED, Activity.SHIPPED)
-            for record in self.activities[role]
-        }
+        author_refs = {record.item_ref for record in self.activities[Activity.LANDED]}
         merger_refs = {record.item_ref for record in self.activities[Activity.MERGED]}
         issue_refs = {record.item_ref for record in self.activities[Activity.ISSUES]}
         review_refs = {record.ref for record in self.activities[Activity.REVIEWS]}

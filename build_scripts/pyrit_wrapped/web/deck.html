@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
 THESIS: A pirate-raccoon party for real contributions, not a formal analytics dashboard.
-OWN-WORLD: Sunset-gold stage, sea-dark ink, chunky Trebuchet lettering, Roakey and his parrot.
-STORY: Celebrate the haul, sail through eight chapters, record a take with manually controlled music.
-FIRST VIEWPORT: Huge headline and facts left; swaying Roakey right; falling confetti above; song cue below.
-FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no concept roll.
+OWN-WORLD: Ten distinct bright chapter fields, sea-dark ink, chunky lettering, Roakey and his parrot.
+STORY: Name the recap, celebrate merged work, credit people and bots, explore activity and code changes.
+FIRST VIEWPORT: PyRIT Wrapped and its username/year or release identity; mascot and falling confetti.
+FORM: User-pinned colorful pirate party with alternating confetti, disco, fireworks, and landing-page sprite.
 -->
 <html lang="en">
 <head>
@@ -33,6 +33,28 @@ FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no 
     </nav>
     <div id="slide-content" class="stage">
       <div id="confetti" class="confetti" aria-hidden="true"></div>
+      <div class="disco" aria-hidden="true">
+        <div class="disco-beams"></div>
+        <svg viewBox="0 0 100 120">
+          <defs><clipPath id="disco-clip"><circle cx="50" cy="67" r="39"/></clipPath></defs>
+          <path d="M50 0V28" stroke="currentColor" stroke-width="2"/>
+          <circle cx="50" cy="67" r="39" fill="#d7edf0" stroke="#123841" stroke-width="2"/>
+          <g clip-path="url(#disco-clip)" class="disco-facets">
+            <path d="M11 45H89M11 59H89M11 73H89M11 87H89M25 28V107M40 28V107M55 28V107M70 28V107M85 28V107" stroke="#56828a" stroke-width="2"/>
+            <path d="M26 46H39V58H26ZM56 60H69V72H56ZM41 74H54V86H41ZM71 88H84V100H71Z" fill="#fff"/>
+            <path d="M12 60H24V72H12ZM41 32H54V44H41ZM71 46H84V58H71ZM26 88H39V100H26Z" fill="#82aeb5"/>
+          </g>
+          <path class="disco-glint" d="M67 35V53M58 44H76" stroke="#fff" stroke-width="3"/>
+        </svg>
+      </div>
+      <div class="fireworks" aria-hidden="true">
+        {% for burst in range(3) %}<div class="firework" style="--burst:{{ burst }}">
+        {% for ray in range(8) %}<i style="--ray:{{ ray }}"></i>{% endfor %}
+        </div>{% endfor %}
+      </div>
+      <div class="raccoon-runner" aria-hidden="true">
+        <img src="{{ runner }}" width="151" height="120" alt="">
+      </div>
       <div class="slide-stack">
       {% for section in sections %}
       <section class="slide slide-{{ section.type }}" id="slide-{{ loop.index }}"
@@ -48,6 +70,21 @@ FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no 
             {% if metric.note %}<small>{{ metric.note }}</small>{% endif %}</dd></div>
           {% endfor %}
         </dl>
+        {% endif %}
+        {% if section.credit_groups %}
+        <div class="credit-groups {% if section.roster %}credit-roster{% else %}credit-leaders{% endif %}">
+          {% for group in section.credit_groups %}
+          <div class="credit-group credit-{{ group.group }}">
+            <h2>{{ group.label }}</h2>
+            <p class="credit-key">{% if section.roster %}Merged PRs / submitted reviews{% else %}Top authors by merged PRs{% endif %}</p>
+            <ul>{% for row in group.rows %}
+              <li><span class="account">@{{ row.actor.login }}</span>
+                  <strong>{{ row.merged_prs }}{% if section.roster %} / {{ row.submitted_reviews }}{% endif %}</strong>
+                  {% if group.group == 'bots' %}<small>{{ row.comments }} comments</small>{% endif %}</li>
+            {% else %}<li>No recorded activity</li>{% endfor %}</ul>
+          </div>
+          {% endfor %}
+        </div>
         {% endif %}
         {% if section.bars %}
         <div class="chart">
@@ -80,6 +117,35 @@ FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no 
           </ul>
         </div>
         {% endif %}
+        {% if section.topic_lines %}
+        <div class="chart topic-line-chart">
+          <h2>LOC changed by area</h2>
+          <p class="chart-key"><span>Removed</span><span>Added</span></p>
+          <ul class="language-list">
+          {% for row in section.topic_lines %}
+            <li><div class="language-label"><span>{{ row.label }}</span>
+                <span>-{{ "{:,}".format(row.deletions) }} / +{{ "{:,}".format(row.additions) }}</span></div>
+              <div class="diverging" aria-hidden="true"><span class="removed"><i style="width:{{ row.deleted_width }}%"></i></span>
+                <span class="added"><i style="width:{{ row.added_width }}%"></i></span></div></li>
+          {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+        {% if section.timeline %}
+        <div class="chart timeline-chart">
+          <h2>{{ section.chart_label }}</h2>
+          <ul class="timeline" style="--series-count:{{ section.timeline | length }}" aria-label="{{ section.timeline_scale }} activity in date order">
+            {% for bar in section.timeline %}
+            <li title="{{ bar.label }}: {{ bar.value }} distinct actions" aria-label="{{ bar.label }}: {{ bar.value }} distinct actions">
+              <span class="time-bar" style="height:{{ bar.width }}%" aria-hidden="true"></span>
+              <span class="time-label" aria-hidden="true">{{ bar.axis_label }}</span>
+            </li>{% endfor %}
+          </ul>
+          <details class="time-values"><summary>Activity counts by {{ section.timeline_scale }}</summary>
+            <dl>{% for bar in section.timeline %}<div><dt>{{ bar.label }}</dt><dd>{{ bar.value }}</dd></div>{% endfor %}</dl>
+          </details>
+        </div>
+        {% endif %}
         <p class="footnote">{{ section.footnote }}</p>
         <details class="full-summary"><summary>Full summary and context</summary><p>{{ section.full_summary }}</p></details>
       </section>
@@ -107,7 +173,7 @@ FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no 
         <a id="spotify-link" target="_blank" rel="noopener noreferrer">Find this song on Spotify</a>
         <details class="cue-list">
           <summary>All songs, in slide order</summary>
-          <ol>{% for track in tracks %}<li>{% if track %}{{ track.title }} &middot; {{ track.artist }}{% else %}No selected track{% endif %}</li>{% endfor %}</ol>
+          <ol>{% for track in tracks %}<li>{% if track %}{{ track.title }} &middot; {{ track.artist }}{% else %}No song change for this chapter{% endif %}</li>{% endfor %}</ol>
         </details>
       </div>
       <div class="recording-tools">
@@ -126,6 +192,23 @@ FORM: User-pinned celebratory deck, pirate/raccoon theme and bounded motion; no 
         <p class="recording-note">This times slides, not music. Start your own screen recorder and control Spotify separately.</p>
       </div>
     </section>
+    {% if contributor_groups %}
+    <details class="contributor-inventory">
+      <summary>Everyone's contributions: complete maintainer, contributor, and bot lists</summary>
+      <p>Counts describe separate roles, not a productivity score. Maintainer groups use the supplied username roster.</p>
+      {% for group in contributor_groups %}
+      <h2>{{ group.label }}</h2>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Account</th><th>Newly opened PRs</th><th>Merged PRs</th><th>Submitted reviews</th><th>Comments</th><th>Opened issues</th></tr></thead>
+        <tbody>{% for row in group.rows %}<tr><th scope="row">@{{ row.actor.login }}</th>
+          <td>{{ row.opened_prs }}</td><td>{{ row.merged_prs }}</td><td>{{ row.submitted_reviews }}</td><td>{{ row.comments }}</td><td>{{ row.opened_issues }}</td></tr>
+          {% else %}<tr><td colspan="6">No recorded activity</td></tr>{% endfor %}</tbody>
+      </table></div>
+      {% endfor %}
+      <p>{{ unknown_merged }} merged PRs have unavailable/deleted authors. Bot statistics use recorded GitHub actors, not inferred AI-assisted work.</p>
+      {% if unmatched_maintainers %}<p>Maintainer handles without matching recorded activity: {{ unmatched_maintainers | join(', ') }}. Verify spelling or aliases; no identity match is guessed.</p>{% endif %}
+    </details>
+    {% endif %}
     <details class="provenance">
       <summary>Reporting window, sources, and limitations</summary>
       <p>UTC events from {{ period.start.isoformat() }} up to, not including, {{ period.cutoff.isoformat() }}.

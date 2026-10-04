@@ -29,9 +29,11 @@
     })
     document.getElementById('chapter-position').textContent = `${index + 1} / ${sections.length}`
     document.body.dataset.chapter = data.slides[index].type
+    document.body.dataset.effect = data.slides[index].effect
+    document.getElementById('slide-content').style.setProperty('--run-distance', `${document.getElementById('slide-content').clientWidth + 180}px`)
     if (changed) {
       const track = data.slides[index].track
-      document.getElementById('track-title').textContent = track ? track.title : 'No selected track'
+      document.getElementById('track-title').textContent = track ? track.title : 'No song change'
       document.getElementById('track-artist').textContent = track ? track.artist : ''
       const link = document.getElementById('spotify-link')
       link.hidden = !track
@@ -39,6 +41,7 @@
       history.replaceState(null, '', `#slide-${index + 1}`)
     }
     if (focus) sections[index].querySelector('h1').focus({ preventScroll: true })
+    if (changed || focus) document.getElementById('slide-content').scrollTop = 0
   }
 
   function update(view) {

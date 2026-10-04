@@ -26,6 +26,7 @@ from build_scripts.pyrit_wrapped.models import (
     FileChange,
     ItemKind,
     Period,
+    PeriodKind,
     ReleaseRange,
     Review,
     Snapshot,
@@ -159,10 +160,18 @@ class Collector:
         self.progress = progress
 
     async def collect_async(
-        self, *, login: str | None, period: Period, taxonomy: TaxonomyConfig, release: ReleaseRange | None = None
+        self,
+        *,
+        login: str | None,
+        period: Period,
+        taxonomy: TaxonomyConfig,
+        release: ReleaseRange | None = None,
+        repository_year: bool = False,
     ) -> Snapshot:
-        if (login is None) == (release is None):
-            raise WrappedError("Choose one contributor or release scope.")
+        if sum((login is not None, release is not None, repository_year)) != 1:
+            raise WrappedError("Choose one contributor, release, or repository-year scope.")
+        if repository_year and period.kind != PeriodKind.YEAR:
+            raise WrappedError("Repository-year scope requires a calendar-year period.")
         contributor = (
             ApiActor.model_validate((await self.client.get_async(path=f"users/{login}")).data).to_actor()
             if login is not None
@@ -180,13 +189,14 @@ class Collector:
         associations = await self._release_associations_async(release) if release is not None else set()
         self.progress("Collecting comments in the activity window.")
         comments = await self._comments_async(contributor=contributor, period=period)
-        reviews = await ReviewReader(self.client).read_async(sorted(reviewed)) if release is not None else []
+        repository_wide = contributor is None
+        reviews = await ReviewReader(self.client).read_async(sorted(reviewed)) if repository_wide else []
         reviewed_active = {
             review.item_number
             for review in reviews
             if period.contains(review.submitted_at) and review.state != "PENDING"
         }
-        initial = authored | merged | pr_closed | associations | (reviewed_active if release is not None else reviewed)
+        initial = authored | merged | pr_closed | associations | (reviewed_active if repository_wide else reviewed)
         pulls = await self._batch_async(numbers=sorted(initial), fetch=self._pull_async)
         items = {item.number: item for item in pulls}
         warnings = await self._load_missing_items_async(
@@ -205,7 +215,7 @@ class Collector:
                 + ". Agent-associated search matches do not establish human authorship."
             )
         review_numbers = {comment.item_number for comment in comments if comment.kind == CommentKind.INLINE}
-        if release is None:
+        if not repository_wide:
             review_numbers |= reviewed
         else:
             review_numbers -= reviewed
@@ -260,6 +270,7 @@ class Collector:
             comments=ordered_comments,
             warnings=sorted(set(warnings)),
             release=release,
+            repository_year=repository_year,
             capabilities=[Capability.CLOSURES, Capability.LOC],
         )
 

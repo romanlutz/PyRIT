@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -68,6 +69,7 @@ class Capability(str, Enum):
 
 class LocScope(str, Enum):
     LANDED_PRS = "contributor_landed_pr_churn"
+    REPOSITORY_PRS = "repository_merged_pr_churn"
     RELEASE_DIFF = "release_net_tree_diff"
 
 
@@ -287,11 +289,14 @@ class CollectionSession(Model):
     taxonomy: TaxonomyConfig
     complete: bool = False
     release: ReleaseRange | None = None
+    repository_year: bool = False
 
     @model_validator(mode="after")
     def _validate_version(self) -> CollectionSession:
         if self.schema_version not in {1, 2}:
             raise ValueError("Unsupported collection-session version; use --refresh.")
+        if self.repository_year and (self.release is not None or self.period.kind != PeriodKind.YEAR):
+            raise ValueError("Repository-year collection requires a calendar year and no release.")
         return self
 
 
@@ -310,13 +315,17 @@ class Snapshot(Model):
     warnings: list[str] = Field(default_factory=list)
     capabilities: list[Capability] = Field(default_factory=list)
     release: ReleaseRange | None = None
+    repository_year: bool = False
 
     @model_validator(mode="after")
     def _validate_integrity(self) -> Snapshot:
         if self.schema_version not in {1, 2} or self.repository != "microsoft/PyRIT" or not self.complete:
             raise ValueError("Only complete version-1 or version-2 public microsoft/PyRIT snapshots can be replayed.")
-        if self.contributor is None and self.release is None:
-            raise ValueError("A snapshot requires a contributor or release.")
+        if self.repository_year:
+            if self.contributor is not None or self.release is not None or self.period.kind != PeriodKind.YEAR:
+                raise ValueError("Repository-year snapshots require a calendar year and no contributor or release.")
+        elif self.contributor is None and self.release is None:
+            raise ValueError("A snapshot requires a contributor, release, or explicit repository-year scope.")
         if self.contributor is not None and self.release is not None:
             raise ValueError("Contributor and release modes must remain separate.")
         numbers = {item.number: item for item in self.items}
@@ -397,6 +406,17 @@ class LocReport(Model):
     totals: LineTotals | None
     by_language: dict[str, LineTotals] | None
     reason: str | None = None
+    by_topic: dict[str, LineTotals] | None = None
+
+
+class Contribution(Model):
+    actor: Actor
+    group: Literal["maintainers", "contributors", "bots"]
+    opened_prs: int = Field(default=0, ge=0)
+    merged_prs: int = Field(default=0, ge=0)
+    submitted_reviews: int = Field(default=0, ge=0)
+    comments: int = Field(default=0, ge=0)
+    opened_issues: int = Field(default=0, ge=0)
 
 
 class Peak(Model):
@@ -432,6 +452,20 @@ class Stats(Model):
     peaks: dict[str, Peak]
     participants: dict[str, list[Actor]]
     release_file_topics: dict[str, int] = Field(default_factory=dict)
+    repository_year: bool = False
+    distinct_daily_events: dict[str, int] = Field(default_factory=dict)
+    contributions: list[Contribution] = Field(default_factory=list)
+    unknown_contributions: dict[str, int] = Field(default_factory=dict)
+    maintainer_logins: list[str] = Field(default_factory=list)
+    code_file_topics: dict[str, int] = Field(default_factory=dict)
+
+    @property
+    def identity(self) -> str:
+        if self.release:
+            return f"PyRIT release {self.release.head.tag}"
+        label = f"GitHub @{self.contributor.login}" if self.contributor else "PyRIT"
+        suffix = " (year to date)" if self.period.year_to_date else ""
+        return f"{label} / {self.period.year}{suffix}"
 
 
 class SongCandidate(Model):
@@ -473,6 +507,7 @@ class Story(Model):
     period: Period
     slides: list[Slide]
     omitted: list[OmittedSlide]
+    repository_year: bool = False
 
 
 def parse_contributor(value: str) -> str:

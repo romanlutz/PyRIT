@@ -15,8 +15,8 @@ from build_scripts.pyrit_wrapped.story import StoryBuilder
 
 def test_empty_story_has_no_fake_achievements(snapshot: Snapshot) -> None:
     story = StoryBuilder(Metrics(snapshot).calculate()).build()
-    assert [slide.type for slide in story.slides] == ["overview", "prs", "issues", "topics", "loc", "recap"]
-    assert len(story.slides) + len(story.omitted) == 8
+    assert [slide.type for slide in story.slides] == ["cover", "overview", "prs", "issues", "topics", "loc", "recap"]
+    assert len(story.slides) + len(story.omitted) == 10
     assert 5 <= len(story.slides) <= 10
     assert all(slide.cue_id is None and slide.duration_ms is None for slide in story.slides)
 

@@ -54,7 +54,7 @@ class MarkdownReport:
             "",
             "| Activity | Count |",
             "|---|---:|",
-            *[self._count_row(role) for role in Activity],
+            *[self._count_row(role) for role in Activity if role not in {Activity.PR_CLOSED, Activity.SHIPPED}],
             "",
             "Roles overlap. These counts must not be summed into a productivity score.",
             "Comment totals distinguish inline comments, nonempty review bodies, and discussion comments.",
@@ -67,6 +67,7 @@ class MarkdownReport:
             "",
         ]
         lines.extend(self._slides())
+        lines.extend(self._contributors())
         if self.stats.release is not None:
             release = self.stats.release
             lines.extend(
@@ -109,7 +110,7 @@ class MarkdownReport:
         return (
             f"@{escape_text(self.stats.contributor.login)}: PyRIT Wrapped {self.stats.period.year}"
             if self.stats.contributor
-            else "PyRIT Wrapped"
+            else f"PyRIT Wrapped {self.stats.period.year}"
         )
 
     def render_songs(self) -> str:
@@ -140,7 +141,51 @@ class MarkdownReport:
     def _count_row(self, role: Activity) -> str:
         value = self.stats.counts[role]
         display = str(value) if value is not None else "Unavailable / not applicable"
-        return f"| {self._LABELS[role]} | {display} |"
+        label = self._LABELS[role]
+        if self.stats.contributor is None:
+            if role == Activity.LANDED:
+                label = "PRs merged in the reporting window"
+            elif role == Activity.MERGED:
+                label = "Merge-actor credit (same repository cohort)"
+        return f"| {label} | {display} |"
+
+    def _contributors(self) -> list[str]:
+        if self.stats.contributor is not None:
+            return []
+        lines = [
+            "## Contributor credit",
+            "",
+            "Maintainer groups use the supplied username roster, matched case-insensitively.",
+            "",
+        ]
+        for group, label in (("maintainers", "Maintainers"), ("contributors", "Other contributors"), ("bots", "Bots")):
+            lines.extend(
+                [
+                    f"### {label}",
+                    "",
+                    "| Account | Newly opened PRs | Merged PRs | Submitted reviews | Comments | Opened issues |",
+                    "|---|---:|---:|---:|---:|---:|",
+                ]
+            )
+            rows = [row for row in self.stats.contributions if row.group == group]
+            lines.extend(
+                f"| @{escape_text(row.actor.login)} | {row.opened_prs} | {row.merged_prs} | "
+                f"{row.submitted_reviews} | {row.comments} | {row.opened_issues} |"
+                for row in rows
+            )
+            if not rows:
+                lines.append("No recorded activity in this group.")
+            lines.append("")
+        unknown = self.stats.unknown_contributions.get("merged_prs", 0)
+        lines.extend(
+            [
+                f"Merged PRs with unavailable/deleted authors: {unknown}.",
+                "Comments include inline and discussion comments, not submitted review bodies.",
+                "Bot credit records GitHub account actors; it does not infer AI-assisted work attributed to humans.",
+                "",
+            ]
+        )
+        return lines
 
     def _slides(self) -> list[str]:
         lines = ["## Slide summaries", ""]
@@ -210,7 +255,7 @@ class MarkdownReport:
             "Issues use labels and conservative title inference. Unknown/Mixed remain in denominators.",
             (
                 "Primary categories require a strict majority of substantive changed paths. "
-                "Interpretive 'primarily' wording requires at least five opened PRs and a confirmed strict majority."
+                "Interpretive 'primarily' wording requires at least five merged PRs and a confirmed strict majority."
             ),
             "",
         ]
@@ -226,7 +271,7 @@ class MarkdownReport:
                 "## Review checkpoint",
                 "",
                 (
-                    "Review the attribution, topic groups, summaries, and omitted types before building HTML. "
+                    "Review the attribution, topic groups, summaries, and omitted types before recording. "
                     "Track selections and undecided suggestions are in songs.md; "
                     "recording supply and rights remain separate."
                 ),

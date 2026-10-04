@@ -1,7 +1,7 @@
 # PyRIT Wrapped
 
-PyRIT Wrapped summarizes either a contributor's public activity or an entire
-release in `microsoft/PyRIT`. Both modes produce a compact 6-8-slide
+PyRIT Wrapped summarizes a contributor's public activity, a repository-wide
+calendar year, or an entire release in `microsoft/PyRIT`. Reports produce a compact 7-10-slide
 click-through HTML deck, complete evidence, and selected soundtrack references.
 No recordings are extracted, downloaded, or bundled. This is repository tooling, independent of the PyRIT runtime.
 
@@ -32,8 +32,11 @@ never overwritten. Each report contains:
 | `songs.md` | Track/artist candidates and rationale for each emitted slide type |
 | `index.html` | Self-contained animated pirate/raccoon deck, charts, manual song cues, and recording timer |
 
-Eight reusable types cover overview, PR pipeline, reviews/people, issues,
-focus areas, activity peaks, LOC/languages, and recap. Review and peak slides
+The cover says **PyRIT Wrapped** and identifies the GitHub username/year,
+PyRIT release, or PyRIT/year. Ten reusable types cover the title, overview,
+contributor credits, PR pipeline, reviews/people, issues, focus areas, activity
+peaks, LOC/languages, and recap. Contributor credits appear in repository-wide
+reports; review and peak slides
 are omitted when there is no activity. Empty and unavailable figures are
 described honestly, not turned into achievements.
 
@@ -42,8 +45,9 @@ described honestly, not turned into achievements.
 Open the generated `index.html` to review the stats offline. Previous/Next,
 chapter buttons, arrow keys, and Restart navigate the same compact story.
 The transcript and full evidence remain available separately. Roakey and his
-parrot join the celebration with falling confetti, a gentle sway, and animated
-chart bars. **Pause animation** stops decorative motion. The operating
+parrot join the celebration with a different background color per chapter,
+alternating confetti, a disco light, slow fireworks, and the running raccoon
+sprite from the landing page. **Pause animation** stops decorative motion. The operating
 system's reduced-motion preference removes animations entirely. Motion also
 pauses when the deck is off-screen or the tab is hidden.
 
@@ -120,13 +124,57 @@ The tree diff remains an exact comparison of the selected snapshots.
 The local Git reader may fetch missing commit/blob objects from origin;
 it never checks out a tag, changes the current branch, or rebases.
 
+## Wrap PyRIT for a year
+
+```powershell
+uv run python -m build_scripts.pyrit_wrapped summarize --repository --year 2026
+```
+
+This includes public activity from all accounts during the UTC calendar year,
+or year to date, rather than replaying a single contributor's subset. Its cache
+is separate from contributor and release collections. Submitted reviews are
+retrieved with independently paginated batched GraphQL, including older PRs.
+LOC sums the diffs of PRs merged in the year; it is not a net yearly tree diff.
+
+## The main story's cohorts
+
+The overview, PR pipeline, change intent, contributor-author counts, and recap
+all use **PRs merged in the reporting window**, based on `merged_at`. Newly
+opened PRs are a separate creation-time cohort. A PR opened earlier can merge
+in this window, and a newly opened PR need not have merged yet. PRs closed
+without merging are not shown in the slide story or distinct activity calendar.
+
+Release merge-commit membership remains available in the provenance and full
+evidence, but is not presented as another competing headline PR count.
+The tag-to-tag tree diff still defines release file and LOC charts. Thus code
+charts describe the selected trees, while contributor and collaboration counts
+describe the publication-date window.
+
+Repository-wide reports show top merged-PR authors grouped into maintainers
+and other contributors, a contributor roster, and bot/agent activity. Expand
+**Everyone's contributions** for every identifiable account's newly opened
+PRs, merged PRs, submitted reviews, inline/discussion comments, and opened issues.
+Deleted/unavailable authors are counted separately, not assigned to a person.
+Names resolve by stable account identity; roles overlap and are not an overall
+productivity ranking. Bot credit uses GitHub's recorded account type and actors,
+not a guess that a human-authored PR was AI-assisted.
+
+The user-supplied maintainer roster is matched case-insensitively:
+`romanlutz`, `richlundeen`, `hannahwestra25`, `varunj-msft`, `jsong468`,
+`behnam-o`, `adrian-gavrila`, `jbolor21`, `nina-msft`, `bashirpartovi`,
+`ValbuenaVC`, `fdubut`, and `spencrr`. This is a recap grouping, not reconstructed
+historical permissions. Unmatched handles are shown explicitly; spelling,
+renames, or aliases are not guessed.
+
 ## What the numbers mean
 
 - **Authored/opened PRs:** created in the reporting window by the contributor.
 - **Own closed PRs:** authored by the contributor and currently closed, with
   their last recorded closure in the window. This includes merged PRs.
-- **Authored PRs that landed:** merged in the window, even if opened earlier.
-- **PRs merged:** GitHub records this account in the PR's `merged_by` field.
+- **PRs merged / authored PRs that landed:** merged in the window, even if opened earlier.
+  This is the slide headline and the JSON `landed_prs` field.
+- **Merge-actor credit:** the legacy JSON `merged_prs` field means GitHub records
+  this account in the PR's `merged_by` field, not the main authored-PR headline.
   Own, other-author, and unavailable-author work are separated. A merge queue's
   recorded actor does not establish who clicked Merge.
 - **Issues opened:** created in the window; pull requests are excluded.
@@ -151,10 +199,12 @@ not the PR's creation or merge date.
 
 Roles overlap and should not be summed into a productivity score. Monthly
 distinct actions deduplicate a merge appearing under both author and merger
-credit or the same merge's closure and do not count a review body again as
+credit and do not count a review body again as
 an independent action. Release membership is not an extra activity event.
 The `reviewed_prs` monthly series marks each PR's first review in the window.
 The busiest month, ISO week, and calendar day use UTC and preserve all ties.
+Activity bars use chronological UTC days when the window spans 50 calendar
+days or fewer, including zero-activity days. Longer windows aggregate by month.
 An ISO week can belong to a different year than its calendar dates.
 Closures are the latest recorded timestamps, not every historical close/reopen
 transition; the tool does not claim to reconstruct lifecycle timelines.
@@ -180,6 +230,13 @@ Git binary records have no text LOC; PR API metadata does not reliably identify
 binary files, so that classification remains unavailable in contributor mode.
 Incomplete file coverage produces unavailable totals, never a plausible
 partial total or a silent zero.
+Focus charts include both changed files and added/removed LOC by topic.
+The slide shows the eight largest LOC areas and an explicitly labeled
+**Other areas** aggregate; the full topic breakdown remains in the facts and
+summary. Aggregation preserves the complete added/removed totals.
+Each added line uses its destination path's topic; each deleted line uses its
+original path's topic, so renames preserve deletion attribution. Topic LOC
+reconciles to total LOC, and incomplete coverage stays unavailable.
 
 ## Topics and interpretation
 
@@ -197,7 +254,7 @@ present; reviewed-PR topics describe the PR's scope, not all lines inspected.
 Topic groups overlap; one PR may appear under several topics. Primary
 distributions assign one category per item, so their counts reconcile to the
 cohort denominator. A primary path category requires a strict majority.
-"Primarily" narration additionally requires at least five opened PRs and a
+"Primarily" narration additionally requires at least five merged PRs and a
 confirmed strict majority. Small samples and ties remain descriptive.
 
 Change intent recognizes prefixes such as `FIX:`, `FIX`, `FEAT:`,

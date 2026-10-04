@@ -1,6 +1,6 @@
 ---
 name: PyRIT Wrapped viewer
-description: A sunset-gold pirate-raccoon celebration of real contributions.
+description: A chapter-colored pirate-raccoon celebration of real contributions.
 colors:
   sea: "#123841"
   deep: "#0c252d"
@@ -10,38 +10,31 @@ colors:
   ink: "#123039"
   teal: "#196b70"
   red: "#9b2926"
+  chapter-cover: "#ffd166"
+  chapter-overview: "#56d9d7"
+  chapter-contributors: "#c4abff"
+  chapter-prs: "#ff9788"
+  chapter-reviews-people: "#91e4b9"
+  chapter-issues: "#ffb8dc"
+  chapter-topics: "#d8ed71"
+  chapter-busiest: "#9ecbff"
+  chapter-loc: "#ffd18a"
+  chapter-recap: "#f4e684"
   control-stroke: "#718f92"
   disabled-text: "#8db0b4"
   divider: "#456b71"
-  chart-track: "#e89b28"
+  chart-track: "#12303920"
   dashed-ring: "#99651f"
   confetti-red: "#f03c3a"
 typography:
-  body:
-    fontFamily: '"Trebuchet MS", "Segoe UI", Arial, sans-serif'
-  display:
-    fontSize: "clamp(2.4rem, 4.5vw, 4.5rem)"
-    fontWeight: 900
-    lineHeight: 1.04
-    letterSpacing: "-.035em"
-  metric:
-    fontSize: "clamp(2.2rem, 4.2vw, 4.4rem)"
-    fontWeight: 900
-    lineHeight: 1
-    letterSpacing: "-.04em"
-  track-title:
-    fontSize: "clamp(1.4rem, 2vw, 2rem)"
-    fontWeight: 900
-  chart-title:
-    fontSize: "1rem"
-    fontWeight: 800
-  metric-label:
-    fontSize: ".9rem"
-    fontWeight: 700
-    lineHeight: 1.3
-  footnote:
-    fontSize: ".75rem"
-    lineHeight: 1.5
+  body: { fontFamily: '"Trebuchet MS", "Segoe UI", Arial, sans-serif' }
+  display: { fontSize: "clamp(2.4rem, 4.5vw, 4.5rem)", fontWeight: 900, lineHeight: 1.04, letterSpacing: "-.035em" }
+  cover: { fontSize: "clamp(3.4rem, 6vw, 6rem)", fontWeight: 900, lineHeight: 1.04, letterSpacing: "-.035em" }
+  metric: { fontSize: "clamp(2.2rem, 4.2vw, 4.4rem)", fontWeight: 900, lineHeight: 1, letterSpacing: "-.04em" }
+  track-title: { fontSize: "clamp(1.4rem, 2vw, 2rem)", fontWeight: 900 }
+  chart-title: { fontSize: "1rem", fontWeight: 800 }
+  metric-label: { fontSize: ".9rem", fontWeight: 700, lineHeight: 1.3 }
+  footnote: { fontSize: ".75rem", lineHeight: 1.5 }
 rounded:
   pill: "999px"
   stage: "6px"
@@ -54,40 +47,13 @@ spacing:
   shell-gutter: "2rem"
   soundtrack-gap: "3rem"
 components:
-  button-primary:
-    backgroundColor: "{colors.gold}"
-    textColor: "{colors.deep}"
-    rounded: "{rounded.pill}"
-    padding: ".55rem 1rem"
-  button-ghost:
-    backgroundColor: "transparent"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.pill}"
-    padding: ".55rem 1rem"
-  button-hover:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.deep}"
-  button-disabled:
-    backgroundColor: "transparent"
-    textColor: "{colors.disabled-text}"
-  chapter-current:
-    backgroundColor: "{colors.gold}"
-    textColor: "{colors.deep}"
-    rounded: "{rounded.pill}"
-    padding: "0"
-    width: "44px"
-    height: "44px"
-  stage:
-    backgroundColor: "{colors.gold}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.stage}"
-    padding: "2.3rem 2.8rem 1.8rem"
-  duration-input:
-    backgroundColor: "{colors.deep}"
-    textColor: "{colors.paper}"
-    rounded: "{rounded.field}"
-    padding: ".3rem"
-    width: "4.5rem"
+  button-primary: { backgroundColor: "{colors.gold}", textColor: "{colors.deep}", rounded: "{rounded.pill}", padding: ".55rem 1rem" }
+  button-ghost: { backgroundColor: "transparent", textColor: "{colors.paper}", rounded: "{rounded.pill}", padding: ".55rem 1rem" }
+  button-hover: { backgroundColor: "{colors.paper}", textColor: "{colors.deep}" }
+  button-disabled: { textColor: "{colors.disabled-text}" }
+  chapter-current: { backgroundColor: "{colors.chapter-cover}", textColor: "{colors.deep}", rounded: "{rounded.pill}", padding: "0", width: "44px" }
+  stage: { backgroundColor: "{colors.chapter-cover}", textColor: "{colors.ink}", rounded: "{rounded.stage}", padding: "2.3rem 2.8rem 1.8rem" }
+  duration-input: { backgroundColor: "{colors.deep}", textColor: "{colors.paper}", rounded: "{rounded.field}", padding: ".3rem", width: "4.5rem" }
 ---
 
 # Design System: PyRIT Wrapped viewer
@@ -96,197 +62,85 @@ components:
 
 **Creative North Star: "The Pirate-Raccoon Party"**
 
-This records the built standalone viewer in this directory, not a new brand
-system for PyRIT's frontend or core. The opening five-part contract in
-`deck.html` is authoritative: a party for real contributions, a sunset-gold
-stage with sea-dark ink and chunky Trebuchet, eight celebratory chapters,
-manually controlled music during a take, and a user-pinned pirate/raccoon
-world with bounded motion. The formal Fluent report is superseded.
+This records the built standalone viewer, not a GUI/core brand system. Keep the user-pinned pirate/raccoon world: chunky lettering, sea-dark ink, ten bright chapter fields, canonical Roakey and parrot artwork, and alternating confetti, disco, fireworks, and the canonical landing-page running sprite.
 
-The first viewport gives the headline and facts the left side, canonical
-Roakey and his parrot the right, confetti overhead, and the song cue below.
-Use the existing `doc\roakey.png` artwork; do not redraw or substitute it.
-The prior finish review found no material desktop or mobile fixes. This is
-a source-grounded record of that verified build, not another redesign pass.
+The cover names a contributor, release, or repository-year. The verified release deck has ten chapters; personal decks have nine. This refresh follows current `deck.css` and `deck.html`, not a redesign. The previously corrected fullscreen ring overflow and confirmed credit/focus captures are retained.
 
 **Key Characteristics:**
-- A bright, flat stage against dark sea surroundings.
-- Oversized truthful numbers, readable charts, and subordinate evidence.
-- A familiar mascot with restrained sway and falling confetti.
-- Explicit manual music cues and recording state, not embedded playback.
+- Distinct chapter fields against a sea-dark frame.
+- Oversized truthful facts, explicit credit, and subordinate evidence.
+- Canonical mascot artwork and four alternating, pauseable effects.
+- Manual song cues and recording state, not embedded playback.
 
 ## Colors
 
-Warm celebration sits inside a cool sea frame; the frontmatter records the
-exact CSS colors, preserving the eight custom-property names.
-
-### Primary
-- **Sunset Gold (`gold`):** stage, current chapter, Next, start-take action,
-  timer, and Spotify link.
-
-### Secondary
-- **Sea (`sea`):** page background and chart fills for counts and additions.
-- **Deep (`deep`):** primary-action text, number field, and skip-link surface.
-- **Teal (`teal`):** narrow confetti pieces.
-
-### Tertiary
-- **Removal Red (`red`):** deleted-line bars and the removal key.
-- **Confetti Red (`confetti-red`):** circular decorative pieces only.
-- **Chart Track (`chart-track`):** underlying bar lanes.
-- **Dashed Ring (`dashed-ring`):** clipped nautical circle on the stage.
-
-### Neutral
-- **Paper (`paper`):** outer text, control hover fill, and pale confetti.
-- **Ink (`ink`):** stage text and the diverging chart's center divider.
-- **Muted (`muted`):** identity, hints, artist, status, and evidence text.
-- **Control Stroke (`control-stroke`):** button and number-field outlines.
-- **Disabled Text (`disabled-text`):** unavailable actions.
-- **Divider (`divider`):** disabled outlines and supporting-section rules.
+The frontmatter records actual CSS values. Stage, countdown, active chapter, and fullscreen background follow `--chapter-color`; component tokens show its cover default, not a fixed global stage.
+- **Primary:** cover gold, overview aqua, contributor lavender, PR coral, review/people mint, issue pink, topic lime, busiest blue, LOC apricot, and recap yellow are ten distinct fields.
+- **Secondary:** Sea frames the page and fills count/addition bars; Deep supports controls. Action Gold remains on Next, Start, the clock, checkbox, and Spotify link outside fullscreen.
+- **Tertiary:** Removal Red distinguishes deletions; Teal, Paper, and Confetti Red decorate the party. The dashed ring stays subordinate.
+- **Neutral:** Ink labels every bright field; Paper and Muted label the dark frame. Control Stroke, Disabled Text, and Divider separate states. Chart Track is translucent ink, not opaque gold.
 
 ## Typography
 
-**Display and Body Font:** Trebuchet MS, with Segoe UI, Arial, and sans-serif
-fallbacks. No downloaded font or separate mono family is required.
-
-**Character:** chunky, friendly, and emphatic. Headlines and facts use the
-heaviest weight; context remains smaller and comfortably spaced.
-
-### Hierarchy
-- **Display:** the frontmatter's balanced chapter headline, limited to 16ch.
-- **Metric:** the frontmatter's oversized facts, with tabular numerals,
-  wrapping for long values, and labels underneath.
-- **Track title:** a heavy, balanced secondary headline below the stage.
-- **Chart title / metric label:** compact headings and explanatory labels.
-- **Body:** descriptions use line-height (1.45) and a maximum width (65ch);
-  expanded summaries use line-height (1.6).
-- **Footnote:** supporting context, limited to 75ch. Metric notes are smaller
-  (0.8rem), normal-weight, and use normal letter spacing.
-
-Timers, chapter position, and count-chart values also use tabular numerals.
-Responsive type changes are recorded in Layout rather than a second scale.
+**Display and Body Font:** Trebuchet MS, Segoe UI, Arial, sans-serif; no downloaded font.
+- **Display / cover:** balanced heavyweight chapter headings, respectively limited to 16ch / 10ch.
+- **Metrics:** tabular oversized facts above labels; long values wrap. Timers and counts also use tabular numerals.
+- **Context:** descriptions use line-height (1.45) and width (65ch); summaries use (1.6), footnotes (75ch), and metric notes normal weight/spacing.
 
 ## Layout
 
-The centered header and deck have a maximum width (1440px), desktop side
-gutters from `shell-gutter`, and no fixed viewport-height lock. The stage is
-a two-column grid (`minmax(0, 1fr) 30%`), with a gap (1.5rem) and minimum
-height (500px). A take raises that minimum to 540px.
-
-Metrics have three equal columns, with explicit one- and two-metric variants.
-Count and language lists retain two columns. The lower song-cue / recording
-grid uses fractional columns (0.8fr / 1.2fr) and `soundtrack-gap`.
-
-- **At widths up to 1000px:** stage padding becomes 1.8rem, the mascot column
-  becomes 25%, and the gap becomes 1rem. Metrics use
-  `clamp(2.1rem, 4vw, 3.5rem)`; the soundtrack gap becomes 1.5rem.
-- **At widths up to 640px:** header wraps; shell gutters become 1rem. The
-  stage becomes block layout with padding (1.4rem 1.1rem 1rem) and minimum
-  height (440px), including during a take. The mascot is a cropped corner
-  accent (122px wide, top 1rem, right -2.2rem), without its caption.
-  Headings reserve 55px on the right, use 2.4rem type, and a 13ch limit.
-  Metrics use 2.25rem, or 2.1rem in two-metric layouts; labels use 0.72rem.
-  Chart labels use 0.7rem and wrap, without removing numeric values.
-  Chapters wrap; the soundtrack stacks into one column. The keyboard hint
-  disappears, not the keyboard affordances.
+The header/deck center within (1440px), with (2rem) side gutters. The stage uses `minmax(0, 1fr) 30%`, gap (1.5rem), and minimum height (540px), also during a take. Metrics have one/two/three-column variants; count and LOC lists use two columns; song/recording columns are (0.8fr / 1.2fr).
+- **Credit:** contributors get a single-column stage without the mascot; roster groups use (1fr 2fr 1fr), with other-human names in two columns.
+- **At ≤1000px:** stage padding (1.8rem), mascot column (25%), gap (1rem); metrics use `clamp(2.1rem, 4vw, 3.5rem)`.
+- **At ≤640px:** wrapping header/navigation, (1rem) gutters, block stage with padding (1.4rem 1.1rem 1rem) and minimum height (440px). Mascot becomes a (122px) corner accent at right (-2.2rem), without caption; credit/song grids stack.
+- **Mobile type/charts:** chapter headings (2.4rem, 13ch), cover (3rem), metrics (2.25rem; two-column 2.1rem), wrapping chart labels (0.7rem), timeline height (140px instead of 160px).
+- **Runner:** reserve (135px) stage bottom padding for the sprite, including fullscreen.
+- **Fullscreen:** hide header, chapter navigation, soundtrack, inventory, summaries, time details, and provenance. Remove shell gutters; stage height is `calc(100vh - 64px)` with `overflow-y: auto`, padding `clamp(2rem, 4vw, 5rem)`, and no radius. Keep a (64px) control strip; Next becomes Sea/Paper. The dashed pseudo-element is anchored at right/bottom (0), fixing overflow. Mobile uses auto height with the same viewport-based minimum; do not promise no scrolling on every viewport.
 
 ## Elevation & Depth
 
-There are no shadows, gradients, glass surfaces, or lifted cards. Depth comes
-from sea/gold contrast and explicit stacking inside an isolated, clipped
-stage: confetti behind the readable slide content, a dashed circle behind
-the composition, and a solid gold countdown overlay above it.
+Flat fields, no shadows or glass. The isolated clipped stage layers the dashed ring behind content, effects at level (0), slide stack/runner at (1), and countdown at (3). Disco beams alone use a translucent conic gradient; it is decoration, not a surface treatment.
 
 ## Shapes
 
-Use the frontmatter's pill controls, gently squared stage, compact field
-corners, and nearly square chart lanes. Thin strokes define controls and
-dividers. The stage's cropped dashed circle is the nautical geometry, not
-a decorative frame around every statistic.
+Pill controls, gently squared stage, compact number field, nearly square bar lanes. Thin control strokes and a cropped (170px) dashed nautical circle provide geometry without framing every fact.
 
 ## Components
 
-### Buttons
+### Controls and Navigation
+Buttons use minimum height (44px), weight (700), and a (1px) stroke. Enabled hover uses Paper/Deep; disabled text/stroke are subdued. Focus is a current-color outline (3px), offset (4px). Header controls shrink to (36px) on mobile.
+Chapter controls are (44px) wide; mobile uses (32px) width / (40px) minimum height. Preserve current-step semantics, live position, arrow keys, skip link, focusable headings, and initially disabled Previous.
+The visibly labelled duration field starts at (10), bounded (5–120), with minimum height (36px); the (18px) Gold checkbox starts unchecked.
 
-Confident, compact pills. Default buttons have a minimum height (44px),
-weight (700), and a thin control stroke (1px). Primary actions are Next and
-Start recording mode. Hover changes enabled controls to Paper with Deep
-text and a Paper border; disabled controls retain the subdued text/stroke
-and a default cursor. Focus is a current-color outline (3px) offset by 4px,
-not a glow. On mobile, header buttons have a minimum height (36px).
-
-### Inputs / Fields
-
-The duration number field uses the frontmatter's deep surface and compact
-shape, a control stroke (1px), and minimum height (36px). Its initial value
-is 10 seconds, with bounds (5–120). Auto-advance is initially unchecked;
-its checkbox is 18px square with a gold accent. Labels remain visible.
-
-### Navigation
-
-Eight numbered chapter buttons expose the current step and a live position.
-Desktop buttons are 44px wide with zero padding; mobile buttons are 32px
-wide with a minimum height (40px). Previous begins disabled. Arrow-key
-navigation, the skip link, focusable chapter headings, and fullscreen remain
-part of the interface.
-
-### Stage, Metrics, and Charts
-
-Only one chapter is visible. Semantic definition lists put oversized facts
-above their labels. Count bars retain labels and comma-formatted values;
-language rows retain explicit negative deletions and positive additions
-alongside a Removed / Added key. Lanes are 11px high; decorative bar geometry
-is hidden from assistive technology. Expanded summaries, provenance, UTC
-boundaries, limitations, and evidence/transcript links remain available.
-
-**The Truth Before Spectacle Rule.** Keep all eight chapters tied to supplied
-facts. Never hide unknowns, inflate counts, or turn LOC into productivity.
-Color and motion must not be the only ways to interpret a chart.
+### Facts, Credit, and Charts
+Only the current chapter is visible. Main PR headlines, intent, and author credit share the reporting-window merged-PR cohort; newly opened PRs stay separate. The verified release example is 207 merges, 240 newly opened PRs, and 37 human merged authors, not permanent UI constants.
+Separate supplied-roster maintainers, other humans, bots, and unavailable identities. Show merged PRs / submitted reviews explicitly; complete semantic tables retain newly opened PRs, merges, reviews, comments, and issues. Never infer AI assistance from bot counts.
+UTC activity charts are daily for windows ≤50 days, monthly otherwise. Ordered bars expose date/count labels and expandable exact values; zero activity remains visible as a date, not an invented bar.
+Focus retains both file-count and added/removed LOC charts by topic. Language/topic churn uses explicit negative/positive values, a Removed/Added key, and (11px) diverging lanes; geometric fills are decorative.
+**The Truth Before Spectacle Rule.** Keep every chapter tied to supplied facts. Never hide unknowns, inflate counts, or turn LOC into productivity. Color and motion must not be the only ways to interpret a chart.
 
 ### Mascot and Motion
-
-Roakey's image keeps its square source proportions and descriptive alt text.
-His desktop caption reads “Small paws. Big adventures.” The sway is a
-four-second ease-in-out loop, rotating between -2deg and 2deg and rising at
-most 6px. Confetti falls through a clipped stage; opacity is 0.55 for overview
-and recap and 0.2 elsewhere. Piece durations, delays, positions, and spin
-come from per-piece properties, not a fixed global timing token.
-
-Count bars reveal once over 0.65s with `cubic-bezier(.16,1,.3,1)`, scaling
-from 0.05 to 1; language bars do not share that animation. Pause animation
-hides confetti, removes count-bar animation, and pauses animated elements.
-The hidden-page and offscreen states also pause animations. Reduced motion
-disables all animations, keeps scrolling automatic, and hides confetti.
-Forced colors hides confetti, uses Highlight for chart fills, and reinforces
-the current chapter and Next borders.
+Roakey and parrot retain descriptive alt text and the caption “Small paws. Big adventures.” The sway rotates (−2deg to 2deg), rises (6px), and loops over (4s), anchored at (50% 90%).
+Confetti uses per-piece position/duration/delay/spin, falling from (−24px) to (680px); CSS layer opacity is (.55). Disco facets rotate over (9s), glint over (4s), and beams sweep (−20deg to 20deg) over (8s).
+Three eight-ray fireworks loop over (6s), staggered by (−2s) per burst; rays rotate in (45deg) increments, move (−8px → −38px → −78px), and fade. The (151px × 120px) running sprite crosses over (9s); its four-frame stride uses (.65s, steps(4)) and object-position (0 → −604px).
+Count bars reveal with `scaleX(.05 → 1)` over (.65s); timelines use `scaleY(.05 → 1)` over (.7s), both with `cubic-bezier(.16,1,.3,1)`. Diverging bars are static.
+Explicit pause hides all four effects, removes count/timeline reveals, and pauses animations; hidden-page/offscreen states also pause them. Reduced motion disables all animations, hides effects, and keeps scrolling automatic. Forced colors hides effects, uses Highlight for count/diverging fills, and strengthens active/Next borders.
 
 ### Manual Soundtrack and Recording State
-
-The song title, artist, manual Spotify search link, and expandable ordered
-cue list are supporting UI, not an audio player. No selected track is an
-explicit cue-list state. The page works offline; opening Spotify is optional.
-
-Ready is the initial timer state. Starting a take presents an “All aboard
-in” countdown and reminds the user to start their own recorder. Pause/resume,
-Finish take, live status, completed-take timestamps, optional slide timing,
-and Download cue sheet support that external workflow. Pause and Finish
-begin disabled; status reserves space to prevent jumping.
-
-During a take, full summaries, provenance, the complete cue list, and timing
-settings are hidden to simplify the recording view. On mobile, the song
-section gains a lower divider. The persistent note explains that the page
-times slides, not music; Spotify and screen capture stay under user control.
+Song/artist cues, manual Spotify links, countdown, optional timing, pause/resume, Finish, status, and cue-sheet export support an external screen recorder, not audio playback or capture. The deck works offline; Spotify remains optional.
+During a take, summaries, provenance, cue list, and timing settings hide. Fullscreen separately suppresses recording tools. Keep the note that slides are timed while music and recording remain manual.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** preserve the sunset-gold stage, sea-dark frame, and chunky Trebuchet.
-- **Do** reuse canonical Roakey and his parrot, with bounded decoration.
-- **Do** retain readable numeric labels, truthful context, and a transcript.
-- **Do** preserve visible focus, animation pause, and reduced-motion behavior.
-- **Do** keep song cues and take state explicit about manual music and capture.
+- **Do** preserve ten chapter colors, the sea-dark frame, and chunky Trebuchet.
+- **Do** reuse canonical Roakey/parrot and the landing-page running sprite.
+- **Do** retain merged-cohort consistency, explicit credit, exact values, and a transcript.
+- **Do** preserve visible focus, motion controls, and the fullscreen overflow correction.
+- **Do** keep music and recording explicitly manual.
 
 ### Don't:
 - **Don't** restore the discarded Fluent report or embedded YouTube player.
-- **Don't** imply Spotify integration, automatic audio, or in-page recording.
-- **Don't** animate essential numbers away or rely on color alone.
-- **Don't** spread this scoped viewer design into PyRIT's frontend or core.
+- **Don't** treat Action Gold as every chapter's background.
+- **Don't** conflate newly opened work, merges, bot activity, and AI-assisted work.
+- **Don't** spread this scoped viewer design into PyRIT's GUI or core.

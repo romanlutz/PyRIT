@@ -30,7 +30,7 @@ class SongCatalog:
             ("Celebration", "Kool & the Gang", "Selected for the opening and collective milestone."),
         ],
         "prs": [
-            ("Work", "Ava Max", "Selected for the opened/closed/landed PR pipeline."),
+            ("Work", "Ava Max", "Selected for newly opened PRs and merged work."),
         ],
         "reviews_people": [
             ("With a Little Help from My Friends", "The Beatles", "Selected for the people helping work land."),
@@ -62,6 +62,8 @@ class SongCatalog:
 
     @classmethod
     def candidates(cls, slide_type: str) -> list[SongCandidate]:
+        if slide_type in {"cover", "contributors"}:
+            return []
         return [
             SongCandidate(
                 title=title,

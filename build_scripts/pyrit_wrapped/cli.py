@@ -38,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--contributor", help="GitHub username, @username, or profile URL.")
     source.add_argument("--snapshot", type=Path, help="Replay a saved complete snapshot offline.")
     source.add_argument("--release", help="Published release tag to wrap across all contributors.")
+    source.add_argument("--repository", action="store_true", help="Wrap all PyRIT contributors for a calendar year.")
     summarize.add_argument(
         "--since-release", help="Base release tag; defaults to the previous published stable release."
     )
@@ -61,11 +62,19 @@ def _progress(message: str) -> None:
 
 
 async def _collect_async(
-    *, login: str | None, cache_dir: Path, taxonomy: TaxonomyConfig, period: Period, release: ReleaseRange | None = None
+    *,
+    login: str | None,
+    cache_dir: Path,
+    taxonomy: TaxonomyConfig,
+    period: Period,
+    release: ReleaseRange | None = None,
+    repository_year: bool = False,
 ) -> Snapshot:
     client = GitHubClient(cache_dir=cache_dir, progress=_progress)
     collector = Collector(client=client, progress=_progress)
-    return await collector.collect_async(login=login, period=period, taxonomy=taxonomy, release=release)
+    return await collector.collect_async(
+        login=login, period=period, taxonomy=taxonomy, release=release, repository_year=repository_year
+    )
 
 
 def _load_snapshot(args: argparse.Namespace) -> Snapshot:
@@ -103,12 +112,17 @@ def _load_live_snapshot(
         if login
         else f"release-{release.base.commit}-{release.head.commit}"
         if release
-        else ""
+        else f"repository-{period.year}"
     )
     profile_dir = args.cache_dir / profile_key
     manifest = profile_dir / "session.json"
     session = _collection_session(
-        path=manifest, period=period, taxonomy=taxonomy, refresh=args.refresh, release=release
+        path=manifest,
+        period=period,
+        taxonomy=taxonomy,
+        refresh=args.refresh,
+        release=release,
+        repository_year=args.repository,
     )
     run_dir = profile_dir / session.identifier
     snapshot_path = run_dir / "snapshot.json"
@@ -118,6 +132,7 @@ def _load_live_snapshot(
             snapshot.period != session.period
             or snapshot.taxonomy != session.taxonomy
             or snapshot.release != session.release
+            or snapshot.repository_year != session.repository_year
         ):
             raise WrappedError("Cached snapshot disagrees with its collection session; use --refresh.")
         _progress(
@@ -133,10 +148,15 @@ def _load_live_snapshot(
             taxonomy=taxonomy,
             period=session.period,
             release=session.release,
+            repository_year=session.repository_year,
         )
     )
-    if snapshot.period != session.period or snapshot.taxonomy != session.taxonomy:
-        raise WrappedError("Collected snapshot disagrees with its requested period/taxonomy.")
+    if (
+        snapshot.period != session.period
+        or snapshot.taxonomy != session.taxonomy
+        or snapshot.repository_year != session.repository_year
+    ):
+        raise WrappedError("Collected snapshot disagrees with its requested period/taxonomy/scope.")
     write_json_atomic(path=snapshot_path, content=snapshot.model_dump_json())
     session.complete = True
     write_json_atomic(path=manifest, content=session.model_dump_json())
@@ -144,7 +164,13 @@ def _load_live_snapshot(
 
 
 def _collection_session(
-    *, path: Path, period: Period, taxonomy: TaxonomyConfig, refresh: bool, release: ReleaseRange | None = None
+    *,
+    path: Path,
+    period: Period,
+    taxonomy: TaxonomyConfig,
+    refresh: bool,
+    release: ReleaseRange | None = None,
+    repository_year: bool = False,
 ) -> CollectionSession:
     now = datetime.now(UTC)
     if path.exists() and not refresh:
@@ -160,10 +186,21 @@ def _collection_session(
             if session.release is not None and release is not None
             else session.release is release
         )
-        if age < timedelta(hours=24) and session.taxonomy == taxonomy and session.schema_version == 2 and same_release:
+        if (
+            age < timedelta(hours=24)
+            and session.taxonomy == taxonomy
+            and session.schema_version == 2
+            and same_release
+            and session.repository_year == repository_year
+        ):
             return session
     session = CollectionSession(
-        identifier=uuid.uuid4().hex, started_at=now, period=period, taxonomy=taxonomy, release=release
+        identifier=uuid.uuid4().hex,
+        started_at=now,
+        period=period,
+        taxonomy=taxonomy,
+        release=release,
+        repository_year=repository_year,
     )
     write_json_atomic(path=path, content=session.model_dump_json())
     return session
@@ -183,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             if snapshot.contributor is not None
             else f"release-{snapshot.release.head.tag.replace('/', '-')}"
             if snapshot.release
-            else "wrapped"
+            else f"repository-{snapshot.period.year}"
         )
         output = args.output_dir or Path("results") / "wrapped" / f"{name}-{stamp}"
         destination = write_reports(snapshot=snapshot, stats=stats, story=story, output_dir=output)
