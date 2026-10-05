@@ -148,6 +148,12 @@ def test_container_resources_accept_consumption_pairs(*, cpu: str, memory: str) 
         ("1", "NaN"),
         ("Infinity", "2"),
         ("invalid", "2"),
+        ("+2", "4"),
+        ("02", "4"),
+        (" 2", "4"),
+        ("2e0", "4"),
+        ("2", "4e0"),
+        ("2", "4_0e-1"),
     ],
 )
 def test_invalid_container_resources_fail_before_azure(

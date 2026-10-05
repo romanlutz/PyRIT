@@ -385,6 +385,52 @@ Before teardown, remove the printed static egress IP from every external allowli
 
 > **Note:** Key Vault uses purge protection. The vault name will be reserved for ~90 days after deletion. Use a different instance name if redeploying immediately. The static egress IP is released and must not remain trusted by downstream systems.
 
+### Journal-bound preview cleanup
+
+For a preview deployed with `--journal-file`, opt into journal-bound cleanup rather than
+guessing IDs from names. This mode requires the exact subscription **ID**, resource-group
+ID and original journal. Directory creation is bound to the active tenant before its
+first mutation. A separate, new JSONL receipt records each command before execution,
+then its result or error correlation; the deployment journal is not modified.
+
+```bash
+python infra/teardown_instance.py \
+    --instance-name preview \
+    --subscription "<subscription-id>" \
+    --resource-group-id "/subscriptions/<subscription-id>/resourceGroups/copyrit-preview" \
+    --journal-file ./preview-deployment.json \
+    --cleanup-receipt ./preview-cleanup-inventory.jsonl \
+    --acknowledge-egress-ip-release \
+    --dry-run
+```
+
+Use a **different** receipt path, remove `--dry-run`, and add `--yes` to perform cleanup.
+For an independently scheduled retention cleanup, also add `--require-expired`.
+Every CLI call is bounded to at most 60 seconds; `--cleanup-timeout-seconds` bounds the
+whole cleanup attempt (default 900, maximum 3600). This is a cleanup polling limit, not
+an extension or replacement of preview or evaluation lifetimes.
+On Windows, bounded calls use the installed Azure CLI's native interpreter directly,
+not `cmd.exe`, so a timeout does not merely terminate its shell wrapper. An unsupported
+launcher layout is an explicit error, not an unbounded shell fallback.
+
+The mode validates live ownership before deletion, removes exact journal-bound external
+grants before deleting the managed identity's resource group, deletes the exact new
+app/service principal, and independently checks their absence. It supports partially
+created instances and already-absent resource groups/identities. Permission, malformed
+response and timeout errors are not treated as absence. A creation with no returned app
+IDs is not deletion authority for a same-name application: ambiguous candidates are
+retained, safe owned ARM cleanup can finish, and the command returns failure requiring
+manual directory ownership binding. Older journals without a tenant binding cannot
+authorize automatic directory cleanup.
+The inventory covers all assignments to the exact preview principal in the subscription;
+an unjournalled external grant blocks managed-identity deletion instead of being silently
+ignored or deleted by guesswork. Journal any post-deployment grants before using them.
+
+Key Vault soft-deletion metadata is retained separately; cleanup does not claim physical
+purge. ARM absence is also **not** proof of sandbox/snapshot data-plane or child-process
+absence. Complete and retain those runtime-specific observations before the preview's
+group is removed. An expiry tag does not execute this command or arrange its schedule.
+
 ## Building the Image
 
 If you need to build and push a new container image:

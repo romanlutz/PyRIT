@@ -49,6 +49,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
+from uuid import UUID
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -200,6 +201,14 @@ class _DeploymentJournal:
         self._document["status"] = status
         self._write()
 
+    def bind_tenant(self, tenant_id: str) -> None:
+        """Bind directory references before the first application mutation."""
+        tenant_id = str(UUID(tenant_id))
+        if self._document.get("tenant_id") not in (None, tenant_id):
+            raise RuntimeError("Deployment journal is already bound to another tenant")
+        self._document["tenant_id"] = tenant_id
+        self._write()
+
     def _write(self) -> None:
         with tempfile.TemporaryDirectory(dir=self.path.parent, prefix=f".{self.path.name}.") as temporary_directory:
             temporary_path = Path(temporary_directory) / self.path.name
@@ -276,6 +285,9 @@ def _deployment_tags(*, instance: str, owner: str, expires_at: str = "") -> dict
 
 def _validate_container_resources(*, cpu_cores: str, memory_gb: str) -> None:
     """Require a supported single-container Consumption CPU/memory pair."""
+    decimal_pattern = r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?"
+    if not all(re.fullmatch(decimal_pattern, value) for value in (cpu_cores, memory_gb)):
+        raise ValueError("--cpu-cores and --memory-gb must use plain decimal notation, for example 2.0 and 4.0")
     try:
         cpu = Decimal(cpu_cores)
         memory = Decimal(memory_gb)
@@ -409,6 +421,13 @@ def create_entra_app(*, display_name: str, service_management_reference: str = "
         dict: A dict with keys 'app_id', 'app_object_id', 'tenant_id', 'sp_id'.
     """
     logger.info("Creating Entra app registration: %s", display_name)
+    tenant_id = _expect_string(
+        run_az_json(args=["account", "show", "--query", "tenantId"]),
+        context="tenant ID",
+    )
+    journal = _CURRENT_JOURNAL.get()
+    if journal is not None:
+        journal.bind_tenant(tenant_id)
 
     # Create app registration and capture output directly (avoids fragile name-based lookup)
     create_args = [
@@ -429,11 +448,6 @@ def create_entra_app(*, display_name: str, service_management_reference: str = "
     app_create_result = _expect_json_object(run_az_json(args=create_args), context="Entra application")
     app_id = _expect_string(app_create_result.get("appId"), context="Entra application ID")
     app_object_id = _expect_string(app_create_result.get("id"), context="Entra application object ID")
-
-    tenant_id = _expect_string(
-        run_az_json(args=["account", "show", "--query", "tenantId"]),
-        context="tenant ID",
-    )
 
     # Create service principal (enterprise app)
     logger.info("Creating service principal for app: %s", app_id)
