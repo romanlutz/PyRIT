@@ -519,3 +519,46 @@ def test_invalid_smoke_arguments_fail_before_creating_containers(
     assert result.returncode == 2
     assert result.stderr
     assert commands == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("architecture", "requires Linux x86_64"),
+        ("download", ""),
+        ("checksum", "pinned uv archive checksum mismatch"),
+    ],
+)
+def test_cohost_tooling_failure_prevents_installation_and_removes_download(
+    *, bash_path: str, tmp_path: Path, failure: str, message: str
+) -> None:
+    prefix = tmp_path / "tools"
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    result = _run_bash(
+        bash_path=bash_path,
+        script=r"""
+uname() {
+    if [ "$1" = -s ]; then echo Linux;
+    elif [ "$TOOLING_FAILURE" = architecture ]; then echo aarch64;
+    else echo x86_64; fi
+}
+curl() {
+    if [ "$TOOLING_FAILURE" = download ]; then return 7; fi
+    printf 'untrusted test bytes' > "${@: -1}"
+}
+sha256sum() { return 1; }
+export -f uname curl sha256sum
+exec bash docker/install_cohost_tooling.sh "$TOOLING_PREFIX"
+""",
+        environment={
+            "TOOLING_FAILURE": failure,
+            "TOOLING_PREFIX": prefix.as_posix(),
+            "TMPDIR": downloads.as_posix(),
+        },
+    )
+    assert result.returncode != 0
+    if message:
+        assert message in result.stderr
+    assert not prefix.exists()
+    assert not list(downloads.iterdir())

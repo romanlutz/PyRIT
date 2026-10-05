@@ -29,8 +29,10 @@ All authenticated users on a GUI instance are **fully trusted**. Any user with E
 | Virtual Network + delegated ACA subnet | `copyrit-{instance-name}-vnet` / `copyrit-{instance-name}-aca-subnet` |
 | NAT Gateway + static egress Public IP | `copyrit-{instance-name}-nat` / `copyrit-{instance-name}-egress-pip` |
 | User-Assigned Managed Identity | `copyrit-{instance-name}-identity` |
+| Sandbox Group (optional) | Explicit `--sandbox-group-name`, inside the new instance resource group |
 | Azure SQL Server + Database | `copyrit-{instance-name}-sql` / `pyrit-{instance-name}` |
 | Storage Account + Blob Container | `copyrit{instance-name-no-hyphens}sa` / `dbdata` |
+| Validation-state Blob Container (optional) | Explicit `--validation-state-container`, in the new storage account and separate from `dbdata` |
 | Key Vault (locked down; backup/audit only — NOT read at runtime) | `copyrit-{instance-name}-kv` |
 | Entra App Registration | `CoPyRIT GUI ({instance-name})` |
 | Log Analytics Workspace | `copyrit-{instance-name}-logs` |
@@ -86,6 +88,13 @@ python infra/deploy_instance.py \
 | `--env-file` | Yes | Path to the `.env` file with target endpoints |
 | `--subscription` | Yes | Azure subscription ID |
 | `--location` | No | Azure region (default: `eastus2`) |
+| `--sql-location` | No | Explicit SQL server/database region; defaults to `--location`. No automatic regional fallback |
+| `--sql-service-objective` | No | `Basic` (default, 5 DTUs) or `S0` (Standard, 10 DTUs) |
+| `--cpu-cores` | No | Consumption CPU allocation, 0.25–4.0 cores in 0.25 increments (default: `1.0`) |
+| `--memory-gb` | No | Memory in GiB; must equal twice `--cpu-cores` (default: `2.0`) |
+| `--pyrit-initializer` | No | Comma-separated startup initializer names (default: `target,technique`); external `.pyrit_conf` can override them |
+| `--sandbox-group-name` | No | Create a new instance-owned SandboxGroup. Grants `Container Apps SandboxGroup Data Owner` to this instance's identity at that exact group scope, with no ARM provisioning role |
+| `--validation-state-container` | No | Create a separate private validation-state container in the instance's own LRS account. No default state container; must be distinct from the result/media container `dbdata` |
 | `--acr-name` | Yes | Shared ACR name |
 | `--container-image` | Yes | Image in `--acr-name` using a non-`latest` tag or SHA-256 digest |
 | `--allowed-groups` | Yes | Comma-separated Entra group object IDs (GUIDs) |
@@ -97,6 +106,8 @@ python infra/deploy_instance.py \
 | `--service-management-reference` | No | Service Tree ID (required by some tenants for Entra app creation) |
 | `--aoai-resource-names` | No | Comma-separated Cognitive Services account names for automatic AOAI RBAC. Grants `Cognitive Services OpenAI User` to the MI on each resource. Does **not** cover Content Safety — see step 3 for that. If omitted, all AOAI roles must be granted manually |
 | `--dry-run` | No | Preview what will be created without executing |
+| `--journal-file` | No | New local JSON file recording non-secret resource, application/service-principal and role-assignment creation references. Existing files are never overwritten |
+| `--retention-hours` | No | Optional preview lifetime; requires `--journal-file`. Adds `ExpiresAt` tags from conservatively before the first resource creation request. **Does not schedule or perform cleanup** |
 
 > **Instance name constraints:** 1–13 lowercase letters, numbers, or internal hyphens; the name must start and end with a letter or number. The Key Vault name `copyrit-{name}-kv` has a 24-character limit.
 
@@ -109,6 +120,109 @@ python infra/deploy_instance.py \
     ... \
     --dry-run
 ```
+
+For a one-replica preview needing more resources or a separately qualified SQL region, specify both sizes and the SQL placement explicitly:
+
+```bash
+python infra/deploy_instance.py \
+    --instance-name my-preview \
+    --env-file ./preview.env \
+    --subscription "<subscription-id>" \
+    --location westus2 \
+    --sql-location westus3 \
+    --sql-service-objective S0 \
+    --cpu-cores 2.0 \
+    --memory-gb 4.0 \
+    --sandbox-group-name my-preview-sandbox \
+    --validation-state-container validation-state \
+    --acr-name <shared-acr-name> \
+    --container-image <acr>.azurecr.io/pyrit@sha256:<digest> \
+    --allowed-groups "<existing-group-id>" \
+    --admin-group "<existing-admin-group-id>" \
+    --journal-file ./preview-deployment.json \
+    --retention-hours 24 \
+    --dry-run
+```
+
+The defaults remain 1 CPU, 2 GiB, same-region Basic SQL and `target,technique`. CPU and memory must form a supported [Consumption resource pair](https://learn.microsoft.com/azure/container-apps/containers#vcpu-and-memory-allocation-requirements). The app remains one minimum/maximum replica with a single active revision; increasing CPU does not increase worker concurrency.
+
+An optional sandbox group is retained with the preview, not deleted after each run. Its runtime role covers only that group's sandbox data plane. The caller still owns fresh per-run sandbox and snapshot IDs, cancellation, and exact child cleanup. Provisioning the group does not install a worker, qualify guest capabilities, or authorize a task. Keep private task/runtime assets outside public images and hydrate them from separately authorized storage.
+
+For an opt-in bounded validation profile, the separate private state container
+keeps scope keys and admission/model counters out of result media. Bind the
+runtime's `state_container_url` to that exact owned container and an immutable
+instance UUID. Explicitly initialize its state once with a conditional
+`If-None-Match: *` upload. Runtime startup must restore and validate existing
+state, never initialize or reset missing state. The runtime must hold and renew
+an exclusive Blob lease and await lease/ETag-conditional persistence before
+worker preparation/spawn and each model dispatch. Missing, corrupt, unavailable
+or uncertain state must block launches. ACA's container filesystem and
+`EmptyDir` volumes are ephemeral and are not authoritative persistence.
+
+The deployment flag creates only the container. It does not implement those
+runtime barriers, generate keys, upload initial state, or authorize runs. Bind
+and qualify the matching runtime's exact bootstrap/restore contract before
+enabling jobs, and never expose state blobs through media APIs or public URLs.
+
+This is a **create-only** workflow: an existing resource group is rejected before any resource or directory mutation. Review the dry run and current subscription-specific availability first. A visible SQL SKU is not necessarily available to the subscription.
+
+The optional journal is written before each mutating Azure CLI operation and records returned resource/Entra/RBAC IDs, not `.env` contents, request bodies, deployment parameter files or credentials. It distinguishes provisioning from the still-required SQL and runtime validation. Preserve it on failure to identify partially created resources. Arrange independent, durable cleanup before a retained preview is created; expiry tags alone do nothing. Delete only that preview's resources and journaled external role assignments and application/service principal. Key Vault purge protection can retain a soft-deleted vault after resource-group teardown; record that separately rather than claiming physical purge.
+
+After successful provisioning, orchestration can explicitly reopen that journal
+with `infra.deploy_instance.resume_deployment_journal`. Supply its independently
+verified current SHA256, exact instance/resource-group ID and tenant ID. This is
+not another deployment or mutation approval. It preserves provisioning status,
+all previous operations and the original absolute expiry. It refuses a stale
+digest, concurrent writer, foreign binding or expired preview.
+
+```python
+from pathlib import Path
+from infra.deploy_instance import resume_deployment_journal, run_az
+
+with resume_deployment_journal(
+    path=Path("preview-deployment.json"),
+    expected_sha256=verified_journal_sha256,
+    instance=instance_name,
+    resource_group_id=owned_resource_group_id,
+    tenant_id=approved_tenant_id,
+) as journal:
+    # Explicitly approved grant to the journalled preview identity only.
+    run_az(args=approved_role_grant_args)
+    operation = journal.begin_artifact(
+        blob_uri=owned_private_blob_uri,
+        sha256=approved_artifact_sha256,
+        size_bytes=approved_artifact_size,
+    )
+    # Perform the owned conditional upload and independent byte readback.
+    journal.verify_artifact(
+        operation=operation,
+        sha256=readback_sha256,
+        size_bytes=readback_size,
+        etag=readback_etag,
+    )
+```
+
+Resumed CLI recording allows only role-assignment creation, with explicit
+`--subscription`, `--assignee-object-id`, `--assignee-principal-type
+ServicePrincipal`, `--role` and `--scope`. The principal must match the exact
+owned identity's creation receipt. The caller still owns approval of the
+specific resource scope and role; subscription membership is not that approval.
+Artifact intents accept only credential-free HTTPS Blob URIs in the journalled
+owned storage account, exact lowercase SHA256 and byte count. Upload success
+alone does not mark an artifact verified: read back the actual bytes and ETag.
+No upload, key generation, SQL mutation or worker launch is performed by this
+API. Arrange bounded SDK/CLI operations separately.
+
+A `.resume-lock` file prevents concurrent resumed writers. Normal exit,
+including an exception, releases it. A killed process leaves it as an explicit
+recovery blocker; verify and settle that exact process before removing its lock.
+The returned journal is usable only inside its active held-lock context. Every
+resumed mutation fails before changing memory, file bytes or dispatching a CLI
+request once that context exits, including exceptional exit. Retaining the
+object or copying/reinstalling its context does not restore its authority.
+Keep the staging intent, upload and independent readback inside that context.
+Never use journal resumption to retry an uncertain grant, extend expiry, alter
+sealed readiness packets or overwrite a failed deployment.
 
 ### 3. Complete the manual steps
 
@@ -123,6 +237,20 @@ ALTER ROLE db_datareader ADD MEMBER [copyrit-{instance-name}-identity];
 ALTER ROLE db_datawriter ADD MEMBER [copyrit-{instance-name}-identity];
 ALTER ROLE db_ddladmin ADD MEMBER [copyrit-{instance-name}-identity];
 ```
+
+For a schema-guarded retained preview, use a separate setup identity to run the
+matching package's `pyrit.memory.migration.run_schema_migrations` before serving
+traffic. Configure the serving memory with `skip_schema_migration=True`, verify
+the expected migration head, and grant its identity only `db_datareader` and
+`db_datawriter`, not `db_ddladmin`.
+
+If directory lookup for `FROM EXTERNAL PROVIDER` is unavailable, the SQL
+administrator can create the contained managed-identity user explicitly with
+`CREATE USER [...] WITH SID = 0x<client-id-bytes-le>, TYPE = E`. Compute the SID
+from the new identity's **client/application ID**, using
+`uuid.UUID(client_id).bytes_le`, not its principal/object ID. Do not grant
+Directory Readers to work around a lookup failure. Verify a new authenticated
+connection and the schema guard before enabling preview jobs.
 
 **Grant Cognitive Services roles** (if using managed identity auth for Azure OpenAI):
 
@@ -312,6 +440,52 @@ This deletes:
 Before teardown, remove the printed static egress IP from every external allowlist. The acknowledgement flag is mandatory even with `--yes`; the script then waits for resource-group deletion to finish. It refuses untagged legacy groups and groups not created by `deploy_instance.py`. For a legacy instance, inventory it manually rather than bypassing these checks.
 
 > **Note:** Key Vault uses purge protection. The vault name will be reserved for ~90 days after deletion. Use a different instance name if redeploying immediately. The static egress IP is released and must not remain trusted by downstream systems.
+
+### Journal-bound preview cleanup
+
+For a preview deployed with `--journal-file`, opt into journal-bound cleanup rather than
+guessing IDs from names. This mode requires the exact subscription **ID**, resource-group
+ID and original journal. Directory creation is bound to the active tenant before its
+first mutation. A separate, new JSONL receipt records each command before execution,
+then its result or error correlation; the deployment journal is not modified.
+
+```bash
+python infra/teardown_instance.py \
+    --instance-name preview \
+    --subscription "<subscription-id>" \
+    --resource-group-id "/subscriptions/<subscription-id>/resourceGroups/copyrit-preview" \
+    --journal-file ./preview-deployment.json \
+    --cleanup-receipt ./preview-cleanup-inventory.jsonl \
+    --acknowledge-egress-ip-release \
+    --dry-run
+```
+
+Use a **different** receipt path, remove `--dry-run`, and add `--yes` to perform cleanup.
+For an independently scheduled retention cleanup, also add `--require-expired`.
+Every CLI call is bounded to at most 60 seconds; `--cleanup-timeout-seconds` bounds the
+whole cleanup attempt (default 900, maximum 3600). This is a cleanup polling limit, not
+an extension or replacement of preview or evaluation lifetimes.
+On Windows, bounded calls use the installed Azure CLI's native interpreter directly,
+not `cmd.exe`, so a timeout does not merely terminate its shell wrapper. An unsupported
+launcher layout is an explicit error, not an unbounded shell fallback.
+
+The mode validates live ownership before deletion, removes exact journal-bound external
+grants before deleting the managed identity's resource group, deletes the exact new
+app/service principal, and independently checks their absence. It supports partially
+created instances and already-absent resource groups/identities. Permission, malformed
+response and timeout errors are not treated as absence. A creation with no returned app
+IDs is not deletion authority for a same-name application: ambiguous candidates are
+retained, safe owned ARM cleanup can finish, and the command returns failure requiring
+manual directory ownership binding. Older journals without a tenant binding cannot
+authorize automatic directory cleanup.
+The inventory covers all assignments to the exact preview principal in the subscription;
+an unjournalled external grant blocks managed-identity deletion instead of being silently
+ignored or deleted by guesswork. Journal any post-deployment grants before using them.
+
+Key Vault soft-deletion metadata is retained separately; cleanup does not claim physical
+purge. ARM absence is also **not** proof of sandbox/snapshot data-plane or child-process
+absence. Complete and retain those runtime-specific observations before the preview's
+group is removed. An expiry tag does not execute this command or arrange its schedule.
 
 ## Building the Image
 

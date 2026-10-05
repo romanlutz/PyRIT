@@ -57,6 +57,44 @@ An optional third argument sets the readiness timeout in seconds. The helper and
 workflow result gates have offline regression coverage in
 `tests/unit/infra/test_docker_ci.py`.
 
+## Trusted cohost preview image
+
+The opt-in local-source build installs the core backend dependencies plus the
+`inspect` and `cohost-original` extras from the matching `uv.lock`. Its locked development
+group retains Jupyter and the notebook kernel; it does not install the default
+production image's optional speech, computer-vision, fairness or browser extras.
+The default build remains unchanged.
+
+```bash
+uv run python docker/build_pyrit_docker.py --source local --cohost-original
+```
+
+This profile requires clean committed source before any Docker changes and checks
+that source again after the base and production builds. A source change fails
+qualification rather than reporting a mixed-source image as successful. It uses
+the local daemon's `default` builder and only the isolated
+`pyrit:cohost-<full-commit>` tag, never overwriting `pyrit:latest`.
+Default non-cohost build tags remain unchanged. These source/tag guards do not
+replace final package/private-runtime compatibility, image size or resource
+qualification, or authorize a registry push/deployment.
+
+This profile also installs checksum-pinned uv 0.8.22 at
+`/opt/pyrit-cohost/bin/uv` and standalone CPython 3.12.11 at
+`/opt/pyrit-cohost/bin/python3.12`, using uv's pinned Linux x86_64 download
+metadata. Installation happens at image build time, not startup. The application's
+`/opt/venv` and interpreter remain separate. Private worker dependencies must be
+hydrated into a separate runtime with `--locked --offline` and
+`UV_PYTHON_DOWNLOADS=never`, then qualified against the actual image and public
+package identity.
+
+The `tooling` Docker target checks the public interpreter independently of the
+application package. It is not a deployable GUI image or a private-worker
+qualification; deploy only the final `production` image after those gates pass.
+
+No private Task, scorer, input image or dependency cache belongs in the public
+build context or image layers. This flag provides tooling and public dependencies,
+not private staging, run authorization or provider qualification.
+
 ## Features
 
 - Pre-installed PyRIT with all dependencies

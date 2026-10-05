@@ -12,7 +12,7 @@
 
 # No default — callers must pass --build-arg BASE_IMAGE=... (see infra/README.md).
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE} AS production
+FROM ${BASE_IMAGE} AS tooling
 
 LABEL description="Docker container for PyRIT with Jupyter Notebook and GUI support"
 
@@ -21,6 +21,7 @@ ARG PYRIT_SOURCE=pypi
 ARG PYRIT_VERSION=""
 ARG GIT_COMMIT=""
 ARG GIT_MODIFIED=""
+ARG PYRIT_COHOST_ORIGINAL=false
 
 # Production environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -39,8 +40,20 @@ ENV VIRTUAL_ENV="/opt/venv"
 # Set up working directory
 WORKDIR /app
 
+COPY docker/install_cohost_tooling.sh /tmp/install_cohost_tooling.sh
+RUN set -eu; case "$PYRIT_COHOST_ORIGINAL" in \
+        true) \
+            test "$PYRIT_SOURCE" = local; \
+            bash /tmp/install_cohost_tooling.sh; \
+            ;; \
+        false) ;; \
+        *) echo "Invalid PYRIT_COHOST_ORIGINAL" >&2; exit 1 ;; \
+    esac && rm /tmp/install_cohost_tooling.sh
+
+FROM tooling AS production
+
 # For local: copy source, install editable, and build frontend
-COPY --chown=vscode:vscode pyproject.toml MANIFEST.in README.md LICENSE /app/
+COPY --chown=vscode:vscode pyproject.toml uv.lock MANIFEST.in README.md LICENSE /app/
 COPY --chown=vscode:vscode pyrit/ /app/pyrit/
 COPY --chown=vscode:vscode frontend/ /app/frontend/
 COPY --chown=vscode:vscode build_scripts/ /app/build_scripts/
@@ -59,11 +72,16 @@ RUN set -eu; if [ "$PYRIT_SOURCE" = "pypi" ]; then \
         echo "Installing PyRIT from PyPI version: $PYRIT_VERSION"; \
         uv pip install --python /opt/venv/bin/python pyrit[speech,opencv,fairness_bias,fastapi,playwright]==$PYRIT_VERSION; \
         echo "Removing local source so the installed PyPI package isn't shadowed"; \
-        rm -rf /app/pyrit /app/frontend /app/build_scripts /app/pyproject.toml /app/MANIFEST.in /app/README.md /app/LICENSE; \
+        rm -rf /app/pyrit /app/frontend /app/build_scripts /app/pyproject.toml /app/uv.lock /app/MANIFEST.in /app/README.md /app/LICENSE; \
     elif [ "$PYRIT_SOURCE" = "local" ]; then \
         echo "Installing PyRIT from local source"; \
         export PYRIT_SOURCE_COMMIT="$GIT_COMMIT" PYRIT_SOURCE_DIRTY="$GIT_MODIFIED"; \
-        uv pip install --python /opt/venv/bin/python -e .[speech,opencv,fairness_bias,fastapi,playwright]; \
+        if [ "$PYRIT_COHOST_ORIGINAL" = true ]; then \
+            UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never \
+                uv sync --locked --python /opt/venv/bin/python --extra inspect --extra cohost-original; \
+        else \
+            uv pip install --python /opt/venv/bin/python -e .[speech,opencv,fairness_bias,fastapi,playwright]; \
+        fi; \
         echo "Building frontend..."; \
         if [ "$GIT_MODIFIED" = "true" ]; then \
             /opt/venv/bin/python -m build_scripts.prepare_package --development; \
@@ -96,7 +114,9 @@ RUN mkdir -p /home/vscode/.pyrit && \
     chown -R vscode:vscode /home/vscode/.pyrit
 
 # ipykernel and jupyter are in the dev dependency-group (not pip extras), so install them explicitly
-RUN uv pip install --python /opt/venv/bin/python ipykernel jupyter
+RUN if [ "$PYRIT_COHOST_ORIGINAL" = false ]; then \
+        uv pip install --python /opt/venv/bin/python ipykernel jupyter; \
+    fi
 
 # Register the Jupyter kernel for the venv
 RUN /opt/venv/bin/python -m ipykernel install --user --name pyrit --display-name "PyRIT"

@@ -42,6 +42,10 @@ param acrName string = ''
 @description('Optional existing user-assigned managed identity resource ID. Empty creates a new identity using the existing naming behavior.')
 param existingManagedIdentityResourceId string = ''
 
+@description('Optional name of a new sandbox group owned by this instance. Empty creates no sandbox group. The app identity receives only its data-plane role on this group.')
+@maxLength(32)
+param sandboxGroupName string = ''
+
 @description('Enable OpenTelemetry managed agent for audit logging. Creates Application Insights and wires the ACA managed OTel collector.')
 param enableOtel bool = false
 
@@ -150,6 +154,27 @@ var effectiveManagedIdentityPrincipalId = createManagedIdentity
   ? managedIdentity!.properties.principalId
   : referencedManagedIdentity!.properties.principalId
 
+resource sandboxGroup 'Microsoft.App/sandboxGroups@2026-07-01' = if (!empty(sandboxGroupName)) {
+  name: sandboxGroupName
+  location: location
+  tags: tags
+}
+
+var sandboxDataOwnerRoleDefinitionId = subscriptionResourceId(
+  'Microsoft.Authorization/roleDefinitions',
+  'c24cf47c-5077-412d-a19c-45202126392c'
+)
+
+resource sandboxDataOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(sandboxGroupName)) {
+  name: guid(sandboxGroup!.id, effectiveManagedIdentityId, sandboxDataOwnerRoleDefinitionId)
+  scope: sandboxGroup
+  properties: {
+    roleDefinitionId: sandboxDataOwnerRoleDefinitionId
+    principalId: effectiveManagedIdentityPrincipalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 resource acaEnvironment 'Microsoft.App/managedEnvironments@2024-10-02-preview' = {
   name: '${appName}-env'
   location: location
@@ -234,6 +259,12 @@ output managedIdentityResourceId string = effectiveManagedIdentityId
 
 @description('The principal ID of the user-assigned managed identity')
 output managedIdentityPrincipalId string = effectiveManagedIdentityPrincipalId
+
+@description('The instance-owned sandbox group resource ID; empty when sandboxGroupName is not set')
+output sandboxGroupResourceId string = !empty(sandboxGroupName) ? sandboxGroup!.id : ''
+
+@description('The app identity data-plane role assignment on the owned sandbox group; empty when disabled')
+output sandboxGroupRoleAssignmentId string = !empty(sandboxGroupName) ? sandboxDataOwner!.id : ''
 
 @description('ACR login server')
 output acrLoginServer string = effectiveAcrServer
