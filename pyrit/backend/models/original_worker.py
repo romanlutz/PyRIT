@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID  # noqa: TC003
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, StrictInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, StrictInt, field_serializer, model_validator
 
 from pyrit.models import EvalCaseRef, EvalSpecRef, config_hash
 
@@ -43,6 +43,16 @@ class CohostSourcePolicy(_FrozenMessage):
     cases: tuple[EvalCaseRef, ...] = Field(min_length=1, max_length=1)
     primary_scorer: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
     display_values: frozenset[str] = Field(max_length=16)
+
+    @field_serializer("display_values", when_used="json")
+    def _serialize_display_values(self, values: frozenset[str]) -> list[str]:
+        """
+        Keep unordered source policy values deterministic in every JSON fingerprint.
+
+        Returns:
+            list[str]: The unchanged reviewed values in canonical order.
+        """
+        return sorted(values)
 
     @model_validator(mode="after")
     def _validate_source(self) -> CohostSourcePolicy:
@@ -224,6 +234,16 @@ class CohostBackendConfig(_FrozenMessage):
     result_container_url: str
     local_test: StrictBool = False
     allow_ordinary_model_calls: Literal[False] = False
+
+    @field_serializer("allowed_operator_oids", "allowed_group_ids", when_used="json")
+    def _serialize_allowlist(self, values: frozenset[str]) -> list[str]:
+        """
+        Serialize unordered authorization membership without changing typed policy values.
+
+        Returns:
+            list[str]: The unchanged allowlist in canonical order.
+        """
+        return sorted(values)
 
     @model_validator(mode="after")
     def _validate_configuration(self) -> CohostBackendConfig:

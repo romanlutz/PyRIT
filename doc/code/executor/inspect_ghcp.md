@@ -590,6 +590,16 @@ state, uncertain commits, lost/expired lease or incomplete prior job fail
 closed. Runtime does not create/reset state or recycle failed admissions.
 Retained envelopes and budgets survive restart without copying worker rows.
 
+Source display values and operator/group allowlists are unordered memberships.
+Their JSON serialization sorts only those fields, so bootstrap, fresh
+interpreters and retained-policy restoration compute the same fingerprint
+without pinning `PYTHONHASHSEED`. Source cases and signed job/history lists
+keep their original order. A changed member, scorer, case, native identity,
+durable target or relay limit still changes policy identity and refuses
+foreign signed state. A packet from an older, differently fingerprinted
+policy is not migrated or re-signed at runtime; create and bind a new owned
+validation scope for the final qualified source/wheel.
+
 Run the normal backend, not a standalone harness:
 `uv run uvicorn pyrit.backend.main:app --host 0.0.0.0 --port 8000 --workers 1`.
 Select the approved alias in ordinary CoPyRIT and launch with its one-use
