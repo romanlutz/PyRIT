@@ -44,6 +44,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -86,6 +88,7 @@ _SHELL = platform.system() == "Windows"
 class _DeploymentJournal:
     """Retain non-secret creation references and an optional preview expiry."""
 
+    _MAX_BYTES = 2_097_152
     _MUTATIONS = {
         ("group", "create"),
         ("identity", "create"),
@@ -141,6 +144,8 @@ class _DeploymentJournal:
         retention_hours: int | None,
     ) -> None:
         self.path = path
+        self._resumed = False
+        self._expected_sha256: str | None = None
         requested_at = datetime.now(UTC)
         expires_at = requested_at + timedelta(hours=retention_hours) if retention_hours is not None else None
         self.expires_at = expires_at.isoformat() if expires_at is not None else ""
@@ -162,6 +167,10 @@ class _DeploymentJournal:
 
     def begin(self, args: list[str]) -> int | None:
         """Record a mutating CLI operation without bodies, parameters or secrets."""
+        if self._resumed:
+            if args[:3] != ["role", "assignment", "create"]:
+                raise RuntimeError("Resumed CLI journalling is limited to explicitly approved role grants")
+            self._validate_post_deployment_grant(args)
         mutating_rest = args[:1] == ["rest"] and "--method" in args and args[args.index("--method") + 1] != "GET"
         if not mutating_rest and not any(tuple(args[: len(prefix)]) == prefix for prefix in self._MUTATIONS):
             return None
@@ -176,7 +185,8 @@ class _DeploymentJournal:
                 "status": "requested",
             }
         )
-        self._document["status"] = "provisioning"
+        if not self._resumed:
+            self._document["status"] = "provisioning"
         self._write()
         return len(self._operations) - 1
 
@@ -198,7 +208,62 @@ class _DeploymentJournal:
 
     def finish(self, status: str) -> None:
         """Record provisioning status without claiming runtime validation."""
+        if self._resumed:
+            raise RuntimeError("Resumed journals cannot rewrite provisioning status")
         self._document["status"] = status
+        self._write()
+
+    def begin_artifact(self, *, blob_uri: str, sha256: str, size_bytes: int) -> int:
+        """Record an owned Blob staging intent before an upload without retaining its contents."""
+        if not self._resumed:
+            raise RuntimeError("Post-deployment artifact staging requires an explicitly resumed journal")
+        self._require_unexpired()
+        try:
+            _managed_identity_blob_uri(blob_uri)
+        except argparse.ArgumentTypeError as error:
+            raise ValueError("Artifact URI must be a credential-free Azure Blob HTTPS URI") from error
+        if re.fullmatch(r"[0-9a-f]{64}", sha256) is None or type(size_bytes) is not int or size_bytes <= 0:
+            raise ValueError("Artifact staging requires an exact lowercase SHA256 and positive byte count")
+        account = (urlparse(blob_uri).hostname or "").split(".")[0]
+        if urlparse(blob_uri).hostname != f"{account}.blob.core.windows.net" or not self._owns_storage_account(account):
+            raise RuntimeError("Artifact URI is not bound to a journalled owned storage account")
+        self._operations.append(
+            {
+                "command": ["artifact", "stage"],
+                "targets": {"blob_uri": blob_uri},
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "requested_at": datetime.now(UTC).isoformat(),
+                "status": "requested",
+            }
+        )
+        self._write()
+        return len(self._operations) - 1
+
+    def verify_artifact(self, *, operation: int, sha256: str, size_bytes: int, etag: str) -> None:
+        """Retain independently read-back artifact identity without claiming an upload alone verified it."""
+        if not self._resumed:
+            raise RuntimeError("Post-deployment artifact verification requires an explicitly resumed journal")
+        event = self._operations[operation]
+        if (
+            event.get("command") != ["artifact", "stage"]
+            or event.get("status") != "requested"
+            or event.get("sha256") != sha256
+            or type(size_bytes) is not int
+            or event.get("size_bytes") != size_bytes
+            or not isinstance(etag, str)
+            or not 1 <= len(etag) <= 1024
+            or "\r" in etag
+            or "\n" in etag
+        ):
+            raise RuntimeError("Artifact readback does not match its exact pending staging intent")
+        event.update(
+            {
+                "status": "verified",
+                "readback_at": datetime.now(UTC).isoformat(),
+                "readback": {"sha256": sha256, "size_bytes": size_bytes, "etag": etag},
+            }
+        )
         self._write()
 
     def bind_tenant(self, tenant_id: str) -> None:
@@ -210,14 +275,124 @@ class _DeploymentJournal:
         self._write()
 
     def _write(self) -> None:
+        raw = (json.dumps(self._document, indent=2) + "\n").encode("utf-8")
+        if len(raw) > self._MAX_BYTES:
+            raise RuntimeError("Deployment journal exceeds the 2 MiB bound")
+        if self._expected_sha256 is not None and hashlib.sha256(self._read_bounded(self.path)).hexdigest() != (
+            self._expected_sha256
+        ):
+            raise RuntimeError("Deployment journal changed outside its exclusive resumed session")
         with tempfile.TemporaryDirectory(dir=self.path.parent, prefix=f".{self.path.name}.") as temporary_directory:
             temporary_path = Path(temporary_directory) / self.path.name
-            with temporary_path.open("x", encoding="utf-8") as stream:
-                json.dump(self._document, stream, indent=2)
-                stream.write("\n")
+            with temporary_path.open("xb") as stream:
+                stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
             temporary_path.replace(self.path)
+        if self._expected_sha256 is not None:
+            self._expected_sha256 = hashlib.sha256(raw).hexdigest()
+
+    def _require_unexpired(self) -> None:
+        expiry = datetime.fromisoformat(self.expires_at)
+        if expiry.tzinfo is None or datetime.now(UTC) >= expiry:
+            raise RuntimeError("Preview expiry prohibits new post-deployment mutations or staging")
+
+    def _owns_storage_account(self, account: str) -> bool:
+        resource_id = f"{self._document['resource_group_id']}/providers/Microsoft.Storage/storageAccounts/{account}"
+        return any(
+            event.get("command") == ["az", "storage", "account"]
+            and event.get("status") == "succeeded"
+            and isinstance(event.get("returned_references"), list)
+            and any(
+                isinstance(reference, dict) and reference.get("id") == resource_id
+                for reference in cast("list[object]", event["returned_references"])
+            )
+            for event in self._operations
+        )
+
+    def _validate_post_deployment_grant(self, args: list[str]) -> None:
+        self._require_unexpired()
+        options = {option: args[index + 1] for index, option in enumerate(args[:-1]) if option in self._SAFE_OPTIONS}
+        principal = options.get("--assignee-object-id")
+        identity_id = (
+            f"{self._document['resource_group_id']}/providers/Microsoft.ManagedIdentity/"
+            f"userAssignedIdentities/copyrit-{self._document['instance']}-identity"
+        )
+        bound_principal = any(
+            event.get("command") == ["az", "identity", "create"]
+            and event.get("status") == "succeeded"
+            and isinstance(event.get("returned_references"), list)
+            and any(
+                isinstance(reference, dict)
+                and reference.get("id") == identity_id
+                and reference.get("principalId") == principal
+                for reference in cast("list[object]", event["returned_references"])
+            )
+            for event in self._operations
+        )
+        subscription = str(self._document["resource_group_id"]).split("/")[2]
+        if (
+            not principal
+            or not bound_principal
+            or options.get("--subscription") != subscription
+            or not options.get("--scope", "").casefold().startswith(f"/subscriptions/{subscription}/".casefold())
+            or not options.get("--role")
+            or options.get("--assignee-principal-type") != "ServicePrincipal"
+        ):
+            raise RuntimeError("Post-deployment role grant is not bound to the exact preview identity/subscription")
+
+    @classmethod
+    def _read_bounded(cls, path: Path) -> bytes:
+        if path.stat().st_size > cls._MAX_BYTES:
+            raise RuntimeError("Deployment journal exceeds the 2 MiB bound")
+        raw = path.read_bytes()
+        if len(raw) > cls._MAX_BYTES:
+            raise RuntimeError("Deployment journal exceeds the 2 MiB bound")
+        return raw
+
+    @classmethod
+    def _reopen(
+        cls,
+        *,
+        path: Path,
+        expected_sha256: str,
+        instance: str,
+        resource_group_id: str,
+        tenant_id: str,
+    ) -> "_DeploymentJournal":
+        raw = cls._read_bounded(path)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise RuntimeError("Deployment journal does not match its exact expected SHA256")
+        document = _expect_json_object(json.loads(raw), context="deployment journal")
+        resource_group_parts = resource_group_id.split("/")
+        if (
+            len(resource_group_parts) != 5
+            or resource_group_parts[0] != ""
+            or resource_group_parts[1] != "subscriptions"
+            or resource_group_parts[3] != "resourceGroups"
+            or str(UUID(resource_group_parts[2])) != resource_group_parts[2]
+            or resource_group_parts[4] != f"copyrit-{instance}"
+            or _INSTANCE_NAME_RE.fullmatch(instance) is None
+            or document.get("schema") != "copyrit-deployment-journal/v1"
+            or document.get("instance") != instance
+            or document.get("resource_group_id") != resource_group_id
+            or document.get("tenant_id") != str(UUID(tenant_id))
+            or document.get("status") != "provisioned_manual_sql_and_runtime_validation_required"
+        ):
+            raise RuntimeError("Deployment journal is not bound to this provisioned preview and tenant")
+        journal = cls.__new__(cls)
+        journal.path = path
+        journal._document = document
+        journal._operations = [
+            _expect_json_object(value, context="journal operation")
+            for value in _expect_json_array(document.get("operations"), context="journal operations")
+        ]
+        journal._document["operations"] = journal._operations
+        journal.expires_at = _expect_string(document.get("expires_at"), context="preview expiry")
+        journal._require_unexpired()
+        journal._resumed = True
+        journal._expected_sha256 = expected_sha256
+        return journal
 
     @classmethod
     def _references(cls, response: object) -> list[dict[str, str]]:
@@ -242,6 +417,41 @@ class _DeploymentJournal:
 _CURRENT_JOURNAL: contextvars.ContextVar[_DeploymentJournal | None] = contextvars.ContextVar(
     "copyrit_deployment_journal", default=None
 )
+
+
+@contextmanager
+def resume_deployment_journal(
+    *,
+    path: Path,
+    expected_sha256: str,
+    instance: str,
+    resource_group_id: str,
+    tenant_id: str,
+) -> Iterator[_DeploymentJournal]:
+    """Append bound post-deployment grants/artifact receipts without changing the original preview lifetime."""
+    if _CURRENT_JOURNAL.get() is not None:
+        raise RuntimeError("Another deployment journal is already active in this context")
+    lock_path = path.with_name(f"{path.name}.resume-lock")
+    with lock_path.open("x", encoding="utf-8") as lock:
+        try:
+            lock.write(json.dumps({"pid": os.getpid(), "opened_at": datetime.now(UTC).isoformat()}) + "\n")
+            lock.flush()
+            os.fsync(lock.fileno())
+            journal = _DeploymentJournal._reopen(
+                path=path,
+                expected_sha256=expected_sha256,
+                instance=instance,
+                resource_group_id=resource_group_id,
+                tenant_id=tenant_id,
+            )
+            token = _CURRENT_JOURNAL.set(journal)
+            try:
+                yield journal
+            finally:
+                _CURRENT_JOURNAL.reset(token)
+        finally:
+            lock.close()
+            lock_path.unlink()
 
 
 def _managed_identity_blob_uri(value: str) -> str:

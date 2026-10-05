@@ -168,6 +168,57 @@ This is a **create-only** workflow: an existing resource group is rejected befor
 
 The optional journal is written before each mutating Azure CLI operation and records returned resource/Entra/RBAC IDs, not `.env` contents, request bodies, deployment parameter files or credentials. It distinguishes provisioning from the still-required SQL and runtime validation. Preserve it on failure to identify partially created resources. Arrange independent, durable cleanup before a retained preview is created; expiry tags alone do nothing. Delete only that preview's resources and journaled external role assignments and application/service principal. Key Vault purge protection can retain a soft-deleted vault after resource-group teardown; record that separately rather than claiming physical purge.
 
+After successful provisioning, orchestration can explicitly reopen that journal
+with `infra.deploy_instance.resume_deployment_journal`. Supply its independently
+verified current SHA256, exact instance/resource-group ID and tenant ID. This is
+not another deployment or mutation approval. It preserves provisioning status,
+all previous operations and the original absolute expiry. It refuses a stale
+digest, concurrent writer, foreign binding or expired preview.
+
+```python
+from pathlib import Path
+from infra.deploy_instance import resume_deployment_journal, run_az
+
+with resume_deployment_journal(
+    path=Path("preview-deployment.json"),
+    expected_sha256=verified_journal_sha256,
+    instance=instance_name,
+    resource_group_id=owned_resource_group_id,
+    tenant_id=approved_tenant_id,
+) as journal:
+    # Explicitly approved grant to the journalled preview identity only.
+    run_az(args=approved_role_grant_args)
+    operation = journal.begin_artifact(
+        blob_uri=owned_private_blob_uri,
+        sha256=approved_artifact_sha256,
+        size_bytes=approved_artifact_size,
+    )
+    # Perform the owned conditional upload and independent byte readback.
+    journal.verify_artifact(
+        operation=operation,
+        sha256=readback_sha256,
+        size_bytes=readback_size,
+        etag=readback_etag,
+    )
+```
+
+Resumed CLI recording allows only role-assignment creation, with explicit
+`--subscription`, `--assignee-object-id`, `--assignee-principal-type
+ServicePrincipal`, `--role` and `--scope`. The principal must match the exact
+owned identity's creation receipt. The caller still owns approval of the
+specific resource scope and role; subscription membership is not that approval.
+Artifact intents accept only credential-free HTTPS Blob URIs in the journalled
+owned storage account, exact lowercase SHA256 and byte count. Upload success
+alone does not mark an artifact verified: read back the actual bytes and ETag.
+No upload, key generation, SQL mutation or worker launch is performed by this
+API. Arrange bounded SDK/CLI operations separately.
+
+A `.resume-lock` file prevents concurrent resumed writers. Normal exit,
+including an exception, releases it. A killed process leaves it as an explicit
+recovery blocker; verify and settle that exact process before removing its lock.
+Never use journal resumption to retry an uncertain grant, extend expiry, alter
+sealed readiness packets or overwrite a failed deployment.
+
 ### 3. Complete the manual steps
 
 The script prints these at the end. The following steps require manual action:
