@@ -13,7 +13,6 @@ Route structure:
 """
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from starlette.concurrency import run_in_threadpool
 
 from pyrit.backend.middleware.auth import AuthenticatedUser
 from pyrit.backend.models.common import ProblemDetail
@@ -22,8 +21,12 @@ from pyrit.backend.models.scenarios import (
     ScenarioRunListResponse,
 )
 from pyrit.backend.routes.common import parse_label_query_params
-from pyrit.backend.services.original_run_admission import OriginalAdmissionError
-from pyrit.backend.services.scenario_run_service import get_scenario_run_service
+from pyrit.backend.services.original_run_admission import APPROVED_ORIGINAL_SCENARIO, OriginalAdmissionError
+from pyrit.backend.services.scenario_run_service import (
+    ScenarioRunConflictError,
+    ScenarioRunNotFoundError,
+    get_scenario_run_service,
+)
 from pyrit.backend.services.scenario_service import get_scenario_service
 from pyrit.models import ScenarioQueueSnapshot, ScenarioResult, ScenarioRunProgress, ScenarioRunState
 from pyrit.models.catalog import (
@@ -33,6 +36,7 @@ from pyrit.models.catalog import (
     ScenarioRunSizeEstimateRequest,
     ScenarioRunSummary,
 )
+from pyrit.models.catalog.scenario import OriginalRunReason
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
@@ -55,8 +59,6 @@ def _admission_http_error(*, error: OriginalAdmissionError) -> HTTPException:
     Returns:
         HTTPException: A safe HTTP status and finite reason code.
     """
-    from pyrit.models.catalog.scenario import OriginalRunReason
-
     status_code = (
         status.HTTP_403_FORBIDDEN
         if error.reason is OriginalRunReason.OPERATOR_NOT_AUTHORIZED
@@ -185,6 +187,8 @@ async def estimate_scenario_run_size(  # pyrit-async-suffix-exempt
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         400: {"model": ProblemDetail, "description": "Invalid request (bad scenario/target/technique)"},
+        404: {"model": ProblemDetail, "description": "Saved run not found"},
+        409: {"model": ProblemDetail, "description": "Saved run cannot be resumed"},
     },
 )
 async def start_scenario_run(  # pyrit-async-suffix-exempt
@@ -199,16 +203,60 @@ async def start_scenario_run(  # pyrit-async-suffix-exempt
 
     Args:
         request: Scenario run configuration.
-        http_request: Request with the authenticated operator, if present.
+        http_request: HTTP admission context and authenticated operator.
 
     Returns:
         ScenarioRunSummary: Run metadata with PENDING status.
     """
+    runtime = getattr(http_request.app.state, "runtime_lifecycle", None)
+    if runtime is not None and runtime.state != "ready":
+        raise HTTPException(status_code=503, detail="Scenario start was interrupted by runtime reinitialization.")
+    if (
+        getattr(http_request.app.state, "original_worker_runtime", None) is not None
+        and request.scenario_name != APPROVED_ORIGINAL_SCENARIO
+    ):
+        raise _admission_http_error(error=OriginalAdmissionError(reason=OriginalRunReason.PROFILE_NOT_ADMITTED))
     service = get_scenario_run_service()
     try:
         return await service.start_run_async(request=request, operator=_operator(request=http_request))
     except OriginalAdmissionError as error:
         raise _admission_http_error(error=error) from None
+    except ScenarioRunNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from None
+    except ScenarioRunConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from None
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None
+
+
+@router.post(
+    "/runs/{scenario_result_id}/resume",
+    response_model=ScenarioRunSummary,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        400: {"model": ProblemDetail, "description": "Saved configuration is no longer available or compatible"},
+        404: {"model": ProblemDetail, "description": "Saved run not found"},
+        409: {"model": ProblemDetail, "description": "Run is ineligible or has no saved launch configuration"},
+    },
+)
+async def resume_scenario_run_async(*, scenario_result_id: str, http_request: Request) -> ScenarioRunSummary:
+    """
+    Resume a failed run using its complete saved launch configuration.
+
+    Returns:
+        ScenarioRunSummary: Scheduled continuation under the saved result ID.
+    """
+    try:
+        await get_scenario_run_service().get_run_async(
+            scenario_result_id=scenario_result_id, operator=_operator(request=http_request)
+        )
+        return await get_scenario_run_service().resume_run_async(scenario_result_id=scenario_result_id)
+    except OriginalAdmissionError as error:
+        raise _admission_http_error(error=error) from None
+    except ScenarioRunNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from None
+    except ScenarioRunConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from None
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None
 
@@ -251,8 +299,7 @@ async def list_scenario_runs(  # pyrit-async-suffix-exempt
     """
     service = get_scenario_run_service()
     try:
-        return await run_in_threadpool(
-            service.list_runs,
+        return await service.list_runs_async(
             scenario_names=scenario_names,
             statuses=run_statuses,
             labels=parse_label_query_params(label),
@@ -303,8 +350,7 @@ async def get_scenario_run(  # pyrit-async-suffix-exempt
         scenario_result_id=scenario_result_id, operator=_operator(request=http_request)
     )
     try:
-        run = await run_in_threadpool(
-            service.get_run_from_storage,
+        run = await service.get_run_from_storage_async(
             scenario_result_id=scenario_result_id,
             active_error=active_snapshot.error,
             queue_position=active_snapshot.queue_position,
@@ -347,8 +393,7 @@ async def get_scenario_run_progress(  # pyrit-async-suffix-exempt
         scenario_result_id=scenario_result_id, operator=_operator(request=http_request)
     )
     try:
-        progress = await run_in_threadpool(
-            service.get_run_progress_from_storage,
+        progress = await service.get_run_progress_from_storage_async(
             scenario_result_id=scenario_result_id,
             since=since,
             limit=limit,
@@ -431,7 +476,7 @@ async def get_scenario_run_results(  # pyrit-async-suffix-exempt
     """
     service = get_scenario_run_service()
     try:
-        result = service.get_run_results(
+        result = await service.get_run_results_async(
             scenario_result_id=scenario_result_id, operator=_operator(request=http_request)
         )
     except OriginalAdmissionError as error:

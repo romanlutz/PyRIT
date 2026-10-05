@@ -15,6 +15,8 @@ from pyrit.prompt_normalizer import PromptNormalizer
 from pyrit.prompt_target.inspect_ghcp_target import InspectGhcpTarget, InspectGhcpTransport
 
 if TYPE_CHECKING:
+    from pydantic import JsonValue
+
     from pyrit.memory import SQLiteMemory
 
 
@@ -110,3 +112,27 @@ class TestInspectGhcpTarget:
                 conversation_id="same-conversation",
             )
         assert len(target.turns) == 1
+
+    @pytest.mark.parametrize("field", ["events", "model_exchanges"])
+    async def test_rejects_nonobject_evidence_without_filtering_it_async(self, field: str) -> None:
+        frame: dict[str, JsonValue] = {
+            "kind": "turn",
+            "run_id": "inspect-episode",
+            "turn_index": 1,
+            "session_id": "same-session",
+            "identity": {"cli_pid": 1},
+            "assistant_text": "answer",
+            "events": [{}],
+            "model_exchanges": [{}],
+        }
+        frame[field] = ["not a structured object"]
+        transport = MagicMock(spec=InspectGhcpTransport)
+        transport.send_turn_async = AsyncMock(return_value=frame)
+        target = InspectGhcpTarget(transport=transport, run_id="inspect-episode", model_name="approved")
+        with pytest.raises(Exception, match="Error sending prompt"):
+            await PromptNormalizer().send_prompt_async(
+                message=Message.from_prompt(prompt="fixture", role="user"),
+                target=target,
+                conversation_id="source-conversation",
+            )
+        assert target.turns == ()

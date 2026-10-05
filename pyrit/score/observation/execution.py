@@ -8,7 +8,6 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, TypeAlias
 
 from pyrit.models import (
-    MEDIA_PATH_DATA_TYPES,
     ContentEntryScorable,
     ContentScorable,
     Message,
@@ -19,12 +18,9 @@ from pyrit.models import (
     ScorableUnion,
     Score,
     ScoringExpectation,
+    ToolEventsObservationPayload,
 )
-from pyrit.models.score.observation import (
-    _content_scorable_digest,
-    _message_piece_digest,
-    _response_piece_digest,
-)
+from pyrit.models.score.observation import _resolved_scored_evidence_digest
 
 if TYPE_CHECKING:
     from pyrit.memory import MemoryInterface
@@ -39,10 +35,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 
-_ObservationEvidence: TypeAlias = Message
+_ObservationEvidence: TypeAlias = Message | ToolEventsObservationPayload
 
 
-def _scored_evidence_digest(
+async def _scored_evidence_digest_async(
     *,
     scorable: ScorableUnion,
     scored_piece_id: uuid.UUID,
@@ -58,43 +54,64 @@ def _scored_evidence_digest(
     Raises:
         NonReplayableObservationError: If the scored evidence cannot be resolved.
     """
-    if isinstance(scorable, MessageScorable):
-        if scored_message_piece is not None and scored_message_piece.id != scored_piece_id:
-            raise NonReplayableObservationError(
-                f"Prepared message piece {scored_message_piece.id} does not match scored piece {scored_piece_id}."
-            )
-        piece = scored_message_piece
-        if piece is None:
-            pieces = memory.get_message_pieces(prompt_ids=[scored_piece_id])
-            piece = next((item for item in pieces if item.id == scored_piece_id), None)
-        if piece is None:
-            raise NonReplayableObservationError(f"Scored message piece {scored_piece_id} is missing.")
-        if piece.converted_value_data_type in MEDIA_PATH_DATA_TYPES:
-            return None
-        return _message_piece_digest(piece, include_id=False)
-    if isinstance(scorable, ContentScorable):
-        if scorable.data_type in MEDIA_PATH_DATA_TYPES:
-            return None
-        return _content_scorable_digest(scorable)
-    if isinstance(scorable, ContentEntryScorable):
-        content = memory.get_scorable_content(content_ids=[scorable.content_id]).get(scorable.content_id)
-        content_digest = memory.get_scorable_content_hashes(content_ids=[scorable.content_id]).get(scorable.content_id)
-        if content is None or content.data_type != scorable.data_type or content_digest is None:
-            raise NonReplayableObservationError(f"Scored content {scorable.content_id} is missing.")
-        if content.data_type in MEDIA_PATH_DATA_TYPES:
-            return None
-        if _content_scorable_digest(content) != content_digest:
-            raise NonReplayableObservationError(f"Scored content {scorable.content_id} was modified.")
-        return content_digest
-    raise NonReplayableObservationError(f"Scorable type {type(scorable).__name__} cannot replay judgment evidence.")
+    if isinstance(scorable, MessageScorable) and scored_message_piece is None:
+        pieces = await memory.get_message_pieces_async(prompt_ids=[scored_piece_id])
+        scored_message_piece = next((piece for piece in pieces if piece.id == scored_piece_id), None)
+    content_id = scorable.content_id if isinstance(scorable, ContentEntryScorable) else None
+    stored_content = await _load_content_evidence_async(memory=memory, content_id=content_id)
+    try:
+        return _resolved_scored_evidence_digest(
+            scorable=scorable,
+            scored_piece_id=scored_piece_id,
+            scored_piece=scored_message_piece,
+            stored_content=stored_content,
+        )
+    except ValueError as error:
+        raise NonReplayableObservationError(str(error)) from error
 
 
-class _ObservationCollector:
-    """Observations created during one root scoring operation."""
+async def _load_content_evidence_async(
+    *, memory: MemoryInterface, content_id: uuid.UUID | None
+) -> tuple[ContentScorable, str] | None:
+    """
+    Load stored content and its hash.
+
+    Returns:
+        tuple[ContentScorable, str] | None: The evidence, or None if unreferenced or missing.
+    """
+    if content_id is None:
+        return None
+    content = (await memory.get_scorable_content_async(content_ids=[content_id])).get(content_id)
+    digest = (await memory.get_scorable_content_hashes_async(content_ids=[content_id])).get(content_id)
+    return (content, digest) if content is not None and digest is not None else None
+
+
+class _ScoringCollector:
+    """Observations and intermediate judgments created during one root scoring operation."""
 
     def __init__(self) -> None:
-        """Initialize an empty observation collection."""
+        """Initialize empty observation and intermediate-score collections."""
         self._observations: dict[uuid.UUID, Observation] = {}
+        self._scores: dict[str, Score] = {}
+
+    def add_scores(self, scores: Sequence[Score]) -> None:
+        """
+        Snapshot finalized nested results without changing caller-owned scores.
+
+        Raises:
+            ValueError: If an ID is reused for a different judgment.
+        """
+        for score in scores:
+            snapshot = score.model_copy(deep=True)
+            score_id = str(score.id)
+            if score_id in self._scores and self._scores[score_id] != snapshot:
+                raise ValueError(f"Intermediate score ID {score_id} was reused with different values.")
+            self._scores[score_id] = snapshot
+
+    @property
+    def intermediate_scores(self) -> list[Score]:
+        """The results of nested scorers at any depth, excluding the public call's returned results."""
+        return list(self._scores.values())
 
     def add(self, observation: Observation) -> None:
         """
@@ -117,10 +134,11 @@ class _ObservationCollector:
         ]
 
 
-_CURRENT_OBSERVATION_COLLECTOR: ContextVar[_ObservationCollector | None] = ContextVar(
+_CURRENT_OBSERVATION_COLLECTOR: ContextVar[_ScoringCollector | None] = ContextVar(
     "current_observation_collector",
     default=None,
 )
+_CURRENT_SCORE_COLLECTOR: ContextVar[_ScoringCollector | None] = ContextVar("current_score_collector", default=None)
 _CURRENT_SCORING_EXPECTATION: ContextVar[ScoringExpectation | None] = ContextVar(
     "current_scoring_expectation",
     default=None,
@@ -136,19 +154,28 @@ _CURRENT_SCORING_MESSAGE: ContextVar[Message | None] = ContextVar(
 
 
 @contextmanager
-def _observation_collection() -> Iterator[_ObservationCollector]:
+def _scoring_collection() -> Iterator[_ScoringCollector]:
     """
-    Create the observation collector for one public scoring call.
+    Collect observations and intermediate results for one public scoring call.
 
     Yields:
-        _ObservationCollector: The root operation's collector.
+        _ScoringCollector: The root operation's collector.
     """
-    collector = _ObservationCollector()
+    collector = _ScoringCollector()
     token = _CURRENT_OBSERVATION_COLLECTOR.set(collector)
+    score_token = _CURRENT_SCORE_COLLECTOR.set(collector)
     try:
         yield collector
     finally:
         _CURRENT_OBSERVATION_COLLECTOR.reset(token)
+        _CURRENT_SCORE_COLLECTOR.reset(score_token)
+
+
+def _collect_scores(scores: Sequence[Score]) -> None:
+    """Retain nested results even when observation capture is suppressed."""
+    collector = _CURRENT_SCORE_COLLECTOR.get()
+    if collector is not None:
+        collector.add_scores(scores)
 
 
 def _collect_observation(observation: Observation) -> None:
@@ -266,19 +293,6 @@ def _merge_observation_ids(*, scores: Sequence[Score]) -> list[uuid.UUID]:
     return merged
 
 
-def _replay_message_piece_id(observation: Observation) -> uuid.UUID | None:
-    """
-    Resolve the scored piece when the observation remains message-anchored.
-
-    Returns:
-        uuid.UUID | None: The canonical scored piece ID, if the anchor contains it.
-    """
-    scored_piece_id = observation.payload.scored_piece_id
-    if isinstance(observation.scorable, MessageScorable) and scored_piece_id in observation.scorable.message_piece_ids:
-        return scored_piece_id
-    return None
-
-
 class _ObservationEvidenceResolver:
     """Resolve managed observation references without calling their original source."""
 
@@ -286,7 +300,7 @@ class _ObservationEvidenceResolver:
         """Initialize the resolver with the observation store."""
         self._memory = memory
 
-    def resolve(self, *, observation: Observation) -> _ObservationEvidence:
+    async def resolve_async(self, *, observation: Observation) -> _ObservationEvidence:
         """
         Resolve an observation's managed response references.
 
@@ -294,31 +308,21 @@ class _ObservationEvidenceResolver:
             _ObservationEvidence: The reconstructed LLM response.
 
         Raises:
-            NonReplayableObservationError: If a referenced message piece is missing.
+            NonReplayableObservationError: If referenced evidence is missing, modified, or unsupported.
         """
         payload = observation.payload
-        scored_evidence_digest = _scored_evidence_digest(
-            scorable=observation.scorable,
-            scored_piece_id=payload.scored_piece_id,
-            memory=self._memory,
+        if isinstance(payload, ToolEventsObservationPayload):
+            return payload
+        pieces = await self._memory.get_message_pieces_async(prompt_ids=list(observation.evidence_message_piece_ids))
+        pieces_by_id = {piece.id: piece for piece in pieces}
+        stored_content = await _load_content_evidence_async(
+            memory=self._memory, content_id=observation.scorable_content_id
         )
-        if scored_evidence_digest != payload.scored_evidence_digest:
-            raise NonReplayableObservationError(f"Observation {observation.id} references modified scored evidence.")
-        pieces = self._memory.get_message_pieces(prompt_ids=list(payload.message_piece_ids))
-        pieces_by_id = {str(piece.id): piece for piece in pieces}
-        missing = [str(piece_id) for piece_id in payload.message_piece_ids if str(piece_id) not in pieces_by_id]
-        if missing:
-            raise NonReplayableObservationError(
-                f"Observation {observation.id} references missing message pieces: {missing}."
+        try:
+            observation.validate_evidence(
+                message_pieces=pieces_by_id,
+                stored_content=stored_content,
             )
-        ordered_pieces = [pieces_by_id[str(piece_id)] for piece_id in payload.message_piece_ids]
-        modified = [
-            str(piece.id)
-            for piece, expected_digest in zip(ordered_pieces, payload.message_piece_digests, strict=True)
-            if _response_piece_digest(piece, include_id=True) != expected_digest
-        ]
-        if modified:
-            raise NonReplayableObservationError(
-                f"Observation {observation.id} references modified message pieces: {modified}."
-            )
-        return Message(message_pieces=ordered_pieces)
+        except ValueError as error:
+            raise NonReplayableObservationError(str(error)) from error
+        return Message(message_pieces=[pieces_by_id[piece_id] for piece_id in observation.response_message_piece_ids])

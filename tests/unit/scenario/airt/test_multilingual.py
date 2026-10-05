@@ -137,6 +137,16 @@ def _response(text: str) -> list[Message]:
 class TestMultilingual:
     """Validate multilingual technique selection and converter construction."""
 
+    @pytest.mark.parametrize("explicit_target", [False, True])
+    def test_default_adversarial_usage(
+        self, *, explicit_target: bool, mock_adversarial_chat: PromptTarget, mock_objective_scorer: TrueFalseScorer
+    ) -> None:
+        scenario = Multilingual(
+            adversarial_chat=mock_adversarial_chat if explicit_target else None,
+            objective_scorer=mock_objective_scorer,
+        )
+        assert scenario.uses_default_adversarial_target is not explicit_target
+
     def test_technique_catalog_includes_only_translation_compatible_factories(self) -> None:
         technique_class = _build_multilingual_technique()
 
@@ -309,7 +319,9 @@ class TestMultilingual:
         metadata = scenario._build_initial_scenario_metadata()
         assert metadata[_LANGUAGES_METADATA_KEY] == ["French", "Spanish"]
 
-    def test_resolve_languages_replays_persisted_set_on_resume(self, mock_adversarial_chat, mock_objective_scorer):
+    async def test_resolve_languages_replays_persisted_set_on_resume(
+        self, mock_adversarial_chat, mock_objective_scorer
+    ):
         scenario = Multilingual(
             adversarial_chat=mock_adversarial_chat,
             objective_scorer=mock_objective_scorer,
@@ -318,8 +330,8 @@ class TestMultilingual:
         stored = MagicMock()
         stored.metadata = {_LANGUAGES_METADATA_KEY: ["French", "Spanish"]}
 
-        with patch.object(scenario._memory, "get_scenario_results", return_value=[stored]):
-            assert scenario._resolve_languages() == ["French", "Spanish"]
+        with patch.object(scenario._memory, "get_scenario_results_async", return_value=[stored]):
+            assert (await scenario._resolve_languages_async()) == ["French", "Spanish"]
 
     async def test_baseline_is_prepended_by_default_with_same_seed_population(
         self, mock_objective_target, mock_adversarial_chat, mock_objective_scorer, mock_memory_seed_groups
@@ -400,8 +412,8 @@ class TestMultilingual:
             patch("asyncio.sleep", new_callable=AsyncMock) as sleep_mock,
             patch.object(
                 memory,
-                "update_scenario_run_state",
-                wraps=memory.update_scenario_run_state,
+                "update_scenario_run_state_async",
+                wraps=memory.update_scenario_run_state_async,
             ) as update_state,
         ):
             await scenario.initialize_async()
@@ -448,7 +460,7 @@ class TestMultilingual:
             awaited.kwargs["message"].get_value() for awaited in mock_objective_target.send_prompt_async.await_args_list
         ] == ["objectif traduit en francais", "objetivo traducido al espanol"]
         assert sleep_mock.await_args_list == [call(1.0), call(2.0)]
-        persisted_results = memory.get_attack_results(scenario_result_id=scenario._scenario_result_id)
+        persisted_results = await memory.get_attack_results_async(scenario_result_id=scenario._scenario_result_id)
         assert len(persisted_results) == 3
         observed_states = [call.kwargs["scenario_run_state"] for call in update_state.call_args_list]
         assert observed_states == [

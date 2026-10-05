@@ -136,8 +136,8 @@ class InspectGhcpTarget(PromptTarget):
                 assistant_text=answer,
                 request_piece_id=request_piece.id,
                 response_piece_id=response.get_piece().id,
-                events=tuple(events),
-                model_exchanges=tuple(exchanges),
+                events=tuple(event for event in events if isinstance(event, dict)),
+                model_exchanges=tuple(exchange for exchange in exchanges if isinstance(exchange, dict)),
             )
         )
         return [response]

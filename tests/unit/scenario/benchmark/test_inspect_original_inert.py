@@ -19,9 +19,10 @@ from inspect_ai.event import ScoreEvent
 from inspect_ai.log import read_eval_log
 from sqlalchemy import func, select
 
+from pyrit import _compatibility
 from pyrit.backend.main import app
 from pyrit.backend.services.attack_service import AttackService
-from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.backend.services.scenario_run_service import ScenarioRunService, _PreparedRun
 from pyrit.backend.services.scenario_service import ScenarioService
 from pyrit.common.utils import to_sha256
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
@@ -54,11 +55,22 @@ from pyrit.scenario.scenarios.benchmark.inspect_original_inert import (
     InspectOriginalInertScenario,
     _allocate_log_dir,
 )
+from tests.unit.backend.conftest import compatibility_id as compatibility_id
+from tests.unit.backend.conftest import isolated_backend_services_async as isolated_backend_services_async
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pyrit.memory import SQLiteMemory
+
+
+def _business_client() -> AsyncClient:
+    """Use the ordinary API marker with the shared test-only startup identity."""
+    return AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+        headers={_compatibility.COMPATIBILITY_HEADER: app.state.compatibility_id},
+    )
 
 
 @pytest.mark.usefixtures("patch_central_database")
@@ -253,9 +265,7 @@ async def test_one_click_runs_unchanged_inspect_twice_with_distinct_offline_sqli
     service = ScenarioRunService()
     try:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 endpoints = (
                     f"/api/scenarios/runs/{first_id}",
                     f"/api/scenarios/runs/{first_id}/progress",
@@ -439,9 +449,7 @@ async def test_one_click_readback_rejects_tampered_final_event_or_archive_eviden
     service = ScenarioRunService()
     try:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 endpoints = (
                     f"/api/scenarios/runs/{result.id}",
                     f"/api/scenarios/runs/{result.id}/progress",
@@ -539,9 +547,7 @@ async def test_one_click_readback_rejects_rehashed_source_message_piece(
             patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
             patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
         ):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 endpoints = (
                     f"/api/scenarios/runs/{result.id}",
                     f"/api/scenarios/runs/{result.id}/progress",
@@ -627,9 +633,7 @@ async def test_one_click_readback_binds_typed_sample_and_imported_result_fields(
             patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
             patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
         ):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 endpoints = (
                     f"/api/scenarios/runs/{result.id}",
                     f"/api/scenarios/runs/{result.id}/progress",
@@ -684,9 +688,7 @@ async def test_one_click_readback_rejects_tampered_plan_case_source_or_objective
     service = ScenarioRunService()
     try:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 endpoints = (
                     f"/api/scenarios/runs/{result.id}",
                     f"/api/scenarios/runs/{result.id}/progress",
@@ -771,9 +773,7 @@ async def test_one_click_attack_conversation_links_reject_unrelated_real_run(
             patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service),
             patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
         ):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 scenario_endpoints = (
                     f"/api/scenarios/runs/{first_run.id}",
                     f"/api/scenarios/runs/{first_run.id}/progress",
@@ -875,9 +875,7 @@ async def test_one_click_direct_attack_readback_rejects_independent_source_spoof
             patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=scenario_service),
             patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
         ):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 attack_id = str(first_import.attack_result_id)
                 detail = f"/api/attacks/{attack_id}"
                 conversation = (
@@ -946,9 +944,7 @@ async def test_one_click_direct_read_rejects_extra_message_with_copied_metadata(
             patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=scenario_service),
             patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
         ):
-            async with AsyncClient(
-                transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-            ) as client:
+            async with _business_client() as client:
                 for endpoint in (
                     f"/api/attacks/{imported.attack_result_id}",
                     f"/api/attacks/{imported.attack_result_id}/messages?conversation_id={attack.conversation_id}",
@@ -983,9 +979,7 @@ async def test_one_click_direct_attack_read_rejects_ambiguous_persisted_import_l
     )
     attack_service = AttackService()
     with patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service):
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-        ) as client:
+        async with _business_client() as client:
             response = await client.get(f"/api/attacks/{attack_id}")
     assert response.status_code >= 400
     assert "harmless fixture" not in response.text
@@ -1003,9 +997,7 @@ async def test_one_click_direct_attack_writes_preserve_original_source_outcome(
     attack_id = str(imported.attack_result_id)
     attack_service = AttackService()
     with patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service):
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-        ) as client:
+        async with _business_client() as client:
             assert (await client.get(f"/api/attacks/{attack_id}")).status_code == 200
             with sqlite_instance.get_session() as session:
                 attack_row = session.get(AttackResultEntry, imported.attack_result_id)
@@ -1070,9 +1062,7 @@ async def test_one_click_manual_score_rejected_before_scorer_or_attack_update(
     if remove_markers:
         await asyncio.to_thread(_remove_original_import_markers, sqlite_instance=sqlite_instance, imported=imported)
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-    ) as client:
+    async with _business_client() as client:
         response = await client.post(
             "/api/scores/manual",
             json={
@@ -1116,11 +1106,14 @@ async def test_one_click_add_message_rejects_before_storage_or_target_dispatch(
     attack_service = AttackService()
     with (
         patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service),
-        patch.object(attack_service, "_send_and_store_message_async", new_callable=AsyncMock) as dispatch,
+        patch.object(
+            attack_service._message_send_service, "_send_and_store_message_async", new_callable=AsyncMock
+        ) as dispatch,
+        patch.object(
+            attack_service._message_send_service, "_store_message_only_async", new_callable=AsyncMock
+        ) as store,
     ):
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-        ) as client:
+        async with _business_client() as client:
             response = await client.post(
                 f"/api/attacks/{imported.attack_result_id}/messages",
                 json={
@@ -1139,6 +1132,7 @@ async def test_one_click_add_message_rejects_before_storage_or_target_dispatch(
         assert response.status_code >= 400
         assert "forged unrelated transcript" not in response.text
         dispatch.assert_not_awaited()
+        store.assert_not_awaited()
     assert len(sqlite_instance.get_message_pieces(conversation_id=attack.conversation_id)) == count
     with sqlite_instance.get_session() as session:
         row = session.get(AttackResultEntry, imported.attack_result_id)
@@ -1170,9 +1164,7 @@ async def test_one_click_conversation_mutations_are_rejected_before_writes(
         await asyncio.to_thread(_remove_original_import_markers, sqlite_instance=sqlite_instance, imported=imported)
     attack_service = AttackService()
     with patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service):
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-        ) as client:
+        async with _business_client() as client:
             response = (
                 await client.post(f"/api/attacks/{imported.attack_result_id}/conversations", json={})
                 if operation == "create"
@@ -1207,9 +1199,7 @@ async def test_ordinary_attack_http_patch_and_human_score_removal_still_work(sql
     sqlite_instance.add_attack_results_to_memory(attack_results=[attack])
     attack_service = AttackService()
     with patch("pyrit.backend.routes.attacks.get_attack_service", return_value=attack_service):
-        async with AsyncClient(
-            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-        ) as client:
+        async with _business_client() as client:
             patched = await client.patch(f"/api/attacks/{attack.attack_result_id}", json={"outcome": "success"})
             assert patched.status_code == 200
             assert patched.json()["outcome"] == AttackOutcome.SUCCESS.value
@@ -1255,16 +1245,17 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
 ) -> None:
     service = ScenarioRunService()
     try:
-        scenario = await service._prepare_run_async(
+        prepared = await service._prepare_run_async(
             request=RunScenarioRequest(
                 scenario_name="benchmark.inspect_original_inert",
                 scenario_params={"eval_family": "inspect_original_inert"},
             )
         )
+        scenario = prepared.scenario
         assert isinstance(scenario, InspectOriginalInertScenario)
         result = await scenario.run_async()
-        summary = service.get_run(scenario_result_id=str(result.id))
-        progress = service.get_run_progress(scenario_result_id=str(result.id), since=None, limit=10)
+        summary = await service.get_run_async(scenario_result_id=str(result.id))
+        progress = await service.get_run_progress_async(scenario_result_id=str(result.id), since=None, limit=10)
         assert summary is not None and progress is not None
         assert summary.status == ScenarioRunState.COMPLETED
         assert summary.target is None
@@ -1307,11 +1298,11 @@ async def test_one_click_backend_returns_original_score_with_undetermined_outcom
                 },
             )
             with pytest.raises(ValueError, match=mismatch_pattern):
-                service.get_run(scenario_result_id=str(result.id))
+                await service.get_run_async(scenario_result_id=str(result.id))
             with pytest.raises(ValueError, match=mismatch_pattern):
-                service.get_run_progress(scenario_result_id=str(result.id), since=None, limit=10)
+                await service.get_run_progress_async(scenario_result_id=str(result.id), since=None, limit=10)
             with pytest.raises(ValueError, match=mismatch_pattern):
-                service.list_runs(scenario_names=["benchmark.inspect_original_inert"])
+                await service.list_runs_async(scenario_names=["benchmark.inspect_original_inert"])
     finally:
         await service.shutdown_async()
 
@@ -1326,7 +1317,7 @@ async def test_http_catalog_and_one_click_run_without_target_or_credentials(sqli
             patch("pyrit.backend.routes.scenarios.get_scenario_service", return_value=catalog),
             patch.dict("os.environ", {"OPENAI_CHAT_MODEL": ""}),
         ):
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async with _business_client() as client:
                 details = await client.get("/api/scenarios/catalog/benchmark.inspect_original_inert")
                 assert details.status_code == 200
                 assert details.json()["scenario_name"] == "benchmark.inspect_original_inert"
@@ -1401,18 +1392,9 @@ async def test_repeated_one_click_http_runs_then_ordinary_offline_scenario_leave
     from pyrit.score import SubStringScorer
     from tests.unit.mocks import MockPromptTarget
 
-    def worker_pending_tasks() -> tuple[str, ...]:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            return ()
-        if loop.is_closed():
-            return ()
-        return tuple(sorted(task.get_name() for task in asyncio.all_tasks(loop) if not task.done()))
-
     target_instances: list[MockPromptTarget] = []
 
-    async def prepare_ordinary_async(*, request: RunScenarioRequest) -> Encoding:
+    async def prepare_ordinary_async(*, request: RunScenarioRequest) -> _PreparedRun:
         _ = request
         target = MockPromptTarget()
         target_instances.append(target)
@@ -1427,14 +1409,14 @@ async def test_repeated_one_click_http_runs_then_ordinary_offline_scenario_leave
             }
         )
         await ordinary.initialize_async()
-        return ordinary
+        return _PreparedRun(scenario=ordinary, adversarial_target=None)
 
     current = asyncio.current_task()
     existing_tasks = {task for task in asyncio.all_tasks() if task is not current and not task.done()}
     service = ScenarioRunService()
     try:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async with _business_client() as client:
                 run_ids: list[str] = []
                 for _ in range(2):
                     started = await client.post(
@@ -1457,21 +1439,21 @@ async def test_repeated_one_click_http_runs_then_ordinary_offline_scenario_leave
                     assert (detail.json()["completed_attacks"], detail.json()["successful_attacks"]) == (1, 0)
                     assert progress.json()["summary"]["overall"]["completed"] == 1
                     assert progress.json()["run"]["original_inspect_import"]["outcome"] == "undetermined"
-                    assert not await asyncio.wrap_future(service._prepare_executor.submit(worker_pending_tasks))
                 assert len(set(run_ids)) == 2
 
         with patch.object(service, "_prepare_run_async", new=prepare_ordinary_async):
-            ordinary = await asyncio.wrap_future(
-                service._prepare_executor.submit(
-                    service._prepare_run_blocking,
-                    request=RunScenarioRequest(scenario_name="garak.encoding", target_name="offline-mock"),
-                )
+            started = await service.start_run_async(
+                request=RunScenarioRequest(scenario_name="garak.encoding", target_name="offline-mock")
             )
-        ordinary_result = await ordinary.run_async()
+            active = service._active_tasks[started.scenario_result_id]
+            assert active.task is not None
+            await asyncio.wait_for(active.task, timeout=45)
+        [ordinary_result] = await sqlite_instance.get_scenario_results_async(
+            scenario_result_ids=[started.scenario_result_id]
+        )
         assert ordinary_result.scenario_run_state is ScenarioRunState.COMPLETED
         assert ordinary_result.attack_results
         assert len(target_instances) == 1 and target_instances[0].prompt_sent
-        assert not await asyncio.wrap_future(service._prepare_executor.submit(worker_pending_tasks))
     finally:
         await service.shutdown_async()
     await asyncio.sleep(0)
@@ -1515,13 +1497,14 @@ async def test_offline_projection_failure_keeps_evidence_but_never_completes_sce
     service = ScenarioRunService()
     try:
         with patch("pyrit.backend.routes.scenarios.get_scenario_run_service", return_value=service):
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            async with _business_client() as client:
                 run_id = str(stored.id)
                 summary = await client.get(f"/api/scenarios/runs/{run_id}")
                 progress = await client.get(f"/api/scenarios/runs/{run_id}/progress")
                 assert summary.status_code == progress.status_code == 200
                 expected = "Original Inspect archive is not a readable `.eval` ZIP."
                 assert summary.json()["error"] == expected
+                assert progress.json()["run"]["error"] == expected
                 assert progress.json()["run"]["failure_reason"] == expected
                 assert progress.json()["summary"]["overall"]["completed"] == 0
                 assert progress.json()["summary"]["atomic_groups"][0]["status"] == "INCOMPLETE"
@@ -1550,6 +1533,7 @@ async def test_offline_projection_failure_keeps_evidence_but_never_completes_sce
                 assert fallback_summary.json()["error"] == (
                     "Original Inspect Task or offline projection failed; reconcile its retained log before retrying."
                 )
+                assert fallback_progress.json()["run"]["error"] == fallback_summary.json()["error"]
                 assert fallback_progress.json()["run"]["failure_reason"] == fallback_summary.json()["error"]
                 assert "credentials.txt" not in fallback_progress.text
                 assert "api_key=not-for-ui" not in fallback_summary.text

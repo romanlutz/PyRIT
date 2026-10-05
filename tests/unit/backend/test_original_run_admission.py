@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from pyrit import _compatibility
 from pyrit.backend.main import app
 from pyrit.backend.middleware.auth import AuthenticatedUser
 from pyrit.backend.services import original_run_admission as admission_module
@@ -284,6 +285,10 @@ class _AuthenticatedApp:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Dispatch a real ASGI request with the test operator."""
         scope["state"] = {"user": self.operator}
+        scope["headers"] = [
+            *scope.get("headers", []),
+            (_compatibility.COMPATIBILITY_HEADER.lower().encode(), _compatibility.get_compatibility_id().encode()),
+        ]
         await app(scope, receive, send)
 
 
@@ -327,7 +332,15 @@ async def _launch_fixture_async(*, client: AsyncClient) -> str:
 
 async def _wait_for_job_async(*, service: ScenarioRunService, run_id: str) -> None:
     """Wait on one test-owned task before reading a terminal HTTP projection."""
-    active = service._active_tasks[run_id]
+    active = service._active_tasks.get(run_id)
+    if active is None:
+        header = await asyncio.to_thread(service._memory.get_scenario_result_header, scenario_result_id=run_id)
+        assert header is not None and header.scenario_run_state in (
+            ScenarioRunState.COMPLETED,
+            ScenarioRunState.FAILED,
+            ScenarioRunState.CANCELLED,
+        )
+        return
     assert active.task is not None
     await asyncio.wait_for(active.task, timeout=75)
 
@@ -335,7 +348,9 @@ async def _wait_for_job_async(*, service: ScenarioRunService, run_id: str) -> No
 @pytest.mark.usefixtures("patch_central_database")
 async def test_original_worker_absent_and_in_process_runner_both_fail_closed() -> None:
     async with AsyncClient(
-        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+        headers={_compatibility.COMPATIBILITY_HEADER: _compatibility.get_compatibility_id()},
     ) as client:
         missing = await client.get(f"/api/scenarios/catalog/{APPROVED_ORIGINAL_SCENARIO}")
         rejected = await client.post(

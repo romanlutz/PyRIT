@@ -9,6 +9,7 @@ const REASON_MESSAGES: Record<OriginalRunReason, string> = {
   admission_expired: 'This admission expired. Reload the approved scenario to request a new one.',
   model_route_unverified: 'The evaluated-model route is not verified.',
   capacity_busy: 'The single original-run slot is busy.',
+  validation_scope_exhausted: 'This validation preview has no remaining original-run admissions.',
   provider_unqualified: 'The original runner or host is not qualified yet.',
   cleanup_pending: 'The original worker has no verified cleanup receipt.',
   source_unverified: 'The original score or evidence could not be verified.',

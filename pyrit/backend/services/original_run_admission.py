@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
-from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 from uuid import UUID  # noqa: TC003 - Pydantic resolves this field type at runtime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -105,6 +105,7 @@ class OriginalRunVerification:
     cleanup_receipt_id: str | None
     persistence_verified: bool
     proof_sha256: str | None
+    original_score_available: bool = False
 
 
 class OriginalRunGrant(Protocol):
@@ -184,6 +185,15 @@ class _IssuedAdmission:
     operator_oid: str
     profile_ref: str
     expires_at: float
+
+
+@runtime_checkable
+class OriginalWorkerCancellationGate(Protocol):
+    """Optional atomic cancellation boundary before irreversible canonical publication."""
+
+    def request_cancellation(self, *, job: OriginalWorkerJob) -> bool:
+        """Accept cancellation before intake, or refuse an already completed source handoff."""
+        ...
 
 
 class OriginalRunGateway:
@@ -353,7 +363,9 @@ class OriginalRunGateway:
                 or (proof.cleanup_receipt_id is not None) != verified_cleanup.proved
             ):
                 raise ValueError("Physical closure differs from the worker's signed proof.")
-            has_grade = proof.original_score is not None
+            if type(proof.original_score_available) is not bool:
+                raise ValueError("Original grade availability requires explicit source authority.")
+            has_grade = proof.original_score is not None or proof.original_score_available
             if has_grade and (
                 not proof.source_coverage_complete
                 or not proof.persistence_verified
@@ -374,8 +386,7 @@ class OriginalRunGateway:
                 raise ValueError("Successful original execution requires a grade and terminal-operation proof.")
             if proof.pyrit_outcome not in (None, AttackOutcome.UNDETERMINED):
                 raise ValueError("Original grade has an unapproved attack-success mapping.")
-            if has_grade:
-                assert proof.original_score is not None
+            if proof.original_score is not None:
                 if not self.runner.allows_display_score(value=proof.original_score):
                     raise ValueError("Original grade has no approved browser display policy.")
             elif proof.pyrit_score_status is not None or proof.pyrit_outcome is not None:
@@ -405,6 +416,7 @@ class OriginalRunGateway:
                 source_state=proof.source_state,
                 source_coverage_complete=proof.source_coverage_complete,
                 original_score=proof.original_score,
+                original_score_available=proof.original_score_available,
                 pyrit_score_status=proof.pyrit_score_status,
                 pyrit_outcome=(
                     AttackOutcome.UNDETERMINED if proof.pyrit_outcome is AttackOutcome.UNDETERMINED else None
@@ -500,3 +512,10 @@ def get_original_run_gateway() -> OriginalRunGateway | None:
         OriginalRunGateway | None: A configured capability, never a user-provided runner.
     """
     return _gateway
+
+
+def uninstall_trusted_original_runner(*, runner: TrustedOriginalRunner) -> None:
+    """Remove only the shutting-down lifespan's owned runner."""
+    global _gateway
+    if _gateway is not None and _gateway.runner is runner:
+        _gateway = None

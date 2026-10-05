@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./_fixtures";
 
 // ---------------------------------------------------------------------------
 // Helpers – mock backend API responses so URL-driven navigation can be
@@ -99,7 +99,7 @@ const ATTACK_ROWS = [
   makeAttackRow("atk-success", "success"),
   makeAttackRow("atk-failure", "failure"),
 ];
-const MARKDOWN_PREFERENCE_STORAGE_KEY = "pyrit.chatMarkdownMode";
+const PREFERENCES_STORAGE_KEY = "pyrit.userPreferences.v1.local";
 
 /** Register every API mock the routing tests rely on. */
 async function mockRoutingAPIs(page: Page) {
@@ -290,11 +290,11 @@ test.describe("URL-driven routing", () => {
     await expect
       .poll(() =>
         page.evaluate(
-          (storageKey: string) => window.localStorage.getItem(storageKey),
-          MARKDOWN_PREFERENCE_STORAGE_KEY,
+          (storageKey: string) => JSON.parse(window.localStorage.getItem(storageKey) ?? "{}").chatMarkdown,
+          PREFERENCES_STORAGE_KEY,
         ),
       )
-      .toBe("markdown");
+      .toBe(true);
 
     await page.getByTitle("History").click();
     await expect(page).toHaveURL(/\/history\/attacks$/);

@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     import uuid
     from collections.abc import Sequence
 
-    from pyrit.score.observation import _ObservationEvidence
+    from pyrit.score.observation.execution import _ObservationEvidence
 
 _DEFAULT_LIKERT_SYSTEM_PROMPT_PATH = SCORER_LIKERT_PATH / "likert_system_prompt.yaml"
 
@@ -469,5 +469,12 @@ class SelfAskLikertScorer(MessageFloatScaleScorer):
             ),
             score_type="float_scale",
         )
-        score.score_metadata = {"likert_value": int(float(unvalidated.raw_score_value))}
+        # Extend rather than replace: `to_score` has already installed whatever
+        # the response handler parsed off the judge's reply, and the sibling
+        # float-scale scorers leave it in place. Replacing the dict would drop
+        # those keys, so a caller-supplied handler could never carry metadata.
+        score.score_metadata = {
+            **(unvalidated.score_metadata or {}),
+            "likert_value": int(float(unvalidated.raw_score_value)),
+        }
         return score

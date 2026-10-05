@@ -404,7 +404,7 @@ export function backendMessageToFrontend(msg: BackendMessage): Message {
   }
 
   const role: Message['role'] = msg.role === 'assistant' || msg.role === 'simulated_assistant'
-    || msg.role === 'system' || msg.role === 'tool'
+    || msg.role === 'system' || msg.role === 'tool' || msg.role === 'simulated_tool'
     ? msg.role
     : msg.role === 'developer' ? 'system' : 'user'
 

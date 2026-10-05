@@ -224,8 +224,9 @@ zero executed PyRIT turns; the original Inspect turn count remains
 source metadata when available.
 Offline Scores are source-attributed, **not** task-owned
 `benchmark_original` scorer attestations or independent external-activity
-proof. The allowlisted live original Task runner still creates neither
-per-case Score nor AttackResult.
+proof. The allowlisted live original Task runner projects that same archive
+after original cleanup to obtain its separately linked Score/AttackResult;
+it never invokes a second scorer.
 
 Re-import with the same archive, case bindings and policy rechecks the
 exact source bytes, run/Sample coverage derived from the typed source,
@@ -356,19 +357,25 @@ details remain in backend logs for reconciliation.
 Without separate server admission, internal/private Tasks, arbitrary Python
 and cyber Evals are not selectable.
 
-### Server-admitted original runner (disabled by default)
+### Server-admitted original preview (disabled by default)
 
-The public repository installs **no** external original runner. Its optional
-`benchmark.approved_original` catalog facade returns 404 until trusted backend
-startup calls `install_trusted_original_runner` with an approved
-**separate-process broker**. A private `TaskOwnedScenario` is registered and
-initialized only inside that worker, after its isolated roots are established
-and before its private imports. It is never registered in, imported by or
-executed in the web process. Explicitly protected Scenario classes are also
-excluded from public registry discovery, and direct requests for their
-registry names are rejected before initializers run. No browser request,
-environment variable, Python path, URL or model deployment can install
-or configure the broker.
+`benchmark.approved_original` is absent until the ordinary backend lifespan
+installs its trusted supervisor and evidence provider. Setting the
+server-owned `PYRIT_ORIGINAL_WORKER_CONFIG` and
+`PYRIT_ORIGINAL_WORKER_CONFIG_SHA256` opts into one hash-bound approved
+source/profile. Leaving both unset preserves ordinary CoPyRIT behavior.
+The config is a closed `CohostBackendConfig`, not a browser-authored command
+or general private-Task catalog.
+
+The frontend, API, native model relay and one trusted worker **child process**
+share one host/ACA replica. Only the evaluated sandbox is separate and must
+receive no real model, database or provisioning credentials. The trusted
+worker may use the preview identity and necessary credentials. It receives
+fresh HOME/app-data/cache/temp/result roots before imports and initializes
+its own scratch SQLite before importing private Task code. The web process
+does not import that Task, solver, scorer or private Scenario. Protected
+Scenario classes stay excluded from public discovery and direct launch.
+There is no VM/UID/IMDS isolation claim for this trusted child.
 
 For an authenticated operator whom the host runner explicitly admits, the
 facade returns only a safe profile reference, the fixed `evaluated` model
@@ -383,30 +390,33 @@ that operator and the approved profile. A request contains exactly:
 }
 ```
 
-The backend consumes that reference before allocation and asks the broker to
-recheck ACL, profile qualification, process isolation and capacity. It stores
-only an opaque, actor-bound job envelope in its **projected** SQLite; no raw
-worker evidence, Score, AttackResult or storage root is accessible from the
-web process. The broker prepares, starts, waits for and aborts one fixed
-worker executable. Its private Task-owned work invokes the unchanged Task
-and original scorer and verifies the exact typed `.eval`, final ScoreEvent,
-one source-attributed Score/AttackResult and a separate terminal-operation
-receipt ID plus digest bound to the app job and source case
-**inside the worker**. A separate authenticated physical-closure receipt
-may prove cleanup even if no Sample or ScoreEvent was produced. The broker's
-release is idempotent observation, not another destructive cleanup command.
-The web process rechecks the broker's job-bound, authenticated proof and
-independent cleanup receipt against its persisted proof digest on later
-reads; it never opens the worker's SQLite. The browser gets an original
-scalar grade only when the broker's reviewed display policy permits that
-value. It never invents a numeric grade, replaces the original scorer or
-maps a categorical value such as `C` into attack success.
+The backend consumes the reference before allocation and rechecks actor,
+group, source qualification, immutable configuration and one-slot capacity.
+The supervisor prepares, starts, waits for, cooperatively cancels and observes
+the exit of one fixed hashed worker executable. App/job/control UUIDs are
+distinct from the framework original-run UUID. The worker executes unchanged
+original setup, solver, scorer and cleanup once. After its real exit, the
+backend independently validates fixed artifact names, byte/hash bindings,
+actual process identity, typed ModelCall correlation, relay drain and exact
+physical closure. Release observes cleanup; it does not run another
+destructive cleanup command.
+
+The supervisor passes the exact `.eval` and authorized envelope to the same
+`OriginalEvidenceService.intake_async` used by authenticated HTTP intake.
+Only the backend writes canonical memory and result storage. It never opens
+worker SQLite or copies its rows. Its strict offline projection creates one
+linked source-attributed Score/AttackResult, not another scorer invocation.
+Later views recheck retained authority and source-derived projection.
+An original scalar is displayed only under the reviewed display policy.
+Null success direction/threshold leave AttackOutcome UNDETERMINED even when
+the authentic original Score is COMPLETE.
 
 Detail, progress and history return a redacted `original_source_result`
-with an allowlisted scalar original grade, coverage, PyRIT Score status,
-undetermined attack outcome and **separate** cleanup status. The raw private
-Scenario result, its original case plan and its attack-conversation routes
-are not browser endpoints. A source grade without proven cleanup is
+with the allowed original grade, coverage, PyRIT Score status,
+undetermined attack outcome and **separate** cleanup status. Authorized
+canonical attack detail/conversations/messages are read-only. Private Task
+configuration, raw Scenario plans and evidence streams are not REST payloads.
+A source grade without proven cleanup is
 `cleanup_uncertain` and 0/1 completed; no Sample or source score despite
 proved physical closure is `failed_ungraded`, also 0/1. A cancelled run
 requires an exact job abort and closure observation; lack of either proof
@@ -414,23 +424,164 @@ fails visibly, never as a completed evaluation. Physical absence alone
 does **not** imply that the original Task reached its final scorer.
 An authenticated original grade retained after incomplete execution is
 `failed_source_verified` with 0/1 completed, not a success claim.
+Cancellation accepted before canonical handoff revokes new relay posts
+immediately and cannot publish a grade, including numeric zero. Once the
+exited original source enters irreversible canonical publication, cancellation
+returns HTTP 409 rather than falsely accepting cancellation of completed work.
+Application shutdown also waits for this irreversible handoff instead of
+cancelling publication; earlier shutdown cancellation drains the owned worker
+and releases the scheduler slot before memory closes.
+While verification/publication is pending, status/history expose no source
+result or grade. Failed publication remains a readable failed run; incomplete
+canonical projection is not available through source-result detail.
 After a web-process interruption, the projected job is marked failed with
 cleanup unverified; a later conflicting broker proof requires explicit
 reconciliation rather than retroactively assuming completion.
 Receipt IDs, Task names, case IDs, private paths, endpoints and
 credentials remain on the host.
 
-This is an admission **contract with an out-of-process public inert-fixture
-HTTP/SQLite test**, not a deployed or qualified private broker. The test
-worker establishes fresh local app-data, Inspect, temp and SQLite roots
-before imports, runs the SHA-pinned harmless Task, and verifies the
-source-linked Score/AttackResult inside its own process. The production
-broker must additionally qualify its fixed executable, deadline, transport,
-private host relay, authenticated job-bound proof, operation-terminal
-receipt and exact resource cleanup independently before issuing a ready
-admission. In particular, a physical cleanup receipt after a failed
-pre-Sample attempt is not a source grade. The public default makes no
-resource or model call.
+The public harmless regression exercises the actual ordinary app/API,
+supervised child, unchanged original Task, exact archive, fresh canonical
+SQLite, linked Score/AttackResult and read-only view. It requires no model,
+network or sandbox and uses a mocked authenticated actor, not live Graph.
+This code proof is not hosted SQL/MI, private-worker qualification or a
+deployed GUI proof. A physical cleanup receipt after a pre-Sample failure
+is still not a source grade. The disabled public default makes no resource
+or model call.
+
+#### Startup and private adapter contract
+
+Use one backend ASGI worker/ACA replica. `.pyrit_conf` must set
+`memory_db_type: azure_sql`, `env_files: []`, `initialization_scripts: []`,
+`initializers: []`, `max_concurrent_scenario_runs: 1`,
+`enable_live_reinitialization: false` and `allow_custom_initializers: false`.
+Key Vault environment reload is not admitted. Set:
+
+| Process setting | Required authority |
+| --- | --- |
+| `PYRIT_CONFIG_FILE` | Absolute immutable backend configuration path |
+| `PYRIT_ORIGINAL_WORKER_CONFIG` / `_SHA256` | Absolute closed JSON descriptor and SHA256 of its exact bytes |
+| `AZURE_TOKEN_CREDENTIALS` | Exactly `ManagedIdentityCredential`, with azure-identity >=1.24 |
+| `AZURE_CLIENT_ID` | Exact newly owned preview UAMI client/application ID |
+| `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` | Approved tenant and this instance's SPA client ID |
+| `ENTRA_ALLOWED_GROUP_IDS` | Approved groups, including the source policy groups |
+| `ENTRA_ADMIN_GROUP_ID` | Approved separate administrator group |
+| `PYRIT_ALLOW_UNAUTHENTICATED_ADMIN` | `false` |
+| `AZURE_SQL_DB_CONNECTION_STRING` / `_PROD` | Identical native-token Driver18 URL, explicit owned database, encryption and certificate verification |
+| `AZURE_STORAGE_ACCOUNT_DB_DATA_CONTAINER_URL` | Exact owned result container HTTPS URL |
+| `AZURE_STORAGE_ACCOUNT_DB_DATA_SAS_TOKEN` | Absent/empty; no shared SAS fallback |
+
+The descriptor binds the final public wheel commit; fixed absolute
+`worker_python`, `worker_entrypoint` and entrypoint SHA256; Python3.12 and
+qualified worker Inspect0.3.247; source root/contract digest; jobs root;
+opaque source/profile aliases; one exact source package/case/primary scorer;
+reviewed display values; actor/group allowlists; MI client ID; database and
+result container; exact owned sandbox group/subscription; and the validation
+instance's expiry, private state container and frozen authority-key digest.
+Backend and worker must report the **same final PyRIT compatibility ID**,
+even though their qualified Inspect versions differ.
+The source descriptor must declare `qualified-updated-public-wheel`, that
+final public commit, exact package/model/harness/case/policy and sorted display
+values. It is data-only qualification, not permission to import private code
+in the web process.
+
+Run Alembic under a **separate schema actor** before starting runtime:
+set `AZURE_CLIENT_ID` to that actor's client ID, keep the exact owned SQL/result
+settings, then run PyRIT's native migration entry point:
+
+```text
+uv run python -c "from pyrit.memory import AzureSQLMemory; from pyrit.memory.migration import run_schema_migrations, check_schema_migrations; m = AzureSQLMemory(skip_schema_migration=True); run_schema_migrations(engine=m.engine); check_schema_migrations(engine=m.engine); m.cleanup()"
+```
+
+This deliberately runs upgrade plus strict schema comparison under the schema
+actor; it is not a runtime command. PyRIT binds Alembic to its native-token engine
+programmatically and has no `pyrit/memory/alembic.ini` CLI configuration.
+Detach that actor before runtime DML. The backend explicitly initializes
+AzureSQLMemory with `skip_schema_migration=True`, requires exact single head
+and `alembic check` compatibility, and fails rather than accepting a schema
+warning. Runtime gets necessary DML/metadata visibility, never CREATE/ALTER.
+A SQL contained identity must use the UAMI client/application ID for its
+TYPE=E SID; a principal/object-ID SID is not interchangeable.
+
+Actual standard sync/async SQL and result-container credentials are observed
+before readiness, with the same frozen MI-only environment checked before
+construction/use/refresh. Only bounded client_id/oid/tid/aud/xms_mirid claims
+are retained; no bearer, HTTP DEBUG logs or private response payload.
+The relay observes the same identity on its actual model-token path.
+Provisioning receipts must independently bind the observed OID to this
+instance's UAMI. A direct pyodbc probe is not proof of these standard paths.
+
+Worker stdin is one JSON line <=64KiB: ABI1, app/job/control UUIDs, actor,
+source/profile aliases, source/per-job manifest digests, absolute source/run
+roots, absolute UTC active/cleanup deadlines, timeout values, loopback relay
+URL and ephemeral capability. Active time is at most1500s; cleanup gets the
+original additional300s, never a fresh clock. `cancel.request.json` contains
+ABI1/job/control IDs. Stdout is one <=4KiB terminal with
+`state: success|error|cancelled`; stderr is drained within16KiB without logging
+its private contents. Fixed outputs are `source.eval`,
+`backend-intake-envelope.json`, `worker-scenario.json`,
+`source-manifest.json`, `runner-closure.json` and `worker-provenance.json`.
+The backend rejects arbitrary filenames, substituted IDs/digests, second
+allocation and unverified exit/closure.
+
+#### Relay, restart and acceptance boundaries
+
+The native relay has only capability-authenticated POST completion/close
+routes for the exact job UUID. The worker sends `PyRIT-Compatibility-ID`
+from its installed same-wheel `pyrit._compatibility.get_compatibility_id()`
+on completion and close requests, never a marker copied from the backend.
+It fixes `pyrit-github-pipeline`, `gpt-4-32`, `gpt-4o` version
+`2024-11-20`, `Microsoft.Default` and API `2024-10-21`.
+No retries, alternate endpoints/models or streaming. Limits are512KiB
+request/2MiB response,4096 completion tokens,180s dispatch including
+credential acquisition,10s authenticated body read, one inflight request,
+one-second minimum spacing and20000 observed tokens/minute.
+Each job permits at most50 attempts/100000 observed tokens; the validation
+pair permits100 attempts/200000 observed tokens. These are observed stop
+thresholds, not invoice ceilings. An authentic final response may overshoot
+a threshold; it is retained unchanged. Unknown/unmetered dispatch blocks
+later admission. HTTP disconnect/cancellation does not prove upstream drain.
+The child's first same-clock qualification may request only `Reply only OK`
+with max_tokens8, at most once per job, and consumes the same budgets.
+
+The opt-in initial validation instance admits cancel-first plus one clean
+success, not a permanent product-wide two-run limit. Bootstrap fresh
+private state **offline**:
+
+```text
+uv run python -m pyrit.backend.services.original_worker_state --config <new-unbound-config.json> --bound-config-output <new-bound-config.json> --private-state-output <new-private-state.json>
+```
+
+Upload that private packet once with If-None-Match:* to
+`instances/<instanceUUID>/state.json` in its separate owned private state
+container. It contains an authority key: never publish it. Runtime acquires
+a60-second lease, renews every20s and conditionally commits ETag+lease state
+before reservation, child spawn and every model dispatch. Missing/modified
+state, uncertain commits, lost/expired lease or incomplete prior job fail
+closed. Runtime does not create/reset state or recycle failed admissions.
+Retained envelopes and budgets survive restart without copying worker rows.
+
+Run the normal backend, not a standalone harness:
+`uv run uvicorn pyrit.backend.main:app --host 0.0.0.0 --port 8000 --workers 1`.
+Select the approved alias in ordinary CoPyRIT and launch with its one-use
+reference. Read status/history under the approved actor, then canonical
+`/api/attacks/{id}`, `/conversations` and
+`/messages?conversation_id=<canonical-id>`. Readback derives piece/tool
+counts, role/value order, hashes, final scorer identity/value and canonical
+links from **this exact typed archive**. It must preserve genuine COMPLETE
+or value-less UND semantics. The retained e73 fixture's20 pieces/nine
+calls/nine replies/1.0 are only that offline regression, never hosted
+acceptance constants or a reason to retry a Task.
+
+Export safe receipts/hashes plus separately protected original archives,
+canonical database and owned result/state containers before the fixed
+24-hour expiry; preserve actual identity, model usage/drain and physical
+closure evidence. Revoke new admission and drain the owned child/relay
+before exact journal-bound instance cleanup. Never modify/delete shared
+CoPyRIT apps, environments, identities or retained fixtures.
+Private same-wheel qualification and real hosted Graph/MI/SQL/Blob/model/
+sandbox/browser acceptance remain deployment gates, not claims from
+offline tests.
 
 ### Authenticated retained-evidence intake and read-only viewing
 

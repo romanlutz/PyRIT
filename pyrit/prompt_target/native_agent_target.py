@@ -243,7 +243,10 @@ class CopilotSdkAgentSession:
         if not isinstance(data, dict):
             raise ValueError("Native event data must be a structured object.")
         if event.event_type == "assistant.message":
-            for request in data.get("toolRequests", []) or []:
+            requests = data.get("toolRequests", []) or []
+            if not isinstance(requests, list):
+                raise ValueError("Native tool requests must be a structured list.")
+            for request in requests:
                 if not isinstance(request, dict):
                     raise ValueError("Native tool request must be a structured object.")
                 call_id, name = request.get("toolCallId"), request.get("name")
@@ -280,6 +283,12 @@ class CopilotSdkAgentSession:
             if previous is None or previous.completion_sequence is not None:
                 raise ValueError("Native tool completion has no unique start.")
             result = data.get("result")
+            model_visible_output = result.get("content") if isinstance(result, dict) else None
+            detailed_output = result.get("detailedContent") if isinstance(result, dict) else None
+            if (model_visible_output is not None and not isinstance(model_visible_output, str)) or (
+                detailed_output is not None and not isinstance(detailed_output, str)
+            ):
+                raise ValueError("Native tool output text must be a string or absent.")
             self._tools[call_id] = NativeToolTrace(
                 call_id=call_id,
                 name=previous.name,
@@ -291,8 +300,8 @@ class CopilotSdkAgentSession:
                 error=data.get("error"),
                 status="succeeded" if success else "failed",
                 request_sequence=previous.request_sequence,
-                model_visible_output=result.get("content") if isinstance(result, dict) else None,
-                detailed_output=result.get("detailedContent") if isinstance(result, dict) else None,
+                model_visible_output=model_visible_output,
+                detailed_output=detailed_output,
             )
             if not isinstance(result, dict) and success:
                 self._gaps.append("Native tool success has no retained result payload.")
@@ -362,12 +371,13 @@ class NativeAgentTarget(PromptTarget):
             data = event.payload.get("data")
             if not isinstance(data, dict):
                 continue
-            if event.event_type == "assistant.message" and isinstance(data.get("content"), str) and data["content"]:
+            content = data.get("content")
+            if event.event_type == "assistant.message" and isinstance(content, str) and content:
                 responses.append(
                     MessagePiece(
                         role="assistant",
                         conversation_id=request.conversation_id,
-                        original_value=data["content"],
+                        original_value=content,
                         prompt_metadata={"native_event_id": event.event_id, "native_session_id": event.session_id},
                     ).to_message()
                 )

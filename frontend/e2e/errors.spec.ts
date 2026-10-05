@@ -1,7 +1,13 @@
-import { test, expect, type Page, type Route } from "@playwright/test";
+import { test, expect, type Page, type Route } from "./_fixtures";
 import type { BackendMessage } from "@/types";
-import { makeAddMessageResponse } from "./_attacks";
+import { fulfillMessageSend, makeAddMessageResponse } from "./_attacks";
+import { READY_RUNTIME } from "./_runtime";
+import { mockVersion } from "./_compatibility";
 import { makeTarget } from "./_targets";
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/runtime", async (route) => { await route.fulfill({ json: READY_RUNTIME }); });
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,7 +102,7 @@ function buildProcessingFailureMock(userText: string) {
 /**
  * Set up all the mocks needed for a full chat flow.
  *
- * The `addMessageHandler` parameter controls what happens on POST messages.
+ * The `addMessageHandler` parameter controls what happens on POST message-sends.
  * By default it returns a success response.  Tests can override it to
  * inject errors on specific calls.
  */
@@ -132,6 +138,7 @@ async function mockAllAPIs(
               model_name: "gpt-4o-mock",
             }),
           ],
+          pagination: { limit: 200, has_more: false },
         }),
       });
     } else {
@@ -144,7 +151,7 @@ async function mockAllAPIs(
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ version: "0.0.0-test", display: "test" }),
+      body: JSON.stringify(mockVersion({ version: "0.0.0-test", display: "test" })),
     });
   });
 
@@ -167,7 +174,7 @@ async function mockAllAPIs(
   // Messages (GET = conversation load, POST = send)
   // Accumulate sent messages so GET returns them
   const sentMessages: BackendMessage[] = [];
-  await page.route(/\/api\/attacks\/[^/]+\/messages/, async (route) => {
+  await page.route(/\/api\/attacks\/[^/]+\/(?:messages|message-sends)(?:\?|$)/, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({
         status: 200,
@@ -203,11 +210,7 @@ async function mockAllAPIs(
       }
       const successMock = buildSuccessMessageMock(userText);
       sentMessages.push(...successMock.messages.messages);
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(successMock),
-      });
+      await fulfillMessageSend(route, successMock);
     } else {
       await route.continue();
     }
@@ -223,15 +226,15 @@ async function mockAllAPIs(
   });
 }
 
-/** Navigate to the target registry, set mock target active, return to chat. */
+/** Navigate to the target registry, set the objective default, return to chat. */
 async function activateMockTarget(page: Page) {
   await page.getByTitle("Registry").click();
   await expect(page.getByText("Target Registry")).toBeVisible({
     timeout: 10000,
   });
-  const setActiveBtn = page.getByRole("button", { name: /set active/i });
-  await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
-  await setActiveBtn.click();
+  const objectiveDefault = page.getByRole("combobox", { name: "Default objective target", exact: true });
+  await expect(objectiveDefault).toBeVisible({ timeout: 5000 });
+  await objectiveDefault.selectOption({ index: 1 });
   await page.getByTitle("Chat").click();
   await expect(page.getByTestId("new-attack-btn")).toBeVisible({ timeout: 5000 });
 }
@@ -264,10 +267,10 @@ async function triggerVisibilityChange(page: Page) {
 }
 
 // ---------------------------------------------------------------------------
-// Error scenario: persisted target processing failure returned with HTTP 200
+// Error scenario: accepted send persists a target processing failure
 // ---------------------------------------------------------------------------
 
-test.describe("Error: target processing failure returned with HTTP 200", () => {
+test.describe("Error: accepted send with target processing failure", () => {
   test("should preserve the draft and offer edit recovery", async ({ page }) => {
     let callCount = 0;
     let recoveryRequest: Record<string, unknown> | undefined;
@@ -282,11 +285,7 @@ test.describe("Error: target processing failure returned with HTTP 200", () => {
       const response = callCount === 1
         ? buildSuccessMessageMock(userText)
         : buildProcessingFailureMock(userText);
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(response),
-      });
+      await fulfillMessageSend(route, response);
     });
     await page.route(/\/api\/attacks\/[^/]+\/conversations/, async (route) => {
       if (route.request().method() === "GET" && recoveryCreated) {
@@ -389,11 +388,7 @@ test.describe("Error: backend 500 on send message", () => {
         } catch {
           /* ignore */
         }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(buildSuccessMessageMock(userText)),
-        });
+        await fulfillMessageSend(route, buildSuccessMessageMock(userText));
       } else {
         // Subsequent sends fail
         await route.fulfill({
@@ -420,8 +415,10 @@ test.describe("Error: backend 500 on send message", () => {
       page.getByText(/Internal server error/i),
     ).toBeVisible({ timeout: 10000 });
 
-    // The failed text should be restored in the input for easy re-send
+    // Retain the draft, but uncertain acceptance permits only evidence refresh.
     await expect(input).toHaveValue("This should fail", { timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Refresh saved messages" })).toBeVisible();
   });
 
   test("should recover cleanly when the first send fails", async ({ page }) => {
@@ -468,11 +465,7 @@ test.describe("Error: network error on send message", () => {
         } catch {
           /* ignore */
         }
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify(buildSuccessMessageMock(userText)),
-        });
+        await fulfillMessageSend(route, buildSuccessMessageMock(userText));
       } else {
         await route.abort("connectionrefused");
       }
@@ -604,6 +597,7 @@ test.describe("Error: create attack fails", () => {
                 model_name: "gpt-4o-mock",
               }),
             ],
+            pagination: { limit: 200, has_more: false },
           }),
         });
       } else {
@@ -616,7 +610,7 @@ test.describe("Error: create attack fails", () => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ version: "0.0.0-test", display: "test" }),
+        body: JSON.stringify(mockVersion({ version: "0.0.0-test", display: "test" })),
       });
     });
 

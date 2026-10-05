@@ -370,6 +370,7 @@ class NativeCliDatabaseEvidenceSink:
             )
             self._gateway_hashes[name].update(data)
             self._gateway_received[name] += len(data)
+        coverage_values: list[JsonValue] = list(coverage)
         await self._append_event_async(
             source=NativeCyberEvidenceSource.HARNESS
             if kind is GatewayFrameKind.GATEWAY_ERROR
@@ -379,7 +380,7 @@ class NativeCliDatabaseEvidenceSink:
                 "gateway_request_id": request_id,
                 "frame_sha256": hashlib.sha256(frame).hexdigest(),
                 "frame_size_bytes": len(frame),
-                "coverage": coverage,
+                "coverage": coverage_values,
                 "wire_protocol": wire_protocol,
                 "error_code": error_code,
                 "status_code": status_code,

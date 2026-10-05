@@ -28,7 +28,7 @@ from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from pyrit.models import AttackSeedGroup
+    from pyrit.models import AttackSeedGroup, BoundedDatasetSize
     from pyrit.models.parameter import Parameter
     from pyrit.scenario.core.atomic_attack import AtomicAttack
     from pyrit.scenario.core.scenario_context import ScenarioContext, TaskOwnedScenarioContext
@@ -73,14 +73,17 @@ class TaskOwnedScenario(Scenario):
         """
         return {}
 
-    async def _estimate_run_size_async(self) -> ScenarioRunSizeEstimate:
+    async def _estimate_run_size_async(self, *, budget: BoundedDatasetSize) -> ScenarioRunSizeEstimate:
         """
         Avoid guessing a count before the trusted Eval source is resolved.
+
+        Args:
+            budget: PyRIT dataset budget; Task/Sample selection remains source-owned.
 
         Returns:
             ScenarioRunSizeEstimate: An unavailable-size explanation.
         """
-        return ScenarioRunSizeEstimate(note="Select an Eval source to determine its Task/Sample count.")
+        return ScenarioRunSizeEstimate.unavailable(note="Select an Eval source to determine its Task/Sample count.")
 
     async def _build_atomic_attacks_async(self, *, context: ScenarioContext) -> list[AtomicAttack]:
         """

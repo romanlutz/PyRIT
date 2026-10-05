@@ -1,8 +1,11 @@
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "./_fixtures";
+import { mockVersion } from "./_compatibility";
 import { makeTarget } from "./_targets";
+import { TOUR_STEPS } from "../src/components/Tour/tourSteps";
 
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
+const TOUR_STEP_COUNT = TOUR_STEPS.length;
 
 type TourViewportName = "mobile" | "desktop";
 
@@ -72,8 +75,8 @@ async function expectTourContainedAndActionable(
 
   const dialog = page.getByRole("alertdialog");
 
-  for (let step = 0; step < 5; step += 1) {
-    await expect(dialog).toContainText(`${step + 1} of 5`);
+  for (let step = 0; step < TOUR_STEP_COUNT; step += 1) {
+    await expect(dialog).toContainText(`${step + 1} of ${TOUR_STEP_COUNT}`);
     await expectTourContained(page, dialog, viewportName === "mobile");
 
     if (viewportName === "desktop" && step === 0) {
@@ -85,7 +88,7 @@ async function expectTourContainedAndActionable(
       expect(dialogBox!.x).toBeGreaterThanOrEqual(targetBox!.x + targetBox!.width);
     }
 
-    if (step < 4) {
+    if (step < TOUR_STEP_COUNT - 1) {
       await dialog.getByRole("button", { name: "Next", exact: true }).click();
     }
   }
@@ -120,12 +123,12 @@ test.describe("Accessibility", () => {
       });
     });
 
-    // Navigate to the registry, set active, return to chat so input is enabled
+    // Save an objective default, then open a new chat with that target.
     await page.getByTitle("Registry").click();
     await expect(page.getByText("Target Registry")).toBeVisible({ timeout: 10000 });
-    const setActiveBtn = page.getByRole("button", { name: /set active/i });
-    await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
-    await setActiveBtn.click();
+    const objectiveDefault = page.getByRole("combobox", { name: "Default objective target", exact: true });
+    await expect(objectiveDefault).toBeVisible({ timeout: 5000 });
+    await objectiveDefault.selectOption({ index: 1 });
     await page.getByTitle("Chat").click();
 
     // Input should be accessible
@@ -219,7 +222,7 @@ test.describe("Accessibility", () => {
       if (path === "/auth/config") {
         return json({ clientId: "", tenantId: "", allowedGroupIds: "" });
       }
-      if (path === "/version") return json({ version: "a11y-test", display: "a11y-test" });
+      if (path === "/version") return json(mockVersion({ display: "a11y-test" }));
       if (path === "/labels") {
         return json({ source: "attacks", labels: { operator: ["roakey"], operation: [] } });
       }
@@ -263,12 +266,12 @@ test.describe("Accessibility", () => {
       });
     });
 
-    // Navigate to the registry, set active, return to chat so input is enabled
+    // Save an objective default, then open a new chat with that target.
     await page.getByTitle("Registry").click();
     await expect(page.getByText("Target Registry")).toBeVisible({ timeout: 10000 });
-    const setActiveBtn = page.getByRole("button", { name: /set active/i });
-    await expect(setActiveBtn).toBeVisible({ timeout: 5000 });
-    await setActiveBtn.click();
+    const objectiveDefault = page.getByRole("combobox", { name: "Default objective target", exact: true });
+    await expect(objectiveDefault).toBeVisible({ timeout: 5000 });
+    await objectiveDefault.selectOption({ index: 1 });
     await page.getByTitle("Chat").click();
 
     const input = page.getByRole("textbox");
@@ -316,7 +319,7 @@ test.describe("Accessibility", () => {
     // Table should exist
     const table = page.getByRole("table");
     await expect(table).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Filter by type:" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Filter by type:", exact: true })).toBeVisible();
   });
 
   test("major views expose page headings and one primary navigation landmark", async ({ page }) => {

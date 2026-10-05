@@ -359,7 +359,7 @@ class RealtimeTarget(OpenAITarget):
         resolved_conversation = (
             conversation
             if conversation is not None
-            else list(self._memory.get_conversation_messages(conversation_id=conversation_id))
+            else list(await self._memory.get_conversation_messages_async(conversation_id=conversation_id))
         )
         system_prompt = self._get_system_prompt_from_conversation(conversation=resolved_conversation)
         config_variables = self._set_system_prompt_and_config_vars(system_prompt=system_prompt)
@@ -387,8 +387,8 @@ class RealtimeTarget(OpenAITarget):
         # Return default system prompt if none found in conversation
         return "You are a helpful AI assistant"
 
-    @limit_requests_per_minute
     @pyrit_target_retry
+    @limit_requests_per_minute
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
         Asynchronously send a message to the OpenAI realtime target.

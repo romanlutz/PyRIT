@@ -156,7 +156,17 @@ async def test_evidence_snapshot_does_not_alias_the_retained_native_stream_async
 
 
 @pytest.mark.parametrize(
-    "defect", ["missing_complete", "wrong_arguments", "duplicate_id", "missing_start", "session_error"]
+    "defect",
+    [
+        "missing_complete",
+        "wrong_arguments",
+        "duplicate_id",
+        "missing_start",
+        "session_error",
+        "malformed_requests",
+        "invalid_model_output",
+        "invalid_detailed_output",
+    ],
 )
 async def test_trace_gaps_are_explicit_not_success_async(defect: str) -> None:
     events = tool_turn()
@@ -168,6 +178,12 @@ async def test_trace_gaps_are_explicit_not_success_async(defect: str) -> None:
         events[2]["id"] = events[1]["id"]
     elif defect == "missing_start":
         events.pop(1)
+    elif defect == "malformed_requests":
+        events[0]["data"]["toolRequests"] = "not a structured list"
+    elif defect == "invalid_model_output":
+        events[2]["data"]["result"]["content"] = {"not": "text"}
+    elif defect == "invalid_detailed_output":
+        events[2]["data"]["result"]["detailedContent"] = ["not", "text"]
     else:
         events.insert(3, event("session.error", {"message": "inert failure", "errorType": "fixture"}))
     session = agent_session(SdkSessionFixture([events]))

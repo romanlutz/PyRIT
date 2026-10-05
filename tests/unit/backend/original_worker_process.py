@@ -26,10 +26,10 @@ async def _run_public_fixture_async(*, root: Path) -> dict[str, Any]:
     from pyrit.registry import ScenarioRegistry
     from pyrit.scenario.scenarios.benchmark.inspect_original_inert import InspectOriginalInertScenario
 
-    memory = SQLiteMemory(db_path=root / "original-worker.sqlite")
+    memory = SQLiteMemory(db_path=root / "original-worker.sqlite", silent=True, _defer_initialization=True)
     memory.results_path = str(root / "results")
     memory.disable_embedding()
-    memory.reset_database()
+    await memory.initialize_async()
     CentralMemory.set_memory_instance(memory)
     try:
         registry = ScenarioRegistry.get_registry_singleton()
@@ -42,11 +42,13 @@ async def _run_public_fixture_async(*, root: Path) -> dict[str, Any]:
             include_baseline=False,
         )
         finished = await scenario.run_async()
-        [stored] = memory.get_scenario_results(scenario_result_ids=[str(finished.id)])
+        [stored] = await memory.get_scenario_results_async(scenario_result_ids=[str(finished.id)])
         plan = ScenarioRunPlan.model_validate(stored.metadata[SCENARIO_RUN_PLAN_METADATA_KEY])
-        imported = ScenarioRunService.verify_original_inspect_import(memory=memory, scenario_result=stored, plan=plan)
+        imported = await asyncio.to_thread(
+            ScenarioRunService.verify_original_inspect_import, memory=memory, scenario_result=stored, plan=plan
+        )
         assert isinstance(imported, OriginalInspectImportSummary)
-        [score] = memory.get_scores(score_ids=[str(imported.score_id)])
+        [score] = await memory.get_scores_async(score_ids=[str(imported.score_id)])
         assert score.score_metadata is not None
         return {
             "original_score": imported.score_value,
@@ -60,7 +62,7 @@ async def _run_public_fixture_async(*, root: Path) -> dict[str, Any]:
             "source_coverage_complete": True,
         }
     finally:
-        memory.dispose_engine()
+        await memory.dispose_engine_async()
 
 
 def main() -> None:

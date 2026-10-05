@@ -11,13 +11,12 @@ constructs local media endpoint URLs for media content.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
 from azure.identity.aio import DefaultAzureCredential
@@ -40,7 +39,6 @@ from pyrit.models import (
     ChatMessageRole,
     Message,
     MessagePiece,
-    PromptDataType,
     Score,
 )
 
@@ -346,7 +344,7 @@ async def _fetch_scores_by_piece_async(
         return {}
 
     memory = CentralMemory.get_memory_instance()
-    fetched = await asyncio.to_thread(memory.get_prompt_scores, prompt_ids=score_lookup_ids)
+    fetched = await memory.get_prompt_scores_async(prompt_ids=score_lookup_ids)
 
     grouped: dict[str, list[Score]] = {}
     for score in fetched:
@@ -436,9 +434,9 @@ def request_piece_to_pyrit_message_piece(
     return MessagePiece(
         role=role,
         original_value=piece.original_value,
-        original_value_data_type=cast("PromptDataType", piece.data_type),
-        converted_value=piece.converted_value or piece.original_value,
-        converted_value_data_type=cast("PromptDataType", piece.data_type),
+        original_value_data_type=piece.data_type,
+        converted_value=piece.converted_value if piece.converted_value is not None else piece.original_value,
+        converted_value_data_type=piece.converted_value_data_type or piece.data_type,
         conversation_id=conversation_id,
         sequence=sequence,
         prompt_metadata=metadata,

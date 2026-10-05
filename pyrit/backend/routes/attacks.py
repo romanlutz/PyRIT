@@ -39,6 +39,7 @@ from pyrit.backend.services.attack_service import (
     AttackSourceImmutableError,
     get_attack_service,
 )
+from pyrit.backend.services.manual_send_scheduler import ManualSendConflictError, ManualSendQueueFullError
 from pyrit.backend.services.original_run_admission import OriginalAdmissionError
 from pyrit.common.deprecation import print_deprecation_message
 
@@ -506,6 +507,8 @@ async def update_main_conversation(  # pyrit-async-suffix-exempt
     responses={
         404: {"model": ProblemDetail, "description": "Attack not found"},
         400: {"model": ProblemDetail, "description": "Message send failed"},
+        409: {"model": ProblemDetail, "description": "Conversation has an active manual operation"},
+        429: {"model": ProblemDetail, "description": "Manual-message admission limit reached"},
     },
 )
 async def add_message(  # pyrit-async-suffix-exempt
@@ -531,6 +534,10 @@ async def add_message(  # pyrit-async-suffix-exempt
 
     try:
         return await service.add_message_async(attack_result_id=attack_result_id, request=request)
+    except ManualSendConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
+    except ManualSendQueueFullError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e)) from e
     except ValueError as e:
         error_msg = str(e)
         if "not found" in error_msg.lower():

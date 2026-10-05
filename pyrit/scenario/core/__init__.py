@@ -10,6 +10,11 @@ from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 
 if TYPE_CHECKING:
     from pyrit.models.parameter import Parameter
+    from pyrit.scenario.core._technique_resolution import (
+        TechniqueResolutionError,
+        resolve_technique_factories,
+        resolve_technique_factories_for_techniques,
+    )
     from pyrit.scenario.core.atomic_attack import AtomicAttack
     from pyrit.scenario.core.atomic_work import AtomicWork
     from pyrit.scenario.core.attack_technique import AttackTechnique
@@ -26,7 +31,11 @@ if TYPE_CHECKING:
     )
     from pyrit.scenario.core.scenario import BaselineAttackPolicy, Scenario
     from pyrit.scenario.core.scenario_context import TaskOwnedScenarioContext
-    from pyrit.scenario.core.scenario_target_defaults import get_default_adversarial_target, get_default_scorer_target
+    from pyrit.scenario.core.scenario_target_defaults import (
+        get_default_adversarial_target,
+        get_default_scorer_target,
+        override_default_adversarial_target,
+    )
     from pyrit.scenario.core.scenario_technique import ScenarioTechnique
     from pyrit.scenario.core.task_owned_atomic_attack import (
         CaseExecutor,
@@ -60,8 +69,12 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "TaskOwnedResultPersistenceError": "pyrit.scenario.core.task_owned_atomic_attack",
     "TaskOwnedScenario": "pyrit.scenario.core.task_owned_scenario",
     "TaskOwnedScenarioContext": "pyrit.scenario.core.scenario_context",
+    "TechniqueResolutionError": "pyrit.scenario.core._technique_resolution",
     "get_default_scorer_target": "pyrit.scenario.core.scenario_target_defaults",
     "get_default_adversarial_target": "pyrit.scenario.core.scenario_target_defaults",
+    "override_default_adversarial_target": "pyrit.scenario.core.scenario_target_defaults",
+    "resolve_technique_factories": "pyrit.scenario.core._technique_resolution",
+    "resolve_technique_factories_for_techniques": "pyrit.scenario.core._technique_resolution",
 }
 
 __all__ = list(_LAZY_EXPORTS)

@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""One-click, unscored original Inspect Task execution for an approved public fixture."""
+"""One-click original Inspect Task execution and source-bound score projection for a public fixture."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from pyrit.executor.benchmark.inspect_eval_source import ResolvedOriginalInspectTask
     from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalCaseResult, InspectOriginalImport
     from pyrit.executor.benchmark.inspect_original_runner import InspectOriginalRun
-    from pyrit.models import AttackResult
+    from pyrit.models import AttackResult, BoundedDatasetSize
     from pyrit.models.catalog.scenario import RunScenarioRequest
     from pyrit.scenario.core.scenario_context import TaskOwnedScenarioContext
 
@@ -384,16 +384,19 @@ class InspectOriginalInertScenario(TaskOwnedScenario):
         ):
             raise ValueError("Only the named inspect_original_inert Task ID is approved; no custom source or profile.")
 
-    async def _estimate_run_size_async(self) -> ScenarioRunSizeEstimate:
+    async def _estimate_run_size_async(self, *, budget: BoundedDatasetSize) -> ScenarioRunSizeEstimate:
         """
         Describe the one planned import without materializing executable Task code.
+
+        Args:
+            budget: PyRIT dataset budget; the approved source contains exactly one Task.
 
         Returns:
             ScenarioRunSizeEstimate: One original Task; no PyRIT grade is estimated.
         """
         self._validate_selection()
         return ScenarioRunSizeEstimate(
-            estimated_attack_count=1,
+            total_attack_count=1,
             components=[ScenarioRunSizeComponent(label="Approved original Inspect Task", count=1)],
             note="One unchanged original Task; its offline result has no success threshold.",
         )

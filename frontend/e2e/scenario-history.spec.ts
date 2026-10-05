@@ -1,4 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./_fixtures";
+import { mockVersion } from "./_compatibility";
+
+import { READY_RUNTIME } from "./_runtime";
 
 const RUN_ID = "123e4567-e89b-12d3-a456-426614174000";
 const ACTIVE_RUN_ID = "123e4567-e89b-12d3-a456-426614174001";
@@ -33,6 +36,8 @@ const datasetSummary = {
 };
 
 const configuredEstimate = {
+  dataset_size: { kind: 'bounded', value: 4 },
+  dataset_limit: { state: 'scenario_default' },
   estimated_attack_count: 8,
   minimum_attack_count: null,
   maximum_attack_count: null,
@@ -85,6 +90,7 @@ const catalogScenario = {
   default_dataset_summaries: [datasetSummary],
   baseline_policy: "enabled",
   include_baseline_by_default: false,
+  uses_default_adversarial_target: false,
   supported_parameters: [
     {
       name: "num_jailbreaks",
@@ -115,6 +121,8 @@ const catalogScenario = {
     },
   ],
   default_run_size: {
+    dataset_size: { kind: 'bounded', value: 8 },
+    dataset_limit: { state: 'scenario_default' },
     estimated_attack_count: 16,
     minimum_attack_count: null,
     maximum_attack_count: null,
@@ -251,11 +259,20 @@ async function mockScenarioAPIs(page: Page): Promise<ScenarioMocks> {
     });
   });
 
+  await page.route(/\/api\/runtime(?:\?|$)/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(READY_RUNTIME),
+    });
+  });
+
   await page.route(/\/api\/version(?:\?|$)/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
+        ...mockVersion(),
         version: "1.1.0",
         display: "PyRIT 1.1.0",
         default_labels: {
@@ -495,6 +512,7 @@ async function mockScenarioAPIs(page: Page): Promise<ScenarioMocks> {
 }
 
 async function configurePromptSendingRun(page: Page): Promise<void> {
+  await page.getByTestId("scenario-target-select").selectOption("test-target");
   await expect(page.getByTestId("scenario-target-select")).toHaveValue("test-target");
   await page.getByTestId("technique-prompt_sending").check();
   await page.getByTestId("technique-jailbreak_system_prompt").uncheck();
@@ -650,7 +668,12 @@ test.describe("Scenario catalog, history, and live run routing", () => {
     await page.reload();
     await expect(page).toHaveURL(`/scanner-history/${RUN_ID}`);
     await expect(page.getByRole("heading", { name: SCENARIO_NAME })).toBeVisible();
-    await page.getByRole("button", { name: "Expand attacks in Prompt sending" }).click();
+    const atomicGroupsToggle = page.getByRole("button", { name: /atomic attack groups$/ });
+    await expect(atomicGroupsToggle).toHaveAttribute("aria-expanded", "true");
+    const groupToggle = page.getByRole("button", { name: "Expand attacks in Prompt sending" });
+    await expect(groupToggle).toBeVisible();
+    await expect(groupToggle).toHaveAttribute("aria-expanded", "false");
+    await groupToggle.click();
     const attemptRow = page.getByRole("row", { name: "View details for prompt_sending" });
     await attemptRow.click();
     await expect(page).toHaveURL(`/scanner-history/${RUN_ID}/${ATTACK_ID}`);

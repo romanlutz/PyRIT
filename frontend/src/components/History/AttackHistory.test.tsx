@@ -119,7 +119,7 @@ describe('AttackHistory', () => {
       expect(screen.getByTestId('empty-state')).toBeInTheDocument()
     })
     expect(screen.getByText('No attacks found')).toBeInTheDocument()
-    expect(screen.getByText('Configure a target before starting an attack.')).toBeInTheDocument()
+    expect(screen.getByText('Set an objective default in the registry, or select a target directly in Chat.')).toBeInTheDocument()
 
     const configureTargetButton = screen.getByRole('button', { name: 'Configure target' })
     expect(configureTargetButton).toBeEnabled()
@@ -800,7 +800,7 @@ describe('AttackHistory', () => {
       expect(screen.getByText('Attack History')).toBeInTheDocument()
     })
 
-    expect(screen.getByRole('button', { name: 'Reset all filters' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Reset all filters' })).toHaveAttribute('aria-disabled', 'true')
   })
 
   it('should call onFiltersChange with attackTypes when attack type filter is selected', async () => {

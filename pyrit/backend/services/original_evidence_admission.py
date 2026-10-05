@@ -178,3 +178,10 @@ def get_original_evidence_provider() -> TrustedOriginalEvidenceProvider | None:
         TrustedOriginalEvidenceProvider | None: The trusted server capability, never source code.
     """
     return _provider
+
+
+def uninstall_original_evidence_provider(*, provider: TrustedOriginalEvidenceProvider) -> None:
+    """Remove only the shutting-down lifespan's owned evidence authority."""
+    global _provider
+    if _provider is provider:
+        _provider = None

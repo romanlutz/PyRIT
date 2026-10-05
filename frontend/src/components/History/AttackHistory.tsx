@@ -262,7 +262,7 @@ export default function AttackHistory({
         view: 'chat' as const,
       }
     : {
-        text: 'Configure a target before starting an attack.',
+        text: 'Set an objective default in the registry, or select a target directly in Chat.',
         label: 'Configure target',
         icon: <SettingsRegular />,
         view: 'registry' as const,
@@ -270,7 +270,7 @@ export default function AttackHistory({
 
   return (
     <div className={styles.root}>
-      <div className={styles.header} data-tour="history-filters">
+      <div className={styles.header}>
         <div className={styles.headerRow}>
           {showTitle && <Text as="h1" size={500} weight="semibold">Attack History</Text>}
           <Button

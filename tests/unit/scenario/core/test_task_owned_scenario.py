@@ -7,7 +7,7 @@ import asyncio
 import uuid
 from contextlib import closing
 from threading import Event
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select, text
@@ -33,6 +33,7 @@ from pyrit.models import (
     Parameter,
     ScenarioEvaluationIdentifier,
     ScenarioRunPlan,
+    ScenarioRunSizeEstimateStatus,
     Score,
 )
 from pyrit.registry.components.scenario_registry import ScenarioRegistry
@@ -225,6 +226,15 @@ def _configured_scenario(
 
 @pytest.mark.usefixtures("patch_central_database")
 class TestTaskOwnedScenario:
+    async def test_default_size_estimate_does_not_resolve_or_run_source_async(self) -> None:
+        with patch.object(_TestEvalScenario, "_build_task_owned_atomic_attacks_async", new_callable=AsyncMock) as build:
+            estimate = await _TestEvalScenario().get_default_run_size_estimate_async()
+
+        assert estimate.status is ScenarioRunSizeEstimateStatus.Unavailable
+        assert estimate.estimated_attack_count is None
+        assert estimate.note == "Select an Eval source to determine its Task/Sample count."
+        build.assert_not_awaited()
+
     def test_registry_can_introspect_no_argument_task_owned_scenario(self) -> None:
         metadata = ScenarioRegistry()._build_metadata("task_owned_test", _TestEvalScenario)
 

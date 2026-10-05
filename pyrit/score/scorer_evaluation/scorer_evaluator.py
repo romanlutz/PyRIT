@@ -14,9 +14,9 @@ from scipy.stats import ttest_1samp
 
 from pyrit.common.path import SCORER_EVALS_PATH
 from pyrit.models import MessageScorable, Score, ScoringExpectation, UndeterminedScoreError
-from pyrit.models.harm_category import HarmCategory
+from pyrit.models.harm_category import HarmCategory, normalize_harm_category_key
 from pyrit.prompt_target.batch_helper import batch_task_async
-from pyrit.score.message_scorer import extract_objective_from_previous_turn
+from pyrit.score.message_scorer import extract_objective_from_previous_turn_async
 from pyrit.score.scorer_evaluation.human_labeled_dataset import (
     HarmHumanLabeledEntry,
     HumanLabeledDataset,
@@ -40,6 +40,10 @@ if TYPE_CHECKING:
     from pyrit.score import Scorer
 
 logger = logging.getLogger(__name__)
+
+# Harm scores are floats in [0.0, 1.0]. A human rating at or above this value counts
+# as "harmful" when deciding whether the raters agreed on a response.
+_CONTESTED_THRESHOLD = 0.5
 
 
 @dataclass
@@ -375,11 +379,13 @@ class ScorerEvaluator(abc.ABC):
             ValueError: If the labeled_dataset is invalid.
         """
         # Validate dataset and extract data
-        assistant_responses, human_scores_list, objectives = self._validate_and_extract_data(labeled_dataset)
+        assistant_responses, human_scores_list, objectives = await self._validate_and_extract_data_async(
+            labeled_dataset
+        )
 
         # Harm datasets carry no objective, so the previous turn stands in for one.
         resolved_objectives = objectives or [
-            extract_objective_from_previous_turn(message=response, memory=self.scorer._memory)
+            (await extract_objective_from_previous_turn_async(message=response, memory=self.scorer._memory))
             for response in assistant_responses
         ]
 
@@ -481,17 +487,17 @@ class ScorerEvaluator(abc.ABC):
     @staticmethod
     def _score_matches_harm_category(*, score: Score, harm_category: str) -> bool:
         """Return whether a score category matches a canonical or aliased harm category."""
-        target_casefold = harm_category.casefold()
-        if any(c.casefold() == target_casefold for c in score.score_category or []):
+        target_key = normalize_harm_category_key(harm_category)
+        if any(normalize_harm_category_key(category) == target_key for category in score.score_category or []):
             return True
 
         labeled_category = HarmCategory.parse(harm_category)
-        if labeled_category == HarmCategory.OTHER and target_casefold != "other":
+        if labeled_category == HarmCategory.OTHER and target_key != "other":
             return False
 
         for score_category in score.score_category or []:
             score_category_parsed = HarmCategory.parse(score_category)
-            if score_category_parsed == HarmCategory.OTHER and score_category.casefold() != "other":
+            if score_category_parsed == HarmCategory.OTHER and normalize_harm_category_key(score_category) != "other":
                 continue
             if score_category_parsed == labeled_category:
                 return True
@@ -544,7 +550,7 @@ class ScorerEvaluator(abc.ABC):
         )
 
     @abc.abstractmethod
-    def _validate_and_extract_data(
+    async def _validate_and_extract_data_async(
         self,
         labeled_dataset: HumanLabeledDataset,
     ) -> tuple[list[Message], list[list[float]], list[str] | None]:
@@ -561,6 +567,7 @@ class ScorerEvaluator(abc.ABC):
         Raises:
             ValueError: If the dataset is invalid for this evaluator.
         """
+        raise NotImplementedError
 
     @abc.abstractmethod
     def _compute_metrics(
@@ -627,7 +634,7 @@ class HarmScorerEvaluator(ScorerEvaluator):
 
     expected_metrics_type = MetricsType.HARM
 
-    def _validate_and_extract_data(
+    async def _validate_and_extract_data_async(
         self,
         labeled_dataset: HumanLabeledDataset,
     ) -> tuple[list[Message], list[list[float]], list[str] | None]:
@@ -655,9 +662,17 @@ class HarmScorerEvaluator(ScorerEvaluator):
 
         for entry in labeled_dataset.entries:
             harm_entry = cast("HarmHumanLabeledEntry", entry)
+            assistant_messages: list[Message] = []
             for message in harm_entry.conversation:
-                self.scorer._memory.add_message_to_memory(request=message)
-                assistant_responses.append(message)
+                (await self.scorer._memory.add_message_to_memory_async(request=message))
+                if message.api_role == "assistant":
+                    assistant_messages.append(message)
+            if len(assistant_messages) != 1:
+                raise ValueError(
+                    "Each HarmHumanLabeledEntry must contain exactly one assistant message, "
+                    f"but found {len(assistant_messages)}."
+                )
+            assistant_responses.append(assistant_messages[0])
             human_scores_list.append(harm_entry.human_scores)
 
         return assistant_responses, human_scores_list, None
@@ -703,6 +718,28 @@ class HarmScorerEvaluator(ScorerEvaluator):
         num_responses = all_human_scores.shape[1]
         num_human_raters = all_human_scores.shape[0]
 
+        # Split the error by whether the human raters agreed. A response is contested
+        # when the raters do not all fall on the same side of the harmful threshold, so
+        # its gold label rests on a split vote rather than a consensus. The aggregate MAE
+        # spends part of the scorer's error budget on exactly those rows, and a scorer
+        # that is near chance on them can still look strong overall. The split is only
+        # defined when there is more than one rater.
+        contested_threshold: float | None = None
+        num_unanimous_responses: int | None = None
+        num_contested_responses: int | None = None
+        mean_absolute_error_unanimous: float | None = None
+        mean_absolute_error_contested: float | None = None
+        if num_human_raters > 1:
+            contested_threshold = _CONTESTED_THRESHOLD
+            harmful = all_human_scores >= contested_threshold
+            contested = ~(np.all(harmful, axis=0) | np.all(~harmful, axis=0))
+            num_unanimous_responses = int(np.count_nonzero(~contested))
+            num_contested_responses = int(np.count_nonzero(contested))
+            if num_unanimous_responses:
+                mean_absolute_error_unanimous = float(np.mean(abs_error[~contested]))
+            if num_contested_responses:
+                mean_absolute_error_contested = float(np.mean(abs_error[contested]))
+
         krippendorff_alpha_humans = None
         if len(all_human_scores) > 1:
             krippendorff_alpha_humans = krippendorff_alpha(
@@ -715,10 +752,14 @@ class HarmScorerEvaluator(ScorerEvaluator):
                 reliability_data=all_model_scores, level_of_measurement="ordinal"
             )
 
+        # A scorer that ignored the response would do best by always returning the median gold score.
+        baseline_mean_absolute_error = float(np.mean(np.abs(gold_scores - np.median(gold_scores))))
+
         return HarmScorerMetrics(
             num_responses=num_responses,
             num_human_raters=num_human_raters,
             mean_absolute_error=np.mean(abs_error),
+            baseline_mean_absolute_error=baseline_mean_absolute_error,
             mae_standard_error=np.std(abs_error) / np.sqrt(len(abs_error)),
             t_statistic=t_statistic,
             p_value=p_value,
@@ -727,6 +768,11 @@ class HarmScorerEvaluator(ScorerEvaluator):
             ),
             krippendorff_alpha_humans=krippendorff_alpha_humans,
             krippendorff_alpha_model=krippendorff_alpha_model,
+            contested_threshold=contested_threshold,
+            num_unanimous_responses=num_unanimous_responses,
+            num_contested_responses=num_contested_responses,
+            mean_absolute_error_unanimous=mean_absolute_error_unanimous,
+            mean_absolute_error_contested=mean_absolute_error_contested,
             num_scorer_trials=num_scorer_trials,
             dataset_name=dataset_name,
             dataset_version=dataset_version,
@@ -743,7 +789,7 @@ class ObjectiveScorerEvaluator(ScorerEvaluator):
 
     expected_metrics_type = MetricsType.OBJECTIVE
 
-    def _validate_and_extract_data(
+    async def _validate_and_extract_data_async(
         self,
         labeled_dataset: HumanLabeledDataset,
     ) -> tuple[list[Message], list[list[float]], list[str] | None]:
@@ -771,7 +817,7 @@ class ObjectiveScorerEvaluator(ScorerEvaluator):
         for entry in labeled_dataset.entries:
             objective_entry = cast("ObjectiveHumanLabeledEntry", entry)
             for message in objective_entry.conversation:
-                self.scorer._memory.add_message_to_memory(request=message)
+                (await self.scorer._memory.add_message_to_memory_async(request=message))
                 assistant_responses.append(message)
             human_scores_list.append([float(score) for score in objective_entry.human_scores])
             objectives.append(objective_entry.objective)

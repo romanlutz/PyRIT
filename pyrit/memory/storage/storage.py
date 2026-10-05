@@ -15,8 +15,10 @@ import aiofiles
 from pyrit.common import get_mime_type
 
 if TYPE_CHECKING:
-    from azure.identity.aio import DefaultAzureCredential
+    from azure.core.credentials_async import AsyncTokenCredential
     from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
+
+    from pyrit.auth.azure_token_observer import AzureTokenObserver
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +167,7 @@ class AzureBlobStorageIO(StorageIO):
         container_url: str | None = None,
         sas_token: str | None = None,
         blob_content_type: SupportedContentType = SupportedContentType.PLAIN_TEXT,
+        azure_token_observer: AzureTokenObserver | None = None,
     ) -> None:
         """
         Initialize an Azure Blob Storage I/O adapter.
@@ -173,6 +176,7 @@ class AzureBlobStorageIO(StorageIO):
             container_url (str | None): Azure Blob container URL.
             sas_token (str | None): Optional SAS token.
             blob_content_type (SupportedContentType): Blob content type for uploads.
+            azure_token_observer: Optional validation before native token use and refresh.
 
         Raises:
             ValueError: If container_url is missing.
@@ -184,8 +188,11 @@ class AzureBlobStorageIO(StorageIO):
 
         self._container_url: str = container_url
         self._sas_token = sas_token
+        if sas_token and azure_token_observer is not None:
+            raise ValueError("Native token observation cannot authenticate a SAS-backed container.")
         self._client_async: AsyncContainerClient | None = None
-        self._credential: DefaultAzureCredential | None = None
+        self._credential: AsyncTokenCredential | None = None
+        self.azure_token_observer = azure_token_observer
 
     async def _create_container_client_async(self) -> AsyncContainerClient:
         """
@@ -223,13 +230,29 @@ class AzureBlobStorageIO(StorageIO):
             )
         account_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
         container_name = path_parts[0]
+        if self.azure_token_observer is not None:
+            self.azure_token_observer.before_token(scope="https://storage.azure.com/.default", path="blob_results")
         self._credential = DefaultAzureCredential()
+        if self.azure_token_observer is not None:
+            from pyrit.auth.azure_token_observer import ObservedAsyncTokenCredential
+
+            self._credential = ObservedAsyncTokenCredential(
+                credential=self._credential, observer=self.azure_token_observer, path="blob_results"
+            )
         self._client_async = AsyncContainerClient(
             account_url=account_url,
             container_name=container_name,
             credential=self._credential,
         )
         return self._client_async
+
+    async def verify_container_access_async(self) -> None:
+        """Read metadata through the same native result client without writing a probe blob."""
+        client = await self._create_container_client_async()
+        try:
+            await client.get_container_properties()
+        finally:
+            await self._close_client_async()
 
     async def _close_client_async(self) -> None:
         """Close the container client and credential, resetting both to None."""

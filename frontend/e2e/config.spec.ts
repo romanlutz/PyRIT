@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "./_fixtures";
 import { makeTarget, type FlatTarget } from "./_targets";
 
 // ---------------------------------------------------------------------------
@@ -56,6 +56,36 @@ const RESPONSIVE_VIEWPORTS = [
   { name: "mobile", width: 390, height: 844 },
   { name: "desktop", width: 1280, height: 800 },
 ] as const;
+
+const FILTER_TARGETS: FlatTarget[] = [
+  {
+    target_registry_name: "filter-chat",
+    target_type: "OpenAIChatTarget",
+    capabilities: {
+      supports_system_prompt: true,
+      supported_input_modalities: ["text", "image_path"],
+      supported_output_modalities: ["text"],
+    },
+  },
+  {
+    target_registry_name: "filter-responses",
+    target_type: "OpenAIResponseTarget",
+    capabilities: {
+      supports_json_schema: true,
+      supports_system_prompt: true,
+      supported_input_modalities: ["text", "function_call_output"],
+      supported_output_modalities: ["text"],
+    },
+  },
+  {
+    target_registry_name: "filter-speech",
+    target_type: "OpenAITTSTarget",
+    capabilities: {
+      supported_input_modalities: ["text"],
+      supported_output_modalities: ["audio_path"],
+    },
+  },
+];
 
 const TARGET_PICKER_CHOICES = [
   {
@@ -173,6 +203,19 @@ async function selectTargetType(
   }).click();
 }
 
+async function checkFilterOptions(
+  page: Page,
+  filterName: string,
+  optionNames: readonly string[]
+): Promise<void> {
+  await page.getByRole("combobox", { name: filterName, exact: true }).click();
+  for (const optionName of optionNames) {
+    await page.getByRole("menuitemcheckbox", { name: optionName, exact: true }).click();
+  }
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menuitemcheckbox")).toHaveCount(0);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -198,8 +241,8 @@ test.describe("Target Registry Page", () => {
     await goToTargets(page);
 
     // Table should appear with both targets
-    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
-    await expect(page.getByText("dall-e-3")).toBeVisible();
+    await expect(page.getByText("gpt-4o", { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("dall-e-3", { exact: true })).toBeVisible();
     await expect(page.locator("table").getByText("OpenAIChatTarget")).toBeVisible();
     await expect(page.locator("table").getByText("OpenAIImageTarget")).toBeVisible();
   });
@@ -225,21 +268,21 @@ test.describe("Target Registry Page", () => {
     await expect(page.getByText(/error/i)).toBeVisible({ timeout: 10000 });
   });
 
-  test("should set a target active", async ({ page }) => {
+  test("should set a default objective target", async ({ page }) => {
     await page.route(/\/api\/targets/, async (route) => {
       await route.fulfill(mockTargetsList(SAMPLE_TARGETS));
     });
 
     await goToTargets(page);
-    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("gpt-4o", { exact: true })).toBeVisible({ timeout: 10000 });
 
-    // Both rows should have a "Set Active" button initially
-    const setActiveBtns = page.getByRole("button", { name: /set active/i });
-    await expect(setActiveBtns.first()).toBeVisible();
-    await setActiveBtns.first().click();
+    const defaults = page.getByRole("region", { name: "Target defaults" });
+    const objectiveDefault = defaults.getByRole("combobox", { name: "Default objective target", exact: true });
+    await expect(objectiveDefault).toBeVisible();
+    await objectiveDefault.selectOption("target-chat-1");
 
-    // After clicking, the first target should show "Active" badge
-    await expect(page.locator("table").getByText("Active", { exact: true }).first()).toBeVisible();
+    await expect(page.getByTestId("target-row-target-chat-1").getByText("Objective", { exact: true })).toBeVisible();
+    await expect(objectiveDefault).toHaveValue("target-chat-1");
   });
 
   test("should open create target dialog", async ({ page }) => {
@@ -269,15 +312,30 @@ test.describe("Target Registry Page", () => {
 
     await goToTargets(page);
     // First load shows one target
-    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
-    await expect(page.getByText("dall-e-3")).not.toBeVisible();
+    await expect(page.getByText("gpt-4o", { exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("dall-e-3", { exact: true })).not.toBeVisible();
 
     // Flip the flag and click refresh
     showExtra = true;
     await page.getByRole("button", { name: /refresh/i }).click();
 
     // Second target should now appear
-    await expect(page.getByText("dall-e-3")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("dall-e-3", { exact: true })).toBeVisible({ timeout: 10000 });
+  });
+
+  test("should keep focus on Reset all filters after it clears them", async ({ page }) => {
+    await routeResponsiveTargetData(page, FILTER_TARGETS);
+    await goToTargets(page);
+    await checkFilterOptions(page, "Filter by type:", ["OpenAIChatTarget"]);
+    await expect(page.getByTestId("target-row-filter-speech")).toHaveCount(0);
+
+    const reset = page.getByRole("button", { name: "Reset all filters", exact: true });
+    await reset.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByTestId("target-row-filter-speech")).toBeVisible();
+    await expect(reset).toBeFocused();
+    await expect(reset).toHaveAttribute("aria-disabled", "true");
   });
 });
 
@@ -394,7 +452,7 @@ test.describe("Create Target Dialog", () => {
 
     // Dialog should close and target should appear in the list
     await expect(page.getByText("Create New Target")).not.toBeVisible({ timeout: 5_000 });
-    await expect(page.getByText("gpt-4o-test")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("gpt-4o-test", { exact: true })).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("OpenAIChatTarget")).toBeVisible();
   });
 
@@ -443,7 +501,7 @@ test.describe("Responsive Target Registry", () => {
       });
       await routeResponsiveTargetData(page, LONG_NAME_TARGETS);
       await goToTargets(page);
-      await expect(page.getByText("gpt-4o-responsive").first()).toBeVisible();
+      await expect(page.getByText("gpt-4o-responsive", { exact: true }).first()).toBeVisible();
 
       const config = page.getByTestId("target-config");
       const newTargetButton = page.getByRole("button", { name: /new target/i });
@@ -471,7 +529,7 @@ test.describe("Responsive Target Registry", () => {
       });
       await routeResponsiveTargetData(page, LONG_NAME_TARGETS);
       await goToTargets(page);
-      await expect(page.getByText("gpt-4o-responsive").first()).toBeVisible();
+      await expect(page.getByText("gpt-4o-responsive", { exact: true }).first()).toBeVisible();
 
       await page.getByRole("button", { name: /new target/i }).click();
       const dialog = page.getByRole("dialog");
@@ -524,26 +582,100 @@ test.describe("Responsive Target Registry", () => {
         dialog
       );
     });
+
+    test(`should fit and align filter selections at ${viewport.name} width`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({
+        width: viewport.width,
+        height: viewport.height,
+      });
+      await routeResponsiveTargetData(page, FILTER_TARGETS);
+      await goToTargets(page);
+      await expect(page.getByTestId("target-row-filter-speech")).toBeVisible();
+
+      const selections = [
+        {
+          filterName: "Filter by type:",
+          optionNames: ["OpenAIChatTarget", "OpenAIResponseTarget"],
+          summary: "Type: OpenAIChatTarget (+1)",
+        },
+        {
+          filterName: "Filter by input:",
+          optionNames: ["Function call output", "Image"],
+          summary: "Inputs: Function call output (+1)",
+        },
+        {
+          filterName: "Filter by capability:",
+          optionNames: ["System Prompt", "JSON Schema"],
+          summary: "Capabilities: System Prompt (+1)",
+        },
+      ] as const;
+      for (const { filterName, optionNames } of selections) {
+        await checkFilterOptions(page, filterName, optionNames);
+      }
+      await expect(page.getByTestId("target-row-filter-responses")).toBeVisible();
+      await expect(page.getByTestId("target-row-filter-chat")).toHaveCount(0);
+
+      for (const { filterName, summary } of selections) {
+        const filter = page.getByRole("combobox", { name: filterName, exact: true });
+        await expect(filter).toHaveValue(summary);
+        const widths = await filter.evaluate((element) => ({
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+        }));
+        expect(widths.scrollWidth).toBeLessThanOrEqual(widths.clientWidth);
+      }
+
+      // Wrapped dropdowns start under the first one, and the reset button centers on the first row.
+      const filterBoxes = await page
+        .getByTestId("target-filters")
+        .getByRole("combobox")
+        .evaluateAll((filters) =>
+          filters.map((filter) => {
+            const box = filter.parentElement?.getBoundingClientRect();
+            return { left: box?.left ?? 0, centerY: box ? box.top + box.height / 2 : 0 };
+          })
+        );
+      expect(filterBoxes).toHaveLength(4);
+      for (const { left } of filterBoxes) {
+        expect(left).toBeGreaterThanOrEqual(filterBoxes[0].left);
+      }
+      const resetBox = await page.getByTestId("target-reset-filters-btn").boundingBox();
+      if (!resetBox) {
+        throw new Error("Expected a visible reset button");
+      }
+      expect(Math.abs(resetBox.y + resetBox.height / 2 - filterBoxes[0].centerY)).toBeLessThanOrEqual(1);
+
+      const config = page.getByTestId("target-config");
+      const configWidth = await config.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+      }));
+      expect(configWidth.scrollWidth).toBeLessThanOrEqual(
+        configWidth.clientWidth
+      );
+    });
   }
 });
 
 test.describe("Target Config ↔ Chat Navigation", () => {
-  test("should display active target info in chat after setting it", async ({ page }) => {
+  test("should preselect the objective default in a new chat", async ({ page }) => {
     await page.route(/\/api\/targets/, async (route) => {
       await route.fulfill(mockTargetsList(SAMPLE_TARGETS));
     });
 
     await goToTargets(page);
-    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText("gpt-4o", { exact: true })).toBeVisible({ timeout: 10000 });
 
-    // Set first target active
-    await page.getByRole("button", { name: /set active/i }).first().click();
+    // Set the first target as the objective default.
+    await page.getByRole("combobox", { name: "Default objective target", exact: true }).selectOption({ index: 1 });
 
     // Navigate back to chat
     await page.getByTitle("Chat").click();
     await expect(page.getByTestId("new-attack-btn")).toBeVisible();
 
-    // Chat should show the active target type. Scope to the badge to
+    // Chat should show the selected target type. Scope to the badge to
     // avoid matching the (hidden) tooltip copy of the same text.
     const badge = page.getByTestId("target-badge");
     await expect(badge).toBeVisible();
@@ -556,15 +688,15 @@ test.describe("Target Config ↔ Chat Navigation", () => {
       await route.fulfill(mockTargetsList(SAMPLE_TARGETS));
     });
 
-    // Start in chat — no-target-banner should be visible
+    // Start in chat with the composer disabled until a target is selected.
     await page.goto("/");
     await page.getByTitle("Chat").click();
-    await expect(page.getByTestId("no-target-banner")).toBeVisible();
+    await expect(page.getByRole("textbox")).toBeDisabled();
 
     // Go to targets, set a target
     await page.getByTitle("Registry").click();
-    await expect(page.getByText("gpt-4o")).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: /set active/i }).first().click();
+    await expect(page.getByText("gpt-4o", { exact: true })).toBeVisible({ timeout: 10000 });
+    await page.getByRole("combobox", { name: "Default objective target", exact: true }).selectOption({ index: 1 });
 
     // Return to chat — send should be enabled when there's text
     await page.getByTitle("Chat").click();
