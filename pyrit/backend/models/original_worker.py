@@ -73,7 +73,7 @@ class CohostRelayConfig(_FrozenMessage):
     max_observed_tokens: StrictInt = Field(default=100_000, ge=1, le=100_000)
     max_request_bytes: StrictInt = Field(default=524_288, ge=1024, le=524_288)
     max_response_bytes: StrictInt = Field(default=2_097_152, ge=1024, le=2_097_152)
-    max_completion_tokens: StrictInt = Field(default=4096, ge=1, le=4096)
+    max_completion_tokens: StrictInt = Field(default=4096, ge=1, le=8192)
     request_timeout_seconds: StrictInt = Field(default=180, ge=1, le=180)
     aggregate_max_requests: StrictInt = Field(default=100, ge=1, le=100)
     aggregate_max_observed_tokens: StrictInt = Field(default=200_000, ge=1, le=200_000)
@@ -256,6 +256,8 @@ class CohostBackendConfig(_FrozenMessage):
             or parsed.password is not None
         ):
             raise ValueError("The trusted child must use this replica's explicit loopback API origin.")
+        if not self.local_test and self.relay.max_completion_tokens != 8192:
+            raise ValueError("Hosted original preview requires its unchanged 8192-token completion configuration.")
         if not self.local_test and self.source.spec.model_route.config_sha256 != self.relay.route_sha256:
             raise ValueError("The approved source and fixed evaluated model route differ.")
         if not self.local_test and self.sandbox is None:

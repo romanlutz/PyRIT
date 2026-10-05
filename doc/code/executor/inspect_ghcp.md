@@ -478,6 +478,12 @@ opaque source/profile aliases; one exact source package/case/primary scorer;
 reviewed display values; actor/group allowlists; MI client ID; database and
 result container; exact owned sandbox group/subscription; and the validation
 instance's expiry, private state container and frozen authority-key digest.
+The hosted preview must explicitly set `relay.max_completion_tokens` to `8192`
+to preserve the accepted original `GenerateConfig(max_tokens=8192)`.
+The generic relay default remains `4096`; it is not the approved private worker
+profile and cannot admit hosted original startup. Do not lower the unchanged
+worker's request, introduce a harness variant, or reuse a `4096`-based completion
+quote as the bound for this profile.
 Backend and worker must report the **same final PyRIT compatibility ID**,
 even though their qualified Inspect versions differ.
 The source descriptor must declare `qualified-updated-public-wheel`, that
@@ -533,7 +539,8 @@ on completion and close requests, never a marker copied from the backend.
 It fixes `pyrit-github-pipeline`, `gpt-4-32`, `gpt-4o` version
 `2024-11-20`, `Microsoft.Default` and API `2024-10-21`.
 No retries, alternate endpoints/models or streaming. Limits are512KiB
-request/2MiB response,4096 completion tokens,180s dispatch including
+request/2MiB response,8192 completion tokens for the explicitly configured
+hosted original profile,180s dispatch including
 credential acquisition,10s authenticated body read, one inflight request,
 one-second minimum spacing and20000 observed tokens/minute.
 Each job permits at most50 attempts/100000 observed tokens; the validation

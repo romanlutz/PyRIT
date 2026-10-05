@@ -37,8 +37,17 @@ if TYPE_CHECKING:
     from starlette.types import Message
 
 
-@pytest.fixture(name="relay")
-async def relay_async(worker_config: CohostBackendConfig) -> AsyncIterator[OriginalModelRelay]:
+@pytest.fixture(name="relay", params=[4096, 8192], ids=["default-4096", "approved-original-8192"])
+async def relay_async(
+    *, worker_config: CohostBackendConfig, request: pytest.FixtureRequest
+) -> AsyncIterator[OriginalModelRelay]:
+    completion_limit = request.param
+    assert type(completion_limit) is int
+    worker_config = worker_config.model_copy(
+        update={
+            "relay": CohostRelayConfig(endpoint=worker_config.relay.endpoint, max_completion_tokens=completion_limit)
+        }
+    )
     await asyncio.to_thread(worker_config.jobs_root.mkdir)
     payload = {
         "id": "public-response",
@@ -98,7 +107,7 @@ async def test_relay_preserves_incoming_ids_exact_request_response_and_authentic
         b'{"messages":[{}],"stream":true}',
         b'{"model":"foreign","messages":[{}]}',
         b'{"messages":[{}],"n":2}',
-        b'{"messages":[{}],"max_tokens":4097}',
+        b'{"messages":[{}],"max_tokens":8193}',
         b'{"messages":[{}],"max_tokens":true}',
         b'{"messages":[{}],"url":"https://example.test"}',
         pytest.param(b"x" * 524_289, id="oversized-request"),
@@ -132,6 +141,115 @@ async def test_qualification_is_first_once_and_included_in_normal_budgets_async(
     assert closed["request_count"] == 1 and closed["upstream_usage_total_tokens"] == 10
     assert relay._request_count == 1 and relay._observed_tokens == 10
     assert relay._jobs[job].records[0]["request_kind"] == "qualification"
+
+
+@pytest.mark.parametrize("limit", [4096, 4097, 8192, 8193])
+@pytest.mark.parametrize("token_key", ["max_tokens", "max_completion_tokens"])
+async def test_actual_original_route_respects_explicit_completion_ceiling_async(
+    *, relay: OriginalModelRelay, tmp_path: Path, limit: int, token_key: str
+) -> None:
+    job, capability = await asyncio.to_thread(_admit, relay=relay, root=tmp_path / "role")
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-4-32",
+        "messages": [{"role": "user", "content": "Public synthetic"}],
+        token_key: limit,
+    }
+    body = TypeAdapter(dict[str, JsonValue]).dump_json(payload)
+    sent: list[dict[str, JsonValue]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert relay._request_count == 1 and relay._observed_tokens == 0 and relay._unresolved
+        sent.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+        return httpx.Response(
+            200,
+            json={"id": "public-response", "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}},
+        )
+
+    async def receive_async() -> Message:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    await relay._client.aclose()
+    relay._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"authorization", ("Bearer " + capability).encode()),
+                (b"x-irid", b"public-inspect-one"),
+            ],
+        },
+        receive=receive_async,
+    )
+    with patch.object(original_model, "_relay", return_value=relay):
+        response = await original_model.original_model_completion_async(job_ref=job, request=request)
+    if limit <= relay.config.max_completion_tokens:
+        assert response.status_code == 200
+        assert sent == [payload]
+        assert relay._request_count == 1 and relay._observed_tokens == 10
+        relay._model_token_async.assert_awaited_once()
+    else:
+        assert response.status_code == 400
+        assert sent == [] and relay._request_count == 0 and relay._observed_tokens == 0
+        relay._model_token_async.assert_not_awaited()
+        assert not relay._jobs[job].accepting
+
+
+@pytest.mark.parametrize("limit", [9, 4096, 8192])
+async def test_qualification_completion_remains_exactly_eight_before_dispatch_async(
+    *, relay: OriginalModelRelay, tmp_path: Path, limit: int
+) -> None:
+    job, capability = await asyncio.to_thread(_admit, relay=relay, root=tmp_path / "role")
+    payload: dict[str, JsonValue] = {
+        "messages": [{"role": "user", "content": "Reply only OK"}],
+        "max_tokens": limit,
+    }
+    with pytest.raises(OriginalRelayError):
+        await relay.forward_async(
+            job_ref=job,
+            capability=capability,
+            content=TypeAdapter(dict[str, JsonValue]).dump_json(payload),
+            request_kind="qualification",
+        )
+    assert relay._request_count == 0 and relay._observed_tokens == 0
+    relay._model_token_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "budget", ["max_requests", "aggregate_max_requests", "max_observed_tokens", "aggregate_max_observed_tokens"]
+)
+async def test_completion_ceiling_never_expands_request_or_observed_budgets_async(
+    *, relay: OriginalModelRelay, tmp_path: Path, budget: str
+) -> None:
+    relay.config = relay.config.model_copy(update={budget: 10 if budget.endswith("tokens") else 1})
+    job, capability = await asyncio.to_thread(_admit, relay=relay, root=tmp_path / "role")
+    payload: dict[str, JsonValue] = {
+        "messages": [{"role": "user", "content": "Public synthetic"}],
+        "max_tokens": relay.config.max_completion_tokens,
+    }
+    content = TypeAdapter(dict[str, JsonValue]).dump_json(payload)
+    await relay.forward_async(job_ref=job, capability=capability, content=content, inspect_request_id="public-first")
+    with pytest.raises(OriginalRelayError):
+        await relay.forward_async(
+            job_ref=job, capability=capability, content=content, inspect_request_id="public-second"
+        )
+    assert relay._request_count == 1 and relay._observed_tokens == 10
+    relay._model_token_async.assert_awaited_once()
+
+
+def test_default_completion_config_stays_4096_and_hosted_preview_requires_explicit_original_limit(
+    worker_config: CohostBackendConfig,
+) -> None:
+    assert worker_config.relay.max_completion_tokens == 4096
+    assert (
+        CohostRelayConfig(endpoint=worker_config.relay.endpoint, max_completion_tokens=8192).max_completion_tokens
+        == 8192
+    )
+    with pytest.raises(ValidationError):
+        CohostRelayConfig(endpoint=worker_config.relay.endpoint, max_completion_tokens=8193)
+    data = worker_config.model_dump(mode="python")
+    data["local_test"] = False
+    with pytest.raises(ValidationError, match="unchanged 8192-token"):
+        CohostBackendConfig.model_validate(data)
 
 
 async def test_duplicate_or_missing_inspect_id_is_not_a_second_original_post_async(

@@ -18,6 +18,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from inspect_ai.log import read_eval_log
 from pydantic import TypeAdapter
+from starlette.datastructures import State
 
 from pyrit._compatibility import COMPATIBILITY_HEADER, get_compatibility_id
 from pyrit.backend.main import app
@@ -95,6 +96,7 @@ async def configured_environment_async(
         patch.object(CentralMemory, "_memory_instance", memory),
         patch.object(CentralMemory, "get_memory_instance", return_value=memory),
         patch.dict(Singleton._instances, {SQLiteMemory: memory}),
+        patch.object(app, "state", State()),
         patch.object(app, "middleware_stack", None),
         patch.object(EntraAuthMiddleware, "_authenticate_with_graph_async", AsyncMock(return_value=_ACTOR)),
         patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH", tmp_path / "no-default-config"),
@@ -117,11 +119,18 @@ async def _terminal_async(*, client: AsyncClient, run_id: str, timeout_seconds: 
 
 
 @pytest.mark.filterwarnings("ignore:MemoryInterface:DeprecationWarning")
+@pytest.mark.parametrize("completion_limit", [4096, 8192])
 async def test_normal_lifespan_api_child_original_archive_canonical_sqlite_and_view_async(
-    *, configured_environment: dict[str, str], worker_config: CohostBackendConfig
+    *, configured_environment: dict[str, str], worker_config: CohostBackendConfig, completion_limit: int
 ) -> None:
     from pyrit.backend import main
 
+    config = worker_config.model_copy(
+        update={"relay": worker_config.relay.model_copy(update={"max_completion_tokens": completion_limit})}
+    )
+    config_path = Path(configured_environment["PYRIT_ORIGINAL_WORKER_CONFIG"])
+    await asyncio.to_thread(config_path.write_text, config.model_dump_json(), encoding="utf-8")
+    config_sha256 = hashlib.sha256(await asyncio.to_thread(config_path.read_bytes)).hexdigest()
     pending, resume = Event(), Event()
     publish = OriginalEvidenceService._publish
 
@@ -135,12 +144,14 @@ async def test_normal_lifespan_api_child_original_archive_canonical_sqlite_and_v
     headers = {COMPATIBILITY_HEADER: get_compatibility_id(), "Authorization": "Bearer public-fixture"}
     with (
         patch.object(main, "setup_frontend"),
+        patch.dict(os.environ, {"PYRIT_ORIGINAL_WORKER_CONFIG_SHA256": config_sha256}),
         patch.object(OriginalEvidenceService, "_publish", new=gated_publish),
     ):
         async with main.app.router.lifespan_context(main.app):
             assert main.app.state.runtime_lifecycle.state == "ready"
             owned = main.app.state.original_worker_runtime
             assert isinstance(owned, OriginalWorkerRuntime)
+            assert owned.relay.config.max_completion_tokens == completion_limit
             async with AsyncClient(
                 transport=ASGITransport(app=main.app), base_url="http://test", headers=headers
             ) as client:
