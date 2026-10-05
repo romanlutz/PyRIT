@@ -20,7 +20,7 @@ from pathlib import Path
 DEVCONTAINER_IMAGE = "pyrit-devcontainer"
 
 
-def get_git_info():
+def get_git_info() -> tuple[str, bool]:
     """Get current git commit hash and check for uncommitted changes."""
     try:
         # Get commit hash
@@ -42,7 +42,7 @@ def get_git_info():
         sys.exit(1)
 
 
-def build_devcontainer(root_dir: Path, force_rebuild: bool = False) -> bool:
+def build_devcontainer(*, root_dir: Path, force_rebuild: bool = False) -> bool:
     """Build the devcontainer base image if needed."""
     print("🔧 Building devcontainer base image...")
     print(f"   Tag: {DEVCONTAINER_IMAGE}")
@@ -83,19 +83,25 @@ def build_devcontainer(root_dir: Path, force_rebuild: bool = False) -> bool:
     return True
 
 
-def build_image(source, version=None, rebuild_base=False):
+def build_image(
+    *, source: str, version: str | None = None, rebuild_base: bool = False, cohost_original: bool = False
+) -> None:
     """Build the Docker image with appropriate tags."""
+    if cohost_original and source != "local":
+        raise ValueError("The cohost-original image requires local source and its matching uv.lock")
     root_dir = Path(__file__).parent.parent
 
     print("🐳 PyRIT Docker Image Builder")
     print("=" * 60)
 
     # First, build the devcontainer base image
-    if not build_devcontainer(root_dir, force_rebuild=rebuild_base):
+    if not build_devcontainer(root_dir=root_dir, force_rebuild=rebuild_base):
         sys.exit(1)
 
     # Prepare build arguments
     build_args = {"PYRIT_SOURCE": source, "BASE_IMAGE": DEVCONTAINER_IMAGE}
+    if cohost_original:
+        build_args["PYRIT_COHOST_ORIGINAL"] = "true"
 
     # Determine version and tag
     if source == "pypi":
@@ -179,7 +185,7 @@ def build_image(source, version=None, rebuild_base=False):
     print()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build PyRIT Docker image",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -200,10 +206,18 @@ Examples:
     parser.add_argument("--version", help="PyRIT version to install (required when source=pypi)")
 
     parser.add_argument("--rebuild-base", action="store_true", help="Force rebuild of the devcontainer base image")
+    parser.add_argument(
+        "--cohost-original",
+        action="store_true",
+        help="Build local source with locked cohost extras and pinned offline-worker tooling",
+    )
 
     args = parser.parse_args()
-
-    build_image(args.source, args.version, args.rebuild_base)
+    if args.cohost_original and args.source != "local":
+        parser.error("--cohost-original requires --source local")
+    build_image(
+        source=args.source, version=args.version, rebuild_base=args.rebuild_base, cohost_original=args.cohost_original
+    )
 
 
 if __name__ == "__main__":

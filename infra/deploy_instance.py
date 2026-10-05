@@ -32,15 +32,20 @@ Usage:
 """
 
 import argparse
+import contextvars
+import hashlib
 import ipaddress
 import json
 import logging
+import os
 import platform
 import re
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
@@ -56,6 +61,8 @@ _GRAPH_USER_READ_SCOPE_ID = "e1fe6dd8-ba31-4d61-89e7-88639da4683d"
 _INSTANCE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,11}[a-z0-9])?$")
 _ACR_NAME_RE = re.compile(r"^[a-z0-9]{5,50}$")
 _GROUP_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_SANDBOX_GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$")
+_BLOB_CONTAINER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 _IMAGE_REPOSITORY_RE = r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
 _IMAGE_VERSION_RE = r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|sha256:[0-9a-fA-F]{64})"
 _CONFIG_BLOB_SCOPE_RE = re.compile(
@@ -73,6 +80,159 @@ _AZURE_BLOB_HOST_SUFFIXES = (
 
 # On Windows, az CLI is a .cmd script that requires shell=True for subprocess to find it.
 _SHELL = platform.system() == "Windows"
+
+
+class _DeploymentJournal:
+    """Retain non-secret creation references and an optional preview expiry."""
+
+    _MUTATIONS = {
+        ("group", "create"),
+        ("identity", "create"),
+        ("ad", "app", "create"),
+        ("ad", "sp", "create"),
+        ("ad", "sp", "update"),
+        ("sql", "server", "create"),
+        ("sql", "db", "create"),
+        ("sql", "server", "firewall-rule", "create"),
+        ("storage", "account", "create"),
+        ("storage", "container-rm", "create"),
+        ("keyvault", "create"),
+        ("keyvault", "update"),
+        ("keyvault", "secret", "set"),
+        ("keyvault", "network-rule", "remove"),
+        ("role", "assignment", "create"),
+        ("deployment", "group", "create"),
+    }
+    _SAFE_OPTIONS = {
+        "--name",
+        "--resource-group",
+        "--subscription",
+        "--server",
+        "--storage-account",
+        "--vault-name",
+        "--display-name",
+        "--id",
+        "--assignee-object-id",
+        "--assignee-principal-type",
+        "--role",
+        "--scope",
+        "--url",
+        "--method",
+    }
+    _REFERENCE_KEYS = {
+        "id",
+        "appId",
+        "principalId",
+        "clientId",
+        "scope",
+        "roleDefinitionId",
+        "resourceId",
+        "appRoleId",
+        "createdAt",
+    }
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        instance: str,
+        resource_group_id: str,
+        retention_hours: int | None,
+    ) -> None:
+        self.path = path
+        requested_at = datetime.now(UTC)
+        expires_at = requested_at + timedelta(hours=retention_hours) if retention_hours is not None else None
+        self.expires_at = expires_at.isoformat() if expires_at is not None else ""
+        self._operations: list[dict[str, object]] = []
+        self._document: dict[str, object] = {
+            "schema": "copyrit-deployment-journal/v1",
+            "instance": instance,
+            "resource_group_id": resource_group_id,
+            "first_creation_request_not_before": requested_at.isoformat(),
+            "retention_hours": retention_hours,
+            "expires_at": self.expires_at or None,
+            "status": "prepared",
+            "operations": self._operations,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("x", encoding="utf-8") as stream:
+            json.dump(self._document, stream, indent=2)
+            stream.write("\n")
+
+    def begin(self, args: list[str]) -> int | None:
+        """Record a mutating CLI operation without bodies, parameters or secrets."""
+        mutating_rest = args[:1] == ["rest"] and "--method" in args and args[args.index("--method") + 1] != "GET"
+        if not mutating_rest and not any(tuple(args[: len(prefix)]) == prefix for prefix in self._MUTATIONS):
+            return None
+        safe_options = {
+            option: args[index + 1] for index, option in enumerate(args[:-1]) if option in self._SAFE_OPTIONS
+        }
+        self._operations.append(
+            {
+                "command": ["az", *args[:2]],
+                "targets": safe_options,
+                "requested_at": datetime.now(UTC).isoformat(),
+                "status": "requested",
+            }
+        )
+        self._document["status"] = "provisioning"
+        self._write()
+        return len(self._operations) - 1
+
+    def complete(self, *, operation: int, result: subprocess.CompletedProcess[str]) -> None:
+        """Retain exact returned IDs and safe error correlation, not response content."""
+        event = self._operations[operation]
+        event["exit_code"] = result.returncode
+        event["status"] = "succeeded" if result.returncode == 0 else "failed"
+        if result.stdout:
+            try:
+                response: object = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                event["response_not_json"] = True
+            else:
+                event["returned_references"] = self._references(response)
+        if result.stderr:
+            event["stderr_sha256"] = hashlib.sha256(result.stderr.encode("utf-8")).hexdigest()
+        self._write()
+
+    def finish(self, status: str) -> None:
+        """Record provisioning status without claiming runtime validation."""
+        self._document["status"] = status
+        self._write()
+
+    def _write(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.path.parent, prefix=f".{self.path.name}.") as temporary_directory:
+            temporary_path = Path(temporary_directory) / self.path.name
+            with temporary_path.open("x", encoding="utf-8") as stream:
+                json.dump(self._document, stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary_path.replace(self.path)
+
+    @classmethod
+    def _references(cls, response: object) -> list[dict[str, str]]:
+        references: list[dict[str, str]] = []
+        if isinstance(response, dict):
+            fields = {
+                key: value for key, value in response.items() if key in cls._REFERENCE_KEYS and isinstance(value, str)
+            }
+            if fields:
+                references.append(fields)
+            output_value = response.get("value")
+            if isinstance(output_value, str) and output_value.startswith("/subscriptions/"):
+                references.append({"resourceId": output_value})
+            for value in response.values():
+                references.extend(cls._references(value))
+        elif isinstance(response, list):
+            for value in response:
+                references.extend(cls._references(value))
+        return references
+
+
+_CURRENT_JOURNAL: contextvars.ContextVar[_DeploymentJournal | None] = contextvars.ContextVar(
+    "copyrit_deployment_journal", default=None
+)
 
 
 def _managed_identity_blob_uri(value: str) -> str:
@@ -99,7 +259,7 @@ def _managed_identity_blob_uri(value: str) -> str:
     return value
 
 
-def _deployment_tags(*, instance: str, owner: str) -> dict[str, str]:
+def _deployment_tags(*, instance: str, owner: str, expires_at: str = "") -> dict[str, str]:
     """Build ownership and governance tags shared by all per-instance resources."""
     tags = {
         "Service": "pyrit-gui",
@@ -109,7 +269,29 @@ def _deployment_tags(*, instance: str, owner: str) -> dict[str, str]:
     }
     if owner:
         tags["Owner"] = owner
+    if expires_at:
+        tags["ExpiresAt"] = expires_at
     return tags
+
+
+def _validate_container_resources(*, cpu_cores: str, memory_gb: str) -> None:
+    """Require a supported single-container Consumption CPU/memory pair."""
+    try:
+        cpu = Decimal(cpu_cores)
+        memory = Decimal(memory_gb)
+    except InvalidOperation as error:
+        raise ValueError("--cpu-cores and --memory-gb must be decimal numbers") from error
+    if (
+        not cpu.is_finite()
+        or not memory.is_finite()
+        or not Decimal("0.25") <= cpu <= Decimal("4.0")
+        or cpu % Decimal("0.25") != 0
+        or memory != cpu * 2
+    ):
+        raise ValueError(
+            "Consumption resources require 0.25-4.0 CPU cores in 0.25 increments "
+            "and twice that amount of memory in GiB (for example, 2.0 CPU and 4.0 GiB)"
+        )
 
 
 def run_az(
@@ -132,15 +314,24 @@ def run_az(
     Raises:
         subprocess.CalledProcessError: If the command fails and check is True.
     """
+    journal = _CURRENT_JOURNAL.get()
+    operation = journal.begin(args) if journal is not None else None
     cmd = ["az"] + args
+    if journal is not None and capture and not any(option in args for option in ("--output", "-o")):
+        cmd += ["-o", "json"]
     logger.debug("Running: %s", " ".join(cmd))
-    return subprocess.run(
-        cmd,
-        capture_output=capture,
-        text=True,
-        check=check,
-        shell=_SHELL,
-    )
+    try:
+        result = subprocess.run(cmd, capture_output=capture, text=True, check=check, shell=_SHELL)
+    except subprocess.CalledProcessError as error:
+        if journal is not None and operation is not None:
+            journal.complete(
+                operation=operation,
+                result=subprocess.CompletedProcess(cmd, error.returncode, error.stdout, error.stderr),
+            )
+        raise
+    if journal is not None and operation is not None:
+        journal.complete(operation=operation, result=result)
+    return result
 
 
 def _expect_json_object(value: object, *, context: str) -> dict[str, object]:
@@ -335,6 +526,7 @@ def create_sql_server_and_db(
     location: str,
     server_name: str,
     database_name: str,
+    service_objective: str = "Basic",
     tags: list[str] | None = None,
 ) -> dict[str, str]:
     """
@@ -345,11 +537,15 @@ def create_sql_server_and_db(
         location (str): The Azure region.
         server_name (str): The SQL server name.
         database_name (str): The database name.
+        service_objective (str): Database service objective: Basic or S0.
         tags (list[str] | None): Tags in 'Key=Value' format.
 
     Returns:
         dict: A dict with keys 'server_fqdn' and 'database_name'.
     """
+    if service_objective not in ("Basic", "S0"):
+        raise ValueError("SQL service objective must be Basic or S0")
+
     # Get current user for Entra admin
     current_user = _expect_json_object(
         run_az_json(
@@ -418,9 +614,9 @@ def create_sql_server_and_db(
         "--server",
         server_name,
         "--edition",
-        "Basic",
+        "Basic" if service_objective == "Basic" else "Standard",
         "--capacity",
-        "5",
+        "5" if service_objective == "Basic" else "10",
     ]
     if tags:
         sql_db_cmd += ["--tags"] + tags
@@ -443,6 +639,16 @@ _STORAGE_URL_TEMPLATE = "https://{account_name}.blob.core.windows.net/{container
 
 # Container name follows the AIRT convention used by AzureSQLMemory
 _STORAGE_CONTAINER_NAME = "dbdata"
+
+
+def _validation_state_container_name(value: str) -> str:
+    """Require a dedicated private container distinct from result media."""
+    if value and (not _BLOB_CONTAINER_NAME_RE.fullmatch(value) or "--" in value or value == _STORAGE_CONTAINER_NAME):
+        raise argparse.ArgumentTypeError(
+            "--validation-state-container must be a 3-63 character lowercase blob container name "
+            "without consecutive hyphens, distinct from dbdata"
+        )
+    return value
 
 
 def _storage_account_name(instance: str) -> str:
@@ -545,6 +751,7 @@ def create_storage_account(
     location: str,
     account_name: str,
     container_name: str = _STORAGE_CONTAINER_NAME,
+    state_container_name: str = "",
     tags: list[str] | None = None,
 ) -> dict[str, str]:
     """
@@ -554,7 +761,7 @@ def create_storage_account(
     (the ``AZURE_STORAGE_ACCOUNT_DB_DATA_CONTAINER_URL`` env var). Container
     access is set to ``off`` (private) — the managed identity authenticates
     via ``Storage Blob Data Contributor``, granted in
-    :func:`create_managed_identity_and_grant_roles`. The public endpoint stays
+    ``create_managed_identity_and_grant_roles``. The public endpoint stays
     network-reachable because Azure media is delivered directly to authorized
     browsers through short-lived user-delegation SAS URLs. Anonymous blob
     access remains disabled.
@@ -564,12 +771,18 @@ def create_storage_account(
         location (str): The Azure region.
         account_name (str): The storage account name (3-24 lowercase alphanumeric).
         container_name (str): The blob container name. Defaults to ``dbdata``.
+        state_container_name (str): Optional separate private validation-state container.
         tags (list[str] | None): Tags in 'Key=Value' format.
 
     Returns:
         dict: A dict with keys 'account_id' (resource ID) and 'container_url'
-        (the full HTTPS URL the target initializer expects).
+        (the full HTTPS URL the target initializer expects), plus
+        'state_container_url' when a validation-state container is requested.
     """
+    _validation_state_container_name(state_container_name)
+    if state_container_name and state_container_name == container_name:
+        raise ValueError("Validation state and result media require separate containers")
+
     logger.info("Creating storage account: %s", account_name)
     sa_cmd = [
         "storage",
@@ -615,6 +828,19 @@ def create_storage_account(
         context="storage account resource ID",
     )
 
+    container_url = _create_private_blob_container(
+        resource_group=resource_group, account_name=account_name, container_name=container_name
+    )
+    result = {"account_id": account_id, "container_url": container_url}
+    if state_container_name:
+        result["state_container_url"] = _create_private_blob_container(
+            resource_group=resource_group, account_name=account_name, container_name=state_container_name
+        )
+    return result
+
+
+def _create_private_blob_container(*, resource_group: str, account_name: str, container_name: str) -> str:
+    """Create an owned private container through the storage control plane."""
     logger.info("Creating blob container: %s/%s", account_name, container_name)
     # Use container-rm (ARM/control plane) instead of `container create` so we
     # don't need to grant the deployer a data plane role like Storage Blob Data
@@ -638,11 +864,10 @@ def create_storage_account(
         ]
     )
 
-    container_url = _STORAGE_URL_TEMPLATE.format(
+    return _STORAGE_URL_TEMPLATE.format(
         account_name=account_name,
         container_name=container_name,
     )
-    return {"account_id": account_id, "container_url": container_url}
 
 
 def configure_sql_network_access(
@@ -943,6 +1168,10 @@ def deploy_bicep(
     env_file_contents: str,
     pyrit_config_file_uri: str,
     tags: dict[str, str],
+    cpu_cores: str = "1.0",
+    memory_gb: str = "2.0",
+    pyrit_initializer: str = "target,technique",
+    sandbox_group_name: str = "",
 ) -> dict[str, object]:
     """
     Deploy the infrastructure and application Bicep templates in sequence.
@@ -972,10 +1201,15 @@ def deploy_bicep(
         pyrit_config_file_uri (str): Optional Azure Blob URI for the backend
             configuration file.
         tags (dict[str, str]): Ownership and governance tags for Bicep-managed resources.
+        cpu_cores (str): CPU cores allocated to the Container App.
+        memory_gb (str): Memory in GiB allocated to the Container App.
+        pyrit_initializer (str): Comma-separated startup initializer names.
+        sandbox_group_name (str): Optional new instance-owned sandbox group name.
 
     Returns:
         dict: The deployment outputs.
     """
+    _validate_container_resources(cpu_cores=cpu_cores, memory_gb=memory_gb)
     logger.info("Deploying infrastructure Bicep template to resource group: %s", resource_group)
     infrastructure_outputs = _deploy_bicep_template(
         resource_group=resource_group,
@@ -985,6 +1219,7 @@ def deploy_bicep(
             "appName": {"value": app_name},
             "acrName": {"value": acr_name},
             "existingManagedIdentityResourceId": {"value": managed_identity_resource_id},
+            "sandboxGroupName": {"value": sandbox_group_name},
             "tags": {"value": tags},
         },
     )
@@ -1005,6 +1240,9 @@ def deploy_bicep(
         "existingManagedIdentityResourceId": {"value": managed_identity_resource_id},
         "envFileContents": {"value": env_file_contents},
         "pyritConfigFileUri": {"value": pyrit_config_file_uri},
+        "cpuCores": {"value": cpu_cores},
+        "memoryGb": {"value": memory_gb},
+        "pyritInitializer": {"value": pyrit_initializer},
         "tags": {"value": tags},
     }
     application_outputs = _deploy_bicep_template(
@@ -1292,6 +1530,45 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Azure region (default: eastus2)",
     )
     parser.add_argument(
+        "--sql-location",
+        default="",
+        help="Explicit SQL server/database region (default: the --location region); no automatic fallback",
+    )
+    parser.add_argument(
+        "--sql-service-objective",
+        choices=("Basic", "S0"),
+        default="Basic",
+        help="SQL database service objective (default: Basic)",
+    )
+    parser.add_argument(
+        "--cpu-cores",
+        default="1.0",
+        help="Container App Consumption CPU cores (default: 1.0)",
+    )
+    parser.add_argument(
+        "--memory-gb",
+        default="2.0",
+        help="Container App memory in GiB; must equal twice --cpu-cores (default: 2.0)",
+    )
+    parser.add_argument(
+        "--pyrit-initializer",
+        default="target,technique",
+        help="Comma-separated startup initializer names (default: target,technique)",
+    )
+    parser.add_argument(
+        "--sandbox-group-name",
+        default="",
+        help=(
+            "Optional new sandbox group in the instance resource group; grants the app only its group-scoped data plane"
+        ),
+    )
+    parser.add_argument(
+        "--validation-state-container",
+        default="",
+        type=_validation_state_container_name,
+        help="Optional separate private container in the owned storage account for restart-safe validation state",
+    )
+    parser.add_argument(
         "--acr-name",
         required=True,
         help="Shared ACR name (the image must already be pushed)",
@@ -1356,6 +1633,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print what would be done without executing",
     )
+    parser.add_argument(
+        "--journal-file",
+        type=Path,
+        help="New local file for non-secret resource, Entra and role-assignment creation references",
+    )
+    parser.add_argument(
+        "--retention-hours",
+        type=int,
+        help="Optional preview lifetime from before the first creation request; requires --journal-file",
+    )
     return parser.parse_args(args)
 
 
@@ -1383,6 +1670,24 @@ def main(args: list[str] | None = None) -> int:
 
     if not _ACR_NAME_RE.fullmatch(parsed.acr_name):
         logger.error("--acr-name must be 5-50 lowercase alphanumeric characters")
+        return 1
+
+    try:
+        _validate_container_resources(cpu_cores=parsed.cpu_cores, memory_gb=parsed.memory_gb)
+    except ValueError as error:
+        logger.error("%s", error)
+        return 1
+    if not parsed.pyrit_initializer.strip():
+        logger.error("--pyrit-initializer must contain at least one initializer name")
+        return 1
+    if parsed.sandbox_group_name and not _SANDBOX_GROUP_NAME_RE.fullmatch(parsed.sandbox_group_name):
+        logger.error("--sandbox-group-name must be 1-32 letters, numbers or hyphens, starting with a letter or number")
+        return 1
+    if parsed.retention_hours is not None and (parsed.retention_hours <= 0 or parsed.journal_file is None):
+        logger.error("--retention-hours must be positive and requires --journal-file")
+        return 1
+    if parsed.journal_file is not None and parsed.journal_file.exists():
+        logger.error("Journal already exists; refusing to overwrite it: %s", parsed.journal_file)
         return 1
 
     config_blob_scope = parsed.pyrit_config_rbac_scope.strip()
@@ -1488,8 +1793,14 @@ def main(args: list[str] | None = None) -> int:
         logger.info("App name: %s", app_name)
         logger.info("SQL server: %s", sql_server_name)
         logger.info("SQL database: %s", sql_db_name)
+        logger.info(
+            "SQL location: %s (service objective: %s)",
+            parsed.sql_location or parsed.location,
+            parsed.sql_service_objective,
+        )
         logger.info("Key Vault: %s", kv_name)
         logger.info("Storage account: %s (container: %s)", storage_account_name, _STORAGE_CONTAINER_NAME)
+        logger.info("Validation state container: %s", parsed.validation_state_container or "(not configured)")
         logger.info("Entra app: %s", entra_app_name)
         logger.info("Allowed groups: %s", group_ids)
         logger.info("Admin group: %s", admin_group_id)
@@ -1504,17 +1815,23 @@ def main(args: list[str] | None = None) -> int:
             logger.info("PyRIT config RBAC scope: %s", config_blob_scope)
         logger.info("ACR: %s", parsed.acr_name)
         logger.info("Location: %s", parsed.location)
+        logger.info("Container resources: %s CPU cores / %s GiB", parsed.cpu_cores, parsed.memory_gb)
+        logger.info("Replicas: 1 minimum / 1 maximum (single active revision)")
+        logger.info("PyRIT initializers: %s", parsed.pyrit_initializer)
+        logger.info("Owned sandbox group: %s", parsed.sandbox_group_name or "(not configured)")
         logger.info("Subscription: %s", parsed.subscription)
+        logger.info("Deployment journal: %s", parsed.journal_file or "(not configured)")
+        logger.info("Preview retention hours: %s", parsed.retention_hours or "(not configured)")
+        logger.info("Expiry tags do not schedule cleanup; arrange independent cleanup before creation")
         if parsed.aoai_resource_names:
             logger.info("AOAI resources: %s", parsed.aoai_resource_names)
         else:
             logger.info("AOAI resources: (none — RBAC must be granted manually)")
         return 0
 
+    journal: _DeploymentJournal | None = None
+    journal_token: contextvars.Token[_DeploymentJournal | None] | None = None
     try:
-        deployment_tags = _deployment_tags(instance=instance, owner=parsed.owner_tag)
-        resource_tags = [f"{key}={value}" for key, value in deployment_tags.items()]
-
         # Step 1: Set subscription
         set_subscription(parsed.subscription)
         subscription_id = _expect_string(
@@ -1522,6 +1839,29 @@ def main(args: list[str] | None = None) -> int:
             context="active subscription ID",
         )
         resource_group_id = f"/subscriptions/{subscription_id}/resourceGroups/{rg_name}"
+
+        group_exists = run_az_json(args=["group", "exists", "--name", rg_name, "--subscription", subscription_id])
+        if not isinstance(group_exists, bool):
+            raise RuntimeError("Azure CLI returned invalid resource group existence data")
+        if group_exists:
+            raise RuntimeError(
+                f"Resource group {resource_group_id} already exists; this create-only workflow cannot update it"
+            )
+
+        if parsed.journal_file is not None:
+            journal = _DeploymentJournal(
+                path=parsed.journal_file,
+                instance=instance,
+                resource_group_id=resource_group_id,
+                retention_hours=parsed.retention_hours,
+            )
+            journal_token = _CURRENT_JOURNAL.set(journal)
+        deployment_tags = _deployment_tags(
+            instance=instance,
+            owner=parsed.owner_tag,
+            expires_at=journal.expires_at if journal is not None else "",
+        )
+        resource_tags = [f"{key}={value}" for key, value in deployment_tags.items()]
 
         # Step 2: Create resource group
         create_resource_group(name=rg_name, location=parsed.location, tags=resource_tags)
@@ -1538,9 +1878,10 @@ def main(args: list[str] | None = None) -> int:
         # Step 5: Create SQL server + database
         sql = create_sql_server_and_db(
             resource_group=rg_name,
-            location=parsed.location,
+            location=parsed.sql_location or parsed.location,
             server_name=sql_server_name,
             database_name=sql_db_name,
+            service_objective=parsed.sql_service_objective,
             tags=resource_tags,
         )
 
@@ -1549,6 +1890,7 @@ def main(args: list[str] | None = None) -> int:
             resource_group=rg_name,
             location=parsed.location,
             account_name=storage_account_name,
+            state_container_name=parsed.validation_state_container,
             tags=resource_tags,
         )
 
@@ -1612,6 +1954,10 @@ def main(args: list[str] | None = None) -> int:
             env_file_contents=env_content,
             pyrit_config_file_uri=parsed.pyrit_config_file_uri,
             tags=deployment_tags,
+            cpu_cores=parsed.cpu_cores,
+            memory_gb=parsed.memory_gb,
+            pyrit_initializer=parsed.pyrit_initializer,
+            sandbox_group_name=parsed.sandbox_group_name,
         )
 
         app_fqdn_output = _expect_json_object(outputs.get("appFqdn"), context="appFqdn deployment output")
@@ -1680,6 +2026,8 @@ def main(args: list[str] | None = None) -> int:
         logger.info("      --query properties.latestRevisionName -o tsv)")
         logger.info("=" * 60)
 
+        if journal is not None:
+            journal.finish("provisioned_manual_sql_and_runtime_validation_required")
         return 0
 
     except RuntimeError as error:
@@ -1690,6 +2038,13 @@ def main(args: list[str] | None = None) -> int:
         if e.stderr:
             logger.error("stderr: %s", e.stderr.strip())
         return 1
+    finally:
+        if journal_token is not None:
+            _CURRENT_JOURNAL.reset(journal_token)
+        if journal is not None:
+            journal_status = str(journal._document["status"])
+            if journal_status not in ("provisioned_manual_sql_and_runtime_validation_required", "failed"):
+                journal.finish("failed")
 
 
 if __name__ == "__main__":

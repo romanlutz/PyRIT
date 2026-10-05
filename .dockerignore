@@ -5,6 +5,8 @@ __pycache__
 *.pyo
 env/
 venv/
+.venv/
+.ruff_cache/
 .ipynb_checkpoints
 .DS_Store
 dist/

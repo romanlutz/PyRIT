@@ -113,6 +113,8 @@ class TestBicepTopology(unittest.TestCase):
             "Microsoft.OperationalInsights/workspaces",
             "Microsoft.Insights/components",
             "Microsoft.ManagedIdentity/userAssignedIdentities",
+            "Microsoft.App/sandboxGroups",
+            "Microsoft.Authorization/roleAssignments",
             "Microsoft.App/managedEnvironments",
             "Microsoft.Network/publicIPAddresses",
             "Microsoft.Authorization/locks",
@@ -139,6 +141,8 @@ class TestBicepTopology(unittest.TestCase):
             "vnetName",
             "managedIdentityResourceId",
             "managedIdentityPrincipalId",
+            "sandboxGroupResourceId",
+            "sandboxGroupRoleAssignmentId",
             "acrLoginServer",
             "appInsightsConnectionString",
         } <= set(infrastructure["outputs"])
@@ -203,6 +207,29 @@ class TestBicepTopology(unittest.TestCase):
         assert "Microsoft.Resources/deployments" not in json.dumps(template)
         assert "deployInfra" not in json.dumps(template)
         assert "deployApp" not in json.dumps(template)
+
+    def test_optional_sandbox_group_is_owned_and_runtime_role_is_group_scoped(self) -> None:
+        template = _compile_bicep(INFRASTRUCTURE_BICEP, self.output_directory / "sandbox-infrastructure.json")
+
+        assert template["parameters"]["sandboxGroupName"]["defaultValue"] == ""
+        assert template["parameters"]["sandboxGroupName"]["maxLength"] == 32
+        group = _resources(template, "Microsoft.App/sandboxGroups")[0]
+        assert group["apiVersion"] == "2026-07-01"
+        assert "empty(parameters('sandboxGroupName'))" in group["condition"]
+        assert group["name"] == "[parameters('sandboxGroupName')]"
+        assert group["location"] == "[parameters('location')]"
+        assert group["tags"] == "[parameters('tags')]"
+        assert "environmentId" not in group.get("properties", {})
+        assignment = _resources(template, "Microsoft.Authorization/roleAssignments")[0]
+        assert "Microsoft.App/sandboxGroups" in assignment["scope"]
+        assert "parameters('sandboxGroupName')" in assignment["scope"]
+        principal_id = assignment["properties"]["principalId"]
+        assert "Microsoft.ManagedIdentity/userAssignedIdentities" in principal_id
+        assert ".principalId" in principal_id
+        assert "variables('effectiveManagedIdentityId')" in assignment["name"]
+        assert ".principalId" not in assignment["name"]
+        assert assignment["properties"]["principalType"] == "ServicePrincipal"
+        assert "c24cf47c-5077-412d-a19c-45202126392c" in template["variables"]["sandboxDataOwnerRoleDefinitionId"]
 
     def test_aca_nat_network_is_static_and_delegated(self):
         template = _compile_bicep(NETWORK_BICEP, self.output_directory / "network.json")
