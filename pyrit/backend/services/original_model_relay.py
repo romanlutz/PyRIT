@@ -61,7 +61,9 @@ class _RelayJob:
     unresolved: bool = False
     usage_complete: bool = True
     records: list[dict[str, JsonValue]] = field(default_factory=list)
-    tasks: set[asyncio.Task[bytes]] = field(default_factory=set)
+    tasks: set[asyncio.Task[bytes] | asyncio.Task[None]] = field(default_factory=set)
+    uncertainty_task: asyncio.Task[None] | None = None
+    closure_task: asyncio.Task[None] | None = None
     receipt: dict[str, JsonValue] | None = None
     inspect_request_ids: set[str] = field(default_factory=set)
 
@@ -124,7 +126,7 @@ class OriginalModelRelay:
             value = self.validation_state.budget
             self._request_count = value.requests
             self._observed_tokens = value.observed_tokens
-            self._unresolved = value.unresolved
+            self._unresolved = value.unresolved or self.validation_state.has_unknown_job()
         elif await asyncio.to_thread(self._budget_path.exists):
             from pyrit.backend.services.original_worker_preflight import CohostPreflight
 
@@ -174,6 +176,8 @@ class OriginalModelRelay:
         return (
             not self._stopping
             and not self._unresolved
+            and not any(job.unresolved or not job.usage_complete for job in self._jobs.values())
+            and not any(job.request_count and job.receipt is None for job in self._jobs.values())
             and (self.validation_state is None or self.validation_state.is_available())
             and self._request_count < self.config.aggregate_max_requests
             and self._observed_tokens < self.config.aggregate_max_observed_tokens
@@ -273,13 +277,24 @@ class OriginalModelRelay:
             else self._jobs[job_ref]
         )
         job.accepting = False
+        if job.closure_task is not None and not job.unresolved:
+            await asyncio.shield(job.closure_task)
         if job.receipt is not None:
             return TypeAdapter(dict[str, JsonValue]).validate_python(job.receipt, strict=True)
         tasks = tuple(job.tasks)
         if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=self.config.request_timeout_seconds + 5)
-            if pending:
-                job.unresolved = True
+            try:
+                _, pending = await asyncio.wait(tasks, timeout=self.config.request_timeout_seconds + 5)
+            except asyncio.CancelledError:
+                if job.closure_task is None:
+                    self._mark_close_unverified(job=job)
+                raise
+            if pending and job.closure_task is None:
+                self._mark_close_unverified(job=job)
+        if job.closure_task is not None and not job.unresolved:
+            await asyncio.shield(job.closure_task)
+            if job.receipt is not None:
+                return TypeAdapter(dict[str, JsonValue]).validate_python(job.receipt, strict=True)
         evidence = self._evidence_bytes(job=job)
         receipt = self.make_close_receipt(
             run_id=job.run_id,
@@ -291,7 +306,14 @@ class OriginalModelRelay:
             evidence=evidence,
         )
         if not job.tasks:
-            job.receipt = receipt
+            if not job.unresolved and job.usage_complete:
+                task = asyncio.create_task(self._commit_role_close_async(job=job, receipt=receipt))
+                job.closure_task = task
+                job.tasks.add(task)
+                task.add_done_callback(lambda finished: finished.exception() if not finished.cancelled() else None)
+                await asyncio.shield(task)
+            else:
+                job.receipt = receipt
         return TypeAdapter(dict[str, JsonValue]).validate_python(receipt, strict=True)
 
     def receipt(self, *, job_ref: UUID) -> dict[str, JsonValue] | None:
@@ -325,6 +347,42 @@ class OriginalModelRelay:
         finally:
             if self._credential is not None:
                 await self._credential.close()
+
+    def _mark_close_unverified(self, *, job: _RelayJob) -> None:
+        job.unresolved = self._unresolved = True
+        job.usage_complete = False
+        if job.uncertainty_task is None:
+            task = asyncio.create_task(self._persist_close_uncertainty_async(job=job))
+            job.uncertainty_task = task
+            job.tasks.add(task)
+            task.add_done_callback(lambda finished: finished.exception() if not finished.cancelled() else None)
+
+    async def _persist_close_uncertainty_async(self, *, job: _RelayJob) -> None:
+        try:
+            async with self._lock:
+                self._unresolved = True
+                await self._persist_budget_async()
+        except (OSError, ValueError, TimeoutError) as error:
+            logger.error("Unverified original model closure persistence failed (%s).", type(error).__name__)
+            raise OriginalRelayError(code="relay_uncertainty_persistence_failed", status_code=503) from error
+        finally:
+            current = asyncio.current_task()
+            if current is not None:
+                job.tasks.discard(current)
+
+    async def _commit_role_close_async(self, *, job: _RelayJob, receipt: dict[str, JsonValue]) -> None:
+        try:
+            async with self._lock:
+                await self._persist_budget_async(verified_close=job)
+                job.receipt = receipt
+        except (OSError, ValueError) as error:
+            self._mark_close_unverified(job=job)
+            logger.error("Original model closure persistence failed (%s).", type(error).__name__)
+            raise OriginalRelayError(code="relay_closure_persistence_failed", status_code=503) from error
+        finally:
+            current = asyncio.current_task()
+            if current is not None:
+                job.tasks.discard(current)
 
     async def _dispatch_async(
         self,
@@ -435,7 +493,7 @@ class OriginalModelRelay:
                 job.observed_tokens += tokens
                 self._observed_tokens += tokens
                 self._minute_tokens.append((monotonic(), tokens))
-                self._unresolved = False
+                self._unresolved = job.unresolved or not job.usage_complete
             record.update(dispatch_state="settled", upstream_usage_total_tokens=tokens)
             if (
                 job.observed_tokens >= self.config.max_observed_tokens
@@ -466,11 +524,15 @@ class OriginalModelRelay:
             job.records.append(record)
             try:
                 async with self._lock:
-                    self._unresolved = self._unresolved or job.unresolved or not job.usage_complete
                     await asyncio.to_thread(
                         self._write_atomic, path=job.evidence_path, content=self._evidence_bytes(job=job)
                     )
+                    self._unresolved = self._unresolved or job.unresolved or not job.usage_complete
+                    committed_uncertainty = self._unresolved
                     await self._persist_budget_async()
+                    self._unresolved = self._unresolved or job.unresolved or not job.usage_complete
+                    if self._unresolved != committed_uncertainty:
+                        await self._persist_budget_async()
             except (OSError, ValueError) as error:
                 job.unresolved = self._unresolved = True
                 job.usage_complete = False
@@ -569,17 +631,20 @@ class OriginalModelRelay:
         except (IndexError, KeyError, ValueError) as error:
             raise OriginalRelayError(code="relay_native_identity_mismatch", status_code=503) from error
 
-    async def _persist_budget_async(self) -> None:
+    async def _persist_budget_async(self, *, verified_close: _RelayJob | None = None) -> None:
+        unresolved = self._unresolved or any(
+            job.request_count and job.receipt is None and job is not verified_close for job in self._jobs.values()
+        )
         if self.validation_state is not None:
             await self.validation_state.update_budget_async(
-                requests=self._request_count, observed_tokens=self._observed_tokens, unresolved=self._unresolved
+                requests=self._request_count, observed_tokens=self._observed_tokens, unresolved=unresolved
             )
             return
         value = {
             "schema_version": 1,
             "requests": self._request_count,
             "observed_tokens": self._observed_tokens,
-            "unresolved": self._unresolved,
+            "unresolved": unresolved,
         }
         await asyncio.to_thread(
             self._write_atomic,

@@ -126,7 +126,14 @@ async def test_normal_lifespan_api_child_original_archive_canonical_sqlite_and_v
     from pyrit.backend import main
 
     config = worker_config.model_copy(
-        update={"relay": worker_config.relay.model_copy(update={"max_completion_tokens": completion_limit})}
+        update={
+            "relay": worker_config.relay.model_copy(
+                update={
+                    "max_completion_tokens": completion_limit,
+                    "request_timeout_seconds": 60 if completion_limit == 8192 else 180,
+                }
+            )
+        }
     )
     config_path = Path(configured_environment["PYRIT_ORIGINAL_WORKER_CONFIG"])
     await asyncio.to_thread(config_path.write_text, config.model_dump_json(), encoding="utf-8")
@@ -152,6 +159,7 @@ async def test_normal_lifespan_api_child_original_archive_canonical_sqlite_and_v
             owned = main.app.state.original_worker_runtime
             assert isinstance(owned, OriginalWorkerRuntime)
             assert owned.relay.config.max_completion_tokens == completion_limit
+            assert owned.relay.config.request_timeout_seconds == (60 if completion_limit == 8192 else 180)
             async with AsyncClient(
                 transport=ASGITransport(app=main.app), base_url="http://test", headers=headers
             ) as client:

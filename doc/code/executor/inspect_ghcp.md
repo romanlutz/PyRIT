@@ -540,7 +540,7 @@ It fixes `pyrit-github-pipeline`, `gpt-4-32`, `gpt-4o` version
 `2024-11-20`, `Microsoft.Default` and API `2024-10-21`.
 No retries, alternate endpoints/models or streaming. Limits are512KiB
 request/2MiB response,8192 completion tokens for the explicitly configured
-hosted original profile,180s dispatch including
+hosted original profile,180s generic dispatch including
 credential acquisition,10s authenticated body read, one inflight request,
 one-second minimum spacing and20000 observed tokens/minute.
 Each job permits at most50 attempts/100000 observed tokens; the validation
@@ -550,6 +550,28 @@ a threshold; it is retained unchanged. Unknown/unmetered dispatch blocks
 later admission. HTTP disconnect/cancellation does not prove upstream drain.
 The child's first same-clock qualification may request only `Reply only OK`
 with max_tokens8, at most once per job, and consumes the same budgets.
+
+A selected profile can explicitly set `relay.request_timeout_seconds` to60s
+without changing the original8192-token Task or the private caller's90s read
+and10s connect/write/pool limits. Its owned-task drain wait is nominally65s,
+not an end-to-end bound: evidence-file and final budget persistence occur
+outside the dispatch timer, and the authenticated close body has its own10s
+bound. The generic180s policy remains a different profile and must not be
+silently relabeled. Freeze the selected descriptor and policy separately
+before consumer qualification; this timing configuration alone is not hosted
+admission.
+If the drain wait times out or its waiter is cancelled before positive
+closure is observed, the relay permanently latches
+aggregate uncertainty, owns its durable uncertainty commit independently of
+that caller, and refuses later runs even after persistence settles or a
+restart restores the budget. Authentic late token usage is still counted;
+it cannot clear the unverified-close latch or establish complete closure.
+Persisted dispatch intent remains unresolved through metering until positive
+close commits, so this restart barrier does not depend on corrective writes
+succeeding. Persistence of an already observed positive close is also owned
+independently of its caller; caller cancellation cannot cancel that commit.
+Missing evidence/budget persistence or lost Blob lease likewise cannot
+publish a verified drain or reset prior dispatch intent.
 
 The opt-in initial validation instance admits cancel-first plus one clean
 success, not a permanent product-wide two-run limit. Bootstrap fresh
