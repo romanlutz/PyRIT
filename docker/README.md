@@ -69,6 +69,15 @@ The default build remains unchanged.
 uv run python docker/build_pyrit_docker.py --source local --cohost-original
 ```
 
+This profile requires clean committed source before any Docker changes and checks
+that source again after the base and production builds. A source change fails
+qualification rather than reporting a mixed-source image as successful. It uses
+the local daemon's `default` builder and only the isolated
+`pyrit:cohost-<full-commit>` tag, never overwriting `pyrit:latest`.
+Default non-cohost build tags remain unchanged. These source/tag guards do not
+replace final package/private-runtime compatibility, image size or resource
+qualification, or authorize a registry push/deployment.
+
 This profile also installs checksum-pinned uv 0.8.22 at
 `/opt/pyrit-cohost/bin/uv` and standalone CPython 3.12.11 at
 `/opt/pyrit-cohost/bin/python3.12`, using uv's pinned Linux x86_64 download

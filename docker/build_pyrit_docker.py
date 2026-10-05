@@ -89,6 +89,9 @@ def build_image(
     """Build the Docker image with appropriate tags."""
     if cohost_original and source != "local":
         raise ValueError("The cohost-original image requires local source and its matching uv.lock")
+    cohost_source = get_git_info() if cohost_original else None
+    if cohost_source is not None and cohost_source[1]:
+        raise ValueError("The cohost-original image requires a clean committed source tree before any Docker build")
     root_dir = Path(__file__).parent.parent
 
     print("🐳 PyRIT Docker Image Builder")
@@ -122,11 +125,13 @@ def build_image(
 
     elif source == "local":
         commit, modified = get_git_info()
+        if cohost_source is not None and (commit, modified) != cohost_source:
+            raise ValueError("Cohost source changed during the base-image build; refusing a mixed-source image")
         build_args["GIT_COMMIT"] = commit
         build_args["GIT_MODIFIED"] = "true" if modified else "false"
 
         # Create tag from commit hash
-        image_tag = f"{commit}"
+        image_tag = f"cohost-{commit}" if cohost_original else commit
         if modified:
             image_tag += "-modified"
 
@@ -141,7 +146,8 @@ def build_image(
     # Build the Docker image
     print("🔨 Building Docker image...")
     print(f"   Tag: pyrit:{image_tag}")
-    print(f"   Also tagging as: pyrit:latest")
+    if not cohost_original:
+        print("   Also tagging as: pyrit:latest")
     print()
 
     cmd = [
@@ -151,9 +157,11 @@ def build_image(
         str(root_dir / "docker" / "Dockerfile"),
         "-t",
         f"pyrit:{image_tag}",
-        "-t",
-        "pyrit:latest",
     ]
+    if cohost_original:
+        cmd.extend(["--builder", "default"])
+    else:
+        cmd.extend(["-t", "pyrit:latest"])
 
     # Add build args
     for key, value in build_args.items():
@@ -170,6 +178,8 @@ def build_image(
         print()
         print("❌ Failed to build Docker image")
         sys.exit(1)
+    if cohost_source is not None and get_git_info() != cohost_source:
+        raise ValueError("Cohost source changed during production build; the resulting image is not qualified")
 
     print()
     print("=" * 60)
@@ -177,7 +187,8 @@ def build_image(
     print("=" * 60)
     print()
     print(f"   pyrit:{image_tag}")
-    print(f"   pyrit:latest")
+    if not cohost_original:
+        print("   pyrit:latest")
     print()
     print("Next steps:")
     print(f"   python docker/run_pyrit_docker.py jupyter")
