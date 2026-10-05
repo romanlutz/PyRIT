@@ -216,6 +216,11 @@ API. Arrange bounded SDK/CLI operations separately.
 A `.resume-lock` file prevents concurrent resumed writers. Normal exit,
 including an exception, releases it. A killed process leaves it as an explicit
 recovery blocker; verify and settle that exact process before removing its lock.
+The returned journal is usable only inside its active held-lock context. Every
+resumed mutation fails before changing memory, file bytes or dispatching a CLI
+request once that context exits, including exceptional exit. Retaining the
+object or copying/reinstalling its context does not restore its authority.
+Keep the staging intent, upload and independent readback inside that context.
 Never use journal resumption to retry an uncertain grant, extend expiry, alter
 sealed readiness packets or overwrite a failed deployment.
 

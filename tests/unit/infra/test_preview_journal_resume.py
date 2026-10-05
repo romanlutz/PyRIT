@@ -3,17 +3,22 @@
 
 """Tests for bound post-deployment journal resumption."""
 
+import contextvars
 import hashlib
 import json
 import subprocess
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from infra import deploy_instance, teardown_instance
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
 TENANT = "22222222-2222-2222-2222-222222222222"
@@ -79,6 +84,132 @@ def _grant_args() -> list[str]:
         "--subscription",
         SUBSCRIPTION,
     ]
+
+
+@pytest.fixture(params=["normal", "exception"])
+def resumed_after_exit(
+    *, provisioned_journal: deploy_instance._DeploymentJournal, request: pytest.FixtureRequest
+) -> tuple[deploy_instance._DeploymentJournal, int, int]:
+    exit_check = (
+        pytest.raises(ValueError, match="owned context exit") if request.param == "exception" else nullcontext()
+    )
+    result: tuple[deploy_instance._DeploymentJournal, int, int] | None = None
+    with exit_check, _resume(provisioned_journal) as retained:
+        grant_operation = retained.begin(_grant_args())
+        assert grant_operation is not None
+        artifact_operation = retained.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100)
+        result = retained, grant_operation, artifact_operation
+        if request.param == "exception":
+            raise ValueError("owned context exit")
+    assert result is not None
+    assert deploy_instance._CURRENT_JOURNAL.get() is None
+    retained = result[0]
+    assert not retained.path.with_name(f"{retained.path.name}.resume-lock").exists()
+    return result
+
+
+@pytest.mark.parametrize(
+    "method", ["begin", "complete", "finish", "bind_tenant", "begin_artifact", "verify_artifact", "_write"]
+)
+def test_retained_resume_denies_every_mutation_after_context_exit(
+    *, resumed_after_exit: tuple[deploy_instance._DeploymentJournal, int, int], method: str
+) -> None:
+    retained, grant_operation, artifact_operation = resumed_after_exit
+    actions: dict[str, Callable[[], object]] = {
+        "begin": lambda: retained.begin(_grant_args()),
+        "complete": lambda: retained.complete(
+            operation=grant_operation, result=subprocess.CompletedProcess(["az"], 0, "{}", "")
+        ),
+        "finish": lambda: retained.finish("success"),
+        "bind_tenant": lambda: retained.bind_tenant(TENANT),
+        "begin_artifact": lambda: retained.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100),
+        "verify_artifact": lambda: retained.verify_artifact(
+            operation=artifact_operation, sha256=ARTIFACT_SHA, size_bytes=100, etag='"etag"'
+        ),
+        "_write": retained._write,
+    }
+    previous_bytes = retained.path.read_bytes()
+    previous_document = json.dumps(retained._document, sort_keys=True)
+    with patch.object(deploy_instance.subprocess, "run", autospec=True) as run:
+        with pytest.raises(RuntimeError, match="active held-lock context"):
+            actions[method]()
+    run.assert_not_called()
+    assert retained.path.read_bytes() == previous_bytes
+    assert json.dumps(retained._document, sort_keys=True) == previous_document
+
+
+@pytest.mark.parametrize("command", ["run_az", "run_az_json"])
+def test_retained_resume_cannot_reactivate_cli_after_context_exit(
+    *, resumed_after_exit: tuple[deploy_instance._DeploymentJournal, int, int], command: str
+) -> None:
+    retained = resumed_after_exit[0]
+    before = retained.path.read_bytes()
+    token = deploy_instance._CURRENT_JOURNAL.set(retained)
+    try:
+        with patch.object(deploy_instance.subprocess, "run", autospec=True) as run:
+            run.return_value = subprocess.CompletedProcess(["az"], 0, "{}", "")
+            with pytest.raises(RuntimeError, match="active held-lock context"):
+                getattr(deploy_instance, command)(args=_grant_args())
+    finally:
+        deploy_instance._CURRENT_JOURNAL.reset(token)
+    run.assert_not_called()
+    assert retained.path.read_bytes() == before
+
+
+def test_retained_resume_denial_precedes_artifact_sdk_call(
+    resumed_after_exit: tuple[deploy_instance._DeploymentJournal, int, int],
+) -> None:
+    retained = resumed_after_exit[0]
+    before = retained.path.read_bytes()
+    upload_sdk = MagicMock(spec=["__call__"])
+    with pytest.raises(RuntimeError, match="active held-lock context"):
+        operation = retained.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100)
+        upload_sdk(operation=operation)
+    upload_sdk.assert_not_called()
+    assert retained.path.read_bytes() == before
+
+
+def test_copied_resume_context_cannot_dispatch_after_exit(
+    provisioned_journal: deploy_instance._DeploymentJournal,
+) -> None:
+    with _resume(provisioned_journal):
+        copied = contextvars.copy_context()
+    before = provisioned_journal.path.read_bytes()
+    with patch.object(deploy_instance.subprocess, "run", autospec=True) as run:
+        with pytest.raises(RuntimeError, match="active held-lock context"):
+            copied.run(deploy_instance.run_az, args=_grant_args())
+    run.assert_not_called()
+    assert provisioned_journal.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("invalid_context", ["unset", "closed_lock"])
+def test_resumed_mutation_requires_active_context_and_open_lock(
+    *, provisioned_journal: deploy_instance._DeploymentJournal, invalid_context: str
+) -> None:
+    with _resume(provisioned_journal) as resumed:
+        before = resumed.path.read_bytes()
+        if invalid_context == "closed_lock":
+            assert resumed._resume_lock is not None
+            resumed._resume_lock.close()
+        token = deploy_instance._CURRENT_JOURNAL.set(None) if invalid_context == "unset" else None
+        try:
+            with pytest.raises(RuntimeError, match="active held-lock context"):
+                resumed.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100)
+        finally:
+            if token is not None:
+                deploy_instance._CURRENT_JOURNAL.reset(token)
+        assert resumed.path.read_bytes() == before
+
+
+def test_old_resume_cannot_write_in_next_session(*, provisioned_journal: deploy_instance._DeploymentJournal) -> None:
+    with _resume(provisioned_journal) as old:
+        pass
+    with _resume(provisioned_journal) as current:
+        before = current.path.read_bytes()
+        with pytest.raises(RuntimeError, match="active held-lock context"):
+            old.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100)
+        assert current.path.read_bytes() == before
+        current.begin_artifact(blob_uri=ARTIFACT_URI, sha256=ARTIFACT_SHA, size_bytes=100)
 
 
 def test_resume_records_actual_grant_before_cli_without_changing_lifetime(

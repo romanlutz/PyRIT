@@ -49,7 +49,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import cast
+from typing import TextIO, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -145,6 +145,7 @@ class _DeploymentJournal:
     ) -> None:
         self.path = path
         self._resumed = False
+        self._resume_lock: TextIO | None = None
         self._expected_sha256: str | None = None
         requested_at = datetime.now(UTC)
         expires_at = requested_at + timedelta(hours=retention_hours) if retention_hours is not None else None
@@ -167,6 +168,7 @@ class _DeploymentJournal:
 
     def begin(self, args: list[str]) -> int | None:
         """Record a mutating CLI operation without bodies, parameters or secrets."""
+        self._require_active_resume()
         if self._resumed:
             if args[:3] != ["role", "assignment", "create"]:
                 raise RuntimeError("Resumed CLI journalling is limited to explicitly approved role grants")
@@ -192,6 +194,7 @@ class _DeploymentJournal:
 
     def complete(self, *, operation: int, result: subprocess.CompletedProcess[str]) -> None:
         """Retain exact returned IDs and safe error correlation, not response content."""
+        self._require_active_resume()
         event = self._operations[operation]
         event["exit_code"] = result.returncode
         event["status"] = "succeeded" if result.returncode == 0 else "failed"
@@ -208,6 +211,7 @@ class _DeploymentJournal:
 
     def finish(self, status: str) -> None:
         """Record provisioning status without claiming runtime validation."""
+        self._require_active_resume()
         if self._resumed:
             raise RuntimeError("Resumed journals cannot rewrite provisioning status")
         self._document["status"] = status
@@ -215,6 +219,7 @@ class _DeploymentJournal:
 
     def begin_artifact(self, *, blob_uri: str, sha256: str, size_bytes: int) -> int:
         """Record an owned Blob staging intent before an upload without retaining its contents."""
+        self._require_active_resume()
         if not self._resumed:
             raise RuntimeError("Post-deployment artifact staging requires an explicitly resumed journal")
         self._require_unexpired()
@@ -242,6 +247,7 @@ class _DeploymentJournal:
 
     def verify_artifact(self, *, operation: int, sha256: str, size_bytes: int, etag: str) -> None:
         """Retain independently read-back artifact identity without claiming an upload alone verified it."""
+        self._require_active_resume()
         if not self._resumed:
             raise RuntimeError("Post-deployment artifact verification requires an explicitly resumed journal")
         event = self._operations[operation]
@@ -268,6 +274,7 @@ class _DeploymentJournal:
 
     def bind_tenant(self, tenant_id: str) -> None:
         """Bind directory references before the first application mutation."""
+        self._require_active_resume()
         tenant_id = str(UUID(tenant_id))
         if self._document.get("tenant_id") not in (None, tenant_id):
             raise RuntimeError("Deployment journal is already bound to another tenant")
@@ -275,6 +282,7 @@ class _DeploymentJournal:
         self._write()
 
     def _write(self) -> None:
+        self._require_active_resume()
         raw = (json.dumps(self._document, indent=2) + "\n").encode("utf-8")
         if len(raw) > self._MAX_BYTES:
             raise RuntimeError("Deployment journal exceeds the 2 MiB bound")
@@ -291,6 +299,12 @@ class _DeploymentJournal:
             temporary_path.replace(self.path)
         if self._expected_sha256 is not None:
             self._expected_sha256 = hashlib.sha256(raw).hexdigest()
+
+    def _require_active_resume(self) -> None:
+        if self._resumed and (
+            self._resume_lock is None or self._resume_lock.closed or _CURRENT_JOURNAL.get() is not self
+        ):
+            raise RuntimeError("Resumed journal mutation requires its active held-lock context")
 
     def _require_unexpired(self) -> None:
         expiry = datetime.fromisoformat(self.expires_at)
@@ -391,6 +405,7 @@ class _DeploymentJournal:
         journal.expires_at = _expect_string(document.get("expires_at"), context="preview expiry")
         journal._require_unexpired()
         journal._resumed = True
+        journal._resume_lock = None
         journal._expected_sha256 = expected_sha256
         return journal
 
@@ -444,10 +459,12 @@ def resume_deployment_journal(
                 resource_group_id=resource_group_id,
                 tenant_id=tenant_id,
             )
+            journal._resume_lock = lock
             token = _CURRENT_JOURNAL.set(journal)
             try:
                 yield journal
             finally:
+                journal._resume_lock = None
                 _CURRENT_JOURNAL.reset(token)
         finally:
             lock.close()
