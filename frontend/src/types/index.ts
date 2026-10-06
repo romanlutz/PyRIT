@@ -513,6 +513,12 @@ export interface ConversationSaveInput {
   labels?: Record<string, string>
 }
 
+export interface NewAttackContext {
+  generation: string
+  ready: boolean
+  labels?: Record<string, string>
+}
+
 export interface ConvertedFileChip {
   name: string
   url: string
