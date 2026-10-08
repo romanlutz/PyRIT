@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from pyrit.analytics import AttackStats as AnalyticsAttackStats
+from pyrit.analytics import compute_outcome_statistics
 from pyrit.analytics.result_analysis import AttackStats as ResultAnalysisAttackStats
 from pyrit.common.pagination import fingerprint_filters
 from pyrit.models import (
@@ -28,6 +29,8 @@ from pyrit.models import (
     AttackOutcome,
     AttackResultSelection,
     AttackStats,
+    OutcomeStatistics,
+    ScenarioProgressCounts,
 )
 
 
@@ -44,6 +47,31 @@ def test_attack_stats_preserves_existing_import_and_constructor() -> None:
     }
     assert asdict(stats) == expected
     assert stats == AttackStats(**expected)
+
+
+def test_shared_outcome_statistics_preserves_existing_attack_type_identity() -> None:
+    assert OutcomeStatistics is AttackAnalyticsStatistics
+    statistics = compute_outcome_statistics({"success": 1, "failure": 1, "error": 2})
+    assert statistics.success_rate == 0.5
+    assert statistics.success_rate_all == 0.25
+    counts = ScenarioProgressCounts(
+        completed=4, succeeded=1, errors=5, retries=3, success_percentage=25, outcomes=statistics
+    )
+    assert counts.model_dump(mode="json")["outcomes"] == asdict(statistics)
+    restored = ScenarioProgressCounts.model_validate_json(counts.model_dump_json())
+    assert restored == counts
+    assert isinstance(restored.outcomes, OutcomeStatistics)
+    assert restored.outcomes.errors == 2
+    assert restored.errors == 5
+
+
+def test_legacy_scenario_counts_do_not_fabricate_an_outcome_breakdown() -> None:
+    counts = ScenarioProgressCounts.model_validate(
+        {"completed": 2, "succeeded": 1, "success_percentage": 50, "errors": 3, "retries": 2}
+    )
+    assert counts.outcomes is None
+    assert counts.errors == 3
+    assert counts.completed == 2
 
 
 @pytest.mark.parametrize(

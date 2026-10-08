@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
+from pyrit.models.analytics import OutcomeStatistics
 from pyrit.models.catalog.scenario import ScenarioOverloadSummary, ScenarioTargetSummary  # noqa: TC001
 from pyrit.models.identifiers.atomic_attack_identifier import AtomicAttackIdentifier
 from pyrit.models.results.attack_result import AttackOutcome, AttackResultRole
@@ -183,7 +184,14 @@ class ScenarioProgressResult(BaseModel):
 
 
 class ScenarioProgressCounts(BaseModel):
-    """Canonical progress counts for a set of scenario execution units."""
+    """
+    Canonical progress counts for a set of scenario execution units.
+
+    ``outcomes`` describes only the selected latest attempts and supplies both
+    decided-only and all-outcome success rates. ``errors`` and ``retries`` retain
+    their historical-attempt meaning and must not be used as outcome denominators.
+    None preserves older count-only payloads whose outcome breakdown is unknown.
+    """
 
     completed: int = Field(..., ge=0)
     planned: int | None = Field(default=None, ge=0)
@@ -191,6 +199,7 @@ class ScenarioProgressCounts(BaseModel):
     success_percentage: int | None = Field(default=None, ge=0, le=100)
     errors: int = Field(..., ge=0)
     retries: int = Field(..., ge=0)
+    outcomes: OutcomeStatistics | None = None
 
 
 class ScenarioExecutionUnit(BaseModel):

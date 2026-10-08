@@ -13,18 +13,27 @@ a conversation, including failed attempts followed by successful retries, remain
 separate. Updating an existing ID changes its current outcome, not the result count.
 Selecting a scenario is a cohort filter, not a switch to scenario-unit statistics.
 
-ASR uses `successes / (successes + failures)`, reusing the existing `AttackStats`
-outcome policy. With no successes or failures, ASR is `None`. Errors and
-undetermined outcomes remain visible but do not enter that denominator.
+The shared `compute_outcome_statistics` calculator returns both denominator
+policies together:
+
+| Field | Denominator | Meaning |
+|---|---|---|
+| `success_rate` | Successes + failures | Success among decided outcomes, the existing ASR default. |
+| `success_rate_all` | All four outcomes | Success among every selected result, including errors and undetermined outcomes. |
+
+An empty denominator produces `None`. For example, one success and one error
+produce `success_rate=1.0` and `success_rate_all=0.5`. An error-only population has
+`success_rate=None` and `success_rate_all=0.0`. Neither rate requires a second query.
 `total_results` includes all four outcomes; `outcome_shares` and `decided_share`
 use that whole selected cohort. Empty outcome shares are zero, and an empty
 cohort's decided share is `None`. All proportions are between 0 and 1.
-Overall ASR is calculated from overall counts, never by averaging subgroup rates.
+Both success rates are calculated from counts, never by averaging subgroup rates.
 
-This differs from latest-execution-unit scenario success statistics. A failed
+Population selection is separate from denominator selection. A failed
 attempt followed by a successful retry yields 50% raw-result ASR even if the
-scenario's latest-unit success rate is 100%. No result-role filtering or inference
-from conversation presence is applied.
+scenario's latest-unit success rate is 100%. Both analyses have both denominator
+policies; the difference in this example is which attempts count. No result-role
+filtering or inference from conversation presence is applied.
 
 Outcome restrictions apply to the entire report and its result page.
 `outcome_filter_applied` asks a renderer to annotate the rate as **ASR*** and
@@ -65,7 +74,7 @@ async with AttackResultAnalytics() as analytics:
             compare_by=AttackAnalyticsDimension(name="attack_type"),
         )
     )
-    print(report.summary.total_results, report.summary.success_rate)
+    print(report.summary.total_results, report.summary.success_rate, report.summary.success_rate_all)
 
     if report.drilldown_unavailable_reason:
         print(report.drilldown_unavailable_reason)
@@ -88,6 +97,57 @@ async with AttackResultAnalytics() as analytics:
         )
     )
 ```
+
+### The same statistics for scenario units
+
+`compute_scenario_statistics` selects each scenario execution unit's latest
+attempt, then calls the same outcome calculator. Its overall, atomic-attack, and
+display-group counts carry an `outcomes` object of the same `OutcomeStatistics`
+type as attack-report summaries, groups, and cells.
+
+```python
+from pyrit.analytics import compute_scenario_statistics
+
+statistics = compute_scenario_statistics(scenario_result)
+outcomes = statistics.overall.outcomes
+assert outcomes is not None  # Always populated by compute_scenario_statistics.
+print(outcomes.success_rate, outcomes.success_rate_all)
+```
+
+`ScenarioProgressCounts.success_percentage` retains its existing all-completed-unit
+denominator and truncated 0-100 representation for compatibility. Both rates under
+`outcomes` are unrounded 0-1 proportions. Historical `errors` and `retries` remain
+separate: an error followed by a successful retry contributes one historical error
+but no latest-unit error. Never derive the decided denominator by subtracting
+historical errors from completed units.
+
+Scenario progress projections and JSON reports preserve the shared `outcomes`
+object; existing displayed percentages do not change. Count-only scenario payloads
+from older callers deserialize with `outcomes=None` because their latest-outcome
+breakdown cannot be reconstructed. Combining a nonempty such payload logs a warning
+and leaves the combined breakdown unavailable rather than guessing failures.
+
+For already counted populations, call `compute_outcome_statistics` directly.
+`combine_outcome_statistics` sums counts from **disjoint** populations and
+recalculates both rates. It also accepts existing `AttackStats` returned by
+`analyze_results` or technique analytics; those APIs retain their existing result
+shape and decided-only default but use the same shared calculation internally.
+`OutcomeStatistics` is an alias for the existing `AttackAnalyticsStatistics` class,
+not a second representation.
+
+```python
+from pyrit.analytics import combine_outcome_statistics, compute_outcome_statistics
+
+first = compute_outcome_statistics({"success": 1, "error": 1})
+second = compute_outcome_statistics({"success": 2, "failure": 1})
+combined = combine_outcome_statistics([first, second])
+print(combined.success_rate, combined.success_rate_all)  # 0.75, 0.6
+```
+
+Do not combine overlapping converter/harm groups to reconstruct a report's
+summary; use its already-computed summary instead.
+
+### Filters and drill-downs
 
 Omit `compare_by` for a one-dimensional breakdown. Supported dimensions include
 operation, operator, targeted harm category, attack type, converter type,

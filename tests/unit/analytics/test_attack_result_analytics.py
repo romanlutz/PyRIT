@@ -64,6 +64,7 @@ async def test_all_saved_ids_and_outcomes_use_raw_decided_denominator(analytics:
     assert report.summary.total_results == 10
     assert report.summary.total_decided == 6
     assert report.summary.success_rate == pytest.approx(4 / 6)
+    assert report.summary.success_rate_all == 0.4
     assert report.summary.decided_share == 0.6
     assert report.summary.outcome_shares == {
         AttackOutcome.SUCCESS: 0.4,
@@ -82,6 +83,7 @@ async def test_empty_report_has_unavailable_rates(analytics: AttackResultAnalyti
     report = await analytics.query_async()
     assert report.summary.total_results == report.summary.total_decided == 0
     assert report.summary.success_rate is None
+    assert report.summary.success_rate_all is None
     assert report.summary.decided_share is None
     assert set(report.summary.outcome_shares.values()) == {0.0}
     assert report.groups == report.cells == report.results.items == []
@@ -104,6 +106,7 @@ async def test_outcome_filter_annotates_and_restricts_entire_report(
     assert report.outcome_filter_applied
     assert report.summary.total_results == count
     assert report.summary.success_rate == rate
+    assert report.summary.success_rate_all == (1.0 if outcome is AttackOutcome.SUCCESS else 0.0)
     assert report.groups[0].statistics == report.summary
     assert all(row.outcome == outcome for row in report.results.items)
 
@@ -146,11 +149,40 @@ async def test_retry_results_keep_raw_asr_distinct_from_scenario_unit_success(
     statistics = compute_scenario_statistics(scenario)
     assert statistics.overall.completed == statistics.overall.succeeded == 1
     assert statistics.overall.success_percentage == 100
+    assert statistics.overall.outcomes.success_rate == statistics.overall.outcomes.success_rate_all == 1.0
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
     report = await analytics.query_async()
     assert report.summary.total_results == report.summary.total_decided == 2
     assert report.summary.success_rate == 0.5
+    assert report.summary.success_rate_all == 0.5
     assert {row.attack_result_id for row in report.results.items} == {result.attack_result_id for result in results}
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        [],
+        [AttackOutcome.SUCCESS, AttackOutcome.ERROR],
+        [AttackOutcome.FAILURE, AttackOutcome.UNDETERMINED],
+        list(AttackOutcome),
+        [AttackOutcome.SUCCESS, AttackOutcome.FAILURE, AttackOutcome.ERROR, AttackOutcome.ERROR],
+    ],
+)
+@pytest.mark.parametrize("compare", [False, True])
+async def test_same_population_has_identical_shared_statistics_in_attacks_and_scenarios(
+    analytics: AttackResultAnalytics, sqlite_instance: SQLiteMemory, outcomes: list[AttackOutcome], compare: bool
+) -> None:
+    results = [make_result(index=index, outcome=outcome) for index, outcome in enumerate(outcomes, 1)]
+    if results:
+        await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+    scenario = make_scenario_result(attack_results={"attack": results})
+    expected = compute_scenario_statistics(scenario).overall.outcomes
+    report = await analytics.query_async(
+        query=AttackAnalyticsQuery(compare_by=AttackAnalyticsDimension(name="converter_type") if compare else None)
+    )
+    assert report.summary == expected
+    assert all(group.statistics == expected for group in report.groups)
+    assert all(cell.statistics == expected for cell in report.cells)
 
 
 async def test_result_roles_do_not_silently_remove_saved_ids(
@@ -268,6 +300,7 @@ async def test_matrix_empty_cells_and_additional_predicates_are_exact(
         assert len(page.items) == cell.statistics.total_results
         if not page.items:
             assert cell.statistics.success_rate is None
+            assert cell.statistics.success_rate_all is None
             assert set(cell.statistics.outcome_shares.values()) == {0.0}
 
 
@@ -359,6 +392,7 @@ async def test_reports_neither_share_mutable_results_nor_cache_outcomes(
     assert updated.summary.total_results == 1
     assert updated.groups[0].statistics.failures == 1
     assert updated.summary.success_rate == 0.0
+    assert updated.summary.success_rate_all == 0.0
 
 
 async def test_native_report_and_quick_calls_use_independent_sessions(

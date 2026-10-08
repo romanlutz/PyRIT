@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import json
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from pyrit.models import AttackResult, ScenarioResult
@@ -129,6 +130,7 @@ class JsonScenarioResultPrinter(ScenarioResultPrinterBase):
                 "num_objective_executions": group.objective_executions,
                 "num_attempts": group.attempts,
                 "success_rate": group.success_rate,
+                "outcomes": asdict(group.outcomes) if group.outcomes is not None else None,
             }
             for group in overview.groups
         ]
@@ -161,6 +163,7 @@ class JsonScenarioResultPrinter(ScenarioResultPrinterBase):
                 "total_objective_executions": overview.objective_executions,
                 "total_attempts": overview.attempts,
                 "overall_success_rate": overview.success_rate,
+                "outcomes": asdict(overview.outcomes) if overview.outcomes is not None else None,
                 "unique_objectives": len(result.get_objectives()),
             },
             "groups": groups,

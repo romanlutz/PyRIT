@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import ClassVar, Self
@@ -30,17 +30,27 @@ class AttackStats:
 @dataclass
 class AttackAnalyticsStatistics(AttackStats):
     """
-    Outcome statistics for one cohort, group, or heatmap cell.
+    Shared outcome statistics for saved results or selected scenario execution units.
 
     ``success_rate`` uses successes / decided results; errors and undetermined
-    outcomes do not enter that denominator. ``decided_share`` and ``outcome_shares``
-    instead use all results. Rates with no applicable denominator are ``None``;
-    shares for an empty cohort are zero. All proportions are in the range 0 through 1.
+    outcomes do not enter that denominator. ``success_rate_all`` instead includes
+    every outcome in its denominator, as do ``decided_share`` and ``outcome_shares``.
+    Rates with no applicable denominator are ``None``; shares for an empty cohort
+    are zero. All proportions are in the range 0 through 1.
+
+    Analytics calculates these values after selecting the counted population.
+    ``total_results`` can therefore describe distinct saved IDs or latest scenario
+    units. The model does not select attempts or infer a counting policy.
     """
 
     total_results: int
     decided_share: float | None
     outcome_shares: dict[AttackOutcome, float]
+    success_rate_all: float | None = field(default=None, kw_only=True)
+
+
+# Preserve the existing class/constructor identity while sharing it beyond attack reports.
+OutcomeStatistics = AttackAnalyticsStatistics
 
 
 class AttackResultSelection(str, Enum):

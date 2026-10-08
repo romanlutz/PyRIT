@@ -5,6 +5,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from pyrit.analytics.outcome_statistics import compute_outcome_statistics
 from pyrit.common.deprecation import print_deprecation_message
 from pyrit.models import (
     AttackOutcome,
@@ -22,11 +23,17 @@ _SYNC_API_REMOVAL_VERSION = "1.4.0"
 
 
 def _compute_stats(successes: int, failures: int, undetermined: int, errors: int) -> AttackStats:
-    total_decided = successes + failures
-    success_rate = successes / total_decided if total_decided > 0 else None
+    statistics = compute_outcome_statistics(
+        {
+            AttackOutcome.SUCCESS: successes,
+            AttackOutcome.FAILURE: failures,
+            AttackOutcome.UNDETERMINED: undetermined,
+            AttackOutcome.ERROR: errors,
+        }
+    )
     return AttackStats(
-        success_rate=success_rate,
-        total_decided=total_decided,
+        success_rate=statistics.success_rate,
+        total_decided=statistics.total_decided,
         successes=successes,
         failures=failures,
         undetermined=undetermined,

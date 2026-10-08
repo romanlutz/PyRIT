@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from pyrit.analytics._execution import AnalyticsExecution
 from pyrit.analytics._profile_aggregation import ProfileAggregation
-from pyrit.analytics.result_analysis import _compute_stats
+from pyrit.analytics.outcome_statistics import compute_outcome_statistics
 from pyrit.exceptions.analytics_exception import AnalyticsBusyException, AnalyticsDataException
 from pyrit.memory import CentralMemory
 from pyrit.memory.attack_analytics import AttackAnalyticsReader, RawAnalyticsOption, RawAnalyticsReport
@@ -34,7 +34,6 @@ from pyrit.models import (
     AttackAnalyticsStatistics,
     AttackAnalyticsValue,
     AttackAnalyticsValueKind,
-    AttackOutcome,
 )
 
 if TYPE_CHECKING:
@@ -266,38 +265,18 @@ class AttackResultAnalytics:
     @staticmethod
     def _statistics(counts: dict[str, int]) -> AttackAnalyticsStatistics:
         """
-        Reuse raw-outcome ASR policy; total shares include errors and undetermined results.
+        Apply shared outcome statistics, retaining the SDK's stored-data error contract.
 
         Returns:
-            AttackAnalyticsStatistics: The existing decided-result rate plus whole-cohort shares.
+            AttackAnalyticsStatistics: Both success rates and whole-cohort outcome shares.
 
         Raises:
             AnalyticsDataException: If saved outcomes or their counts are invalid.
         """
-        if set(counts) - {outcome.value for outcome in AttackOutcome}:
-            raise AnalyticsDataException("Stored results contain an unsupported attack outcome.")
-        if any(type(count) is not int or count < 0 for count in counts.values()):
-            raise AnalyticsDataException("Stored results contain invalid outcome counts.")
-        stats = _compute_stats(
-            successes=counts.get(AttackOutcome.SUCCESS.value, 0),
-            failures=counts.get(AttackOutcome.FAILURE.value, 0),
-            undetermined=counts.get(AttackOutcome.UNDETERMINED.value, 0),
-            errors=counts.get(AttackOutcome.ERROR.value, 0),
-        )
-        total = stats.total_decided + stats.undetermined + stats.errors
-        return AttackAnalyticsStatistics(
-            success_rate=stats.success_rate,
-            total_decided=stats.total_decided,
-            successes=stats.successes,
-            failures=stats.failures,
-            undetermined=stats.undetermined,
-            errors=stats.errors,
-            total_results=total,
-            decided_share=stats.total_decided / total if total else None,
-            outcome_shares={
-                outcome: counts.get(outcome.value, 0) / total if total else 0.0 for outcome in AttackOutcome
-            },
-        )
+        try:
+            return compute_outcome_statistics(counts)
+        except ValueError as error:
+            raise AnalyticsDataException(str(error)) from error
 
     @staticmethod
     def _option(*, raw: RawAnalyticsOption, dimension: AttackAnalyticsDimension) -> AttackAnalyticsOption:

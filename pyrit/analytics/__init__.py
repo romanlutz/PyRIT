@@ -11,6 +11,7 @@ from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 if TYPE_CHECKING:
     from pyrit.analytics.attack_result_analytics import AttackResultAnalytics
     from pyrit.analytics.conversation_analytics import ConversationAnalytics
+    from pyrit.analytics.outcome_statistics import combine_outcome_statistics, compute_outcome_statistics
     from pyrit.analytics.result_analysis import (
         AttackStats,
         analyze_results,
@@ -25,6 +26,8 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "ApproximateTextMatching": "pyrit.analytics.text_matching",
     "AttackResultAnalytics": "pyrit.analytics.attack_result_analytics",
     "AttackStats": "pyrit.analytics.result_analysis",
+    "combine_outcome_statistics": "pyrit.analytics.outcome_statistics",
+    "compute_outcome_statistics": "pyrit.analytics.outcome_statistics",
     "compute_scenario_statistics": "pyrit.analytics.scenario_statistics",
     "ConversationAnalytics": "pyrit.analytics.conversation_analytics",
     "ExactTextMatching": "pyrit.analytics.text_matching",
