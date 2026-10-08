@@ -200,6 +200,15 @@ acknowledgment, original source completeness, closure, and a source grade stay
 distinct. Runtime kind names do not imply installed implementations, and this
 local harmless PoC does not replace ordinary Scenario orchestration or add GUI
 Task editing.
+The opt-in remote gateway keeps that canonical owner on the API side.
+Its execution-only worker protocol authenticates service identity and scoped
+operator delegation, admits immutable references under separate gateway/worker
+fences, and transfers exact bounded source artifacts. Worker completion is
+not API canonical completion: the API verifies original/derived manifest
+provenance and imports original bytes with an installed writer, never remote
+database IDs. A URL or worker runtime declaration does not install private
+platform execution, provisioning or agent controls; uncertain dispatch,
+closure and settlement remain quarantined.
 An external original Task requires separate, default-off backend admission.
 The web process stores only an opaque actor-bound job, never imports the
 private `TaskOwnedScenario` or connects to its raw worker SQLite. The opt-in

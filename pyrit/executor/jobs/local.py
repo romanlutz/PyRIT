@@ -15,6 +15,7 @@ from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.executor.jobs.ledger import LocalEvaluationJobLedger
 from pyrit.executor.jobs.port import (
     EvaluationArtifactWriter,
+    EvaluationCanonicalSettlementError,
     EvaluationJobError,
     EvaluationJobErrorCode,
     EvaluationJobRuntimeRegistry,
@@ -32,6 +33,7 @@ from pyrit.models.evaluation_job import (
     EvaluationDeliveryState,
     EvaluationEvidenceState,
     EvaluationJobDelivery,
+    EvaluationJobRegistration,
     EvaluationJobRequest,
     EvaluationJobSnapshot,
     EvaluationJobState,
@@ -45,6 +47,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from uuid import UUID
 
+    from pyrit.executor.jobs.port import EvaluationRuntimeContext
+
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
@@ -53,6 +57,7 @@ T = TypeVar("T")
 class _LocalRuntimeContext:
     request: EvaluationJobRequest
     fence_id: UUID
+    actor_id: str
     run_root: Path
     ledger: LocalEvaluationJobLedger
 
@@ -156,6 +161,16 @@ class LocalEvaluationJobPort:
         """
         self._require_open()
         self._authorize(actor_id)
+
+    async def catalog_async(self, *, actor_id: str) -> tuple[EvaluationJobRegistration, ...]:
+        """
+        Return only explicitly installed registrations for an admitted actor.
+
+        Returns:
+            tuple[EvaluationJobRegistration, ...]: The local owner's reviewed catalog.
+        """
+        self.authorize_actor(actor_id)
+        return self.registry.registrations
 
     async def submit_async(self, *, request: EvaluationJobRequest, actor_id: str) -> EvaluationJobSubmission:
         """
@@ -292,6 +307,9 @@ class LocalEvaluationJobPort:
                 context = _LocalRuntimeContext(
                     request=snapshot.request,
                     fence_id=fence_id,
+                    actor_id=await run_legacy_sync_async(
+                        ledger.admitted_actor, job_id=delivery.job_id, fence_id=fence_id
+                    ),
                     run_root=self.root / "attempts" / str(delivery.job_id),
                     ledger=ledger,
                 )
@@ -399,13 +417,24 @@ class LocalEvaluationJobPort:
             await self._finish_async(
                 context=context,
                 state=state,
-                cleanup=artifacts.cleanup,
+                cleanup=await self._publication_refused_async(context=context, artifacts=artifacts),
                 evidence=EvaluationEvidenceState.SOURCE_RETAINED,
                 reason="cancelled_before_finalization" if state is EvaluationJobState.CANCELLED else error.code.value,
                 manifest=artifacts.manifest,
             )
             return
         await self._publish_async(context=context, artifacts=artifacts)
+
+    async def _publication_refused_async(
+        self, *, context: EvaluationRuntimeContext, artifacts: EvaluationRuntimeArtifacts
+    ) -> EvaluationCleanupState:
+        """
+        Preserve local closure; a remote facade must also account for unsettled handoff.
+
+        Returns:
+            EvaluationCleanupState: Verified local closure or remote settlement uncertainty.
+        """
+        return artifacts.cleanup
 
     async def _publish_async(self, *, context: _LocalRuntimeContext, artifacts: EvaluationRuntimeArtifacts) -> None:
         try:
@@ -425,13 +454,24 @@ class LocalEvaluationJobPort:
                 reason=None if canonical.source_complete else "source_incomplete",
                 canonical=canonical,
             )
+        except EvaluationCanonicalSettlementError as error:
+            await run_legacy_sync_async(
+                context.ledger.finish,
+                job_id=context.request.job_id,
+                fence_id=context.fence_id,
+                state=EvaluationJobState.FAILED,
+                cleanup=EvaluationCleanupState.UNKNOWN,
+                evidence=EvaluationEvidenceState.CANONICAL,
+                reason="remote_settlement_uncertain",
+                canonical=EvaluationCanonicalReceipt.model_validate(error.canonical),
+            )
         except Exception as error:
             code = error.code if isinstance(error, EvaluationJobError) else EvaluationJobErrorCode.WRITER_FAILED
             logger.error("Canonical job writer refused or failed job=%s code=%s", context.request.job_id, code.value)
             await self._finish_async(
                 context=context,
                 state=EvaluationJobState.FAILED,
-                cleanup=EvaluationCleanupState.VERIFIED,
+                cleanup=error.cleanup if isinstance(error, EvaluationRuntimeError) else EvaluationCleanupState.VERIFIED,
                 evidence=EvaluationEvidenceState.SOURCE_RETAINED,
                 reason=code.value,
                 manifest=artifacts.manifest,

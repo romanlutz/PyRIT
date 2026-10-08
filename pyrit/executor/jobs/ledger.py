@@ -254,6 +254,17 @@ class LocalEvaluationJobLedger:
             ).fetchall()
         return tuple(EvaluationJobDelivery(job_id=UUID(row[0]), request_sha256=row[1]) for row in rows)
 
+    def admitted_actor(self, *, job_id: UUID, fence_id: UUID) -> str:
+        """
+        Retrieve an internally authenticated actor under the committed dispatch fence.
+
+        Returns:
+            str: The unchanged actor recorded at immutable admission.
+        """
+        with self._connect() as connection:
+            row = self._fenced_row(connection=connection, job_id=job_id, fence_id=fence_id)
+            return str(row["actor_id"])
+
     def claim(
         self, *, delivery: EvaluationJobDelivery, allowed_actor_ids: frozenset[str]
     ) -> tuple[EvaluationDeliveryState, UUID | None]:

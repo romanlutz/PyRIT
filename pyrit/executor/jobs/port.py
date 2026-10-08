@@ -58,6 +58,15 @@ class EvaluationJobError(ValueError):
         self.code = code
 
 
+class EvaluationCanonicalSettlementError(EvaluationJobError):
+    """API-owned canonical persistence succeeded but remote settlement remains uncertain."""
+
+    def __init__(self, canonical: EvaluationCanonicalReceipt) -> None:
+        """Preserve real canonical references without falsely declaring settled closure."""
+        super().__init__(EvaluationJobErrorCode.DISPATCH_UNCERTAIN)
+        self.canonical = canonical
+
+
 @dataclass(frozen=True, kw_only=True)
 class EvaluationRuntimeArtifacts:
     """Exact source artifacts after runtime closure, never a worker database."""
@@ -118,6 +127,11 @@ class EvaluationRuntimeContext(Protocol):
     @property
     def fence_id(self) -> UUID:
         """The independently committed local dispatch incarnation."""
+        ...
+
+    @property
+    def actor_id(self) -> str:
+        """The internally admitted actor, never a browser-supplied runtime identity."""
         ...
 
     @property

@@ -74,10 +74,9 @@ async def catalog_async(*, request: Request) -> tuple[EvaluationJobRegistration,
     """
     port, actor = _admission(request)
     try:
-        port.authorize_actor(actor)
+        return await port.catalog_async(actor_id=actor)
     except EvaluationJobError as error:
         raise _http_error(error) from error
-    return port.registry.registrations
 
 
 @router.post("/evaluation-jobs", response_model=EvaluationJobSubmission, status_code=202)

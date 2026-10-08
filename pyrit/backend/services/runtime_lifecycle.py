@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
-from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings
+from pyrit.backend.services.evaluation_job_service import evaluation_job_settings_from_environment
 from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.original_worker_runtime import OriginalWorkerRuntime
 from pyrit.backend.services.scenario_run_service import get_scenario_run_service, peek_scenario_run_service
@@ -124,9 +124,9 @@ class RuntimeLifecycle:
         try:
             config = await self._load_async()
             preflight = await CohostPreflight.from_environment_async()
-            job_settings = await asyncio.to_thread(LocalEvaluationJobSettings.from_environment, os.environ)
+            job_settings = await asyncio.to_thread(evaluation_job_settings_from_environment, os.environ)
             if job_settings is not None and (preflight is not None or not self.topology_supported):
-                raise ValueError("Local evaluation jobs require one backend owner and cannot share original preview.")
+                raise ValueError("Evaluation jobs require one backend owner and cannot share original preview.")
             if preflight is not None:
                 preflight.validate_configuration(loader=config, environment=os.environ)
                 if not self.topology_supported:
@@ -188,7 +188,7 @@ class RuntimeLifecycle:
             return {
                 **self.status(),
                 "outcome": "unsupported",
-                "message": "The local evaluation job port is startup-owned; configuration changes require a restart.",
+                "message": "The evaluation job port is startup-owned; configuration changes require a restart.",
             }
         if self.original_worker is not None:
             return {

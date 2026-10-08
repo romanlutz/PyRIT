@@ -20,13 +20,16 @@ from pyrit.backend.middleware.auth import require_admin
 from pyrit.backend.middleware.runtime import RuntimeAdmissionMiddleware
 from pyrit.backend.routes import configuration, health
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
-from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings
+from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings, RemoteEvaluationJobSettings
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.runtime_lifecycle import RuntimeLifecycle
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.executor.jobs.local import LocalEvaluationJobPort
+from pyrit.executor.jobs.remote import RemoteEvaluationJobGateway
+from pyrit.executor.jobs.worker_client import EvaluationWorkerHttpSettings
 from pyrit.memory import CentralMemory, MemoryInterface
+from pyrit.models.evaluation_worker import evaluation_worker_schema_sha256
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
 
@@ -417,3 +420,45 @@ async def test_shutdown_keeps_canonical_memory_alive_until_local_job_writer_join
             await asyncio.gather(caller, return_exceptions=True)
     assert order == ["jobs", "services", "memory"]
     assert runtime.evaluation_jobs is None and runtime.app.state.evaluation_job_port is None
+
+
+async def test_remote_startup_installs_deliberate_canonical_facade_after_ready_async(
+    *, runtime: RuntimeLifecycle, tmp_path: Path
+) -> None:
+    config = await runtime._load_async()
+    settings = RemoteEvaluationJobSettings(
+        root=tmp_path / "gateway",
+        allowed_actor_ids=frozenset({"00000000-0000-4000-8000-000000000001"}),
+        identity_name="explicit-fixture",
+        transport=EvaluationWorkerHttpSettings(
+            base_url="http://127.0.0.1",
+            audience="fixture-audience",
+            service_id="public_fixture",
+            schema_sha256=evaluation_worker_schema_sha256(),
+            allow_loopback_http=True,
+        ),
+    )
+    port = MagicMock(spec=RemoteEvaluationJobGateway)
+    memory = MagicMock(spec=MemoryInterface)
+    scenario_service = MagicMock(spec=ScenarioRunService)
+
+    def start_consumer() -> None:
+        assert runtime.state == "ready" and runtime.app.state.evaluation_job_port is port
+
+    port.start_consumer.side_effect = start_consumer
+    with (
+        patch.object(CohostPreflight, "from_environment_async", new_callable=AsyncMock, return_value=None),
+        patch.object(lifecycle_module, "evaluation_job_settings_from_environment", return_value=settings),
+        patch.object(
+            RemoteEvaluationJobSettings, "create_port_async", new_callable=AsyncMock, return_value=port
+        ) as create,
+        patch.object(config, "initialize_pyrit_async", new_callable=AsyncMock),
+        patch.object(CentralMemory, "get_memory_instance", return_value=memory),
+        patch.object(lifecycle_module, "get_scenario_run_service", return_value=scenario_service),
+    ):
+        await runtime.startup_async()
+    assert runtime.state == "ready" and runtime.evaluation_jobs is port
+    create.assert_awaited_once()
+    port.startup_async.assert_awaited_once()
+    port.start_consumer.assert_called_once()
+    assert runtime.begin_apply(version="unchanged")["outcome"] == "unsupported"

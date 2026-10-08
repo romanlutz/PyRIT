@@ -798,6 +798,116 @@ No Azure broker transport, private provisioning, service identity, remote
 exec/closure/reset, platform wait/agent transport, or production isolation is
 provided or qualified by this local public PoC.
 
+### Opt-in remote execution-only gateway
+
+`RemoteEvaluationJobSettings` is a startup-only configuration for a generic
+authenticated job service. It is **not** private platform configuration, a
+provisioning client, an Inspect protocol, or an automatic implementation of all
+runtime kinds. The public backend keeps its own durable queue, authenticated
+operator admission and canonical SQLite. `RemoteEvaluationJobGateway` is a
+deliberately installed local-owner facade; it does not proxy a worker database
+or a worker's canonical result. Ordinary Scenario execution and existing UI
+controls remain unchanged.
+
+Configure the remote backend explicitly:
+
+```text
+PYRIT_EVALUATION_JOB_BACKEND=remote
+PYRIT_EVALUATION_JOB_ROOT=<absolute local gateway owner directory>
+PYRIT_EVALUATION_JOB_ALLOWED_OPERATOR_OIDS=<explicit authenticated operator UUIDs>
+PYRIT_EVALUATION_JOB_REMOTE_URL=https://worker.example.invalid
+PYRIT_EVALUATION_JOB_REMOTE_SERVICE_ID=<approved generic service ID>
+PYRIT_EVALUATION_JOB_REMOTE_IDENTITY=<named host-installed credential provider>
+PYRIT_EVALUATION_JOB_REMOTE_AUDIENCE=<configured service audience>
+PYRIT_EVALUATION_JOB_REMOTE_PROTOCOL_VERSION=1
+PYRIT_EVALUATION_JOB_REMOTE_PROTOCOL_SHA256=<evaluation_worker_schema_sha256()>
+```
+
+`EvaluationWorkerCredentialRegistry` is empty by default. A trusted host must
+deliberately install a named factory returning an
+`EvaluationWorkerCredentialProvider`. The provider supplies two separate
+credentials: service identity and scoped operator delegation, bound to the
+configured audience and exact method/path/body/job identity. The service must
+verify both and authorize source/profile-to-operation mapping on its own side.
+An actor header, browser Graph token, token string in settings, arbitrary
+Python import path or ambient credential discovery is not a replacement.
+Uninstalled production identity/delegation fails closed; this implementation
+does not supply or qualify Entra/OBO or private platform identity.
+
+The transport owns `httpx.AsyncClient` with HTTPS/TLS verification, redirects
+disabled and environment proxies disabled. Credential-bearing URLs, queries
+and fragments are rejected. Loopback HTTP requires
+`PYRIT_EVALUATION_JOB_REMOTE_ALLOW_LOOPBACK_HTTP=true`; a fixture-only provider
+is refused anywhere except that explicitly configured loopback test authority.
+This flag is not an authentication bypass and installs no fixture credentials.
+Request/artifact deadlines default to 10/30 seconds, polling to 0.25 seconds
+with a 60-second deadline, and cancellation settlement to 10 seconds. The
+corresponding `REMOTE_REQUEST_TIMEOUT_SECONDS`, `REMOTE_ARTIFACT_TIMEOUT_SECONDS`,
+`REMOTE_POLL_INTERVAL_SECONDS`, `REMOTE_POLL_DEADLINE_SECONDS` and
+`REMOTE_SETTLEMENT_TIMEOUT_SECONDS` suffixes use the same
+`PYRIT_EVALUATION_JOB_` prefix. All limits must be finite and bounded.
+Partial settings and incompatible versions/schemas fail before execution.
+
+CoPyRIT/framework clients still use the public `/api/evaluation-jobs` producer
+surface. The gateway intersects authenticated per-operator worker grants with
+its own pinned registrations. Only the public harmless original and its
+reviewed canonical writer are installed. Service-advertised Tasks, runtime
+kinds, code, initial inputs, models, provisioning settings or Mode 1 steering
+are never dynamically installed.
+
+`pyrit.models.evaluation_worker` defines the separate execution-only
+`/api/evaluation-worker/v1` wire. It provides protocol/catalog, job
+admission/status/cancel/control, protected manifest/artifact retrieval and
+gateway settlement messages. Worker `completed` means retained original
+evidence and observed owned closure, not a grade or canonical import. Worker
+messages forbid canonical receipts, projection IDs and Score/AttackResult IDs.
+The gateway stores the actor-bound request, gateway fence, independent worker
+fence/incarnation and a separate worker event cursor in `remote.sqlite`.
+An ambiguous response or restart cannot replace that binding or replay the
+original. The local and worker event sequences are distinct.
+
+The service exports its original manifest **verbatim** under the worker fence.
+The gateway verifies authenticated binding/terminal identity, request/source/
+case/profile, gap-free events, exact inventory, media types, byte lengths and
+SHA256, then downloads only declared flat names from the same service authority.
+Existing per-artifact/aggregate bounds remain 16/32 MiB. It retains the exact
+original manifest bytes and creates a separately identified **derived**
+handoff manifest for the same inventory/bytes under its own gateway fence;
+both digests and the original byte digest are linked durably. This is not a
+silent fence restamp or provider-incarnation attestation.
+
+Only `OriginalInspectArtifactWriter` in the API imports the exact binary `.eval`
+and creates/verifies its own canonical Score, AttackResult and archive records.
+It never copies worker SQLite IDs or reruns the source scorer. Gateway
+settlement acknowledges that retained/imported handoff, not a guest shutdown.
+A cancelled/failed source with verified joined closure and absent artifacts
+can use `closure_observed` with **no artifact hashes**. Unknown closure/evidence
+cannot use that disposition. A source runtime error after a requested cancel
+remains a source error in the retained worker receipt; requested gateway
+cancellation and source-grade absence are separate facts.
+
+Remote cancellation, caller disconnect, control polling and finalization keep
+retained owners. Verified closure requires the worker's reviewed task/storage
+join, not HTTP ACK, process-client interruption or platform stop/status.
+Cancellation after source retention but before API finalization keeps the
+retained archive without a canonical grade and quarantines its unsettled
+handoff; it does not automatically send a retention acknowledgment or retry.
+Unknown dispatch/settlement quarantines new work. If API canonical import
+commits but settlement is lost, the job retains its actual local canonical IDs
+with failed/unknown settlement rather than reporting a successful run or
+dropping the grade. Retained evidence and complete deterministic import
+readback support explicit reconciliation, but there is no automatic restart
+repair, source retry or execution renewal after authorization expires.
+
+Real separate-process/TCP harmless proofs are distinct from mock HTTP unit
+tests and fixture credential verification is not production identity
+qualification. This public gateway provides no private HTTP host, operation
+policy, provider-assignment/incarnation fencing, faithful guest exec/timeout/
+termination/reset guarantees, managed agent controls, or production isolation.
+Those must be supplied and independently reviewed before private-platform
+execution. No cloud/model/private-original authority follows from configuring
+a URL.
+
 ## Supported execution and qualification
 
 - One selected, original text `Sample`, one original scorer, one epoch, one
