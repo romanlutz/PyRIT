@@ -20,7 +20,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
 
-from sqlalchemy import MetaData, and_, case, exists, false, func, literal, not_, or_, select, update
+from sqlalchemy import MetaData, String, and_, case, exists, false, func, literal, not_, or_, select, update
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -106,8 +107,8 @@ from pyrit.models import (
     SeedObjective,
     SeedOrigin,
     SeedPrompt,
+    SeedRecord,
     SeedType,
-    SeedUnion,
     TargetIdentifier,
     group_conversation_message_pieces_by_sequence,
     sort_message_pieces,
@@ -4362,29 +4363,27 @@ class MemoryInterface(abc.ABC):
     @staticmethod
     def _get_seed_example_seeds(
         *, session: Session, scope: "ColumnElement[bool]", example_ids: Sequence[uuid.UUID]
-    ) -> dict[uuid.UUID, list[SeedUnion]]:
+    ) -> dict[uuid.UUID, list[SeedRecord]]:
         """
-        Read the stored seeds of the given logical examples.
-
-        A seed that cannot be rebuilt is skipped with a warning, so one bad row does not stop the read.
-        For example, a simulated conversation saved with prompt file paths fails when a file is missing.
+        Read all stored members without reconstructing seeds or resolving configuration paths.
 
         Returns:
-            dict[uuid.UUID, list[SeedUnion]]: The seeds of each example that has readable seeds, in the
+            dict[uuid.UUID, list[SeedRecord]]: The stored members of each example, in the
             order of ``example_ids``. Objectives come first, then seeds by sequence and ID.
         """
         logical_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
         entries = session.scalars(
             select(SeedEntry)
             .where(scope, logical_id.in_(example_ids))
-            .order_by(case((SeedEntry.seed_type == "objective", 0), else_=1), SeedEntry.sequence, SeedEntry.id)
+            .order_by(
+                case((SeedEntry.seed_type == "objective", 0), else_=1),
+                SeedEntry.sequence,
+                func.lower(sql_cast(SeedEntry.id, String(36))),
+            )
         ).all()
-        seeds: dict[uuid.UUID, list[SeedUnion]] = {example_id: [] for example_id in example_ids}
+        seeds: dict[uuid.UUID, list[SeedRecord]] = {example_id: [] for example_id in example_ids}
         for entry in entries:
-            try:
-                seeds[entry.prompt_group_id or entry.id].append(entry.get_seed())
-            except ValueError as e:
-                logger.warning(f"Skipping stored seed {entry.id} because it cannot be read: {e}")
+            seeds[entry.prompt_group_id or entry.id].append(entry.get_seed_record())
         return {example_id: example_seeds for example_id, example_seeds in seeds.items() if example_seeds}
 
     def _execute_get_seed_examples(
@@ -4397,16 +4396,17 @@ class MemoryInterface(abc.ABC):
         harm_categories: Sequence[str] | None,
         seed_types: Sequence[SeedType] | None,
         value_search: str | None,
-    ) -> tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]:
+    ) -> tuple[dict[uuid.UUID, list[SeedRecord]], int, DecodedKeysetCursor | None]:
         """
         Read one keyset page of complete logical seed examples.
 
         Returns:
-            tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]: The seeds of each
+            tuple[dict[uuid.UUID, list[SeedRecord]], int, DecodedKeysetCursor | None]: The seeds of each
             example in page order, the number of examples that match the filters, and the sort key of
             the last example when more examples follow.
         """
         logical_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+        logical_id_key = func.lower(sql_cast(logical_id, String(36)))
         scope = self._seed_example_scope(dataset_name=dataset_name)
         filters = self._seed_example_filters(
             scope=scope,
@@ -4416,21 +4416,25 @@ class MemoryInterface(abc.ABC):
             value_search=value_search,
         )
         grouped = (
-            select(logical_id.label("example_id"), func.min(SeedEntry.date_added).label("first_added"))
+            select(
+                logical_id.label("example_id"),
+                logical_id_key.label("example_id_key"),
+                func.min(SeedEntry.date_added).label("first_added"),
+            )
             .where(scope, *filters)
-            .group_by(logical_id)
+            .group_by(logical_id, logical_id_key)
             .subquery()
         )
         page = select(grouped.c.example_id, grouped.c.first_added)
         if after is not None:
-            anchor_id = uuid.UUID(after.identifier)
+            anchor_id = str(uuid.UUID(after.identifier))
             page = page.where(
                 or_(
                     grouped.c.first_added < after.timestamp,
-                    and_(grouped.c.first_added == after.timestamp, grouped.c.example_id < anchor_id),
+                    and_(grouped.c.first_added == after.timestamp, grouped.c.example_id_key < anchor_id),
                 )
             )
-        page = page.order_by(grouped.c.first_added.desc(), grouped.c.example_id.desc()).limit(limit + 1)
+        page = page.order_by(grouped.c.first_added.desc(), grouped.c.example_id_key.desc()).limit(limit + 1)
 
         with closing(self._get_session()) as session:
             total = session.execute(select(func.count()).select_from(grouped)).scalar_one()
@@ -4444,12 +4448,12 @@ class MemoryInterface(abc.ABC):
             next_after = DecodedKeysetCursor(timestamp=last.first_added, identifier=str(last.example_id))
         return seeds, total, next_after
 
-    def _execute_get_seed_example(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedUnion]:
+    def _execute_get_seed_example(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedRecord]:
         """
         Read one complete logical seed example.
 
         Returns:
-            list[SeedUnion]: The seeds of the example. The list is empty if the dataset does not contain it.
+            list[SeedRecord]: The stored members. The list is empty if the dataset does not contain the example.
         """
         with closing(self._get_session()) as session:
             seeds = self._get_seed_example_seeds(
@@ -8593,16 +8597,16 @@ class MemoryInterface(abc.ABC):
         harm_categories: Sequence[str] | None = None,
         seed_types: Sequence[SeedType] | None = None,
         value_search: str | None = None,
-    ) -> tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]:
+    ) -> tuple[dict[uuid.UUID, list[SeedRecord]], int, DecodedKeysetCursor | None]:
         """
         Read one page of complete logical seed examples from one dataset.
 
         A logical example is all seeds in the dataset that share a ``prompt_group_id``, or one seed
         without a group. Examples are ordered by their earliest ``date_added``, then by example ID,
-        both descending. Values inside one filter use OR, different filters use AND, and any seed
-        of an example can satisfy a filter. This method does not render templates or load media.
-        A simulated conversation saved with prompt file paths loads those files. If it cannot be
-        read, it is skipped with a warning.
+        both descending, using the canonical textual UUID order on every backend. Values inside
+        one filter use OR, different filters use AND, and any member can satisfy a filter.
+        Members are stored-record projections: configurations remain raw text, and no templates
+        are rendered or referenced files loaded.
 
         Args:
             dataset_name: The dataset name. None or an empty string selects seeds without a dataset name.
@@ -8616,7 +8620,7 @@ class MemoryInterface(abc.ABC):
                 text, ignoring case. Simulated-conversation configurations are not searched.
 
         Returns:
-            tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]: The seeds of each
+            tuple[dict[uuid.UUID, list[SeedRecord]], int, DecodedKeysetCursor | None]: The stored members of each
             example keyed by example ID in page order, objectives first; the number of examples that
             match the filters; and the sort key of the last example when more examples follow.
         """
@@ -8631,7 +8635,7 @@ class MemoryInterface(abc.ABC):
             value_search=value_search,
         )
 
-    async def get_seed_example_async(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedUnion]:
+    async def get_seed_example_async(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedRecord]:
         """
         Read one complete logical seed example from one dataset.
 
@@ -8642,7 +8646,7 @@ class MemoryInterface(abc.ABC):
             example_id: The ``prompt_group_id`` of the example, or the seed ID of a seed without a group.
 
         Returns:
-            list[SeedUnion]: The seeds of the example, objectives first. The list is empty if the
+            list[SeedRecord]: The stored members, objectives first. The list is empty if the
             dataset does not contain it.
         """
         return await self._run_database_operation_async(

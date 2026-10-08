@@ -14,7 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from pyrit.backend.models.common import PaginationInfo
-from pyrit.models import PromptDataType, SeedType, SeedUnion
+from pyrit.models import PromptDataType, SeedRecord, SeedType
 
 
 class DatasetInfo(BaseModel):
@@ -74,4 +74,6 @@ class SeedExampleListResponse(BaseModel):
 class SeedExampleDetailResponse(SeedExampleSummary):
     """One logical seed example with all of its stored seeds."""
 
-    members: list[SeedUnion] = Field(..., description="Stored seeds, objectives first, then by sequence")
+    members: list[SeedRecord] = Field(
+        ..., description="Stored seed records without reconstruction, objectives first, then by sequence"
+    )

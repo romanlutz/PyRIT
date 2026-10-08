@@ -97,14 +97,17 @@ preserve the recorded origin.
 ## Browse stored seeds
 
 The seed browser reads stored seeds from memory only. It does not load providers, open
-media files, render templates, or generate conversations. A simulated-conversation seed
-saved by an older PyRIT version stores prompt file paths, so the browser loads those files.
-If a seed cannot be read, for example because a file is missing, the browser skips it and
-logs a warning. An example with no readable seeds is not shown, but `total` counts it.
+media or template files, render templates, or generate conversations. Members are
+`SeedRecord` projections, not reconstructed execution-ready seeds. Simulated-conversation
+configurations remain unchanged in `value`, including legacy file references and
+configurations that cannot be executed. Missing files do not remove members or examples.
+Stored IDs, hashes, nullable roles and sequences, parameters, objective conditions, and
+provenance are retained. Existing `get_seeds_async()` reconstruction is unchanged.
 
 - `GET /api/datasets/seeds?selection_key=<key>` lists one page of logical examples.
 - `GET /api/datasets/seeds/{example_id}?selection_key=<key>` returns all members of one example
-  as seed objects (`SeedPrompt`, `SeedObjective`, or `SeedSimulatedConversation`).
+  as stored records, identified by `seed_type`. Configuration fields such as `num_turns`
+  remain in the stored JSON `value`; browsing does not resolve them into live seed objects.
 
 Get the `selection_key` from `GET /api/datasets`. The unnamed key `dataset:unnamed` includes
 NULL and empty dataset names. The example ID is the `prompt_group_id`, or the seed ID when
@@ -119,10 +122,13 @@ SQLite ignores case for ASCII characters only. `search` does not look in
 simulated-conversation configurations, because their stored value is JSON. Use
 `seed_type=simulated_conversation` to find them.
 
-Examples sort by the earliest member `date_added`, newest first, then by example ID. A
+Examples sort by the earliest member `date_added`, newest first, then by canonical textual
+example ID, descending. SQLite and Azure SQL use the same UUID order. A
 cursor is valid only for the same `selection_key` and filters. Other cursors return 400.
 
 Each list item has a preview of the first text member: at most 100 characters, with `...`
-and `preview_truncated` when it is shortened. Media members show only the file name, and
-other types show a type label. The browser does not render templates or run
+and `preview_truncated` when it is shortened. Media members show only the file name.
+Standalone absolute paths and URLs stored as text show `[Text reference]` rather than
+paths or credentials; detail retains the full stored value. Other types show a type label.
+The browser does not render templates or run
 simulated conversations.

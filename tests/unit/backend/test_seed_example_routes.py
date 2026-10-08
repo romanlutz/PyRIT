@@ -1,7 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+import json
 from collections.abc import AsyncIterator
+from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -9,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from pyrit.backend.main import app
 from pyrit.backend.services.dataset_service import get_dataset_service
+from pyrit.common.utils import to_sha256
 from pyrit.memory import MemoryInterface
 from pyrit.memory.memory_models import SeedEntry
 from pyrit.models import AnswerMatches, MatchesObjective, Seed, SeedObjective, SeedPrompt, SeedSimulatedConversation
@@ -104,6 +108,45 @@ async def test_list_seed_examples_builds_safe_previews(client: AsyncClient, sqli
     assert items[str(configuration.id)]["preview"] == "[Simulated conversation configuration]"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/private/seed.txt",
+        r"C:\private\seed.txt",
+        r"\\server\private\seed.txt",
+        "https://storage.example.test/seed.txt?sig=secret",
+        "HTTPS://user:password@example.test/seed.txt?token=secret",
+        " \thttps://example.test/seed.txt?token=secret",
+    ],
+)
+async def test_seed_example_preview_hides_text_references_async(
+    client: AsyncClient, sqlite_instance: MemoryInterface, value: str
+) -> None:
+    seed = _prompt(value, data_type="text")
+    await _store(sqlite_instance, seed)
+
+    listed = await client.get(URL, params={"selection_key": NAMED})
+    detail = await client.get(f"{URL}/{seed.id}", params={"selection_key": NAMED})
+
+    assert listed.status_code == detail.status_code == 200
+    item = listed.json()["items"][0]
+    assert item["preview"] == "[Text reference]"
+    assert item["preview_truncated"] is False
+    assert detail.json()["members"][0]["value"] == value
+
+
+@pytest.mark.parametrize("value", ["User: describe the image", "Discuss /private/example without opening it"])
+async def test_seed_example_preview_preserves_ordinary_prose_async(
+    client: AsyncClient, sqlite_instance: MemoryInterface, value: str
+) -> None:
+    await _store(sqlite_instance, _prompt(value))
+
+    response = await client.get(URL, params={"selection_key": NAMED})
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["preview"] == value
+
+
 async def test_get_seed_example_returns_full_text_of_truncated_preview(client: AsyncClient, sqlite_instance):
     seed = _prompt("x" * 150)
     await _store(sqlite_instance, seed)
@@ -148,7 +191,7 @@ async def test_list_seed_examples_returns_empty_page(client: AsyncClient, sqlite
     assert (body["pagination"]["has_more"], body["pagination"]["next_cursor"]) == (False, None)
 
 
-async def test_get_seed_example_returns_all_members_as_domain_seeds(client: AsyncClient, sqlite_instance):
+async def test_get_seed_example_returns_all_stored_members(client: AsyncClient, sqlite_instance):
     group = uuid4()
     objective = SeedObjective(
         value="objective", dataset_name=DATASET, prompt_group_id=group, harm_categories=["violence"], added_by="test"
@@ -166,7 +209,43 @@ async def test_get_seed_example_returns_all_members_as_domain_seeds(client: Asyn
     assert set(members) == {str(objective.id), str(prompt.id), str(configuration.id)}
     assert members[str(prompt.id)]["metadata"] == {"source_id": 7}
     assert members[str(configuration.id)]["seed_type"] == "simulated_conversation"
-    assert members[str(configuration.id)]["num_turns"] == 2
-    assert members[str(configuration.id)]["adversarial_chat_system_prompt"]["value"] == "adversarial"
+    assert members[str(configuration.id)]["value"] == configuration.value
+    stored_configuration = json.loads(members[str(configuration.id)]["value"])
+    assert stored_configuration["num_turns"] == 2
+    assert stored_configuration["adversarial_chat_system_prompt"]["value"] == "adversarial"
     assert (body["preview"], body["objective_count"], body["has_unlabeled_harm"]) == ("objective", 1, True)
     assert unnamed.status_code == 404
+
+
+async def test_seed_example_routes_preserve_legacy_configuration_without_reconstruction_async(
+    client: AsyncClient, sqlite_instance: MemoryInterface, tmp_path: Path
+) -> None:
+    group = uuid4()
+    prompt = _prompt("related prompt", prompt_group_id=group)
+    configuration = SeedEntry(entry=_conversation(prompt_group_id=group))
+    configuration.value = json.dumps(
+        {"num_turns": 2, "adversarial_chat_system_prompt_path": str(tmp_path / "missing.yaml")}
+    )
+    configuration.value_sha256 = to_sha256(configuration.value)
+    expected_id, expected_value, expected_hash = configuration.id, configuration.value, configuration.value_sha256
+    await _store(sqlite_instance, prompt)
+    async with await sqlite_instance.get_session_async() as session:
+        session.add(configuration)
+        await session.commit()
+
+    with (
+        patch.object(SeedEntry, "get_seed", side_effect=AssertionError("seed reconstruction")),
+        patch.object(Path, "read_text", side_effect=AssertionError("file read")),
+        patch.object(SeedPrompt, "render_template_value_silent", side_effect=AssertionError("template rendering")),
+    ):
+        listed = await client.get(URL, params={"selection_key": NAMED, "seed_type": "simulated_conversation"})
+        detail = await client.get(f"{URL}/{group}", params={"selection_key": NAMED})
+
+    assert listed.status_code == detail.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["piece_count"] == 2
+    assert listed.json()["items"][0]["seed_types"] == ["prompt", "simulated_conversation"]
+    members = {member["id"]: member for member in detail.json()["members"]}
+    assert set(members) == {str(prompt.id), str(expected_id)}
+    assert members[str(expected_id)]["value"] == expected_value
+    assert members[str(expected_id)]["value_sha256"] == expected_hash

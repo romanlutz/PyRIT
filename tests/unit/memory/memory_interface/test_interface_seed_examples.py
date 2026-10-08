@@ -2,16 +2,22 @@
 # Licensed under the MIT license.
 
 import json
-import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.dialects import mssql, sqlite
+from sqlalchemy.sql import Select
 
+from pyrit.common.pagination import DecodedKeysetCursor
+from pyrit.common.utils import to_sha256
 from pyrit.memory import MemoryInterface
 from pyrit.memory.memory_models import SeedEntry
-from pyrit.models import Seed, SeedObjective, SeedPrompt, SeedSimulatedConversation
+from pyrit.models import Seed, SeedObjective, SeedPrompt, SeedRecord, SeedSimulatedConversation
 
 DATASET = "browse"
 T0 = datetime(2024, 1, 1, tzinfo=UTC)
@@ -33,7 +39,8 @@ async def _ids(memory: MemoryInterface, dataset_name: str | None = DATASET, **fi
 
 
 async def test_get_seed_examples_orders_by_first_date_then_id_and_seeks(sqlite_instance: MemoryInterface):
-    tied_low, tied_high = sorted([uuid4(), uuid4()])
+    tied_low = UUID("00000000-0000-0000-0000-000000000001")
+    tied_high = UUID("ffffffff-ffff-ffff-ffff-000000000000")
     newest, oldest = uuid4(), uuid4()
     await _add(
         sqlite_instance,
@@ -54,6 +61,45 @@ async def test_get_seed_examples_orders_by_first_date_then_id_and_seeks(sqlite_i
     assert (after.timestamp, after.identifier) == (T0 + timedelta(1), str(tied_high))
     assert last is None
     assert first_total == second_total == 4
+
+
+async def test_get_seed_examples_uses_textual_uuid_keys_on_both_dialects_async(
+    sqlite_instance: MemoryInterface,
+) -> None:
+    seed = SeedPrompt(value="prompt", dataset_name=DATASET, date_added=T0)
+    await _add(sqlite_instance, seed)
+    statements: list[Select[Any]] = []
+
+    def capture(
+        _connection: Any,
+        statement: Any,
+        _multiparams: Any,
+        _params: Any,
+        _execution_options: Any,
+    ) -> None:
+        if isinstance(statement, Select):
+            statements.append(statement)
+
+    engine = sqlite_instance._get_async_engine().sync_engine
+    event.listen(engine, "before_execute", capture)
+    try:
+        await sqlite_instance.get_seed_examples_async(
+            dataset_name=DATASET,
+            limit=1,
+            after=DecodedKeysetCursor(timestamp=T0, identifier="ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        )
+    finally:
+        event.remove(engine, "before_execute", capture)
+
+    assert len(statements) == 3
+    for dialect in (mssql.dialect(), sqlite.dialect()):
+        page = str(statements[1].compile(dialect=dialect, compile_kwargs={"literal_binds": True})).lower()
+        members = str(statements[2].compile(dialect=dialect, compile_kwargs={"literal_binds": True})).lower()
+        assert "lower(cast(coalesce(" in page
+        assert "as varchar(36)" in page
+        assert "example_id_key < 'ffffffff-ffff-ffff-ffff-ffffffffffff'" in page
+        assert "example_id_key desc" in page
+        assert "order by" in members and "lower(cast(" in members
 
 
 async def test_get_seed_examples_orders_filtered_examples_by_first_date_of_all_members(
@@ -83,7 +129,8 @@ async def test_get_seed_examples_returns_complete_groups_objective_first(sqlite_
 
     assert total == 1
     assert [seed.id for seed in examples[group]] == [objective.id, first.id, second.id]
-    assert isinstance(examples[group][0], SeedObjective)
+    assert isinstance(examples[group][0], SeedRecord)
+    assert examples[group][0].seed_type == "objective"
 
 
 async def test_get_seed_examples_filters_match_across_members(sqlite_instance: MemoryInterface):
@@ -158,7 +205,7 @@ async def test_get_seed_examples_search_ignores_simulated_conversation_json(sqli
     assert set(await _ids(sqlite_instance, seed_types=["simulated_conversation"])) == {standalone.id, group}
 
 
-def _legacy_conversation_entry(*, missing_file: Path, prompt_group_id: UUID) -> SeedEntry:
+def _legacy_conversation_entry(*, prompt_file: Path, prompt_group_id: UUID) -> SeedEntry:
     entry = SeedEntry(
         entry=SeedSimulatedConversation(
             num_turns=2,
@@ -169,39 +216,52 @@ def _legacy_conversation_entry(*, missing_file: Path, prompt_group_id: UUID) -> 
         )
     )
     entry.value = json.dumps(
-        {"num_turns": 2, "sequence": 0, "adversarial_chat_system_prompt_path": str(missing_file)},
+        {"num_turns": 2, "sequence": 0, "adversarial_chat_system_prompt_path": str(prompt_file)},
         sort_keys=True,
         separators=(",", ":"),
     )
+    entry.value_sha256 = to_sha256(entry.value)
     return entry
 
 
-async def test_get_seed_examples_skips_seeds_that_cannot_be_read(
-    sqlite_instance: MemoryInterface, tmp_path: Path, caplog: pytest.LogCaptureFixture
-):
-    mixed, broken = uuid4(), uuid4()
+@pytest.mark.parametrize("file_exists", [True, False])
+async def test_get_seed_examples_preserves_legacy_members_without_loading_files_async(
+    sqlite_instance: MemoryInterface, tmp_path: Path, file_exists: bool
+) -> None:
+    mixed, standalone = uuid4(), uuid4()
+    prompt_file = tmp_path / "legacy.yaml"
+    if file_exists:
+        prompt_file.write_text('value: "{{ 1 + 1 }}"\ndata_type: text', encoding="utf-8")
     prompt = SeedPrompt(value="readable", dataset_name=DATASET, prompt_group_id=mixed)
     await _add(sqlite_instance, prompt)
-    mixed_entry = _legacy_conversation_entry(missing_file=tmp_path / "gone.yaml", prompt_group_id=mixed)
-    broken_entry = _legacy_conversation_entry(missing_file=tmp_path / "gone.yaml", prompt_group_id=broken)
-    skipped_ids = [str(mixed_entry.id), str(broken_entry.id)]
+    mixed_entry = _legacy_conversation_entry(prompt_file=prompt_file, prompt_group_id=mixed)
+    standalone_entry = _legacy_conversation_entry(prompt_file=prompt_file, prompt_group_id=standalone)
+    mixed_id, standalone_id = mixed_entry.id, standalone_entry.id
+    expected = {entry.id: (entry.value, entry.value_sha256) for entry in (mixed_entry, standalone_entry)}
     await _store(sqlite_instance, mixed_entry)
-    await _store(sqlite_instance, broken_entry)
+    await _store(sqlite_instance, standalone_entry)
 
     with (
-        caplog.at_level(logging.WARNING, logger="pyrit.memory.memory_interface"),
-        pytest.warns(DeprecationWarning, match="adversarial_chat_system_prompt_path"),
+        patch.object(SeedEntry, "get_seed", side_effect=AssertionError("seed reconstruction")),
+        patch.object(Path, "read_text", side_effect=AssertionError("file read")),
+        patch.object(SeedPrompt, "render_template_value_silent", side_effect=AssertionError("template rendering")),
     ):
-        examples, total, _ = await sqlite_instance.get_seed_examples_async(dataset_name=DATASET, limit=10)
+        examples, total, _ = await sqlite_instance.get_seed_examples_async(
+            dataset_name=DATASET, limit=10, seed_types=["simulated_conversation"]
+        )
+        detail = await sqlite_instance.get_seed_example_async(dataset_name=DATASET, example_id=mixed)
 
-    assert [seed.id for seed in examples[mixed]] == [prompt.id]
-    assert broken not in examples
+    assert {seed.id for seed in examples[mixed]} == {prompt.id, mixed_id}
+    assert [seed.id for seed in examples[standalone]] == [standalone_id]
+    assert detail == examples[mixed]
     assert total == 2
-    messages = [record.getMessage() for record in caplog.records]
-    assert all(any(seed_id in message for message in messages) for seed_id in skipped_ids)
+    for members in examples.values():
+        for record in members:
+            if record.seed_type == "simulated_conversation":
+                assert (record.value, record.value_sha256) == expected[record.id]
 
 
-async def test_get_seed_examples_returns_domain_simulated_conversation(sqlite_instance: MemoryInterface):
+async def test_get_seed_examples_preserves_simulated_configuration(sqlite_instance: MemoryInterface):
     conversation = SeedSimulatedConversation(
         num_turns=2,
         adversarial_chat_system_prompt=SeedPrompt(value="adversarial", parameters=["objective"]),
@@ -213,8 +273,28 @@ async def test_get_seed_examples_returns_domain_simulated_conversation(sqlite_in
     seeds = await sqlite_instance.get_seed_example_async(dataset_name=DATASET, example_id=conversation.id)
 
     assert len(seeds) == 1
-    assert isinstance(seeds[0], SeedSimulatedConversation)
-    assert seeds[0].adversarial_chat_system_prompt.value == "adversarial"
+    assert isinstance(seeds[0], SeedRecord)
+    assert seeds[0].seed_type == "simulated_conversation"
+    assert seeds[0].value == conversation.value
+    assert seeds[0].value_sha256 == conversation.value_sha256
+
+
+async def test_get_seed_examples_keeps_unparseable_configuration_inspectable_async(
+    sqlite_instance: MemoryInterface, tmp_path: Path
+) -> None:
+    group = uuid4()
+    entry = _legacy_conversation_entry(prompt_file=tmp_path / "missing.yaml", prompt_group_id=group)
+    entry.value = "unparseable stored configuration"
+    expected_value, expected_hash = entry.value, entry.value_sha256
+    await _store(sqlite_instance, entry)
+
+    examples, total, _ = await sqlite_instance.get_seed_examples_async(dataset_name=DATASET, limit=10)
+    detail = await sqlite_instance.get_seed_example_async(dataset_name=DATASET, example_id=group)
+
+    assert total == 1
+    assert detail == examples[group]
+    assert detail[0].value == expected_value
+    assert detail[0].value_sha256 == expected_hash
 
 
 async def test_get_seed_example_returns_empty_outside_its_dataset(sqlite_instance: MemoryInterface):

@@ -4,7 +4,7 @@
 """Azure SQL execution of the seed example read queries."""
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete
@@ -18,7 +18,9 @@ from pyrit.models import SeedObjective, SeedPrompt
 async def test_seed_examples_on_azure_sql(azuresql_instance: AzureSQLMemory):
     test_id = str(uuid4())
     dataset = f"2748-azure-{test_id}"
-    group, newer, older = uuid4(), uuid4(), uuid4()
+    group = UUID("ffffffff-ffff-ffff-ffff-000000000000")
+    older = UUID("00000000-0000-0000-0000-000000000001")
+    newer = uuid4()
     base_time = datetime(2024, 1, 1, tzinfo=UTC)
     seeds = [
         SeedPrompt(value="hello", dataset_name=dataset, prompt_group_id=group, date_added=base_time),
@@ -44,16 +46,19 @@ async def test_seed_examples_on_azure_sql(azuresql_instance: AzureSQLMemory):
         return list(examples)
 
     try:
-        assert await ids() == [newer, *sorted([group, older], reverse=True)]
+        assert await ids() == [newer, group, older]
         assert await ids(harm_categories=["missing", "VIOLENCE"], value_search="HELLO") == [group]
         assert await ids(seed_types=["objective"], data_types=["text"]) == [group]
         for search in ["100%", "a_b", "[ab]", "\\"]:
             assert await ids(value_search=search) == [newer]
         assert await ids(value_search="0_") == []
 
-        first, _, after = await azuresql_instance.get_seed_examples_async(dataset_name=dataset, limit=1)
+        first, _, after = await azuresql_instance.get_seed_examples_async(dataset_name=dataset, limit=2)
         rest, _, last = await azuresql_instance.get_seed_examples_async(dataset_name=dataset, limit=100, after=after)
         assert after is not None
+        assert after.identifier == str(group)
+        assert list(first) == [newer, group]
+        assert list(rest) == [older]
         assert last is None
         assert [*first, *rest] == await ids()
 

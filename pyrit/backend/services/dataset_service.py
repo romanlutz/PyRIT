@@ -8,6 +8,9 @@ Wraps ``SeedDatasetProvider`` discovery and memory to list available datasets.
 """
 
 import logging
+import ntpath
+import posixpath
+import re
 from collections.abc import Sequence
 from functools import lru_cache
 from uuid import UUID
@@ -29,10 +32,8 @@ from pyrit.models import (
     ConversationStats,
     PromptDataType,
     SeedDatasetSummary,
-    SeedObjective,
-    SeedSimulatedConversation,
+    SeedRecord,
     SeedType,
-    SeedUnion,
 )
 
 logger = logging.getLogger(__name__)
@@ -222,36 +223,41 @@ class DatasetService:
         return name
 
     @classmethod
-    def _summarize(cls, *, example_id: UUID, seeds: Sequence[SeedUnion]) -> SeedExampleSummary:
+    def _summarize(cls, *, example_id: UUID, seeds: Sequence[SeedRecord]) -> SeedExampleSummary:
         preview, truncated = cls._preview(seeds)
         return SeedExampleSummary(
             example_id=example_id,
             name=next((seed.name for seed in seeds if seed.name), None),
             preview=preview,
             preview_truncated=truncated,
-            modalities=sorted({seed.data_type for seed in seeds if seed.data_type}),
+            modalities=sorted({seed.data_type for seed in seeds}),
             seed_types=sorted({seed.seed_type for seed in seeds}),
             piece_count=len(seeds),
-            objective_count=sum(isinstance(seed, SeedObjective) for seed in seeds),
+            objective_count=sum(seed.seed_type == "objective" for seed in seeds),
             harm_categories=sorted({category for seed in seeds for category in seed.harm_categories or []}),
             has_unlabeled_harm=any(not seed.harm_categories for seed in seeds),
         )
 
     @staticmethod
-    def _preview(seeds: Sequence[SeedUnion]) -> tuple[str, bool]:
+    def _preview(seeds: Sequence[SeedRecord]) -> tuple[str, bool]:
         """
         Build the list preview from the first text seed, or else from a type label.
 
         A simulated-conversation configuration is not a prompt, so it gets only a label.
-        Media seeds show only a file name, so the preview does not expose paths or URL credentials.
+        Media seeds show only a file name. Standalone paths and URLs stored as text get a label.
 
         Returns:
             tuple[str, bool]: The preview and whether the text was shortened.
         """
-        shown = [seed for seed in seeds if not isinstance(seed, SeedSimulatedConversation)]
+        shown = [seed for seed in seeds if seed.seed_type != "simulated_conversation"]
         seed = next((seed for seed in shown if seed.data_type == "text"), shown[0] if shown else None)
         if seed is None:
             return "[Simulated conversation configuration]", False
+        value = seed.value.lstrip()
+        if seed.data_type == "text" and (
+            ntpath.isabs(value) or posixpath.isabs(value) or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value)
+        ):
+            return "[Text reference]", False
         preview = None
         if seed.data_type == "text" or seed.data_type in MEDIA_PATH_DATA_TYPES:
             preview = format_last_message_preview(value=seed.value, data_type=seed.data_type)
