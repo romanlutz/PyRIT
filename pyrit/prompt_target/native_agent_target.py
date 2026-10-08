@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
     from pydantic import JsonValue
 
+    from pyrit.prompt_target.common.evaluation_feedback import EvaluationFeedbackCapture
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,7 +41,9 @@ class NativeAgentSession(Protocol):
     capabilities: NativeAgentCapabilities
     simulated: bool
 
-    async def send_async(self, *, prompt: str, timeout_seconds: float) -> tuple[NativeAgentEvent, ...]:
+    async def send_async(
+        self, *, prompt: str, timeout_seconds: float, expected_source_cursor: int | None = None
+    ) -> tuple[NativeAgentEvent, ...]:
         """Send one operator instruction and wait for a quiescent native turn."""
         ...
 
@@ -108,7 +112,7 @@ class CopilotSdkAgentSession:
         self._tools: dict[str, NativeToolTrace] = {}
         self._requests: dict[str, NativeToolRequest] = {}
         self._gaps: list[str] = []
-        self._ids: set[str] = set()
+        self._by_id: dict[str, NativeAgentEvent] = {}
         self._idle = False
         self._closed = False
         self._lock = asyncio.Lock()
@@ -119,7 +123,9 @@ class CopilotSdkAgentSession:
             raise ValueError("Native event retention limits must be positive.")
         self._unsubscribe = session.on(self._receive)
 
-    async def send_async(self, *, prompt: str, timeout_seconds: float) -> tuple[NativeAgentEvent, ...]:
+    async def send_async(
+        self, *, prompt: str, timeout_seconds: float, expected_source_cursor: int | None = None
+    ) -> tuple[NativeAgentEvent, ...]:
         """
         Invoke the existing CLI agent and retain its native events, including failed turns.
 
@@ -132,8 +138,14 @@ class CopilotSdkAgentSession:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("The native agent session is closed.")
-            start = len(self._events)
-            self._idle = False
+            with self._event_lock:
+                if expected_source_cursor is not None and (
+                    len(self._events) != expected_source_cursor
+                    or (self._events and not self.evidence().coverage_complete)
+                ):
+                    raise RuntimeError("The native source changed after working-memory input admission.")
+                start = len(self._events)
+                self._idle = False
             async with asyncio.timeout(timeout_seconds):
                 await self._session.send_and_wait(prompt, timeout=timeout_seconds)
             if not self.evidence().idle:
@@ -221,9 +233,13 @@ class CopilotSdkAgentSession:
             event_id, event_type = raw.get("id"), raw.get("type")
             if not isinstance(event_id, str) or not event_id or not isinstance(event_type, str):
                 raise ValueError("Native events require actual IDs and types.")
-            if event_id in self._ids:
-                raise ValueError("Native event ID was repeated.")
-            self._ids.add(event_id)
+            previous = self._by_id.get(event_id)
+            if previous is not None:
+                if json.dumps(previous.payload, sort_keys=True, allow_nan=False) != json.dumps(
+                    raw, sort_keys=True, allow_nan=False
+                ):
+                    raise ValueError("Native event ID replay changed its payload.")
+                return
             retained = NativeAgentEvent(
                 sequence=len(self._events) + 1,
                 event_id=event_id,
@@ -232,6 +248,7 @@ class CopilotSdkAgentSession:
                 payload=json.loads(encoded),
             )
             self._events.append(retained)
+            self._by_id[event_id] = retained
             self._correlate(retained)
         except (ValueError, TypeError, KeyError) as error:
             self._gaps.append(str(error))
@@ -242,6 +259,13 @@ class CopilotSdkAgentSession:
         data = raw.get("data")
         if not isinstance(data, dict):
             raise ValueError("Native event data must be a structured object.")
+        if event.event_type in {
+            "assistant.message",
+            "tool.execution_start",
+            "tool.execution_complete",
+            "session.error",
+        }:
+            self._idle = False
         if event.event_type == "assistant.message":
             requests = data.get("toolRequests", []) or []
             if not isinstance(requests, list):
@@ -310,7 +334,13 @@ class CopilotSdkAgentSession:
 class NativeAgentTarget(PromptTarget):
     """Send prepared prompts to a lease-owned native CLI session, never to a host shell."""
 
-    def __init__(self, *, session: NativeAgentSession, turn_timeout_seconds: float = 60) -> None:
+    def __init__(
+        self,
+        *,
+        session: NativeAgentSession,
+        turn_timeout_seconds: float = 60,
+        evaluation_feedback: EvaluationFeedbackCapture | None = None,
+    ) -> None:
         """
         Configure the public target around an existing, qualified native session.
 
@@ -339,6 +369,9 @@ class NativeAgentTarget(PromptTarget):
         self.session = session
         self._turn_timeout_seconds = turn_timeout_seconds
         self._conversation_id: str | None = None
+        self.evaluation_feedback = evaluation_feedback
+        if evaluation_feedback is not None:
+            evaluation_feedback.bind_native(session=session)
 
     @property
     def conversation_id(self) -> str | None:
@@ -346,14 +379,15 @@ class NativeAgentTarget(PromptTarget):
         return self._conversation_id
 
     def _build_identifier(self) -> ComponentIdentifier:
-        return self._create_identifier(
-            params={
-                "native_session_id": self.session.session_id,
-                "environment_id": self.session.environment_id,
-                "simulated": self.session.simulated,
-                "adapter": "native_agent_session",
-            }
-        )
+        params = {
+            "native_session_id": self.session.session_id,
+            "environment_id": self.session.environment_id,
+            "simulated": self.session.simulated,
+            "adapter": "native_agent_session",
+        }
+        if self.evaluation_feedback is not None:
+            params["feedback_policy_sha256"] = self.evaluation_feedback.policy_sha256
+        return self._create_identifier(params=params)
 
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         request = normalized_conversation[-1]
@@ -362,10 +396,22 @@ class NativeAgentTarget(PromptTarget):
         if self._conversation_id is not None and request.conversation_id != self._conversation_id:
             raise ValueError("A native session cannot be silently reused for another conversation or rerun.")
         self._conversation_id = request.conversation_id
+        expected_source_cursor = (
+            await self.evaluation_feedback.before_send_async(request=request)
+            if self.evaluation_feedback is not None
+            else None
+        )
         async with asyncio.timeout(self._turn_timeout_seconds):
-            events = await self.session.send_async(
-                prompt="\n".join(request.get_values()), timeout_seconds=self._turn_timeout_seconds
-            )
+            if expected_source_cursor is None:
+                events = await self.session.send_async(
+                    prompt="\n".join(request.get_values()), timeout_seconds=self._turn_timeout_seconds
+                )
+            else:
+                events = await self.session.send_async(
+                    prompt="\n".join(request.get_values()),
+                    timeout_seconds=self._turn_timeout_seconds,
+                    expected_source_cursor=expected_source_cursor,
+                )
         responses: list[Message] = []
         for event in events:
             data = event.payload.get("data")
@@ -393,5 +439,9 @@ class NativeAgentTarget(PromptTarget):
                         prompt_metadata={"native_event_id": event.event_id, "native_session_id": event.session_id},
                     ).to_message()
                 )
+        if self.evaluation_feedback is not None:
+            await self.evaluation_feedback.capture_native_async(
+                request=request, responses=responses, evidence=self.session.evidence()
+            )
         # Empty list remains a write-only result, never a manufactured assistant receipt.
         return responses

@@ -209,6 +209,20 @@ provenance and imports original bytes with an installed writer, never remote
 database IDs. A URL or worker runtime declaration does not install private
 platform execution, provisioning or agent controls; uncertain dispatch,
 closure and settlement remain quarantined.
+The separate opt-in `EvaluationLiveFeedback` coordinates **runtime working
+memory**, not API canonical memory. The target retains ordered, source-identified
+observations; the ordinary normalizer writes messages; the required scorer writes
+its own scores and rationales. Only verified shared-owner row readback publishes an
+`EvaluationReadySnapshot`. The attack checks that watermark before generation,
+and the target checks it again before delivery. A source-watermark dispatch guard
+rejects an observation that arrives between those checks. Targets do not grade or
+choose prompts, and the coordinator does not replace normalizer/scorer writes.
+Source-event cursor, readiness generation, job lifecycle cursor, control reservation,
+observed application and physical closure are distinct. An exact final archive
+seals local lineage without reinserting working rows; canonical import is a later,
+separately owned operation. The public CPU-only Inspect example qualifies this
+local ordering with explicit SDK/model fixtures, not live synchronization over the
+unchanged worker-v1 HTTP protocol or universal managed-agent steering.
 An external original Task requires separate, default-off backend admission.
 The web process stores only an opaque actor-bound job, never imports the
 private `TaskOwnedScenario` or connects to its raw worker SQLite. The opt-in

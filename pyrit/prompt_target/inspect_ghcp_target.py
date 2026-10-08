@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pyrit.models import Message, construct_response_from_request
 from pyrit.prompt_target.common.prompt_target import PromptTarget
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from pydantic import JsonValue
 
     from pyrit.models import ComponentIdentifier
+    from pyrit.prompt_target.common.evaluation_feedback import EvaluationFeedbackCapture
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,6 +50,17 @@ class InspectGhcpTransport(Protocol):
         ...
 
 
+@runtime_checkable
+class InspectGhcpGuardedTransport(InspectGhcpTransport, Protocol):
+    """An explicitly installed harness source guard, not provided by ordinary contained transports."""
+
+    async def send_turn_guarded_async(
+        self, *, instruction: str, turn_index: int, expected_source_cursor: int
+    ) -> dict[str, JsonValue]:
+        """Recheck the owning harness's event watermark at dispatch before delivering an input."""
+        ...
+
+
 class InspectGhcpTarget(PromptTarget):
     """Send prepared text turns into one retained Inspect-owned GHCP sandbox session."""
 
@@ -68,13 +80,28 @@ class InspectGhcpTarget(PromptTarget):
         ),
     )
 
-    def __init__(self, *, transport: InspectGhcpTransport, run_id: str, model_name: str) -> None:
-        """Bind a caller-owned sandbox transport without opening a new session."""
+    def __init__(
+        self,
+        *,
+        transport: InspectGhcpTransport,
+        run_id: str,
+        model_name: str,
+        evaluation_feedback: EvaluationFeedbackCapture | None = None,
+    ) -> None:
+        """
+        Bind a caller-owned sandbox transport without opening a new session.
+
+        Raises:
+            ValueError: If opt-in feedback lacks the installed source-watermark guard.
+        """
+        if evaluation_feedback is not None and not isinstance(transport, InspectGhcpGuardedTransport):
+            raise ValueError("Live Inspect feedback requires an installed source-watermark dispatch guard.")
         super().__init__(endpoint="inspect://agent", model_name=model_name)
         self._transport = transport
         self._run_id = run_id
         self._conversation_id: str | None = None
         self._turns: list[InspectGhcpTurn] = []
+        self.evaluation_feedback = evaluation_feedback
 
     @property
     def turns(self) -> tuple[InspectGhcpTurn, ...]:
@@ -82,7 +109,10 @@ class InspectGhcpTarget(PromptTarget):
         return tuple(self._turns)
 
     def _build_identifier(self) -> ComponentIdentifier:
-        return self._create_identifier(params={"adapter": "inspect_ghcp", "run_id": self._run_id})
+        params = {"adapter": "inspect_ghcp", "run_id": self._run_id}
+        if self.evaluation_feedback is not None:
+            params["feedback_policy_sha256"] = self.evaluation_feedback.policy_sha256
+        return self._create_identifier(params=params)
 
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         """
@@ -96,9 +126,19 @@ class InspectGhcpTarget(PromptTarget):
         """
         request = self._validate_history(normalized_conversation=normalized_conversation)
         request_piece = request.get_piece()
-        frame = await self._transport.send_turn_async(
-            instruction=request_piece.converted_value, turn_index=len(self._turns) + 1
-        )
+        if self.evaluation_feedback is not None:
+            expected_cursor = await self.evaluation_feedback.before_send_async(request=request)
+            if not isinstance(self._transport, InspectGhcpGuardedTransport):
+                raise ValueError("The reviewed source dispatch guard is no longer installed.")
+            frame = await self._transport.send_turn_guarded_async(
+                instruction=request_piece.converted_value,
+                turn_index=len(self._turns) + 1,
+                expected_source_cursor=expected_cursor,
+            )
+        else:
+            frame = await self._transport.send_turn_async(
+                instruction=request_piece.converted_value, turn_index=len(self._turns) + 1
+            )
         turn_index = len(self._turns) + 1
         session_id = frame.get("session_id")
         identity = frame.get("identity")
@@ -127,19 +167,21 @@ class InspectGhcpTarget(PromptTarget):
             response_text_pieces=[answer],
             prompt_metadata={"inspect_ghcp_session_id": session_id, "inspect_ghcp_turn": turn_index},
         )
-        self._turns.append(
-            InspectGhcpTurn(
-                turn_index=turn_index,
-                session_id=session_id,
-                identity=identity,
-                instruction=request_piece.converted_value,
-                assistant_text=answer,
-                request_piece_id=request_piece.id,
-                response_piece_id=response.get_piece().id,
-                events=tuple(event for event in events if isinstance(event, dict)),
-                model_exchanges=tuple(exchange for exchange in exchanges if isinstance(exchange, dict)),
-            )
+        turn = InspectGhcpTurn(
+            turn_index=turn_index,
+            session_id=session_id,
+            identity=identity,
+            instruction=request_piece.converted_value,
+            assistant_text=answer,
+            request_piece_id=request_piece.id,
+            response_piece_id=response.get_piece().id,
+            events=tuple(event for event in events if isinstance(event, dict)),
+            model_exchanges=tuple(exchange for exchange in exchanges if isinstance(exchange, dict)),
         )
+        if self.evaluation_feedback is not None:
+            await self.evaluation_feedback.capture_inspect_async(request=request, response=response, turn=turn)
+            turn = replace(turn, response_piece_id=response.get_piece().id)
+        self._turns.append(turn)
         return [response]
 
     def _validate_history(self, *, normalized_conversation: list[Message]) -> Message:

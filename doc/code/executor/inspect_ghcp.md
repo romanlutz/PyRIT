@@ -135,6 +135,71 @@ neither benchmark verdicts nor typed progress achievements; the
 TaskOwned AttackResult links only the one original-report UND Score.
 No ManualScorer stop sentinel was observed in the accepted one-click run.
 
+## Local ordered working-memory feedback
+
+`EvaluationLiveFeedback` is a separate, constructor-injected, default-off runtime
+seam. The controlled `examples.inspect_live_feedback` Task runs genuine Inspect
+setup/solver/original-scoring/cleanup around the real PyRIT `RedTeamingAttack`,
+`PromptNormalizer`, `NativeAgentTarget`, `IncludesScorer` and SQLite. Its SDK-shaped
+events and adversarial/assistant replies are **explicit scripted fixtures**. Its
+counter is an actual harmless in-process Python action, not a native CLI tool,
+external model, sandbox or provider proof. Run a fresh local custody directory:
+
+```powershell
+uv run --no-sync --offline python -m examples.inspect_live_feedback --root C:\path\to\fresh-live-run
+```
+
+The runtime owns the working memory already shared by attack, normalizer, target
+and scorer. Ordered source event IDs, actual source message/tool IDs, conversation
+IDs and stable source-to-piece mappings are retained in a separate process-owned
+SQLite custody journal. Raw typed-event coverage is not wire/token coverage.
+`raw_only_event_ids` explicitly separates nonprojected events such as usage, blank
+tool-request framing and idle boundaries from normalized message/tool rows.
+Exact source replay is idempotent; changed replay, gaps, incomplete projection,
+foreign owners or stale content stop the next input. Restarting an unsealed journal
+quarantines it for explicit reconciliation, not automatic source replay.
+
+The normalizer and scorer remain the actual writers. Readback requires the exact
+committed response plus the installed COMPLETE scorer verdict, matching expectation
+and nonblank persisted rationale. An optional independent committed-row witness runs
+**before** readiness publication. The snapshot is checked before next adversarial
+generation and again before prepared transport delivery; the native adapter checks
+the source cursor at dispatch. The text-only `InspectGhcpTarget` seam additionally
+requires an owning harness's live capture probe and `InspectGhcpGuardedTransport`.
+Ordinary frame-only transports cannot claim live readiness. Actual user/assistant
+event IDs and a root idle boundary are required; tool frames are unsupported on this
+narrow Inspect seam. No private relay metadata/body-logging policy is changed.
+
+Opt-in operator stepping uses `EvaluationFeedbackControlRequest`, which names
+the session and exact ready snapshot in addition to an existing
+`EvaluationControlRequest` boundary. `reserve_control_async` durably reserves one
+matching next original input. Its `EvaluationFeedbackControlReceipt` proves
+**reservation only**, not delivery or agent application. Exact retries return the
+same reservation; changed IDs/payloads, stale boundaries, undeclared actions and
+source turn-limit exhaustion refuse. Premature polling does not poison a pending
+valid write. Actual persistence, source or witness failures revoke continuation.
+STOP and resource closure remain lifecycle responsibilities, not memory readiness.
+There is no new live-observation/control HTTP route or GUI exposure in this slice.
+
+The two-turn working criterion produces separate false/true feedback Scores with
+rationales. The controlled Task's original scorer independently produces `1.0`.
+Final archive reconciliation retains exact bytes and seals source lineage without
+inserting a second copy of the eight working pieces or two feedback Scores.
+`HarmlessLiveFeedbackCase.import_final_to_canonical_async` requires the actual
+sealed receipt/retained bytes and a distinct physical memory owner. It calls the
+existing strict offline importer, not the Task or scorer again, and imports only
+the original Inspect Sample projection, not worker rows. Its original Score is
+COMPLETE and linked AttackResult is UNDETERMINED because no success threshold is
+declared. SQLite's default singleton is not a second database owner; use the
+separately owned API process or explicit isolated test memory.
+
+This local feedback contract has its **own** schema fingerprint. Worker-v1,
+unchanged Mode 1 admission and the preserved remote final-archive proof are
+unchanged. The latter is not evidence of live cross-process memory synchronization.
+The local qualification does not enable arbitrary Mode 2/3 tasks, managed-agent
+parity, private platform execution, new network/model authority, large-artifact
+transfer or future biology/GPU workloads.
+
 ## Mode 1: import an original Inspect run without PyRIT steering
 
 `InspectOriginalEvalImporter` reads a **preexisting `.eval`** directly, without

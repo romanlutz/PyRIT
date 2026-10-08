@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
 
+    from pyrit.executor.attack.core.attack_feedback import AttackFeedbackObserver
     from pyrit.prompt_target.common.prompt_target import PromptTarget
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         max_turns: int = 10,
         score_last_turn_only: bool = False,
         terminal_scoring: RedTeamingTerminalScoring = RedTeamingTerminalScoring.INTERNAL,
+        feedback_observer: AttackFeedbackObserver | None = None,
     ) -> None:
         """
         Initialize the red teaming attack strategy.
@@ -156,6 +158,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             terminal_scoring (RedTeamingTerminalScoring): INTERNAL preserves the usual
                 PyRIT objective scorer; EXTERNAL_FINAL returns ungraded evidence to a
                 task-owned scorer. Defaults to INTERNAL.
+            feedback_observer (AttackFeedbackObserver | None): Optional runtime-owned ordered
+                memory/scorer readback barrier. Defaults to None.
 
         Raises:
             ValueError: If the internal objective scorer is missing or an external-final
@@ -243,6 +247,21 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
         self._max_turns = max_turns
         self._score_last_turn_only = score_last_turn_only
+        self._feedback_observer = feedback_observer
+        if feedback_observer is not None:
+            if (
+                self._objective_scorer is None
+                or score_last_turn_only
+                or terminal_scoring is not RedTeamingTerminalScoring.INTERNAL
+                or not self._use_score_as_feedback
+            ):
+                raise ValueError("Live feedback requires a persisted objective scorer and rationale on every turn.")
+            feedback_observer.validate_setup(
+                memory=self._memory,
+                normalizer_memory=self._prompt_normalizer.memory,
+                objective_target=objective_target,
+                objective_scorer=self._objective_scorer,
+            )
 
     def external_final_scoring_session(self) -> RedTeamingExternalFinalSession:
         """
@@ -294,6 +313,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
     def _build_identifier(self) -> ComponentIdentifier:
         if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
             return self._create_identifier(params={"terminal_scoring": self._terminal_scoring.value})
+        if self._feedback_observer is not None:
+            return self._create_identifier(params={"feedback_policy_sha256": self._feedback_observer.policy_sha256})
         return self._create_identifier()
 
     def _validate_scoring_expectation(self, *, context: MultiTurnAttackContext[Any]) -> None:
@@ -411,6 +432,21 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
 
     async def _perform_async(self, *, context: MultiTurnAttackContext[Any]) -> AttackResult:
         """
+        Execute the ordinary turn loop, revoking opt-in continuation on errors or cancellation.
+
+        Returns:
+            AttackResult: The ordinary attack result, without replacing source or scorer outcomes.
+        """
+        if self._feedback_observer is None:
+            return await self._perform_turns_async(context=context)
+        try:
+            return await self._perform_turns_async(context=context)
+        except BaseException:
+            await self._feedback_observer.execution_failed_async()
+            raise
+
+    async def _perform_turns_async(self, *, context: MultiTurnAttackContext[Any]) -> AttackResult:
+        """
         Execute the red teaming attack by iteratively generating prompts,
         sending them to the target, and scoring the responses in a loop
         until the objective is achieved or the maximum turns are reached.
@@ -447,6 +483,12 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
         while context.executed_turns < self._max_turns and (self._score_last_turn_only or not achieved_objective):
             logger.info(f"Executing turn {context.executed_turns + 1}/{self._max_turns}")
 
+            if self._feedback_observer is not None:
+                await self._feedback_observer.before_turn_async(
+                    conversation_id=context.session.conversation_id,
+                    turn_index=context.executed_turns + 1,
+                    expectation=context.expectation,
+                )
             # Determine what to send next
             try:
                 message_to_send = await self._generate_next_prompt_async(
@@ -488,6 +530,8 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             context.last_response = await self._send_prompt_to_objective_target_async(
                 context=context, message=message_to_send
             )
+            if self._feedback_observer is not None:
+                await self._feedback_observer.response_committed_async(response=context.last_response)
 
             if self._terminal_scoring is RedTeamingTerminalScoring.EXTERNAL_FINAL:
                 if context.last_response.is_error():
@@ -726,6 +770,10 @@ class RedTeamingAttack(MultiTurnAttackStrategy[MultiTurnAttackContext[Any], Atta
             )
 
         objective_scores = scoring_results["objective_scores"]
+        if self._feedback_observer is not None:
+            await self._feedback_observer.feedback_committed_async(
+                response=context.last_response, scores=objective_scores, expectation=context.expectation
+            )
         return objective_scores[0] if objective_scores else None
 
 

@@ -600,17 +600,9 @@ class LocalEvaluationJobLedger:
 
     @staticmethod
     def _lock_file(*, owner: BinaryIO, release: bool) -> None:
-        import sys
+        from pyrit.common.local_file_lock import lock_local_file
 
-        owner.seek(0)
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK if release else msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(owner.fileno(), fcntl.LOCK_UN if release else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_local_file(owner=owner, release=release)
 
     @staticmethod
     def _authorize(*, row: sqlite3.Row, actor_id: str) -> None:
