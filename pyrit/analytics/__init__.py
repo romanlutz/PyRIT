@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from pyrit.common.lazy_imports import get_lazy_dir, resolve_lazy_export
 
 if TYPE_CHECKING:
+    from pyrit.analytics.attack_result_analytics import AttackResultAnalytics
     from pyrit.analytics.conversation_analytics import ConversationAnalytics
     from pyrit.analytics.result_analysis import (
         AttackStats,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "analyze_results": "pyrit.analytics.result_analysis",
     "ApproximateTextMatching": "pyrit.analytics.text_matching",
+    "AttackResultAnalytics": "pyrit.analytics.attack_result_analytics",
     "AttackStats": "pyrit.analytics.result_analysis",
     "ConversationAnalytics": "pyrit.analytics.conversation_analytics",
     "ExactTextMatching": "pyrit.analytics.text_matching",
