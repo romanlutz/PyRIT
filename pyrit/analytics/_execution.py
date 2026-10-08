@@ -18,7 +18,7 @@ from pyrit.exceptions.analytics_exception import AnalyticsBusyException, Analyti
 from pyrit.memory.query_control import QueryControl
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -141,19 +141,21 @@ class AnalyticsExecution:
             finished=self._loop.create_future(),
         )
         lane.running.add(work)
-        operation = self._loop.create_task(self._execute_async(task=task, control=work.control))
+        try:
+            operation = self._create_task(self._execute_async(task=task, control=work.control))
+        except BaseException:
+            self._finish(lane=lane, work=work)
+            raise
         work.task = operation
         operation.add_done_callback(lambda completed: self._complete(lane=lane, work=work, task=completed))
         try:
             done, _ = await asyncio.wait({operation}, timeout=work.control.remaining)
             if not done:
-                work.abandoned = True
-                work.control.cancel()
+                self._abandon(work=work, task=operation)
                 raise AnalyticsTimeoutException
             return operation.result()
         except asyncio.CancelledError:
-            work.abandoned = True
-            work.control.cancel()
+            self._abandon(work=work, task=operation)
             raise
 
     async def close_async(self) -> None:
@@ -164,6 +166,8 @@ class AnalyticsExecution:
         returning early would allow a replacement controller to overlap database
         operations still cleaning up. Cancelling this await, even repeatedly, is
         propagated only after draining. The memory backend itself is not disposed.
+        If scheduling the drain fails, admission remains closed and a later
+        ``close_async`` call can retry the drain.
         """
         self._check_loop()
         if self._close_task is None:
@@ -175,7 +179,7 @@ class AnalyticsExecution:
                         waiter.ready.set_exception(AnalyticsBusyException())
                 for work in lane.running:
                     work.control.cancel()
-            self._close_task = self._loop.create_task(self._drain_async())
+            self._close_task = self._create_task(self._drain_async())
         cancellation: asyncio.CancelledError | None = None
         while not self._close_task.done():
             try:
@@ -190,6 +194,13 @@ class AnalyticsExecution:
         if asyncio.get_running_loop() is not self._loop:
             raise RuntimeError("Analytics must be used and closed on its owning event loop.")
 
+    def _create_task(self, coroutine: Coroutine[object, object, T]) -> asyncio.Task[T]:
+        try:
+            return self._loop.create_task(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
+
     async def _admit_async(self, lane: _Lane) -> None:
         if self._closing:
             raise AnalyticsBusyException
@@ -202,7 +213,8 @@ class AnalyticsExecution:
         lane.queued.append(waiter)
         try:
             try:
-                await asyncio.wait_for(waiter.ready, timeout=self._queue_timeout)
+                async with asyncio.timeout(self._queue_timeout):
+                    await waiter.ready
             except TimeoutError as error:
                 raise AnalyticsBusyException from error
             if self._closing or monotonic() >= waiter.deadline:
@@ -229,13 +241,23 @@ class AnalyticsExecution:
 
     def _complete(self, *, lane: _Lane, work: _Operation, task: asyncio.Task[T]) -> None:
         if not task.cancelled():
-            error = task.exception()
-            if work.abandoned and error is not None and not isinstance(error, AnalyticsTimeoutException):
-                logger.error("Analytics operation failed after its caller left.", exc_info=error)
+            task.exception()
+        self._finish(lane=lane, work=work)
+        if work.abandoned:
+            self._log_abandoned_error(task)
+
+    def _finish(self, *, lane: _Lane, work: _Operation) -> None:
         lane.running.remove(work)
         work.task = None
         self._release(lane)
         work.finished.set_result(None)
+
+    def _abandon(self, *, work: _Operation, task: asyncio.Task[T]) -> None:
+        work.abandoned = True
+        work.control.cancel()
+        # Completion can precede cancellation delivery, after its callback consumed the exception.
+        if work.finished.done():
+            self._log_abandoned_error(task)
 
     async def _drain_async(self) -> None:
         await gather_with_cleanup_async(work.finished for lane in self._lanes.values() for work in lane.running)
@@ -247,3 +269,10 @@ class AnalyticsExecution:
         result = await task(control)
         control.check()
         return result
+
+    @staticmethod
+    def _log_abandoned_error(task: asyncio.Task[T]) -> None:
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None and not isinstance(error, AnalyticsTimeoutException):
+                logger.error("Analytics operation failed after its caller left.", exc_info=error)

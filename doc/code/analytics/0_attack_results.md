@@ -177,12 +177,20 @@ raises `AnalyticsTimeoutException`. Native async readers own the `QueryControl`
 database deadlines, connection acquisition, interruption, and session restoration.
 The SDK adds no second SQL timeout mechanism, sync DB facade, or event-loop thread.
 
+Cancelling a queued call removes it without starting database work, including
+cancellation racing with an admission grant.
+
 Cancelling a caller or reaching its response deadline signals cooperative
 cancellation. It does **not** release a still-running query's slot. Capacity
 remains occupied until the operation and its session cleanup actually finish.
 Closing rejects queued/new calls, signals active work, and waits for that cleanup,
 even when it outlasts the response deadline. Cancelling `close_async` is propagated
 only after draining; repeated cancellation cannot open an overlapping controller.
+
+If the event loop cannot schedule an operation, the scheduling error propagates
+and its unused capacity is released. If scheduling shutdown fails, admission
+stays closed and `close_async()` can be retried. Unexpected operation failures
+after a caller leaves are logged, including failures racing with cancellation.
 
 Closing one bound facade closes the shared controller for every facade attached
 to it. Those facades are terminal. Construct a new SDK owner only after closing

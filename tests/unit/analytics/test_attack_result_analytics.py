@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from pyrit.analytics import AttackResultAnalytics
+from pyrit.analytics import AttackResultAnalytics, compute_scenario_statistics
 from pyrit.common.task_utils import gather_with_cleanup_async
 from pyrit.exceptions.analytics_exception import AnalyticsBusyException, AnalyticsDataException
 from pyrit.memory import CentralMemory, MemoryInterface, SQLiteMemory
@@ -28,9 +28,12 @@ from pyrit.models import (
     AttackAnalyticsValue,
     AttackIdentifier,
     AttackOutcome,
+    AttackResultMetadata,
+    AttackResultRole,
     TargetIdentifier,
 )
 from unit.memory.test_attack_analytics import make_result, predicate
+from unit.mocks import make_scenario_result
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -131,6 +134,35 @@ async def test_overall_rate_is_not_an_average_of_groups(
     assert report.summary.success_rate == 0.25
     assert {group.statistics.success_rate for group in report.groups} == {0.0, 1.0}
     assert len(report.results.items) == 4
+
+
+async def test_retry_results_keep_raw_asr_distinct_from_scenario_unit_success(
+    analytics: AttackResultAnalytics, sqlite_instance: SQLiteMemory
+) -> None:
+    results = [make_result(outcome=AttackOutcome.FAILURE), make_result(index=2)]
+    for result in results:
+        result.objective = "One objective, retried"
+    scenario = make_scenario_result(attack_results={"attack": results})
+    statistics = compute_scenario_statistics(scenario)
+    assert statistics.overall.completed == statistics.overall.succeeded == 1
+    assert statistics.overall.success_percentage == 100
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+    report = await analytics.query_async()
+    assert report.summary.total_results == report.summary.total_decided == 2
+    assert report.summary.success_rate == 0.5
+    assert {row.attack_result_id for row in report.results.items} == {result.attack_result_id for result in results}
+
+
+async def test_result_roles_do_not_silently_remove_saved_ids(
+    analytics: AttackResultAnalytics, sqlite_instance: SQLiteMemory
+) -> None:
+    results = [make_result(index=index) for index, _ in enumerate(AttackResultRole, 1)]
+    for result, role in zip(results, AttackResultRole, strict=True):
+        result.attribution_data = AttackResultMetadata(result_role=role).to_metadata()
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+    report = await analytics.query_async()
+    assert report.summary.total_results == len(AttackResultRole)
+    assert {row.attack_result_id for row in report.results.items} == {result.attack_result_id for result in results}
 
 
 async def test_drilldown_appends_to_existing_any_and_response_all_predicates(
