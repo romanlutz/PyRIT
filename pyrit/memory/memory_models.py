@@ -1508,7 +1508,6 @@ class SeedEntry(Base):
     added_by = mapped_column(String, nullable=False)
     prompt_metadata: Mapped[dict[str, str | int] | None] = mapped_column(JSON, nullable=True)
     parameters: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    is_jinja_template: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     prompt_group_id: Mapped[uuid.UUID | None] = mapped_column(CustomUUID, nullable=True)
     sequence: Mapped[int | None] = mapped_column(INTEGER, nullable=True)
     role: Mapped[ChatMessageRole | None] = mapped_column(String, nullable=True)
@@ -1547,7 +1546,6 @@ class SeedEntry(Base):
         self.date_added = entry.date_added
         self.added_by = entry.added_by
         self.prompt_metadata = self._pack_seed_metadata(entry)
-        self.is_jinja_template = entry.is_jinja_template
         self.prompt_group_id = entry.prompt_group_id
         self.seed_type = seed_type
         self.origin = entry.origin.value
@@ -1646,12 +1644,12 @@ class SeedEntry(Base):
             decoded = None
         return cleaned, decoded
 
-    def get_seed(self) -> Seed:
+    def get_seed(self) -> SeedPrompt | SeedObjective | SeedSimulatedConversation:
         """
         Convert this database entry back into a Seed object.
 
         Returns:
-            Seed: The reconstructed seed object (SeedPrompt, SeedObjective, or SeedSimulatedConversation)
+            SeedPrompt | SeedObjective | SeedSimulatedConversation: The reconstructed seed object.
 
         Raises:
             ValueError: If persisted conditions are invalid or attached to a non-objective seed,
@@ -1661,7 +1659,6 @@ class SeedEntry(Base):
         if self.seed_type != "objective" and self.conditions not in (None, []):
             raise ValueError("Only objective seeds can have persisted conditions.")
         cleaned_metadata, decoded_schema = self._unpack_seed_metadata(self.prompt_metadata)
-        domain_template_flag = self._domain_template_flag()
         if self.seed_type == "objective":
             return SeedObjective(
                 id=self.id,
@@ -1679,7 +1676,6 @@ class SeedEntry(Base):
                 added_by=self.added_by,
                 metadata=cleaned_metadata,
                 prompt_group_id=self.prompt_group_id,
-                is_jinja_template=domain_template_flag,
                 conditions=self.conditions if self.conditions is not None else (),
             )
         if self.seed_type == "simulated_conversation":
@@ -1717,7 +1713,6 @@ class SeedEntry(Base):
                     added_by=self.added_by,
                     metadata=cleaned_metadata,
                     prompt_group_id=self.prompt_group_id,
-                    is_jinja_template=domain_template_flag,
                     num_turns=config.get("num_turns", 3),
                     sequence=config.get("sequence", 0),
                     pyrit_version=config.get("pyrit_version"),
@@ -1749,20 +1744,10 @@ class SeedEntry(Base):
             metadata=cleaned_metadata,
             response_json_schema=decoded_schema,
             parameters=self.parameters,
-            is_jinja_template=domain_template_flag,
             prompt_group_id=self.prompt_group_id,
             sequence=self.sequence or 0,
             role=self.role,
         )
-
-    def _domain_template_flag(self) -> bool:
-        """
-        Normalize an unknown historical template flag to the domain default.
-
-        Returns:
-            bool: The persisted flag, or the domain's false default for historical NULL values.
-        """
-        return self.is_jinja_template if self.is_jinja_template is not None else False
 
 
 class AttackResultEntry(Base):

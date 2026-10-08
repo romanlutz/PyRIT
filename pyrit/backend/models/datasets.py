@@ -6,16 +6,15 @@ Dataset models for the PyRIT API.
 
 Datasets are seed prompt/objective collections provided by
 ``SeedDatasetProvider`` subclasses. These models describe the wire format for
-listing available datasets.
+listing available datasets and browsing their stored seed examples.
 """
 
-from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 from pyrit.backend.models.common import PaginationInfo
+from pyrit.models import PromptDataType, SeedType, SeedUnion
 
 
 class DatasetInfo(BaseModel):
@@ -49,68 +48,30 @@ class DatasetListResponse(BaseModel):
     items: list[DatasetInfo] = Field(..., description="List of available datasets")
 
 
-class SeedExampleMemberView(BaseModel):
-    """Persisted member of a logical seed example."""
-
-    id: UUID
-    prompt_group_id: UUID | None = None
-    seed_type: str
-    data_type: str
-    value: str
-    value_sha256: str | None = None
-    role: str | None = None
-    sequence: int | None = None
-    name: str | None = None
-    dataset_name: str | None = None
-    harm_categories: list[str] | None = None
-    description: str | None = None
-    source: str | None = None
-    authors: list[str] | None = None
-    groups: list[str] | None = None
-    date_added: datetime
-    added_by: str
-    metadata: dict[str, Any] | None = None
-    parameters: list[str] | None = None
-    is_jinja_template: bool | None = None
-
-
 class SeedExampleSummary(BaseModel):
-    """List representation of one complete logical seed example."""
+    """One logical seed example: the seeds that share a group ID, or one seed without a group."""
 
-    example_id: UUID
-    dataset_name: str | None = None
-    name: str | None = None
-    preview: str
-    preview_truncated: bool
-    is_template: bool | None = None
-    parameters: list[str] | None = None
-    seed_ids: list[UUID]
-    modalities: list[str]
-    seed_types: list[str]
+    example_id: UUID = Field(..., description="The prompt_group_id, or the seed ID of a seed without a group")
+    name: str | None = Field(None, description="The first member name, if any")
+    preview: str = Field(..., description="Text preview of at most 100 characters, or a type label")
+    preview_truncated: bool = Field(..., description="Whether the preview text was shortened")
+    modalities: list[PromptDataType]
+    seed_types: list[SeedType]
     piece_count: int
     objective_count: int
     harm_categories: list[str]
-    has_unlabeled_harm: bool
+    has_unlabeled_harm: bool = Field(..., description="Whether any member has no harm category")
 
 
 class SeedExampleListResponse(BaseModel):
-    """Paginated logical seed examples."""
+    """One page of logical seed examples."""
 
     items: list[SeedExampleSummary]
     pagination: PaginationInfo
-    total: int
+    total: int = Field(..., description="Number of logical examples that match the filters")
 
 
-class SeedExampleDetailResponse(BaseModel):
-    """Complete persisted logical seed example."""
+class SeedExampleDetailResponse(SeedExampleSummary):
+    """One logical seed example with all of its stored seeds."""
 
-    example_id: UUID
-    dataset_name: str | None = None
-    seed_ids: list[UUID]
-    piece_count: int
-    objective_count: int
-    modalities: list[str]
-    seed_types: list[str]
-    harm_categories: list[str]
-    has_unlabeled_harm: bool
-    members: list[SeedExampleMemberView]
+    members: list[SeedUnion] = Field(..., description="Stored seeds, objectives first, then by sequence")

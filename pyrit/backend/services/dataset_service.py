@@ -2,41 +2,40 @@
 # Licensed under the MIT license.
 
 """
-Dataset service for listing seed datasets.
+Dataset service for listing seed datasets and browsing their stored seed examples.
 
 Wraps ``SeedDatasetProvider`` discovery and memory to list available datasets.
 """
 
 import logging
-import ntpath
-import posixpath
 from collections.abc import Sequence
 from functools import lru_cache
-from urllib.parse import urlparse
 from uuid import UUID
 
+from pyrit.backend.mappers import format_last_message_preview
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.datasets import (
     DatasetInfo,
     DatasetListResponse,
     SeedExampleDetailResponse,
     SeedExampleListResponse,
-    SeedExampleMemberView,
     SeedExampleSummary,
 )
+from pyrit.common.pagination import decode_keyset_cursor, encode_keyset_cursor, fingerprint_filters
 from pyrit.datasets import SeedDatasetProvider
-from pyrit.memory import CentralMemory, SeedExampleDatasetScope
-from pyrit.models import SeedDatasetSummary
+from pyrit.memory import CentralMemory
+from pyrit.models import (
+    MEDIA_PATH_DATA_TYPES,
+    ConversationStats,
+    PromptDataType,
+    SeedDatasetSummary,
+    SeedObjective,
+    SeedSimulatedConversation,
+    SeedType,
+    SeedUnion,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class DatasetNotFoundError(ValueError):
-    """Raised when a syntactically valid named selection is not loaded in Memory."""
-
-
-class InvalidDatasetSelectionError(ValueError):
-    """Raised when a dataset selection key has an invalid format."""
 
 
 class DatasetService:
@@ -118,178 +117,146 @@ class DatasetService:
         limit: int = 20,
         cursor: str | None = None,
         search: str | None = None,
-        data_types: Sequence[str] | None = None,
+        data_types: Sequence[PromptDataType] | None = None,
         harm_categories: Sequence[str] | None = None,
-        seed_types: Sequence[str] | None = None,
+        seed_types: Sequence[SeedType] | None = None,
     ) -> SeedExampleListResponse:
         """
-        List logical seed examples using Memory's database-backed page query.
+        List one page of the stored logical seed examples of a dataset.
+
+        The cursor is bound to the dataset and the filters. A cursor that is not valid for the
+        request causes an error. It does not restart at the first page.
+
+        Args:
+            selection_key (str): The ``selection_key`` of a dataset from ``list_datasets_async``.
+            limit (int): The maximum number of examples to return.
+            cursor (str | None): The ``next_cursor`` of the previous page.
+            search (str | None): Literal text that the value of a text prompt or objective must contain,
+                ignoring case. Simulated-conversation configurations are not searched.
+            data_types (Sequence[PromptDataType] | None): Match examples with a member of any of these data types.
+            harm_categories (Sequence[str] | None): Match examples with a member in any of these harm categories.
+            seed_types (Sequence[SeedType] | None): Match examples with a member of any of these seed types.
 
         Returns:
-            SeedExampleListResponse: The selected logical examples and pagination metadata.
+            SeedExampleListResponse: The page, its pagination data, and the number of matching examples.
+
+        Raises:
+            ValueError: If the selection key or the cursor is not valid.
         """
-        scope = await self._resolve_browsing_selection_async(selection_key=selection_key)
-        page = self._memory.get_seed_example_page(
-            dataset_scope=scope,
+        dataset_name = self._parse_selection_key(selection_key)
+        fingerprint = fingerprint_filters(
+            filters={
+                "selection_key": selection_key,
+                "data_types": data_types or None,
+                "harm_categories": [category.lower() for category in harm_categories] if harm_categories else None,
+                "seed_types": seed_types or None,
+                "search": search or None,
+            }
+        )
+        after = decode_keyset_cursor(cursor=cursor, fingerprint=fingerprint)
+        if cursor and after is None:
+            raise ValueError("The cursor is not valid for this dataset and these filters")
+
+        examples, total, next_after = await self._memory.get_seed_examples_async(
+            dataset_name=dataset_name,
             limit=limit,
-            cursor=cursor,
+            after=after,
             data_types=data_types,
             harm_categories=harm_categories,
             seed_types=seed_types,
             value_search=search,
         )
-        items = [self._summary(item) for item in page.items]
+        next_cursor = (
+            encode_keyset_cursor(
+                timestamp=next_after.timestamp, identifier=next_after.identifier, fingerprint=fingerprint
+            )
+            if next_after
+            else None
+        )
         return SeedExampleListResponse(
-            items=items,
+            items=[self._summarize(example_id=example_id, seeds=seeds) for example_id, seeds in examples.items()],
             pagination=PaginationInfo(
-                limit=limit,
-                has_more=page.next_cursor is not None,
-                next_cursor=page.next_cursor,
-                prev_cursor=cursor,
+                limit=limit, has_more=next_after is not None, next_cursor=next_cursor, prev_cursor=cursor
             ),
-            total=page.total,
+            total=total,
         )
 
-    async def get_seed_example_async(self, *, selection_key: str, example_id: str) -> SeedExampleDetailResponse:
-        """Return one complete logical seed example without materializing seed models."""
-        scope = await self._resolve_browsing_selection_async(selection_key=selection_key)
-        try:
-            logical_id = UUID(example_id)
-        except ValueError as exc:
-            raise ValueError(f"Seed example not found: {example_id}") from exc
-        item = self._memory.get_seed_example(dataset_scope=scope, example_id=logical_id)
-        if item is None:
-            raise ValueError(f"Seed example not found: {example_id}")
-        return SeedExampleDetailResponse(
-            example_id=item.example_id,
-            dataset_name=item.dataset_name,
-            seed_ids=item.seed_ids,
-            piece_count=item.piece_count,
-            objective_count=item.objective_count,
-            modalities=item.modalities,
-            seed_types=item.seed_types,
-            harm_categories=item.harm_categories,
-            has_unlabeled_harm=item.has_unlabeled_harm,
-            members=[self._member(member) for member in item.members],
-        )
-
-    async def _resolve_browsing_selection_async(self, *, selection_key: str) -> SeedExampleDatasetScope:
+    async def get_seed_example_async(self, *, selection_key: str, example_id: UUID) -> SeedExampleDetailResponse | None:
         """
-        Resolve a browse selection from persisted dataset identities only.
+        Get one stored logical seed example of a dataset with all of its members.
+
+        Args:
+            selection_key (str): The ``selection_key`` of a dataset from ``list_datasets_async``.
+            example_id (UUID): The ``example_id`` from the list response.
 
         Returns:
-            SeedExampleDatasetScope: The validated named or unnamed scope.
+            SeedExampleDetailResponse | None: The example, or None if the dataset does not contain it.
 
         Raises:
-            DatasetNotFoundError: If a named dataset is not represented in Memory.
-            InvalidDatasetSelectionError: If the selection key is malformed.
+            ValueError: If the selection key is not valid.
         """
-        scope = self._selection_scope(selection_key)
-        if scope.kind == "named":
-            summaries = self._memory.get_seed_dataset_summaries()
-            if not any(summary.dataset_name == scope.name for summary in summaries):
-                raise DatasetNotFoundError(f"Dataset not found: {selection_key}")
-        return scope
+        seeds = await self._memory.get_seed_example_async(
+            dataset_name=self._parse_selection_key(selection_key), example_id=example_id
+        )
+        if not seeds:
+            return None
+        summary = self._summarize(example_id=example_id, seeds=seeds)
+        return SeedExampleDetailResponse(**summary.model_dump(), members=seeds)
 
     @staticmethod
-    def _selection_scope(selection_key: str) -> SeedExampleDatasetScope:
+    def _parse_selection_key(selection_key: str) -> str | None:
         """
-        Resolve the stable dataset selection namespace.
+        Get the dataset name of a selection key.
 
         Returns:
-            SeedExampleDatasetScope: The named or unnamed memory query scope.
+            str | None: The dataset name, or None for the unnamed population.
+
+        Raises:
+            ValueError: If the selection key is not valid.
         """
         if selection_key == "dataset:unnamed":
-            return SeedExampleDatasetScope.unnamed()
-        prefix = "dataset:named:"
-        if selection_key.startswith(prefix) and selection_key[len(prefix) :]:
-            return SeedExampleDatasetScope.named(selection_key[len(prefix) :])
-        raise InvalidDatasetSelectionError(f"Invalid dataset selection key: {selection_key}")
+            return None
+        name = selection_key.removeprefix("dataset:named:")
+        if not name or name == selection_key:
+            raise ValueError(f"Invalid dataset selection key: {selection_key}")
+        return name
 
     @classmethod
-    def _summary(cls, item: object) -> SeedExampleSummary:
-        members = item.members  # type: ignore[attr-defined]
-        preview, truncated = cls._preview(members)
+    def _summarize(cls, *, example_id: UUID, seeds: Sequence[SeedUnion]) -> SeedExampleSummary:
+        preview, truncated = cls._preview(seeds)
         return SeedExampleSummary(
-            example_id=item.example_id,  # type: ignore[attr-defined]
-            dataset_name=item.dataset_name,  # type: ignore[attr-defined]
-            name=next((member.name for member in members if member.name), None),
+            example_id=example_id,
+            name=next((seed.name for seed in seeds if seed.name), None),
             preview=preview,
             preview_truncated=truncated,
-            is_template=cls._template_status(members),
-            parameters=cls._template_parameters(members),
-            seed_ids=item.seed_ids,  # type: ignore[attr-defined]
-            modalities=item.modalities,  # type: ignore[attr-defined]
-            seed_types=item.seed_types,  # type: ignore[attr-defined]
-            piece_count=item.piece_count,  # type: ignore[attr-defined]
-            objective_count=item.objective_count,  # type: ignore[attr-defined]
-            harm_categories=item.harm_categories,  # type: ignore[attr-defined]
-            has_unlabeled_harm=item.has_unlabeled_harm,  # type: ignore[attr-defined]
+            modalities=sorted({seed.data_type for seed in seeds if seed.data_type}),
+            seed_types=sorted({seed.seed_type for seed in seeds}),
+            piece_count=len(seeds),
+            objective_count=sum(isinstance(seed, SeedObjective) for seed in seeds),
+            harm_categories=sorted({category for seed in seeds for category in seed.harm_categories or []}),
+            has_unlabeled_harm=any(not seed.harm_categories for seed in seeds),
         )
 
     @staticmethod
-    def _template_status(members: Sequence[object]) -> bool | None:
+    def _preview(seeds: Sequence[SeedUnion]) -> tuple[str, bool]:
         """
-        Aggregate nullable template status without treating unknown as false.
+        Build the list preview from the first text seed, or else from a type label.
+
+        A simulated-conversation configuration is not a prompt, so it gets only a label.
+        Media seeds show only a file name, so the preview does not expose paths or URL credentials.
 
         Returns:
-            bool | None: True if any member is a template, None if the status is unknown,
-                otherwise False.
+            tuple[str, bool]: The preview and whether the text was shortened.
         """
-        statuses = [member.is_jinja_template for member in members]
-        if any(status is True for status in statuses):
-            return True
-        if any(status is None for status in statuses):
-            return None
-        return False
-
-    @staticmethod
-    def _template_parameters(members: Sequence[object]) -> list[str] | None:
-        """Return persisted parameters for known template members only."""
-        for member in members:
-            if member.is_jinja_template is True:
-                return member.parameters
-        return None
-
-    @staticmethod
-    def _preview(members: Sequence[object]) -> tuple[str, bool]:
-        safe_text = [
-            member.value
-            for member in members
-            if member.data_type == "text"
-            and not urlparse(member.value).scheme
-            and not (ntpath.isabs(member.value) or posixpath.isabs(member.value))
-        ]
-        if safe_text:
-            value = max(safe_text, key=len)
-            return (value[:100] + "...", len(value) > 100) if len(value) > 100 else (value, False)
-        data_type = members[0].data_type if members else "seed"
-        return f"{data_type} seed", False
-
-    @staticmethod
-    def _member(member: object) -> SeedExampleMemberView:
-        return SeedExampleMemberView(
-            id=member.id,
-            prompt_group_id=member.prompt_group_id,
-            seed_type=member.seed_type,
-            data_type=member.data_type,
-            value=member.value,
-            value_sha256=member.value_sha256,
-            role=member.role,
-            sequence=member.sequence,
-            name=member.name,
-            dataset_name=member.dataset_name,
-            harm_categories=member.harm_categories,
-            description=member.description,
-            source=member.source,
-            authors=member.authors,
-            groups=member.groups,
-            date_added=member.date_added,
-            added_by=member.added_by,
-            metadata=member.metadata,
-            parameters=member.parameters,
-            is_jinja_template=member.is_jinja_template,
-        )
+        shown = [seed for seed in seeds if not isinstance(seed, SeedSimulatedConversation)]
+        seed = next((seed for seed in shown if seed.data_type == "text"), shown[0] if shown else None)
+        if seed is None:
+            return "[Simulated conversation configuration]", False
+        preview = None
+        if seed.data_type == "text" or seed.data_type in MEDIA_PATH_DATA_TYPES:
+            preview = format_last_message_preview(value=seed.value, data_type=seed.data_type)
+        truncated = seed.data_type == "text" and len(seed.value) > ConversationStats.PREVIEW_MAX_LEN
+        return preview or f"[{seed.data_type}]", truncated
 
     @staticmethod
     def _merge_unnamed_summaries(summaries: Sequence[SeedDatasetSummary]) -> SeedDatasetSummary | None:

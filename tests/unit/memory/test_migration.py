@@ -178,32 +178,6 @@ def test_run_schema_migrations_applies_head_revision():
             engine.dispose()
 
 
-def test_seed_template_flag_migration_lifecycle():
-    """The seed template marker is added and removed through the normal Alembic lifecycle."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        db_path = os.path.join(temp_dir, "seed-template-flag.db")
-        engine = create_engine(f"sqlite:///{db_path}")
-        try:
-            with engine.begin() as connection:
-                config = _config_for(connection)
-                command.upgrade(config, "7a9c1e3f5b2d")
-                assert "is_jinja_template" not in {
-                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
-                }
-
-                command.upgrade(config, "head")
-                assert "is_jinja_template" in {
-                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
-                }
-
-                command.downgrade(config, "7a9c1e3f5b2d")
-                assert "is_jinja_template" not in {
-                    column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
-                }
-        finally:
-            engine.dispose()
-
-
 @pytest.mark.parametrize("starting_revision", ["9b2d4f6a8c0e", "fcecd0617e61"])
 def test_seed_conditions_and_follow_up_template_migrations_merge(starting_revision: str) -> None:
     engine = create_engine("sqlite:///:memory:")
@@ -218,9 +192,7 @@ def test_seed_conditions_and_follow_up_template_migrations_merge(starting_revisi
         with engine.connect() as connection:
             version = connection.execute(text("SELECT version_num FROM pyrit_memory_alembic_version")).scalar_one()
             assert version == _get_alembic_head_revision(config=config)
-            assert "conditions" in {
-                column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")
-            }
+            assert "conditions" in {column["name"] for column in inspect(connection).get_columns("SeedPromptEntries")}
             assert "adversarial_prompt_template" in {
                 column["name"] for column in inspect(connection).get_columns("AttackIdentifiers")
             }

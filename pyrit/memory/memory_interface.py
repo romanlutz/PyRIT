@@ -20,17 +20,17 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
 
-from sqlalchemy import MetaData, String, and_, case, cast, exists, false, func, literal, not_, or_, select, update
+from sqlalchemy import MetaData, and_, case, exists, false, func, literal, not_, or_, select, update
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-from sqlalchemy.orm import aliased, joinedload
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute, flag_modified
 from sqlalchemy.orm.session import Session
 
 from pyrit.common.async_compatibility import legacy_sync_override, run_legacy_sync_async
 from pyrit.common.deprecation import print_deprecation_message
-from pyrit.common.pagination import decode_keyset_cursor, encode_keyset_cursor, fingerprint_filters
+from pyrit.common.pagination import DecodedKeysetCursor
 
 if TYPE_CHECKING:
     from pyrit.memory.memory_embedding import MemoryEmbedding
@@ -88,6 +88,7 @@ from pyrit.models import (
     MessagePiece,
     MessageScorable,
     Observation,
+    PromptDataType,
     RetryEvent,
     ScenarioAttackResultDelta,
     ScenarioIdentifier,
@@ -106,6 +107,7 @@ from pyrit.models import (
     SeedOrigin,
     SeedPrompt,
     SeedType,
+    SeedUnion,
     TargetIdentifier,
     group_conversation_message_pieces_by_sequence,
     sort_message_pieces,
@@ -160,475 +162,6 @@ class _PreparedScorableContent:
     source: ContentScorable
     stored: ContentScorable
     value_sha256: str
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SeedExample:
-    """One logical seed example and its persisted members."""
-
-    example_id: uuid.UUID
-    dataset_name: str | None
-    seed_ids: list[uuid.UUID]
-    members: list[SeedExampleMember]
-    piece_count: int
-    objective_count: int
-    modalities: list[str]
-    seed_types: list[str]
-    harm_categories: list[str]
-    has_unlabeled_harm: bool
-
-    def __getitem__(self, key: str) -> Any:
-        """
-        Allow response-style field access alongside typed attributes.
-
-        Returns:
-            Any: The requested field value.
-        """
-        return getattr(self, key)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SeedExamplePage:
-    """A bounded page of logical seed examples."""
-
-    items: list[SeedExample]
-    total: int
-    next_cursor: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class SeedExampleMember:
-    """Side-effect-free persisted seed data for browsing."""
-
-    id: uuid.UUID
-    prompt_group_id: uuid.UUID | None
-    seed_type: str
-    data_type: str
-    value: str
-    value_sha256: str | None
-    role: str | None
-    sequence: int | None
-    name: str | None
-    dataset_name: str | None
-    harm_categories: list[str] | None
-    description: str | None
-    source: str | None
-    authors: list[str] | None
-    groups: list[str] | None
-    date_added: datetime
-    added_by: str
-    prompt_metadata: dict[str, Any] | None
-    parameters: list[str] | None
-    is_jinja_template: bool | None
-
-    @property
-    def metadata(self) -> dict[str, Any] | None:
-        """Persisted metadata under the Seed model's public name."""
-        return self.prompt_metadata
-
-
-@dataclass(frozen=True, slots=True)
-class SeedExampleDatasetScope:
-    """Explicit dataset namespace for logical seed-example browsing."""
-
-    kind: Literal["named", "unnamed"]
-    name: str | None = None
-
-    @classmethod
-    def named(cls, name: str) -> SeedExampleDatasetScope:
-        """
-        Create a named dataset scope.
-
-        Args:
-            name: The non-empty persisted dataset name.
-
-        Returns:
-            The named dataset scope.
-
-        Raises:
-            ValueError: If the name is empty.
-        """
-        if not name:
-            raise ValueError("A named dataset scope requires a non-empty name")
-        return cls(kind="named", name=name)
-
-    @classmethod
-    def unnamed(cls) -> SeedExampleDatasetScope:
-        """
-        Create the combined NULL/empty dataset scope.
-
-        Returns:
-            The unnamed dataset scope.
-        """
-        return cls(kind="unnamed")
-
-    def __post_init__(self) -> None:
-        """
-        Validate the scope's name and kind combination.
-
-        Raises:
-            ValueError: If the scope kind and name do not agree.
-        """
-        if self.kind not in {"named", "unnamed"}:
-            raise ValueError(f"Unsupported dataset scope kind: {self.kind}")
-        if self.kind == "named" and not self.name:
-            raise ValueError("A named dataset scope requires a non-empty name")
-        if self.kind == "unnamed" and self.name is not None:
-            raise ValueError("An unnamed dataset scope cannot have a name")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _SeedExampleQuery:
-    """Immutable filters and pagination state for a logical seed example query."""
-
-    dataset_scope: SeedExampleDatasetScope
-    limit: int
-    cursor: Any
-    fingerprint: str
-    data_types: tuple[str, ...]
-    harm_categories: tuple[str, ...]
-    seed_types: tuple[str, ...]
-    value_search: str | None
-
-
-def _seed_example_logical_id(member: Any) -> Any:
-    """Return the logical example key for a seed entry or alias."""
-    return func.coalesce(member.prompt_group_id, member.id)
-
-
-def _seed_example_order_key(logical_id: Any) -> Any:
-    """Return the canonical textual UUID key shared by ordering and seeking."""
-    return func.lower(cast(logical_id, String(36)))
-
-
-def _seed_example_dataset_condition(member: Any, *, dataset_name: str | None) -> Any:
-    """
-    Build the dataset scope condition used by seed example queries.
-
-    Returns:
-        Any: The SQLAlchemy condition for the requested dataset scope.
-    """
-    if dataset_name is None:
-        return or_(member.dataset_name.is_(None), member.dataset_name == "")
-    return member.dataset_name == dataset_name
-
-
-def _seed_example_filter_fingerprint(
-    *,
-    dataset_name: str | None,
-    data_types: tuple[str, ...],
-    harm_categories: tuple[str, ...],
-    seed_types: tuple[str, ...],
-    value_search: str | None,
-) -> str:
-    """Return the stable identity of the effective seed example filters."""
-    return fingerprint_filters(
-        filters={
-            "dataset_name": dataset_name,
-            "data_types": data_types,
-            "harm_categories": harm_categories,
-            "seed_types": seed_types,
-            "value_search": value_search or "",
-        },
-        length=64,
-    )
-
-
-def _build_seed_example_query(
-    *,
-    dataset_scope: SeedExampleDatasetScope,
-    limit: int,
-    cursor: str | None,
-    data_types: Sequence[str] | None,
-    harm_categories: Sequence[str] | None,
-    seed_types: Sequence[str] | None,
-    value_search: str | None,
-) -> _SeedExampleQuery:
-    """
-    Normalize seed example filters and decode a filter-bound cursor.
-
-    Returns:
-        _SeedExampleQuery: The immutable effective query state.
-
-    Raises:
-        ValueError: If ``limit`` is invalid or the cursor is malformed or mismatched.
-    """
-    if not 1 <= limit <= 100:
-        raise ValueError("limit must be between 1 and 100")
-
-    normalized_types = tuple(sorted(set(data_types or ())))
-    normalized_harms = tuple(sorted(set(harm_categories or ())))
-    normalized_seed_types = tuple(sorted(set(seed_types or ())))
-    if len(normalized_types) + len(normalized_harms) + len(normalized_seed_types) > 100:
-        raise ValueError("Too many seed example filter values")
-    fingerprint = _seed_example_filter_fingerprint(
-        dataset_name=dataset_scope.name if dataset_scope.kind == "named" else None,
-        data_types=normalized_types,
-        harm_categories=normalized_harms,
-        seed_types=normalized_seed_types,
-        value_search=value_search,
-    )
-    decoded_cursor = decode_keyset_cursor(cursor=cursor, fingerprint=fingerprint)
-    if cursor is not None and decoded_cursor is None:
-        raise ValueError("Invalid or filter-mismatched seed example cursor")
-    return _SeedExampleQuery(
-        dataset_scope=dataset_scope,
-        limit=limit,
-        cursor=decoded_cursor,
-        fingerprint=fingerprint,
-        data_types=normalized_types,
-        harm_categories=normalized_harms,
-        seed_types=normalized_seed_types,
-        value_search=value_search,
-    )
-
-
-def _seed_example_member_predicate(
-    member: Any,
-    *,
-    query: _SeedExampleQuery,
-    filter_name: str,
-    harm_condition_builder: Callable[[Any, Sequence[str]], Any],
-) -> Any:
-    """
-    Build one member-level predicate for a logical example filter.
-
-    Returns:
-        Any: The SQLAlchemy condition for the requested member filter.
-    """
-    predicates: list[Any] = []
-    if filter_name == "data_types" and query.data_types:
-        predicates.append(member.data_type.in_(query.data_types))
-    if filter_name == "seed_types" and query.seed_types:
-        predicates.append(member.seed_type.in_(query.seed_types))
-    if filter_name == "harm_categories" and query.harm_categories:
-        predicates.append(harm_condition_builder(member.harm_categories, query.harm_categories))
-    if filter_name == "value_search" and query.value_search:
-        escaped = query.value_search.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        predicates.extend([member.data_type == "text", func.lower(member.value).like(f"%{escaped}%", escape="\\")])
-    return and_(*predicates) if predicates else literal(True)
-
-
-def _build_seed_example_filter_conditions(
-    *,
-    query: _SeedExampleQuery,
-    logical_id: Any,
-    harm_condition_builder: Callable[[Any, Sequence[str]], Any],
-) -> list[Any]:
-    """
-    Build the dataset and independent member-existence filters.
-
-    Returns:
-        list[Any]: SQLAlchemy conditions for the grouped logical-example query.
-    """
-    dataset_name = query.dataset_scope.name if query.dataset_scope.kind == "named" else None
-    conditions: list[Any] = [_seed_example_dataset_condition(SeedEntry, dataset_name=dataset_name)]
-    filter_values = (
-        ("data_types", query.data_types),
-        ("harm_categories", query.harm_categories),
-        ("seed_types", query.seed_types),
-        ("value_search", (query.value_search,) if query.value_search else ()),
-    )
-    for filter_name, values in filter_values:
-        if not values:
-            continue
-        member = aliased(SeedEntry)
-        conditions.append(
-            exists(
-                select(1).where(
-                    _seed_example_dataset_condition(member, dataset_name=dataset_name),
-                    _seed_example_logical_id(member) == logical_id,
-                    _seed_example_member_predicate(
-                        member,
-                        query=query,
-                        filter_name=filter_name,
-                        harm_condition_builder=harm_condition_builder,
-                    ),
-                )
-            )
-        )
-    return conditions
-
-
-def _seed_example_order_by(logical_id: Any) -> list[Any]:
-    """Return deterministic member ordering within each logical example."""
-    return [
-        logical_id,
-        case(
-            (SeedEntry.seed_type == "objective", 0),
-            (SeedEntry.seed_type == "simulated_conversation", 1),
-            else_=2,
-        ),
-        case((SeedEntry.sequence.is_(None), 1), else_=0),
-        SeedEntry.sequence,
-        SeedEntry.id,
-    ]
-
-
-def _seed_example_keyset_seek_condition(*, grouped_subquery: Any, cursor: Any) -> Any:
-    """
-    Build the seek predicate for first-added descending, ID descending order.
-
-    Returns:
-        Any: The SQLAlchemy condition selecting rows after the cursor.
-    """
-    return or_(
-        grouped_subquery.c.first_added < cursor.timestamp,
-        and_(
-            grouped_subquery.c.first_added == cursor.timestamp,
-            grouped_subquery.c.example_id_key < cursor.identifier,
-        ),
-    )
-
-
-def _query_seed_example_page(
-    *,
-    session: Session,
-    query: _SeedExampleQuery,
-    harm_condition_builder: Callable[[Any, Sequence[str]], Any],
-) -> tuple[list[Any], int]:
-    """
-    Select one logical seed example page and its total logical count.
-
-    Returns:
-        tuple[list[Any], int]: Over-fetched page rows and the logical total.
-    """
-    logical_id = _seed_example_logical_id(SeedEntry)
-    logical_id_key = _seed_example_order_key(logical_id)
-    grouped_subquery = (
-        select(
-            logical_id.label("example_id"),
-            logical_id_key.label("example_id_key"),
-            func.min(SeedEntry.date_added).label("first_added"),
-        )
-        .where(
-            and_(
-                *_build_seed_example_filter_conditions(
-                    query=query,
-                    logical_id=logical_id,
-                    harm_condition_builder=harm_condition_builder,
-                )
-            )
-        )
-        .group_by(logical_id, logical_id_key)
-        .subquery()
-    )
-    group_query = select(
-        grouped_subquery.c.example_id,
-        grouped_subquery.c.first_added,
-        literal(query.dataset_scope.name if query.dataset_scope.kind == "named" else None).label("dataset_name"),
-    )
-    if query.cursor is not None:
-        group_query = group_query.where(
-            _seed_example_keyset_seek_condition(grouped_subquery=grouped_subquery, cursor=query.cursor)
-        )
-    page_rows = list(
-        session.execute(
-            group_query.order_by(grouped_subquery.c.first_added.desc(), grouped_subquery.c.example_id_key.desc()).limit(
-                query.limit + 1
-            )
-        ).all()
-    )
-    total = int(session.execute(select(func.count()).select_from(grouped_subquery)).scalar_one())
-    return page_rows, total
-
-
-def _query_seed_example_members(
-    *, session: Session, query: _SeedExampleQuery, example_ids: Sequence[uuid.UUID]
-) -> list[SeedEntry]:
-    """
-    Load all members for the selected logical examples in one query.
-
-    Returns:
-        list[SeedEntry]: Persisted members ordered within each logical example.
-    """
-    logical_id = _seed_example_logical_id(SeedEntry)
-    return list(
-        session.execute(
-            select(SeedEntry)
-            .where(
-                _seed_example_dataset_condition(
-                    SeedEntry,
-                    dataset_name=query.dataset_scope.name if query.dataset_scope.kind == "named" else None,
-                ),
-                logical_id.in_(example_ids),
-            )
-            .order_by(*_seed_example_order_by(logical_id))
-        ).scalars()
-    )
-
-
-def _build_seed_examples(*, rows: Sequence[Any], members: Sequence[SeedEntry]) -> list[SeedExample]:
-    """
-    Materialize logical seed examples from selected rows and persisted members.
-
-    Returns:
-        list[SeedExample]: The logical examples represented by the selected rows.
-    """
-    selected_ids = [row.example_id for row in rows]
-    members_by_group: dict[uuid.UUID, list[SeedEntry]] = {example_id: [] for example_id in selected_ids}
-    for entry in members:
-        members_by_group.setdefault(entry.prompt_group_id or entry.id, []).append(entry)
-
-    items: list[SeedExample] = []
-    for row in rows:
-        entries = members_by_group[row.example_id]
-        items.append(
-            SeedExample(
-                example_id=row.example_id,
-                dataset_name=row.dataset_name,
-                seed_ids=[entry.id for entry in entries],
-                members=[
-                    SeedExampleMember(
-                        id=entry.id,
-                        prompt_group_id=entry.prompt_group_id,
-                        seed_type=entry.seed_type,
-                        data_type=entry.data_type,
-                        value=entry.value,
-                        value_sha256=entry.value_sha256,
-                        role=entry.role,
-                        sequence=entry.sequence,
-                        name=entry.name,
-                        dataset_name=entry.dataset_name,
-                        harm_categories=list(entry.harm_categories) if entry.harm_categories is not None else None,
-                        description=entry.description,
-                        source=entry.source,
-                        authors=list(entry.authors) if entry.authors is not None else None,
-                        groups=list(entry.groups) if entry.groups is not None else None,
-                        date_added=entry.date_added,
-                        added_by=entry.added_by,
-                        prompt_metadata=dict(entry.prompt_metadata) if entry.prompt_metadata is not None else None,
-                        parameters=list(entry.parameters) if entry.parameters is not None else None,
-                        is_jinja_template=entry.is_jinja_template,
-                    )
-                    for entry in entries
-                ],
-                piece_count=len(entries),
-                objective_count=sum(entry.seed_type == "objective" for entry in entries),
-                modalities=sorted({entry.data_type for entry in entries}),
-                seed_types=sorted({entry.seed_type for entry in entries}),
-                harm_categories=sorted({category for entry in entries for category in (entry.harm_categories or [])}),
-                has_unlabeled_harm=any(not entry.harm_categories for entry in entries),
-            )
-        )
-    return items
-
-
-def _build_seed_example_next_cursor(*, rows: Sequence[Any], query: _SeedExampleQuery) -> str | None:
-    """
-    Build the continuation cursor when the page was over-fetched.
-
-    Returns:
-        str | None: The filter-bound continuation cursor, if another page exists.
-    """
-    if len(rows) <= query.limit:
-        return None
-    last = rows[query.limit - 1]
-    return encode_keyset_cursor(
-        timestamp=last.first_added,
-        identifier=str(last.example_id),
-        fingerprint=query.fingerprint,
-    )
 
 
 class AttackResultKeysetCursor(NamedTuple):
@@ -1375,7 +908,6 @@ class MemoryInterface(abc.ABC):
                 id already exists with a different target or belongs to a different attack execution.
         """
         self._insert_conversation(conversation=conversation)
-
 
     def _execute_add_message_pieces_to_memory(self, *, message_pieces: Sequence[MessagePiece]) -> None:
         """
@@ -4770,6 +4302,162 @@ class MemoryInterface(abc.ABC):
         except Exception as e:
             logger.exception(f"Failed to retrieve dataset summaries with error {e}")
             raise
+
+    @staticmethod
+    def _seed_example_scope(*, dataset_name: str | None) -> "ColumnElement[bool]":
+        if dataset_name:
+            return SeedEntry.dataset_name == dataset_name
+        return or_(SeedEntry.dataset_name.is_(None), SeedEntry.dataset_name == "")
+
+    def _seed_example_filters(
+        self,
+        *,
+        scope: "ColumnElement[bool]",
+        data_types: Sequence[PromptDataType] | None,
+        harm_categories: Sequence[str] | None,
+        seed_types: Sequence[SeedType] | None,
+        value_search: str | None,
+    ) -> list[Any]:
+        """
+        Build one logical-example membership condition for each active filter.
+
+        Each filter matches when any member of the example matches it, so different members can
+        satisfy different filters. The IN subqueries use the unaliased table because the
+        dialect JSON array match emits SQL text that references the table name.
+
+        Returns:
+            list[Any]: SQLAlchemy conditions to combine with AND.
+        """
+        member_conditions: list[Any] = []
+        if data_types:
+            member_conditions.append(SeedEntry.data_type.in_(list(data_types)))
+        if harm_categories:
+            member_conditions.append(
+                self._get_condition_json_array_match(
+                    json_column=SeedEntry.harm_categories,
+                    property_path="$",
+                    array_to_match=list(harm_categories),
+                    match_mode="any",
+                )
+            )
+        if seed_types:
+            member_conditions.append(SeedEntry.seed_type.in_(list(seed_types)))
+        if value_search:
+            # A simulated-conversation value is JSON, so its keys would match common words such as "prompt".
+            pattern = "%" + re.sub(r"([\\%_\[])", r"\\\1", value_search) + "%"
+            member_conditions.append(
+                and_(
+                    SeedEntry.data_type == "text",
+                    SeedEntry.seed_type != "simulated_conversation",
+                    SeedEntry.value.ilike(pattern, escape="\\"),
+                )
+            )
+
+        logical_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+        return [
+            logical_id.in_(select(logical_id).where(scope, condition).correlate(None))
+            for condition in member_conditions
+        ]
+
+    @staticmethod
+    def _get_seed_example_seeds(
+        *, session: Session, scope: "ColumnElement[bool]", example_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, list[SeedUnion]]:
+        """
+        Read the stored seeds of the given logical examples.
+
+        A seed that cannot be rebuilt is skipped with a warning, so one bad row does not stop the read.
+        For example, a simulated conversation saved with prompt file paths fails when a file is missing.
+
+        Returns:
+            dict[uuid.UUID, list[SeedUnion]]: The seeds of each example that has readable seeds, in the
+            order of ``example_ids``. Objectives come first, then seeds by sequence and ID.
+        """
+        logical_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+        entries = session.scalars(
+            select(SeedEntry)
+            .where(scope, logical_id.in_(example_ids))
+            .order_by(case((SeedEntry.seed_type == "objective", 0), else_=1), SeedEntry.sequence, SeedEntry.id)
+        ).all()
+        seeds: dict[uuid.UUID, list[SeedUnion]] = {example_id: [] for example_id in example_ids}
+        for entry in entries:
+            try:
+                seeds[entry.prompt_group_id or entry.id].append(entry.get_seed())
+            except ValueError as e:
+                logger.warning(f"Skipping stored seed {entry.id} because it cannot be read: {e}")
+        return {example_id: example_seeds for example_id, example_seeds in seeds.items() if example_seeds}
+
+    def _execute_get_seed_examples(
+        self,
+        *,
+        dataset_name: str | None,
+        limit: int,
+        after: DecodedKeysetCursor | None,
+        data_types: Sequence[PromptDataType] | None,
+        harm_categories: Sequence[str] | None,
+        seed_types: Sequence[SeedType] | None,
+        value_search: str | None,
+    ) -> tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]:
+        """
+        Read one keyset page of complete logical seed examples.
+
+        Returns:
+            tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]: The seeds of each
+            example in page order, the number of examples that match the filters, and the sort key of
+            the last example when more examples follow.
+        """
+        logical_id = func.coalesce(SeedEntry.prompt_group_id, SeedEntry.id)
+        scope = self._seed_example_scope(dataset_name=dataset_name)
+        filters = self._seed_example_filters(
+            scope=scope,
+            data_types=data_types,
+            harm_categories=harm_categories,
+            seed_types=seed_types,
+            value_search=value_search,
+        )
+        grouped = (
+            select(logical_id.label("example_id"), func.min(SeedEntry.date_added).label("first_added"))
+            .where(scope, *filters)
+            .group_by(logical_id)
+            .subquery()
+        )
+        page = select(grouped.c.example_id, grouped.c.first_added)
+        if after is not None:
+            anchor_id = uuid.UUID(after.identifier)
+            page = page.where(
+                or_(
+                    grouped.c.first_added < after.timestamp,
+                    and_(grouped.c.first_added == after.timestamp, grouped.c.example_id < anchor_id),
+                )
+            )
+        page = page.order_by(grouped.c.first_added.desc(), grouped.c.example_id.desc()).limit(limit + 1)
+
+        with closing(self._get_session()) as session:
+            total = session.execute(select(func.count()).select_from(grouped)).scalar_one()
+            rows = session.execute(page).all()
+            seeds = self._get_seed_example_seeds(
+                session=session, scope=scope, example_ids=[row.example_id for row in rows[:limit]]
+            )
+        next_after = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_after = DecodedKeysetCursor(timestamp=last.first_added, identifier=str(last.example_id))
+        return seeds, total, next_after
+
+    def _execute_get_seed_example(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedUnion]:
+        """
+        Read one complete logical seed example.
+
+        Returns:
+            list[SeedUnion]: The seeds of the example. The list is empty if the dataset does not contain it.
+        """
+        with closing(self._get_session()) as session:
+            seeds = self._get_seed_example_seeds(
+                session=session,
+                scope=self._seed_example_scope(dataset_name=dataset_name),
+                example_ids=[example_id],
+            )
+        return seeds.get(example_id, [])
 
     def _execute_get_seed_dataset_names(self) -> Sequence[str]:
         """
@@ -8894,6 +8582,72 @@ class MemoryInterface(abc.ABC):
             a single deterministic entry for seeds without a dataset name.
         """
         return await self._run_database_operation_async(self._execute_get_seed_dataset_summaries)
+
+    async def get_seed_examples_async(
+        self,
+        *,
+        dataset_name: str | None,
+        limit: int,
+        after: DecodedKeysetCursor | None = None,
+        data_types: Sequence[PromptDataType] | None = None,
+        harm_categories: Sequence[str] | None = None,
+        seed_types: Sequence[SeedType] | None = None,
+        value_search: str | None = None,
+    ) -> tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]:
+        """
+        Read one page of complete logical seed examples from one dataset.
+
+        A logical example is all seeds in the dataset that share a ``prompt_group_id``, or one seed
+        without a group. Examples are ordered by their earliest ``date_added``, then by example ID,
+        both descending. Values inside one filter use OR, different filters use AND, and any seed
+        of an example can satisfy a filter. This method does not render templates or load media.
+        A simulated conversation saved with prompt file paths loads those files. If it cannot be
+        read, it is skipped with a warning.
+
+        Args:
+            dataset_name: The dataset name. None or an empty string selects seeds without a dataset name.
+            limit: The maximum number of examples to return.
+            after: The sort key of the last example on the previous page.
+            data_types: Match seeds with any of these data types.
+            harm_categories: Match seeds with any of these harm categories, as whole values that
+                ignore case.
+            seed_types: Match seeds with any of these seed types.
+            value_search: Match text prompts and objectives whose stored value contains this literal
+                text, ignoring case. Simulated-conversation configurations are not searched.
+
+        Returns:
+            tuple[dict[uuid.UUID, list[SeedUnion]], int, DecodedKeysetCursor | None]: The seeds of each
+            example keyed by example ID in page order, objectives first; the number of examples that
+            match the filters; and the sort key of the last example when more examples follow.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_seed_examples,
+            dataset_name=dataset_name,
+            limit=limit,
+            after=after,
+            data_types=data_types,
+            harm_categories=harm_categories,
+            seed_types=seed_types,
+            value_search=value_search,
+        )
+
+    async def get_seed_example_async(self, *, dataset_name: str | None, example_id: uuid.UUID) -> list[SeedUnion]:
+        """
+        Read one complete logical seed example from one dataset.
+
+        Seeds are read as in ``get_seed_examples_async``.
+
+        Args:
+            dataset_name: The dataset name. None or an empty string selects seeds without a dataset name.
+            example_id: The ``prompt_group_id`` of the example, or the seed ID of a seed without a group.
+
+        Returns:
+            list[SeedUnion]: The seeds of the example, objectives first. The list is empty if the
+            dataset does not contain it.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_seed_example, dataset_name=dataset_name, example_id=example_id
+        )
 
     def get_seed_dataset_names(self) -> Sequence[str]:
         """

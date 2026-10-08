@@ -16,7 +16,7 @@ from sqlite3 import Cursor as SQLiteCursor
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import and_, case, create_engine, event, exists, func, literal, or_, select, text
+from sqlalchemy import and_, case, create_engine, event, exists, func, or_, select, text
 from sqlalchemy.engine import AdaptedConnection, ExceptionContext
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -490,27 +490,6 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         joiner = " OR " if match_mode == "any" else " AND "
         combined = joiner.join(conditions)
         return text(f"({combined})").bindparams(**bindparams_dict)
-
-    def _get_seed_harm_category_condition(
-        self, *, json_column: InstrumentedAttribute[Any], categories: Sequence[str]
-    ) -> Any:
-        """
-        Build an aliased-column-safe SQLite harm-category membership predicate.
-
-        Returns:
-            Any: A SQLAlchemy predicate matching any requested category.
-        """
-        values = [category.lower() for category in categories]
-        safe_json = case(
-            (func.json_valid(json_column) == 1, json_column),
-            else_=literal("[]"),
-        )
-        safe_array = case(
-            (func.json_type(safe_json, literal("$")) == "array", safe_json),
-            else_=literal("[]"),
-        )
-        elements = func.json_each(safe_array).table_valued("value")
-        return exists(select(1).select_from(elements).where(func.lower(elements.c.value).in_(values)))
 
     def get_all_table_models(self) -> list[type[Base]]:
         """

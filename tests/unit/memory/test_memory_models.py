@@ -545,32 +545,6 @@ class TestSeedEntry:
         assert isinstance(recovered, SeedObjective)
         assert recovered.value == "objective text"
 
-    @pytest.mark.parametrize("seed_kind", ["prompt", "objective", "simulated_conversation"])
-    def test_get_seed_normalizes_historical_null_template_flag(self, seed_kind: str):
-        if seed_kind == "prompt":
-            seed = _make_seed_prompt()
-        elif seed_kind == "objective":
-            seed = SeedObjective(value="objective text", dataset_name="ds", added_by="tester")
-        else:
-            seed = SeedSimulatedConversation(
-                adversarial_chat_system_prompt=SeedPrompt(value="adversarial"),
-                pyrit_version="1.0.0",
-            )
-
-        entry = SeedEntry(entry=seed)
-        entry.is_jinja_template = None
-
-        recovered = entry.get_seed()
-        assert recovered.is_jinja_template is False
-
-    @pytest.mark.parametrize("is_template", [True, False])
-    def test_get_seed_preserves_persisted_template_flag(self, is_template: bool):
-        entry = SeedEntry(entry=_make_seed_prompt(is_jinja_template=is_template))
-        entry.is_jinja_template = is_template
-
-        recovered = entry.get_seed()
-        assert recovered.is_jinja_template is is_template
-
     def test_seed_prompt_preserves_parameters(self):
         seed = _make_seed_prompt(parameters=["param1", "param2"])
         entry = SeedEntry(entry=seed)

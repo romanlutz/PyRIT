@@ -93,3 +93,36 @@ an explicit origin other than `local`. Remote dataset providers assign
 use `GENERATED`. Origin does not describe upstream authorship. Use `origin=SeedOrigin.USER`
 for explicit user entries. Unspecified and legacy origins remain `UNKNOWN`, while edits
 preserve the recorded origin.
+
+## Browse stored seeds
+
+The seed browser reads stored seeds from memory only. It does not load providers, open
+media files, render templates, or generate conversations. A simulated-conversation seed
+saved by an older PyRIT version stores prompt file paths, so the browser loads those files.
+If a seed cannot be read, for example because a file is missing, the browser skips it and
+logs a warning. An example with no readable seeds is not shown, but `total` counts it.
+
+- `GET /api/datasets/seeds?selection_key=<key>` lists one page of logical examples.
+- `GET /api/datasets/seeds/{example_id}?selection_key=<key>` returns all members of one example
+  as seed objects (`SeedPrompt`, `SeedObjective`, or `SeedSimulatedConversation`).
+
+Get the `selection_key` from `GET /api/datasets`. The unnamed key `dataset:unnamed` includes
+NULL and empty dataset names. The example ID is the `prompt_group_id`, or the seed ID when
+the seed has no group. Only members in the selected dataset are returned.
+
+The list accepts `limit` (1 to 100), `cursor`, `search`, and repeated `modality`,
+`seed_type`, and `harm_category` parameters. Values of one parameter use OR. Different
+parameters use AND, and different members of an example can match different parameters.
+Harm categories match complete values without case sensitivity. `search` finds literal
+text in the values of text prompts and objectives; `%`, `_`, and `[` are not patterns.
+SQLite ignores case for ASCII characters only. `search` does not look in
+simulated-conversation configurations, because their stored value is JSON. Use
+`seed_type=simulated_conversation` to find them.
+
+Examples sort by the earliest member `date_added`, newest first, then by example ID. A
+cursor is valid only for the same `selection_key` and filters. Other cursors return 400.
+
+Each list item has a preview of the first text member: at most 100 characters, with `...`
+and `preview_truncated` when it is shortened. Media members show only the file name, and
+other types show a type label. The browser does not render templates or run
+simulated conversations.
