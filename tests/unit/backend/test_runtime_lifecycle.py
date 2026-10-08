@@ -20,9 +20,12 @@ from pyrit.backend.middleware.auth import require_admin
 from pyrit.backend.middleware.runtime import RuntimeAdmissionMiddleware
 from pyrit.backend.routes import configuration, health
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
+from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
+from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.runtime_lifecycle import RuntimeLifecycle
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.executor.jobs.local import LocalEvaluationJobPort
 from pyrit.memory import CentralMemory, MemoryInterface
 from pyrit.setup.configuration_loader import ConfigurationLoader
 
@@ -283,3 +286,134 @@ def test_authorization_policy_does_not_change_with_environment(runtime: RuntimeL
         with pytest.raises(Exception) as error:
             require_admin(request)
     assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_startup_installs_only_explicit_local_job_port_and_starts_consumer_after_ready_async(
+    *, runtime: RuntimeLifecycle, tmp_path: Path, enabled: bool
+) -> None:
+    config = await runtime._load_async()
+    settings = LocalEvaluationJobSettings(
+        root=tmp_path / "jobs", allowed_actor_ids=frozenset({"00000000-0000-4000-8000-000000000001"})
+    )
+    port = MagicMock(spec=LocalEvaluationJobPort)
+    memory = MagicMock(spec=MemoryInterface)
+    scenario_service = MagicMock(spec=ScenarioRunService)
+
+    def start_consumer() -> None:
+        assert runtime.state == "ready"
+        assert runtime.app.state.evaluation_job_port is port
+
+    port.start_consumer.side_effect = start_consumer
+    with (
+        patch.object(CohostPreflight, "from_environment_async", new_callable=AsyncMock, return_value=None),
+        patch.object(LocalEvaluationJobSettings, "from_environment", return_value=settings if enabled else None),
+        patch.object(
+            LocalEvaluationJobSettings, "create_port_async", new_callable=AsyncMock, return_value=port
+        ) as create,
+        patch.object(config, "initialize_pyrit_async", new_callable=AsyncMock) as initialize,
+        patch.object(CentralMemory, "get_memory_instance", return_value=memory),
+        patch.object(lifecycle_module, "get_scenario_run_service", return_value=scenario_service),
+    ):
+        await runtime.startup_async()
+    assert runtime.state == "ready"
+    initialize.assert_awaited_once()
+    scenario_service.reconcile_interrupted_runs_async.assert_awaited_once()
+    if enabled:
+        create.assert_awaited_once()
+        assert create.call_args.kwargs["memory"] is memory
+        port.startup_async.assert_awaited_once()
+        port.start_consumer.assert_called_once()
+        assert runtime.evaluation_jobs is port
+        assert runtime.begin_apply(version="ignored")["outcome"] == "unsupported"
+    else:
+        create.assert_not_awaited()
+        port.start_consumer.assert_not_called()
+        assert runtime.evaluation_jobs is None and runtime.app.state.evaluation_job_port is None
+
+
+@pytest.mark.parametrize("conflict", ["original_preview", "multiple_workers"])
+async def test_local_job_startup_refuses_preview_and_topology_before_initialization_async(
+    *, runtime: RuntimeLifecycle, tmp_path: Path, conflict: str
+) -> None:
+    config = await runtime._load_async()
+    settings = LocalEvaluationJobSettings(
+        root=tmp_path / "jobs", allowed_actor_ids=frozenset({"00000000-0000-4000-8000-000000000001"})
+    )
+    runtime.topology_supported = conflict != "multiple_workers"
+    preflight = MagicMock(spec=CohostPreflight) if conflict == "original_preview" else None
+    with (
+        patch.object(CohostPreflight, "from_environment_async", new_callable=AsyncMock, return_value=preflight),
+        patch.object(LocalEvaluationJobSettings, "from_environment", return_value=settings),
+        patch.object(LocalEvaluationJobSettings, "create_port_async", new_callable=AsyncMock) as create,
+        patch.object(config, "initialize_pyrit_async", new_callable=AsyncMock) as initialize,
+    ):
+        await runtime.startup_async()
+    assert runtime.state == "restart-required" and runtime.outcome == "initialization-failed"
+    assert runtime.app.state.evaluation_job_port is None and runtime.evaluation_jobs is None
+    initialize.assert_not_awaited()
+    create.assert_not_awaited()
+
+
+async def test_local_job_startup_failure_closes_owned_port_without_publishing_readiness_async(
+    *, runtime: RuntimeLifecycle, tmp_path: Path
+) -> None:
+    config = await runtime._load_async()
+    settings = LocalEvaluationJobSettings(
+        root=tmp_path / "jobs", allowed_actor_ids=frozenset({"00000000-0000-4000-8000-000000000001"})
+    )
+    port = MagicMock(spec=LocalEvaluationJobPort)
+    port.startup_async.side_effect = ValueError("fixture startup refusal")
+    with (
+        patch.object(CohostPreflight, "from_environment_async", new_callable=AsyncMock, return_value=None),
+        patch.object(LocalEvaluationJobSettings, "from_environment", return_value=settings),
+        patch.object(LocalEvaluationJobSettings, "create_port_async", new_callable=AsyncMock, return_value=port),
+        patch.object(config, "initialize_pyrit_async", new_callable=AsyncMock),
+        patch.object(CentralMemory, "get_memory_instance", return_value=MagicMock(spec=MemoryInterface)),
+    ):
+        await runtime.startup_async()
+    assert runtime.state == "restart-required"
+    assert runtime.evaluation_jobs is None and runtime.app.state.evaluation_job_port is None
+    port.shutdown_async.assert_awaited_once()
+    port.start_consumer.assert_not_called()
+
+
+async def test_shutdown_keeps_canonical_memory_alive_until_local_job_writer_joins_async(
+    runtime: RuntimeLifecycle,
+) -> None:
+    port = MagicMock(spec=LocalEvaluationJobPort)
+    memory = MagicMock(spec=MemoryInterface)
+    entered, release = asyncio.Event(), asyncio.Event()
+    order: list[str] = []
+
+    async def join_jobs_async() -> None:
+        entered.set()
+        await release.wait()
+        order.append("jobs")
+
+    async def close_async() -> None:
+        order.append("services")
+
+    async def dispose_async() -> None:
+        order.append("memory")
+
+    port.shutdown_async.side_effect = join_jobs_async
+    memory.dispose_engine_async.side_effect = dispose_async
+    runtime.evaluation_jobs = port
+    runtime.app.state.evaluation_job_port = port
+    with (
+        patch.object(CentralMemory, "_memory_instance", memory),
+        patch.object(lifecycle_module, "close_services_async", side_effect=close_async),
+    ):
+        caller = asyncio.create_task(runtime.shutdown_async())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert not caller.done() and order == []
+            memory.dispose_engine_async.assert_not_awaited()
+            release.set()
+            await caller
+        finally:
+            release.set()
+            await asyncio.gather(caller, return_exceptions=True)
+    assert order == ["jobs", "services", "memory"]
+    assert runtime.evaluation_jobs is None and runtime.app.state.evaluation_job_port is None

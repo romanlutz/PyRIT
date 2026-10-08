@@ -12,8 +12,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+import anyio
 from inspect_ai.hooks import Hooks, hooks
 
+from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.models.native_cyber_evidence import (
     NativeCyberEvidenceSource,
     NativeCyberRawKind,
@@ -74,7 +76,7 @@ class InspectOriginalLiveCapture:
             InspectOriginalLiveCapture: A bounded live source associated with one PyRIT episode.
         """
         capture = cls(memory=memory, episode_id=episode_id)
-        await asyncio.to_thread(capture._capture.open_raw_stream, stream=capture._stream)
+        await run_legacy_sync_async(capture._capture.open_raw_stream, stream=capture._stream)
         return capture
 
     async def observe_run_start_async(self, *, data: RunStart) -> None:
@@ -242,7 +244,7 @@ class InspectOriginalLiveCapture:
             self._add_gap("Inspect live hook frames exceeded their bounded optional source quota.")
             return False
         try:
-            write = await asyncio.to_thread(
+            write = await run_legacy_sync_async(
                 self._capture.append_raw, run_id=self.episode_id, stream_id=self._stream.stream_id, data=encoded
             )
         except Exception:  # noqa: BLE001 - Inspect downgrades hook exceptions; record the gap before re-raising
@@ -259,7 +261,7 @@ class InspectOriginalLiveCapture:
         if self._closed:
             return
         data = bytes(self._stored_bytes)
-        await asyncio.to_thread(
+        await run_legacy_sync_async(
             self._capture.close_raw_stream,
             run_id=self.episode_id,
             stream_id=self._stream.stream_id,
@@ -316,4 +318,6 @@ class _PyritOriginalInspectHooks(Hooks):
 
     async def on_run_end(self, data: RunEnd) -> None:  # pyrit-async-suffix-exempt
         if capture := _ACTIVE_CAPTURE.get():
-            await capture.observe_run_end_async(data=data)
+            # Inspect emits this from a cancelled AnyIO scope before resetting its run owner.
+            with anyio.CancelScope(shield=True):
+                await capture.observe_run_end_async(data=data)

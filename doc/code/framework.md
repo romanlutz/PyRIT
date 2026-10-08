@@ -191,6 +191,15 @@ verified original scorer into a source-attributed PyRIT `Score` and
 result IDs. There is no reviewed success threshold for this Task, so its
 `AttackOutcome` remains UNDETERMINED even when the source Score is COMPLETE;
 the Scenario does not create a second, synthetic attack result or grade.
+The additive `EvaluationJobPort` is a separate, default-off PyRIT scheduling
+and evidence handoff contract, not an Inspect or platform API. Its producer
+admits immutable source/case/run/attempt references; an explicitly installed
+runtime owns execution and reviewed wait boundaries. A separate canonical
+writer imports exact source artifacts, never worker database rows. Queue
+acknowledgment, original source completeness, closure, and a source grade stay
+distinct. Runtime kind names do not imply installed implementations, and this
+local harmless PoC does not replace ordinary Scenario orchestration or add GUI
+Task editing.
 An external original Task requires separate, default-off backend admission.
 The web process stores only an opaque actor-bound job, never imports the
 private `TaskOwnedScenario` or connects to its raw worker SQLite. The opt-in

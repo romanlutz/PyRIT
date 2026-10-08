@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -84,7 +85,58 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from pyrit.memory import SQLiteMemory
-    from pyrit.models import AttackResult
+    from pyrit.models import AttackResult, Conversation
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.filterwarnings(r"ignore:MemoryInterface\.:DeprecationWarning")
+async def test_direct_original_import_cancellation_joins_actual_persistence_thread_async(
+    *, tmp_path: Path, sqlite_instance: SQLiteMemory, original_log_async: EvalLog
+) -> None:
+    source = await asyncio.to_thread(EvalSourceFactory.resolve_original_inert, family="inspect_original_inert")
+    cases, run = _case_inventory(source=source, samples=original_log_async.samples or [])
+    archives = await asyncio.to_thread(lambda: tuple(tmp_path.glob("*.eval")))
+    assert len(archives) == 1
+    importer = InspectOriginalEvalImporter(memory=sqlite_instance)
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    add_conversation = sqlite_instance.add_conversation_to_memory
+
+    def held_conversation(*, conversation: Conversation) -> None:
+        loop.call_soon_threadsafe(started.set)
+        if not release.wait(timeout=10):
+            raise RuntimeError("The test owner did not release its held canonical writer.")
+        add_conversation(conversation=conversation)
+
+    with patch.object(sqlite_instance, "add_conversation_to_memory", side_effect=held_conversation):
+        task = asyncio.create_task(importer.import_eval_log_async(path=archives[0], cases=cases, run=run))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            task.cancel()
+            await asyncio.sleep(0.02)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    def read_ids() -> tuple[list[str], list[str]]:
+        with sqlite_instance.get_session() as session:
+            return (
+                [str(identifier) for identifier in session.scalars(select(ScoreEntry.id))],
+                [str(identifier) for identifier in session.scalars(select(AttackResultEntry.id))],
+            )
+
+    score_ids, attack_ids = await asyncio.to_thread(read_ids)
+    scores = await sqlite_instance.get_scores_async(score_ids=score_ids)
+    attacks = await sqlite_instance.get_attack_results_async(attack_result_ids=attack_ids)
+    assert len(scores) == len(attacks) == 1
+    assert scores[0].status is ScoreStatus.COMPLETE and scores[0].score_value == "1.0"
+    assert attacks[0].automated_score and attacks[0].automated_score.id == scores[0].id
 
 
 def test_public_task_pin_matches_git_lf_and_windows_crlf_checkouts(tmp_path: Path) -> None:

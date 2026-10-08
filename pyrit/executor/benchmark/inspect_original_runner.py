@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from inspect_ai import eval_async
 
+from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.executor.benchmark.inspect_eval_projection import InspectProjectionVersion
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
 from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter, InspectOriginalImport
@@ -70,7 +71,7 @@ async def run_original_inert_eval_async(
     episode_id = f"inspect-run-{run.run_instance_id.hex}"
     importer = InspectOriginalEvalImporter(memory=memory)
     capture = memory.native_cyber_evidence
-    await asyncio.to_thread(
+    await run_legacy_sync_async(
         capture.create_episode,
         start=NativeCyberEpisodeStart(
             run_id=episode_id,
@@ -93,12 +94,12 @@ async def run_original_inert_eval_async(
         with active_original_capture(capture=live):
             logs = await eval_async(tasks=source.task, log_dir=str(log_dir), log_format="eval")
     except asyncio.CancelledError:
-        await asyncio.to_thread(
+        await run_legacy_sync_async(
             capture.mark_capture_gap, run_id=episode_id, reason="Original Inspect run was cancelled before log import."
         )
         raise
     except Exception as error:
-        await asyncio.to_thread(
+        await run_legacy_sync_async(
             capture.mark_capture_gap, run_id=episode_id, reason="Original Inspect Task failed before log import."
         )
         raise RuntimeError(
@@ -108,7 +109,7 @@ async def run_original_inert_eval_async(
         await live.close_async()
 
     if len(logs) != 1 or not logs[0].location:
-        await asyncio.to_thread(
+        await run_legacy_sync_async(
             capture.mark_capture_gap, run_id=episode_id, reason="Original Inspect Task returned no unique `.eval`."
         )
         raise RuntimeError(f"Original Inspect Task returned no unique log; pending capture {episode_id} retained.")
@@ -116,7 +117,7 @@ async def run_original_inert_eval_async(
     try:
         await asyncio.to_thread(source.verify_unchanged)
     except ValueError as error:
-        await asyncio.to_thread(
+        await run_legacy_sync_async(
             capture.mark_capture_gap, run_id=episode_id, reason="Original Inspect Task source drifted after execution."
         )
         await importer._import_async(

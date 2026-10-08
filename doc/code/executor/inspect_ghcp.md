@@ -707,6 +707,97 @@ cannot claim complete projected event coverage. These are private memory
 bytes, not public output; do not publish raw `.eval` files or their
 sensitive transcript data.
 
+### Opt-in local evaluation job port
+
+`pyrit.models.evaluation_job` defines a versioned **PyRIT-owned** queue
+contract. It is not an Inspect or sandbox-platform protocol. Immutable requests
+contain source/case/run/attempt references, an installed runtime kind and an
+execution-profile digest. Initial input stays in the source. Requests cannot
+supply Python, URLs, model/sandbox settings, secrets, or additional Mode 1
+adversarial controls.
+
+The producer, receiver, runtime and canonical writer protocols live in
+`pyrit.executor.jobs.port`. `LocalEvaluationJobPort` uses a separate local
+`queue.sqlite` journal and an exclusive owner lock. An exact actor-bound
+redelivery is a duplicate, not another original execution. Changed same-ID
+requests and different job/attempt aliases for the same source case/run are
+rejected. The receiver returns `started`, `duplicate`, or `busy`; a broker must
+not settle a busy delivery. None of these acknowledgments is a grade.
+Previously dispatched attempts found after restart become `interrupted`.
+Unknown or failed closure blocks new dispatch; there is no automatic retry or
+success-shaped recovery.
+
+Only `PublicOriginalInspectJobRuntime` is installed by the local factory.
+It runs the existing SHA-pinned, model-free `inspect_original_inert` Task
+unchanged, in independently disposed scratch SQLite. Exact original binary
+bytes and a fenced manifest cross to `OriginalInspectArtifactWriter`, which
+imports into canonical memory and verifies linked Score/AttackResult/archive
+readback. No worker database rows are merged. The original grade is `1.0`;
+without a reviewed success threshold, the AttackOutcome remains UNDETERMINED.
+Job `succeeded` means source completion and canonical import, not benchmark
+success.
+
+Run the actual local CLI example from the repository root, using a **new**
+absolute local evidence directory:
+
+```powershell
+uv run --no-sync --offline python -m examples.evaluation_job_inert --root C:\local\public-evaluation-proof
+```
+
+The example requires the existing Inspect optional dependencies. It does not
+restore dependencies, call a model, contact Azure, or build an image. It retains
+`canonical.sqlite`, the separate queue journal, scratch evidence, original
+logs, and immutable named artifacts/manifest. Do not publish those runtime
+artifacts merely because this source fixture is harmless.
+
+The additive backend routes are disabled unless startup explicitly configures:
+
+```text
+PYRIT_EVALUATION_JOB_BACKEND=local
+PYRIT_EVALUATION_JOB_ROOT=<absolute local owner directory>
+PYRIT_EVALUATION_JOB_ALLOWED_OPERATOR_OIDS=<explicit authenticated operator UUIDs>
+```
+
+The backend requires canonical SQLite, one worker/replica, and no simultaneous
+original-preview backend. The routes still require a server-authenticated
+operator when ordinary authentication is disabled; setting an actor header or
+an unauthenticated-admin option does not grant job access. Changing startup
+job settings or canonical memory requires a restart, not live reinitialization.
+
+`GET /api/evaluation-jobs/catalog`, `POST /api/evaluation-jobs`,
+`GET /api/evaluation-jobs/{job_id}?after_sequence=...`, and the corresponding
+`/cancel` and `/control` endpoints expose the producer port.
+`EvaluationJobHttpClient` accepts a caller-owned authenticated `httpx.AsyncClient`
+with the usual compatibility headers. The server derives the actor from
+authentication, not request JSON. Framework callers can instead use
+`create_public_original_job_port_async`, then `startup_async`,
+`start_consumer`, and the same typed submit/status/cancel methods.
+Ordinary Scenario behavior and existing GUI controls are unchanged. This is a
+CLI/library/authenticated API PoC, **not a new wired CoPyRIT job button**.
+
+Cancellation is joined before releasing owned runtime/storage work. The
+original runner/importer uses owned thread writes; the original run-end hook
+also shields its close inside Inspect's cancelled AnyIO scope. A cancelled
+source does not acquire a canonical grade. The cancellation test transparently
+instruments a real harmless solver hold; only the separate positive/fresh run
+claims unchanged source lifecycle. Verified local closure means the owned
+coroutines, writes and scratch engine drained, not that an interrupted source
+scorer/cleanup completed. Once `finalizing` begins, cancel is refused and the
+canonical writer is retained/joined.
+
+The schema also names `reviewed_inspect_variant` and `native_binding`, but names
+do not install runtimes. Mode 2 proof covers reviewed-boundary capability
+validation and ordered command delivery only, not a live Inspect agent.
+SendMessage/Nudge carry bounded text; Advance/Stop do not. Commands require the
+actor, per-job capability, current runtime-created boundary and admitted
+action. Delivery is not proof that an agent acted. No shell or follow-up Task
+is created. Mode 3 has only a harmless native handler/artifact-port fixture,
+with `native_evidence` rather than a fabricated `.eval`; it proves no private
+native runtime parity. The default backend advertises neither Mode 2 nor 3.
+No Azure broker transport, private provisioning, service identity, remote
+exec/closure/reset, platform wait/agent transport, or production isolation is
+provided or qualified by this local public PoC.
+
 ## Supported execution and qualification
 
 - One selected, original text `Sample`, one original scorer, one epoch, one

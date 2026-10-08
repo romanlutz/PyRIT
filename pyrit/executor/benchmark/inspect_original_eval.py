@@ -19,6 +19,7 @@ from zipfile import BadZipFile, ZipFile
 from inspect_ai.event import ScoreEvent, ToolEvent
 from inspect_ai.log import EvalLog, read_eval_log
 
+from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.executor.benchmark.inspect_eval_projection import (
     InspectProjectionVersion,
     final_original_score_event,
@@ -283,7 +284,7 @@ class InspectOriginalEvalImporter:
                 }
             )
         )
-        return await asyncio.to_thread(
+        return await run_legacy_sync_async(
             self._persist_import,
             log=log,
             archive=archive,

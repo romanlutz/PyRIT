@@ -7,13 +7,14 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
 from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
+from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings
 from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.original_worker_runtime import OriginalWorkerRuntime
 from pyrit.backend.services.scenario_run_service import get_scenario_run_service, peek_scenario_run_service
@@ -28,6 +29,9 @@ from pyrit.registry import InitializerRegistry
 from pyrit.setup.configuration_loader import ConfigurationLoader
 from pyrit.setup.environment_loading import resolve_environment_async
 from pyrit.setup.initialization import validate_reinitialization_memory
+
+if TYPE_CHECKING:
+    from pyrit.executor.jobs.local import LocalEvaluationJobPort
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +52,9 @@ class RuntimeLifecycle:
             )
         }
         self.original_worker: OriginalWorkerRuntime | None = None
+        self.evaluation_jobs: LocalEvaluationJobPort | None = None
         self.app.state.original_worker_runtime = None
+        self.app.state.evaluation_job_port = None
         self.source = source
         self.edit_lock = asyncio.Lock()
         self.state = "initializing"
@@ -118,6 +124,9 @@ class RuntimeLifecycle:
         try:
             config = await self._load_async()
             preflight = await CohostPreflight.from_environment_async()
+            job_settings = await asyncio.to_thread(LocalEvaluationJobSettings.from_environment, os.environ)
+            if job_settings is not None and (preflight is not None or not self.topology_supported):
+                raise ValueError("Local evaluation jobs require one backend owner and cannot share original preview.")
             if preflight is not None:
                 preflight.validate_configuration(loader=config, environment=os.environ)
                 if not self.topology_supported:
@@ -140,10 +149,20 @@ class RuntimeLifecycle:
                 self.original_worker = OriginalWorkerRuntime(preflight=preflight)
                 await self.original_worker.startup_async()
                 self.app.state.original_worker_runtime = self.original_worker
+            if job_settings is not None:
+                self.evaluation_jobs = await job_settings.create_port_async(memory=CentralMemory.get_memory_instance())
+                await self.evaluation_jobs.startup_async()
+                self.app.state.evaluation_job_port = self.evaluation_jobs
             await get_scenario_run_service().reconcile_interrupted_runs_async()
             _, self.version = await self.source.read_with_version_async()
             self._publish(config)
+            if self.evaluation_jobs is not None:
+                self.evaluation_jobs.start_consumer()
         except Exception:
+            if self.evaluation_jobs is not None:
+                await self.evaluation_jobs.shutdown_async()
+                self.evaluation_jobs = None
+                self.app.state.evaluation_job_port = None
             if self.original_worker is not None:
                 await self.original_worker.shutdown_async()
                 self.original_worker = None
@@ -164,6 +183,12 @@ class RuntimeLifecycle:
                 **self.status(),
                 "outcome": "unsupported",
                 "message": ("Reinitialization requires one backend worker and one replica."),
+            }
+        if self.evaluation_jobs is not None:
+            return {
+                **self.status(),
+                "outcome": "unsupported",
+                "message": "The local evaluation job port is startup-owned; configuration changes require a restart.",
             }
         if self.original_worker is not None:
             return {
@@ -261,6 +286,7 @@ class RuntimeLifecycle:
             or outstanding_estimates()
             or has_active_manual_sends()
             or (self.original_worker is not None and self.original_worker.has_active_work())
+            or (self.evaluation_jobs is not None and self.evaluation_jobs.has_active_work())
         )
 
     async def shutdown_async(self) -> None:
@@ -280,6 +306,10 @@ class RuntimeLifecycle:
                     self.original_worker = None
             finally:
                 try:
+                    if self.evaluation_jobs is not None:
+                        await self.evaluation_jobs.shutdown_async()
+                        self.app.state.evaluation_job_port = None
+                        self.evaluation_jobs = None
                     await close_services_async()
                 finally:
                     if CentralMemory._memory_instance is not None:
