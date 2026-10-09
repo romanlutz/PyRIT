@@ -117,13 +117,16 @@ def _mock_target(response_text: str) -> MagicMock:
 
 def _sent_request(target: MagicMock) -> str:
     _, send_kwargs = target.send_prompt_async.call_args
-    return send_kwargs["message"].message_pieces[-1].converted_value
+    message = send_kwargs["message"]
+    assert isinstance(message, Message)
+    return message.message_pieces[-1].converted_value
 
 
 def _label_value(metadata: dict, suffix: str) -> str:
     """Read a per-piece label value, whose key carries the scored piece's id."""
     matches = [value for key, value in metadata.items() if key.endswith(f"_{suffix}")]
     assert len(matches) == 1, f"expected one {suffix} entry, got {matches}"
+    assert isinstance(matches[0], str)
     return matches[0]
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from unit.mocks import MockPromptTarget
 
 from pyrit.backend.services.scenario_configuration_resolver import ScenarioConfigurationResolver
 from pyrit.converter import Base64Converter
@@ -27,7 +28,6 @@ from pyrit.scenario.core.dataset_configuration import DatasetConstraintError
 from pyrit.scenario.core.scenario import BaselineAttackPolicy
 from pyrit.scenario.scenarios.garak import Divergence, DivergenceDatasetConfiguration, DivergenceTechnique
 from pyrit.score import DivergenceScorer, SubStringScorer, TrueFalseInverterScorer
-from tests.unit.mocks import MockPromptTarget
 
 
 @pytest.fixture

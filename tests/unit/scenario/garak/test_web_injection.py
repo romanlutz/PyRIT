@@ -6,6 +6,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from unit.mocks import MockPromptTarget
 
 from pyrit.executor.attack import PromptSendingAttack
 from pyrit.memory import CentralMemory
@@ -29,7 +30,6 @@ from pyrit.score import (
     TrueFalseScorer,
 )
 from pyrit.score.true_false.regex.xss_output_scorer import XSSOutputScorer
-from tests.unit.mocks import MockPromptTarget
 
 
 def _mock_id(name: str) -> ComponentIdentifier:
