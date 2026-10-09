@@ -158,6 +158,35 @@ def test_combining_unequal_scenario_groups_recomputes_both_denominators() -> Non
     assert combined == statistics.overall
 
 
+@pytest.mark.parametrize("field", ["completed", "succeeded", "success_percentage"])
+def test_combining_revalidates_mutated_scenario_totals(field: str) -> None:
+    counts = ScenarioProgressCounts(
+        completed=2,
+        succeeded=1,
+        errors=1,
+        retries=0,
+        success_percentage=50,
+        outcomes=compute_outcome_statistics({"success": 1, "error": 1}),
+    )
+    setattr(counts, field, 10)
+    with pytest.raises(ValueError, match="completed|succeeded|success_percentage"):
+        combine_execution_counts([counts])
+
+
+@pytest.mark.parametrize("field", ["successes", "total_results", "success_rate_all"])
+def test_combining_revalidates_mutated_nested_outcomes(field: str) -> None:
+    counts = ScenarioProgressCounts(
+        completed=2,
+        succeeded=1,
+        errors=1,
+        retries=0,
+        outcomes=compute_outcome_statistics({"success": 1, "error": 1}),
+    )
+    setattr(counts.outcomes, field, 10)
+    with pytest.raises(ValueError):
+        combine_execution_counts([counts])
+
+
 def test_saved_plan_counts_planned_units_and_reports_unattributed_attempts() -> None:
     result = make_scenario_result(
         attack_results={

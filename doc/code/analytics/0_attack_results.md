@@ -18,12 +18,15 @@ policies together:
 
 | Field | Denominator | Meaning |
 |---|---|---|
-| `success_rate` | Successes + failures | Success among decided outcomes, the existing ASR default. |
+| `success_rate_decided` | Successes + failures | Success among decided outcomes, the existing ASR default. |
 | `success_rate_all` | All four outcomes | Success among every selected result, including errors and undetermined outcomes. |
 
+`success_rate` remains the compatible stored field; `success_rate_decided` is its
+read-only alias, not an independently mutable value. Shared-model JSON includes
+both names and accepts either when validating a payload; conflicting aliases fail.
 An empty denominator produces `None`. For example, one success and one error
-produce `success_rate=1.0` and `success_rate_all=0.5`. An error-only population has
-`success_rate=None` and `success_rate_all=0.0`. Neither rate requires a second query.
+produce `success_rate_decided=1.0` and `success_rate_all=0.5`. An error-only population
+has `success_rate_decided=None` and `success_rate_all=0.0`. Neither rate requires a second query.
 `total_results` includes all four outcomes; `outcome_shares` and `decided_share`
 use that whole selected cohort. Empty outcome shares are zero, and an empty
 cohort's decided share is `None`. All proportions are between 0 and 1.
@@ -74,7 +77,7 @@ async with AttackResultAnalytics() as analytics:
             compare_by=AttackAnalyticsDimension(name="attack_type"),
         )
     )
-    print(report.summary.total_results, report.summary.success_rate, report.summary.success_rate_all)
+    print(report.summary.total_results, report.summary.success_rate_decided, report.summary.success_rate_all)
 
     if report.drilldown_unavailable_reason:
         print(report.drilldown_unavailable_reason)
@@ -111,7 +114,7 @@ from pyrit.analytics import compute_scenario_statistics
 statistics = compute_scenario_statistics(scenario_result)
 outcomes = statistics.overall.outcomes
 assert outcomes is not None  # Always populated by compute_scenario_statistics.
-print(outcomes.success_rate, outcomes.success_rate_all)
+print(outcomes.success_rate_decided, outcomes.success_rate_all)
 ```
 
 `ScenarioProgressCounts.success_percentage` retains its existing all-completed-unit
@@ -127,6 +130,13 @@ from older callers deserialize with `outcomes=None` because their latest-outcome
 breakdown cannot be reconstructed. Combining a nonempty such payload logs a warning
 and leaves the combined breakdown unavailable rather than guessing failures.
 
+Shared outcome statistics validate supplied counts, totals, rates, and shares at
+construction. Scenario progress totals must agree with the nested outcome counts.
+Combining statistics also revalidates existing objects, including nested values
+modified after construction, instead of silently repairing contradictions.
+Objects remain mutable for compatibility: make a new result through the shared
+calculator when changing counts, rather than editing cached totals or rates.
+
 For already counted populations, call `compute_outcome_statistics` directly.
 `combine_outcome_statistics` sums counts from **disjoint** populations and
 recalculates both rates. It also accepts existing `AttackStats` returned by
@@ -141,11 +151,44 @@ from pyrit.analytics import combine_outcome_statistics, compute_outcome_statisti
 first = compute_outcome_statistics({"success": 1, "error": 1})
 second = compute_outcome_statistics({"success": 2, "failure": 1})
 combined = combine_outcome_statistics([first, second])
-print(combined.success_rate, combined.success_rate_all)  # 0.75, 0.6
+print(combined.success_rate_decided, combined.success_rate_all)  # 0.75, 0.6
 ```
 
 Do not combine overlapping converter/harm groups to reconstruct a report's
 summary; use its already-computed summary instead.
+
+### Maintained APIs and deprecated wrappers
+
+`analyze_results` and `compute_technique_stats_async` remain supported. Their default
+results keep the six-field `AttackStats` dataclass and its existing constructor,
+`asdict`, and decided-only rate. Pass `include_outcome_statistics=True` to obtain
+the shared `OutcomeStatistics` directly, without an extra conversion or query:
+
+```python
+from pyrit.analytics import analyze_results, compute_technique_stats_async
+
+analysis = analyze_results(attack_results, include_outcome_statistics=True)
+print(analysis["Overall"].success_rate_decided, analysis["Overall"].success_rate_all)
+
+techniques = await compute_technique_stats_async(
+    technique_eval_hashes=technique_hashes,
+    include_outcome_statistics=True,
+)
+for technique_hash, outcomes in techniques.items():
+    print(technique_hash, outcomes.success_rate_decided, outcomes.success_rate_all)
+```
+
+The opt-in changes returned statistics, not grouping, result selection, or retry
+policy. Default `AttackStats` also exposes the read-only `success_rate_decided`
+property, without adding dataclass fields.
+
+| API | Status |
+|---|---|
+| `analyze_results`, `compute_technique_stats_async`, `get_cached_results_for_technique_async` | Maintained. |
+| Synchronous `compute_technique_stats` and `get_cached_results_for_technique` | Deprecated; scheduled for removal in 1.4.0. Use the async equivalents. |
+| `ScenarioResult.objective_achieved_rate` | Deprecated; scheduled for removal in 1.4.0. Use `compute_scenario_statistics`. |
+
+No additional API is deprecated by these changes.
 
 ### Filters and drill-downs
 

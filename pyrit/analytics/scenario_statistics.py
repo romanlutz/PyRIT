@@ -310,7 +310,7 @@ def combine_execution_counts(counts: Iterable[ScenarioProgressCounts]) -> Scenar
             None unless every input has one. ``outcomes`` is None if a nonempty legacy input
             lacks its breakdown; historical errors cannot reconstruct latest outcomes.
     """
-    counts = list(counts)
+    counts = [ScenarioProgressCounts.model_validate(item) for item in counts]
     completed = sum(item.completed for item in counts)
     succeeded = sum(item.succeeded for item in counts)
     planned = [item.planned for item in counts]

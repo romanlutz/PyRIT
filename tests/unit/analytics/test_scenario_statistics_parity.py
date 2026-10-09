@@ -11,10 +11,11 @@ and the reports (JSON printer).
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import TypeAdapter
 
 from pyrit.analytics import compute_scenario_statistics
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
@@ -27,6 +28,7 @@ from pyrit.models import (
     AttackResult,
     AttackSeedGroup,
     ComponentIdentifier,
+    OutcomeStatistics,
     ScenarioRunPlan,
     ScenarioRunPlanAtomicGroup,
     ScenarioRunPlanSeedGroup,
@@ -352,7 +354,7 @@ async def test_sdk_api_and_reports_report_identical_statistics(history_name: str
     # Reports
     report = json.loads(await JsonScenarioResultPrinter().render_async(scenario_result))
     assert report["stats"]["overall_success_rate"] == (expected or 0)
-    assert report["stats"]["outcomes"] == asdict(sdk.overall.outcomes)
+    assert report["stats"]["outcomes"] == TypeAdapter(OutcomeStatistics).dump_python(sdk.overall.outcomes, mode="json")
 
     # Per-group numbers agree between the SDK, the saved-plan progress view, and the reports. Compare
     # key sets first so a group missing from one view fails instead of reading as 0%.
@@ -369,7 +371,9 @@ async def test_sdk_api_and_reports_report_identical_statistics(history_name: str
         name: (completed, rate or 0) for name, (completed, rate) in sdk_groups_with_results.items()
     }
     for group in report["groups"]:
-        assert group["outcomes"] == asdict(sdk.display_groups[group["name"]].outcomes)
+        assert group["outcomes"] == TypeAdapter(OutcomeStatistics).dump_python(
+            sdk.display_groups[group["name"]].outcomes, mode="json"
+        )
     if history.plan is not None:
         progress_groups = {
             group.display_group: (group.completed, group.success_percentage)

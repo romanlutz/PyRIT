@@ -21,7 +21,7 @@ def compute_outcome_statistics(counts: Mapping[str, int] | Mapping[AttackOutcome
     Calculate both success rates for an already selected population.
 
     This function neither queries memory nor chooses result IDs, retries, roles,
-    or scenario units. ``success_rate`` uses success + failure; ``success_rate_all``
+    or scenario units. ``success_rate_decided`` (also ``success_rate``) uses success + failure; ``success_rate_all``
     uses every outcome. Both are proportions, not rounded percentages.
 
     Args:
@@ -77,6 +77,8 @@ def combine_outcome_statistics(statistics: Iterable[AttackStats]) -> OutcomeStat
     """
     counts: Counter[AttackOutcome] = Counter()
     for item in statistics:
+        if isinstance(item, OutcomeStatistics):
+            item.validate_consistency()
         counts.update(
             _validated_counts(
                 {

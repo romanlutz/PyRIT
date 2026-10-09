@@ -24,6 +24,12 @@ _EAGER_PACKAGE_EXCEPTIONS = frozenset(
 _LAZY_IMPORT_SPOT_CHECKS = [
     (
         "pyrit.analytics",
+        "compute_technique_stats_async",
+        "pyrit.analytics.technique_analysis",
+        "pyrit.analytics.attack_result_analytics",
+    ),
+    (
+        "pyrit.analytics",
         "compute_outcome_statistics",
         "pyrit.analytics.outcome_statistics",
         "pyrit.memory.attack_analytics",
