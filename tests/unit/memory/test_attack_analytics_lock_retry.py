@@ -449,13 +449,13 @@ async def test_sqlite_reset_failure_discards_connection_and_preserves_cancellati
 
 @pytest.mark.parametrize("method", ["report", "matrix", "compact_report", "results", "facets"])
 @pytest.mark.parametrize("expire_after_busy", [False, True])
+@pytest.mark.parametrize("started", [0.0, 248.670460394], ids=["exact-clock", "fractional-clock"])
 async def test_every_analytics_projection_retries_busy_in_the_same_session_async(
-    *, file_memory: SQLiteMemory, method: str, expire_after_busy: bool
+    *, file_memory: SQLiteMemory, method: str, expire_after_busy: bool, started: float
 ) -> None:
     original = AsyncSession.execute
     calls: dict[Executable, int] = {}
     sessions: set[AsyncSession] = set()
-    started = time.monotonic()
     control = QueryControl(deadline=started + 10)
 
     async def execute_async(self: AsyncSession, statement: Executable) -> Result[Any]:
@@ -480,7 +480,7 @@ async def test_every_analytics_projection_retries_busy_in_the_same_session_async
                 assert control.expired and not control.cancel_event.is_set()
             else:
                 await wait_for_completion_async(future=task)
-                assert control.remaining == 10
+                assert control.remaining == pytest.approx(10)
             assert not task.cancelled() and task.cancelling() == 0
         finally:
             if not task.done():
