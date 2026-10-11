@@ -45,6 +45,8 @@ manual runs and its weekly schedule. Merge groups publish the analyzer's prepare
 SARIF through the documented code-scanning API so an expired queue ref can be
 distinguished from a genuine upload failure. Categories and fingerprints are
 preserved; failed analysis retains CodeQL's native diagnostic upload.
+The merge-group helper uses the authenticated client and context supplied by the
+pinned `actions/github-script` action, with no separate HTTP client or Python setup.
 
 Only a successful matching-refs response proving that the exact queue ref is absent
 or points to another SHA permits retirement. A missing-ref upload rejection is
@@ -55,11 +57,15 @@ cancellation when a matrix job has already failed. The CodeQL job needs
 `actions: write` for self-cancellation; workflow-wide permissions remain empty.
 Fork PRs use native CodeQL publishing and GitHub's read-only fork token policy.
 
-Run the deterministic, offline regression coverage with:
+Run the deterministic, offline regression coverage with Node.js installed.
+The pytest entry point runs the Node scenario tests and checks workflow wiring:
 
 ```bash
 uv run --frozen pytest tests/unit/build_scripts/test_codeql_merge_group.py -q
 ```
+
+The helper's scenarios can also run directly with
+`node --test tests/unit/build_scripts/test_codeql_merge_group.cjs`.
 
 ## Running a subset while iterating
 

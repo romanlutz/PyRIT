@@ -58,23 +58,23 @@ jobs:
           sarif_file: ${{ runner.temp }}/codeql-upload/upload.sarif
           category: "/language:${{ matrix.language }}"
 
-      - name: Set up merge-group upload helper
-        if: github.event_name == 'merge_group'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: "0.9.17"
-          enable-cache: false
-
       - name: Publish merge-group CodeQL results
         if: github.event_name == 'merge_group'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         timeout-minutes: 8
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           ANALYSIS_OUTCOME: ${{ steps.analysis.outcome }}
           SARIF_FILE: ${{ runner.temp }}/codeql-upload/upload.sarif
           SARIF_CATEGORY: "/language:${{ matrix.language }}"
-        run: |
-          uv run --no-project python -m build_scripts.codeql_merge_group \
-            --analysis-outcome "$ANALYSIS_OUTCOME" \
-            --sarif-file "$SARIF_FILE" \
-            --category "$SARIF_CATEGORY"
+        with:
+          retries: 0
+          script: |
+            const publish = require(require('node:path').resolve('build_scripts', 'codeql_merge_group.cjs'));
+            await publish({
+              github, context, core,
+              sarifFile: process.env.SARIF_FILE,
+              category: process.env.SARIF_CATEGORY,
+              analysisOutcome: process.env.ANALYSIS_OUTCOME,
+              runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              checkout: process.env.GITHUB_WORKSPACE,
+            });
