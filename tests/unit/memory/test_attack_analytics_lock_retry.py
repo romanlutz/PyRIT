@@ -448,25 +448,43 @@ async def test_sqlite_reset_failure_discards_connection_and_preserves_cancellati
 
 
 @pytest.mark.parametrize("method", ["report", "matrix", "compact_report", "results", "facets"])
+@pytest.mark.parametrize("expire_after_busy", [False, True])
 async def test_every_analytics_projection_retries_busy_in_the_same_session_async(
-    *, file_memory: SQLiteMemory, method: str
+    *, file_memory: SQLiteMemory, method: str, expire_after_busy: bool
 ) -> None:
     original = AsyncSession.execute
     calls: dict[Executable, int] = {}
     sessions: set[AsyncSession] = set()
+    started = time.monotonic()
+    control = QueryControl(deadline=started + 10)
 
     async def execute_async(self: AsyncSession, statement: Executable) -> Result[Any]:
         sessions.add(self)
         calls[statement] = calls.get(statement, 0) + 1
         if calls[statement] == 1:
+            if expire_after_busy:
+                clock.monotonic.return_value = control.deadline
             raise _sqlite_error(sqlite3.SQLITE_BUSY)
         return await original(self, statement)
 
-    with patch.object(AsyncSession, "execute", execute_async):
-        await _read_async(
-            reader=AttackAnalyticsReader(memory=file_memory),
-            method=method,
-            control=QueryControl(deadline=time.monotonic() + 10),
+    with patch.object(query_control, "time") as clock, patch.object(AsyncSession, "execute", execute_async):
+        # Only the query clock is controlled; the event loop watchdog remains real.
+        clock.monotonic.return_value = started
+        task = asyncio.create_task(
+            _read_async(reader=AttackAnalyticsReader(memory=file_memory), method=method, control=control)
         )
-    assert calls and all(count == 2 for count in calls.values())
+        try:
+            if expire_after_busy:
+                with pytest.raises(AnalyticsTimeoutException):
+                    await wait_for_completion_async(future=task)
+                assert control.expired and not control.cancel_event.is_set()
+            else:
+                await wait_for_completion_async(future=task)
+                assert control.remaining == 10
+            assert not task.cancelled() and task.cancelling() == 0
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert calls and all(count == (1 if expire_after_busy else 2) for count in calls.values())
     assert len(sessions) == 1
