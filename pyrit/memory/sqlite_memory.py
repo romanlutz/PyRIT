@@ -401,30 +401,47 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         """
         Generate SQLAlchemy filter conditions for filtering conversation pieces by prompt metadata.
 
+        Metadata keys are free-form, so each key is quoted into the JSON path
+        and the path is bound rather than spelled out: a key holding a dot is a
+        literal key, not a path step, and a key holding a hyphen is neither a
+        JSON path nor a legal bind-parameter name.
+
         Returns:
             list: A list of SQLAlchemy conditions.
         """
-        json_conditions = " AND ".join(
-            [f"JSON_EXTRACT(prompt_metadata, '$.{key}') = :{key}" for key in prompt_metadata]
-        )
+        json_paths, bindparams = [], {}
+        for index, (key, value) in enumerate(prompt_metadata.items()):
+            path_param, value_param = f"pm_path_{index}", f"pm_value_{index}"
+            json_paths.append(f"JSON_EXTRACT(prompt_metadata, :{path_param}) = :{value_param}")
+            bindparams[path_param] = f'$."{key}"'
+            # Note: We do NOT convert values to string here, to allow integer comparison in JSON
+            bindparams[value_param] = value
 
         # Create SQL condition using SQLAlchemy's text() with bindparams
-        # Note: We do NOT convert values to string here, to allow integer comparison in JSON
-        condition = text(json_conditions).bindparams(**dict(prompt_metadata.items()))
+        condition = text(" AND ".join(json_paths)).bindparams(**bindparams)
         return [condition]
 
     def _get_seed_metadata_conditions(self, *, metadata: dict[str, str | int]) -> Any:
         """
         Generate SQLAlchemy filter conditions for filtering seed prompts by metadata.
 
+        Metadata keys are free-form, so each key is quoted into the JSON path
+        and the path is bound rather than spelled out, for the same reason as
+        in _get_message_pieces_prompt_metadata_conditions.
+
         Returns:
             Any: A SQLAlchemy text condition with bound parameters.
         """
-        json_conditions = " AND ".join([f"JSON_EXTRACT(prompt_metadata, '$.{key}') = :{key}" for key in metadata])
+        json_paths, bindparams = [], {}
+        for index, (key, value) in enumerate(metadata.items()):
+            path_param, value_param = f"sm_path_{index}", f"sm_value_{index}"
+            json_paths.append(f"JSON_EXTRACT(prompt_metadata, :{path_param}) = :{value_param}")
+            bindparams[path_param] = f'$."{key}"'
+            # Note: We do NOT convert values to string here, to allow integer comparison in JSON
+            bindparams[value_param] = value
 
         # Create SQL condition using SQLAlchemy's text() with bindparams
-        # Note: We do NOT convert values to string here, to allow integer comparison in JSON
-        return text(json_conditions).bindparams(**dict(metadata.items()))
+        return text(" AND ".join(json_paths)).bindparams(**bindparams)
 
     def _get_condition_json_property_match(
         self,

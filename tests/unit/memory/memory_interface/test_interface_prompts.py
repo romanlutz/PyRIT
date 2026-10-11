@@ -1043,6 +1043,53 @@ async def test_get_message_pieces_captured_response_metadata(sqlite_instance: Me
     assert retrieved[0].prompt_metadata[key] == value
 
 
+@pytest.mark.parametrize("key", ["attack.id", "a-b", "sp ace", "with:colon"])
+async def test_get_message_pieces_prompt_metadata_key_with_non_identifier_character(
+    sqlite_instance: MemoryInterface, key: str
+):
+    """A free-form metadata key must be queryable whatever characters it holds.
+
+    The key used to be spelled into the JSON path and reused as the bind-parameter
+    name, so a dot read as a path step and a hyphen was not a legal parameter name:
+    the query raised ``ArgumentError: This text() construct doesn't define a bound
+    parameter named ...`` instead of filtering.
+    """
+    matching = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="targeted",
+        prompt_metadata={key: "value"},
+    )
+    other = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="unrelated",
+        prompt_metadata={key: "something_else"},
+    )
+    sqlite_instance._insert_entries(entries=[PromptMemoryEntry(entry=matching), PromptMemoryEntry(entry=other)])
+
+    retrieved = await sqlite_instance.get_message_pieces_async(prompt_metadata={key: "value"})
+
+    assert len(retrieved) == 1
+    assert retrieved[0].original_value == "targeted"
+
+
+async def test_get_message_pieces_prompt_metadata_multiple_non_identifier_keys(sqlite_instance: MemoryInterface):
+    """Several free-form keys in one query each get their own bound path and value."""
+    metadata = {"attack.id": "a", "a-b": "b", "plain": "c"}
+    piece = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="hit",
+        prompt_metadata=metadata,
+    )
+    sqlite_instance._insert_entries(entries=[PromptMemoryEntry(entry=piece)])
+
+    assert len(await sqlite_instance.get_message_pieces_async(prompt_metadata=metadata)) == 1
+    assert len(await sqlite_instance.get_message_pieces_async(prompt_metadata={"attack.id": "a", "a-b": "b"})) == 1
+    assert len(await sqlite_instance.get_message_pieces_async(prompt_metadata={"attack.id": "a", "a-b": "nope"})) == 0
+
+
 async def test_get_message_pieces_id(sqlite_instance: MemoryInterface):
     entries = [
         PromptMemoryEntry(
