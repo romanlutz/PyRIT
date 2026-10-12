@@ -915,10 +915,36 @@ Partial settings and incompatible versions/schemas fail before execution.
 
 CoPyRIT/framework clients still use the public `/api/evaluation-jobs` producer
 surface. The gateway intersects authenticated per-operator worker grants with
-its own pinned registrations. Only the public harmless original and its
-reviewed canonical writer are installed. Service-advertised Tasks, runtime
+its own pinned registrations. Default backend startup installs only the public
+harmless original and its reviewed canonical writer. Service-advertised Tasks, runtime
 kinds, code, initial inputs, models, provisioning settings or Mode 1 steering
 are never dynamically installed.
+
+Trusted server composition can instead call `create_remote_job_port_async`
+with one explicit `EvaluationJobRegistration` and its API-owned
+`EvaluationArtifactWriter`, plus the existing root, actor allowlist, transport
+settings and credential provider. This constructs an unstarted gateway, not a
+runtime implementation or a catalog loader. The locally installed runtime kind,
+source pin, case, profile, controls and artifact kind must match the admitted
+request and delegated catalog grant. Only that registration's writer is installed;
+there is no original-writer fallback. The original factory retains its existing
+signature and delegates with its same pinned source and canonical SQLite writer.
+Existing original constructor calls remain supported.
+Successful construction transfers credential shutdown to the gateway. If construction
+fails, the factory joins HTTP transport closure while the caller retains credential
+ownership, preserving the existing backend's single provider-close path.
+
+The injected writer owns evidence interpretation and canonical persistence.
+It must validate its reviewed native or Inspect source and retain exact artifacts
+in API-owned storage, never adopt worker database rows or IDs. The gateway verifies
+the complete fenced handoff and the writer's job/request/manifest/artifact receipt
+before settlement. `EvaluationCanonicalReceipt.score_ids` and
+`attack_result_ids` may both be empty for honestly ungraded evidence;
+`source_complete` then describes source coverage, not a guest exit status, original
+grade or agent application. The generic factory supplies no native grader or
+public native projection. Its offline native transport test retains fixture bytes
+in canonical SQLite without a Score or AttackResult; it does not qualify a private
+native backend, real execution, a provider or deployment.
 
 `pyrit.models.evaluation_worker` defines the separate execution-only
 `/api/evaluation-worker/v1` wire. It provides protocol/catalog, job
@@ -941,9 +967,11 @@ handoff manifest for the same inventory/bytes under its own gateway fence;
 both digests and the original byte digest are linked durably. This is not a
 silent fence restamp or provider-incarnation attestation.
 
-Only `OriginalInspectArtifactWriter` in the API imports the exact binary `.eval`
-and creates/verifies its own canonical Score, AttackResult and archive records.
-It never copies worker SQLite IDs or reruns the source scorer. Gateway
+For the default original binding, `OriginalInspectArtifactWriter` in the API
+imports the exact binary `.eval` and creates/verifies its own canonical Score,
+AttackResult and archive records. It never copies worker SQLite IDs or reruns the
+source scorer. An explicitly installed non-original writer receives only its
+matching exact source artifacts, not a substituted original grader. Gateway
 settlement acknowledges that retained/imported handoff, not a guest shutdown.
 A cancelled/failed source with verified joined closure and absent artifacts
 can use `closure_observed` with **no artifact hashes**. Unknown closure/evidence

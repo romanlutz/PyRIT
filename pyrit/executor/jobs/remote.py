@@ -31,7 +31,6 @@ from pyrit.models.evaluation_job import (
     EvaluationJobRegistration,
     EvaluationJobRequest,
     EvaluationJobSubmission,
-    EvaluationRuntimeKind,
 )
 from pyrit.models.evaluation_worker import (
     EvaluationGatewaySettlement,
@@ -50,7 +49,7 @@ if TYPE_CHECKING:
 
     import httpx
 
-    from pyrit.executor.jobs.port import EvaluationRuntimeContext
+    from pyrit.executor.jobs.port import EvaluationArtifactWriter, EvaluationRuntimeContext
     from pyrit.executor.jobs.worker_auth import EvaluationWorkerCredentialProvider
     from pyrit.memory import MemoryInterface
 
@@ -76,17 +75,29 @@ async def _join_owned_async(operation: Awaitable[T]) -> T:
 
 
 class RemoteEvaluationJobRuntime:
-    """Transport only the sole locally reviewed original source; never install catalog code."""
+    """Transport one explicitly installed source binding; never install catalog code."""
 
     def __init__(
         self,
         *,
-        original: PublicOriginalInspectJobRuntime,
+        original: PublicOriginalInspectJobRuntime | None = None,
         client: EvaluationWorkerHttpClient,
         journal: EvaluationRemoteJournal,
+        registration: EvaluationJobRegistration | None = None,
     ) -> None:
-        """Bind the approved registration, protected client and gateway-owned journal."""
-        self.registration = original.registration
+        """
+        Bind explicit runtime metadata or the existing approved original, never both.
+
+        Raises:
+            ValueError: If no unique server-installed binding is supplied.
+        """
+        if registration is None:
+            if original is None:
+                raise ValueError("An explicit remote registration or approved original is required.")
+            registration = original.registration
+        elif original is not None:
+            raise ValueError("A remote runtime cannot combine original and explicit registrations.")
+        self.registration = EvaluationJobRegistration.model_validate(registration)
         self.client = client
         self.journal = journal
 
@@ -95,12 +106,15 @@ class RemoteEvaluationJobRuntime:
         Retain remote execution ownership and exact artifacts without trusting worker database results.
 
         Returns:
-            EvaluationRuntimeArtifacts: Verified original bytes with an explicitly derived gateway manifest.
+            EvaluationRuntimeArtifacts: Verified source bytes with an explicitly derived gateway manifest.
 
         Raises:
+            EvaluationJobError: If the admitted source is not this installed registration.
             EvaluationRuntimeCancelled: If cancellation was joined with independently observed settlement.
             EvaluationRuntimeError: If transport, evidence or closure remains refused or uncertain.
         """
+        if not self.registration.accepts(context.request):
+            raise EvaluationJobError(EvaluationJobErrorCode.UNSUPPORTED_RUNTIME)
         admission = EvaluationWorkerAdmission(
             request=context.request,
             request_sha256=context.request.request_sha256,
@@ -163,6 +177,8 @@ class RemoteEvaluationJobRuntime:
         worker, exact_manifest = await self.client.manifest_async(
             admission=admission, binding=snapshot.binding, manifest_sha256=terminal.manifest_sha256
         )
+        if any(artifact.kind is not self.registration.artifact_kind for artifact in worker.artifacts):
+            raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
         payloads = [
             (
                 artifact.name,
@@ -233,20 +249,24 @@ class RemoteEvaluationJobRuntime:
             return EvaluationCleanupState.UNKNOWN
 
 
-class RemoteOriginalInspectArtifactWriter:
+class RemoteEvaluationArtifactWriter:
     """Only the public API writer may create canonical IDs; worker settlement comes afterward."""
 
     def __init__(
         self,
         *,
-        writer: OriginalInspectArtifactWriter,
+        writer: EvaluationArtifactWriter,
         client: EvaluationWorkerHttpClient,
         journal: EvaluationRemoteJournal,
+        registration: EvaluationJobRegistration | None = None,
     ) -> None:
         """Bind actual canonical persistence, authenticated settlement and local provenance."""
         self.writer = writer
         self.client = client
         self.journal = journal
+        self._registration = (
+            EvaluationJobRegistration.model_validate(registration) if registration is not None else None
+        )
 
     async def import_async(
         self, *, request: EvaluationJobRequest, artifacts: EvaluationRuntimeArtifacts
@@ -263,10 +283,32 @@ class RemoteOriginalInspectArtifactWriter:
         self, *, request: EvaluationJobRequest, artifacts: EvaluationRuntimeArtifacts
     ) -> EvaluationCanonicalReceipt:
         try:
+            request = EvaluationJobRequest.model_validate(request)
+            artifacts.verify()
+            if artifacts.cleanup is not EvaluationCleanupState.VERIFIED or (
+                self._registration is not None
+                and (
+                    not self._registration.accepts(request)
+                    or any(
+                        artifact.kind is not self._registration.artifact_kind
+                        for artifact in artifacts.manifest.artifacts
+                    )
+                )
+            ):
+                raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
             admission, binding, worker, gateway = await run_legacy_sync_async(self.journal.handoff, request.job_id)
             if gateway != artifacts.manifest or admission.request != request:
                 raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
-            canonical = await self.writer.import_async(request=request, artifacts=artifacts)
+            canonical = EvaluationCanonicalReceipt.model_validate(
+                await self.writer.import_async(request=request, artifacts=artifacts)
+            )
+            if (
+                canonical.job_id != request.job_id
+                or canonical.request_sha256 != request.request_sha256
+                or canonical.manifest_sha256 != gateway.manifest_sha256
+                or canonical.artifact_sha256 not in {artifact.sha256 for artifact in gateway.artifacts}
+            ):
+                raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
         except Exception as error:
             await _mark_uncertain_async(journal=self.journal, job_id=request.job_id)
             raise EvaluationRuntimeError(
@@ -290,6 +332,9 @@ class RemoteOriginalInspectArtifactWriter:
         return canonical
 
 
+RemoteOriginalInspectArtifactWriter = RemoteEvaluationArtifactWriter
+
+
 class RemoteEvaluationJobGateway(LocalEvaluationJobPort):
     """The same local canonical owner with actor-specific authenticated remote grants."""
 
@@ -297,24 +342,40 @@ class RemoteEvaluationJobGateway(LocalEvaluationJobPort):
         self,
         *,
         root: Path,
-        original: PublicOriginalInspectJobRuntime,
-        memory: MemoryInterface,
+        original: PublicOriginalInspectJobRuntime | None = None,
+        memory: MemoryInterface | None = None,
         allowed_actor_ids: frozenset[str],
         client: EvaluationWorkerHttpClient,
+        registration: EvaluationJobRegistration | None = None,
+        writer: EvaluationArtifactWriter | None = None,
     ) -> None:
-        """Install only one approved inert source and its actual API-owned writer."""
+        """
+        Install one explicit registration/writer or the existing original/memory pair.
+
+        Raises:
+            ValueError: If installation is incomplete or combines the two ownership paths.
+        """
+        if original is not None:
+            if memory is None or registration is not None or writer is not None:
+                raise ValueError("Use only the approved original and its canonical memory.")
+            registration = original.registration
+            writer = OriginalInspectArtifactWriter(memory=memory, runtime=original)
+        elif registration is None or writer is None or memory is not None:
+            raise ValueError("An explicit registration and API-owned artifact writer are required.")
+        registration = EvaluationJobRegistration.model_validate(registration)
         self.client = client
         self.journal = EvaluationRemoteJournal(root)
-        runtime = RemoteEvaluationJobRuntime(original=original, client=client, journal=self.journal)
-        writer = RemoteOriginalInspectArtifactWriter(
-            writer=OriginalInspectArtifactWriter(memory=memory, runtime=original),
+        runtime = RemoteEvaluationJobRuntime(registration=registration, client=client, journal=self.journal)
+        remote_writer = RemoteEvaluationArtifactWriter(
+            registration=registration,
+            writer=writer,
             client=client,
             journal=self.journal,
         )
         super().__init__(
             root=root,
             registry=EvaluationJobRuntimeRegistry((runtime,)),
-            writers={EvaluationRuntimeKind.ORIGINAL_INSPECT: writer},
+            writers={registration.runtime: remote_writer},
             allowed_actor_ids=allowed_actor_ids,
         )
         self._remote_close: asyncio.Task[None] | None = None
@@ -378,6 +439,42 @@ class RemoteEvaluationJobGateway(LocalEvaluationJobPort):
             await self.client.close_async()
 
 
+async def create_remote_job_port_async(
+    *,
+    root: Path,
+    registration: EvaluationJobRegistration,
+    writer: EvaluationArtifactWriter,
+    allowed_actor_ids: frozenset[str],
+    settings: EvaluationWorkerHttpSettings,
+    credentials: EvaluationWorkerCredentialProvider,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> RemoteEvaluationJobGateway:
+    """
+    Compose one server-approved remote binding with its trusted API-owned canonical writer.
+
+    Catalogs only restrict the installed binding. This factory loads no source code,
+    supplies no grader, and does not infer a writer or canonical memory from worker data.
+    Credentials transfer to the gateway only on success; construction rollback closes
+    the factory's HTTP transport and leaves credentials with the caller.
+
+    Returns:
+        RemoteEvaluationJobGateway: An unstarted gateway with one explicit runtime/writer pair.
+    """
+    registration = EvaluationJobRegistration.model_validate(registration)
+    client = EvaluationWorkerHttpClient(settings=settings, credentials=credentials, transport=transport)
+    try:
+        return RemoteEvaluationJobGateway(
+            root=root,
+            registration=registration,
+            writer=writer,
+            allowed_actor_ids=allowed_actor_ids,
+            client=client,
+        )
+    except BaseException:
+        await _join_owned_async(client.close_transport_async())
+        raise
+
+
 async def create_remote_original_job_port_async(
     *,
     root: Path,
@@ -401,7 +498,12 @@ async def create_remote_original_job_port_async(
     if not isinstance(memory, SQLiteMemory):
         raise ValueError("The remote job gateway requires API-owned canonical SQLite.")
     original = await PublicOriginalInspectJobRuntime.create_async()
-    client = EvaluationWorkerHttpClient(settings=settings, credentials=credentials, transport=transport)
-    return RemoteEvaluationJobGateway(
-        root=root, original=original, memory=memory, allowed_actor_ids=allowed_actor_ids, client=client
+    return await create_remote_job_port_async(
+        root=root,
+        registration=original.registration,
+        writer=OriginalInspectArtifactWriter(memory=memory, runtime=original),
+        allowed_actor_ids=allowed_actor_ids,
+        settings=settings,
+        credentials=credentials,
+        transport=transport,
     )

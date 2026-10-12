@@ -345,10 +345,14 @@ class EvaluationWorkerHttpClient:
             raise EvaluationJobError(EvaluationJobErrorCode.REQUEST_CONFLICT)
         return result
 
+    async def close_transport_async(self) -> None:
+        """Close the owned HTTP transport without taking the caller's credential ownership."""
+        await self._client.aclose()
+
     async def close_async(self) -> None:
         """Close the owned HTTP client before its explicitly installed credential provider."""
         try:
-            await self._client.aclose()
+            await self.close_transport_async()
         finally:
             await self.credentials.close_async()
 
