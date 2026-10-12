@@ -373,12 +373,8 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         """
         Generate SQL conditions for filtering by prompt metadata.
 
-        Uses JSON_VALUE() function specific to SQL Azure to query metadata fields in JSON format.
-
-        Metadata keys are free-form, so each key is quoted into the JSON path
-        and the path is bound rather than spelled out: a key holding a dot is a
-        literal key, not a path step, and a key holding a hyphen is neither a
-        JSON path nor a legal bind-parameter name.
+        Uses OPENJSON() to compare free-form metadata keys literally rather than
+        interpreting them as JSON path expressions.
 
         Args:
             prompt_metadata (dict[str, str | int]): Dictionary of metadata key-value pairs to filter by.
@@ -389,11 +385,13 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         json_validation = "ISJSON(prompt_metadata) = 1"
         json_conditions, bindparams = [], {}
         for index, (key, value) in enumerate(prompt_metadata.items()):
-            path_param, value_param = f"md_path_{index}", f"md_value_{index}"
-            json_conditions.append(f"JSON_VALUE(prompt_metadata, :{path_param}) = :{value_param}")
-            bindparams[path_param] = f'$."{key}"'
-            # Note: JSON_VALUE always returns nvarchar in SQL Server, so we must convert all values to strings
-            # to avoid type conversion errors when comparing mixed types (e.g., int and string)
+            key_param, value_param = f"md_key_{index}", f"md_value_{index}"
+            alias = f"metadata_{index}"
+            json_conditions.append(
+                f"EXISTS (SELECT 1 FROM OPENJSON(prompt_metadata) AS [{alias}] "
+                f"WHERE [{alias}].[key] = :{key_param} AND [{alias}].[value] = :{value_param})"
+            )
+            bindparams[key_param] = key
             bindparams[value_param] = str(value)
 
         # Combine both conditions

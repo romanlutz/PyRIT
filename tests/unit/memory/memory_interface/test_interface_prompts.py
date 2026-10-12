@@ -1090,6 +1090,123 @@ async def test_get_message_pieces_prompt_metadata_multiple_non_identifier_keys(s
     assert len(await sqlite_instance.get_message_pieces_async(prompt_metadata={"attack.id": "a", "a-b": "nope"})) == 0
 
 
+@pytest.mark.parametrize(
+    ("literal_key", "other_metadata"),
+    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+)
+async def test_get_message_pieces_prompt_metadata_matches_literal_json_keys(
+    sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
+):
+    matching = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="literal",
+        prompt_metadata={literal_key: "value"},
+    )
+    other = MessagePiece(
+        conversation_id=str(uuid4()),
+        role="user",
+        original_value="other",
+        prompt_metadata=other_metadata,
+    )
+    sqlite_instance._insert_entries(entries=[PromptMemoryEntry(entry=matching), PromptMemoryEntry(entry=other)])
+
+    retrieved = await sqlite_instance.get_message_pieces_async(prompt_metadata={literal_key: "value"})
+
+    assert [piece.original_value for piece in retrieved] == ["literal"]
+
+
+@pytest.mark.parametrize(
+    ("literal_key", "other_metadata"),
+    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+)
+async def test_seed_metadata_retrieval_matches_literal_json_keys(
+    sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
+):
+    literal_group_id, nested_group_id = uuid4(), uuid4()
+    seeds = [
+        SeedPrompt(
+            value="literal first",
+            data_type="text",
+            metadata={literal_key: "value"},
+            prompt_group_id=literal_group_id,
+        ),
+        SeedPrompt(
+            value="literal second",
+            data_type="text",
+            metadata={literal_key: "value"},
+            prompt_group_id=literal_group_id,
+        ),
+        SeedPrompt(
+            value="nested",
+            data_type="text",
+            metadata=other_metadata,
+            prompt_group_id=nested_group_id,
+        ),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="tester")
+
+    retrieved = await sqlite_instance.get_seeds_async(metadata={literal_key: "value"})
+    assert {seed.value for seed in retrieved} == {"literal first", "literal second"}
+
+
+@pytest.mark.parametrize(
+    ("literal_key", "other_metadata"),
+    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+)
+async def test_seed_removal_matches_literal_json_keys(
+    sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
+):
+    seeds = [
+        SeedPrompt(value="literal", data_type="text", metadata={literal_key: "value"}),
+        SeedPrompt(value="nested", data_type="text", metadata=other_metadata),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="tester")
+
+    removed = await sqlite_instance.remove_seeds_from_memory_async(metadata={literal_key: "value"})
+
+    remaining = await sqlite_instance.get_seeds_async()
+    assert [seed.value for seed in remaining] == ["nested"]
+    assert removed == 1
+
+
+@pytest.mark.parametrize(
+    ("literal_key", "other_metadata"),
+    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+)
+async def test_seed_group_removal_matches_literal_json_keys(
+    sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
+):
+    literal_group_id, nested_group_id = uuid4(), uuid4()
+    seeds = [
+        SeedPrompt(
+            value="literal first",
+            data_type="text",
+            metadata={literal_key: "value"},
+            prompt_group_id=literal_group_id,
+        ),
+        SeedPrompt(
+            value="literal second",
+            data_type="text",
+            metadata={literal_key: "value"},
+            prompt_group_id=literal_group_id,
+        ),
+        SeedPrompt(
+            value="nested",
+            data_type="text",
+            metadata=other_metadata,
+            prompt_group_id=nested_group_id,
+        ),
+    ]
+    await sqlite_instance.add_seeds_to_memory_async(seeds=seeds, added_by="tester")
+
+    removed = await sqlite_instance.remove_seed_groups_from_memory_async(metadata={literal_key: "value"})
+
+    remaining = await sqlite_instance.get_seeds_async()
+    assert [seed.value for seed in remaining] == ["nested"]
+    assert removed == 2
+
+
 async def test_get_message_pieces_id(sqlite_instance: MemoryInterface):
     entries = [
         PromptMemoryEntry(
