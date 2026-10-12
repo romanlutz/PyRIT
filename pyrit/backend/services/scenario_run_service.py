@@ -1423,12 +1423,14 @@ class ScenarioRunService:
             plan = None
 
         # Build result fields from DB (always computed so in-progress runs show progress)
-        total_attacks, completed_attacks, objective_achieved_rate, successful_attacks = (
-            self._progress_read_model.calculate_progress_counts(
-                scenario_result=scenario_result,
-                plan=plan,
-            )
+        overall_counts = self._progress_read_model.calculate_progress_counts(
+            scenario_result=scenario_result,
+            plan=plan,
         )
+        total_attacks = overall_counts.planned if overall_counts.planned is not None else overall_counts.completed
+        completed_attacks = overall_counts.completed
+        objective_achieved_rate = overall_counts.success_percentage or 0
+        successful_attacks = overall_counts.succeeded
         techniques_used = (
             list(dict.fromkeys(group.technique_name or group.display_group for group in plan.atomic_groups))
             if plan is not None
@@ -1522,6 +1524,7 @@ class ScenarioRunService:
             queue_position=queue_position,
             active_scenario_result_id=active_scenario_result_id,
             overload_summaries=self._build_overload_summaries(retry_events=overload_events),
+            producer_counts=overall_counts.producer_counts,
         )
 
     @staticmethod
@@ -1604,6 +1607,15 @@ class ScenarioRunService:
                 successful_units=overall.succeeded,
                 error_attempts=overall.errors,
                 total_retries=overall.retries,
+                target_facing_attempts=overall.producer_counts.target_facing.attempts,
+                target_facing_error_attempts=overall.producer_counts.target_facing.errors,
+                target_facing_retries=overall.producer_counts.target_facing.retries,
+                orchestration_attempts=overall.producer_counts.orchestration.attempts,
+                orchestration_error_attempts=overall.producer_counts.orchestration.errors,
+                orchestration_retries=overall.producer_counts.orchestration.retries,
+                unknown_role_attempts=overall.producer_counts.unknown.attempts,
+                unknown_role_error_attempts=overall.producer_counts.unknown.errors,
+                unknown_role_retries=overall.producer_counts.unknown.retries,
             )
         return recounted
 
@@ -1674,6 +1686,25 @@ class ScenarioRunService:
             if atomic_groups is not None
             else list(aggregate.atomic_attack_names)
         )
+        from pyrit.models import ScenarioProducerCategoryCounts, ScenarioProducerCounts
+
+        producer_counts = ScenarioProducerCounts(
+            target_facing=ScenarioProducerCategoryCounts(
+                attempts=aggregate.target_facing_attempts,
+                errors=aggregate.target_facing_error_attempts,
+                retries=aggregate.target_facing_retries,
+            ),
+            orchestration=ScenarioProducerCategoryCounts(
+                attempts=aggregate.orchestration_attempts,
+                errors=aggregate.orchestration_error_attempts,
+                retries=aggregate.orchestration_retries,
+            ),
+            unknown=ScenarioProducerCategoryCounts(
+                attempts=aggregate.unknown_role_attempts,
+                errors=aggregate.unknown_role_error_attempts,
+                retries=aggregate.unknown_role_retries,
+            ),
+        )
         return ScenarioRunListItem(
             scenario_result_id=record.scenario_result_id,
             scenario_name=record.scenario_name,
@@ -1700,6 +1731,7 @@ class ScenarioRunService:
             successful_attacks=successful,
             error_attacks=aggregate.error_attempts,
             attack_details_available=False,
+            producer_counts=producer_counts,
         )
 
     @staticmethod
