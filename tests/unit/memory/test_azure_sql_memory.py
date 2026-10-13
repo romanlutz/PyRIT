@@ -983,3 +983,18 @@ def test_scenario_role_match_condition_uses_binary_collation_and_datalength_guar
     compiled_mssql = str(condition.compile(dialect=mssql.dialect(), compile_kwargs={"literal_binds": True}))
     assert "(result_role COLLATE Latin1_General_100_BIN2) = 'target_facing'" in compiled_mssql
     assert "datalength(result_role) = datalength(N'target_facing')" in compiled_mssql
+
+
+def test_get_metadata_conditions_binds_special_character_keys(
+    uninitialized_memory_interface: AzureSQLMemory,
+) -> None:
+    """Metadata keys with dots become quoted path parameters, not bind names (#3179)."""
+    conditions = uninitialized_memory_interface._get_metadata_conditions(
+        prompt_metadata={"a.b": "v1", "prompt-type": "v2"}
+    )
+
+    compiled = str(conditions[0].compile(compile_kwargs={"literal_binds": False}))
+    assert "JSON_VALUE(prompt_metadata, :meta_path_0)" in compiled
+    assert "JSON_VALUE(prompt_metadata, :meta_path_1)" in compiled
+    assert "ISJSON" in compiled
+    assert ":a.b" not in compiled and ":prompt-type" not in compiled

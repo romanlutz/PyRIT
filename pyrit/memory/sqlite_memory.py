@@ -404,14 +404,7 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         Returns:
             list: A list of SQLAlchemy conditions.
         """
-        json_conditions = " AND ".join(
-            [f"JSON_EXTRACT(prompt_metadata, '$.{key}') = :{key}" for key in prompt_metadata]
-        )
-
-        # Create SQL condition using SQLAlchemy's text() with bindparams
-        # Note: We do NOT convert values to string here, to allow integer comparison in JSON
-        condition = text(json_conditions).bindparams(**dict(prompt_metadata.items()))
-        return [condition]
+        return self._get_metadata_conditions(prompt_metadata=prompt_metadata)
 
     def _get_seed_metadata_conditions(self, *, metadata: dict[str, str | int]) -> Any:
         """
@@ -420,11 +413,29 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
         Returns:
             Any: A SQLAlchemy text condition with bound parameters.
         """
-        json_conditions = " AND ".join([f"JSON_EXTRACT(prompt_metadata, '$.{key}') = :{key}" for key in metadata])
+        return self._get_metadata_conditions(prompt_metadata=metadata)[0]
 
-        # Create SQL condition using SQLAlchemy's text() with bindparams
-        # Note: We do NOT convert values to string here, to allow integer comparison in JSON
-        return text(json_conditions).bindparams(**dict(metadata.items()))
+    def _get_metadata_conditions(self, *, prompt_metadata: dict[str, str | int]) -> list[TextClause]:
+        """
+        Generate SQLAlchemy filter conditions for prompt metadata with arbitrary keys.
+
+        Keys are bound as quoted JSON path parameters and matched by indexed value
+        parameters, so keys containing dots, hyphens or spaces stay one literal key
+        and never become bind-parameter names (#3179, same shape as the label fix in #3063).
+
+        Returns:
+            list: A list of SQLAlchemy conditions.
+        """
+        json_conditions: list[str] = []
+        bind_values: dict[str, str | int] = {}
+        for key_index, (key, value) in enumerate(prompt_metadata.items()):
+            path_param = f"meta_path_{key_index}"
+            value_param = f"meta_value_{key_index}"
+            json_conditions.append(f"JSON_EXTRACT(prompt_metadata, :{path_param}) = :{value_param}")
+            bind_values[path_param] = f'$."{key}"'
+            # Values stay unconverted so integer comparison in JSON keeps working.
+            bind_values[value_param] = value
+        return [text(" AND ".join(json_conditions)).bindparams(**bind_values)]
 
     def _get_condition_json_property_match(
         self,

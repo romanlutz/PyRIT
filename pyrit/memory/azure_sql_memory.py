@@ -376,6 +376,10 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
 
         Uses JSON_VALUE() function specific to SQL Azure to query metadata fields in JSON format.
 
+        Keys are bound as quoted JSON path parameters and matched by indexed value
+        parameters, so keys containing dots, hyphens or spaces stay one literal key
+        and never become bind-parameter names (#3179, same shape as the label fix in #3063).
+
         Args:
             prompt_metadata (dict[str, str | int]): Dictionary of metadata key-value pairs to filter by.
 
@@ -383,16 +387,18 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             list: List containing a single SQLAlchemy text condition with bound parameters.
         """
         json_validation = "ISJSON(prompt_metadata) = 1"
-        json_conditions = " AND ".join([f"JSON_VALUE(prompt_metadata, '$.{key}') = :{key}" for key in prompt_metadata])
-        # Combine both conditions
-        conditions = f"{json_validation} AND {json_conditions}"
-
-        # Create SQL condition using SQLAlchemy's text() with bindparams
-        # for safe parameter passing, preventing SQL injection
-        # Note: JSON_VALUE always returns nvarchar in SQL Server, so we must convert all values to strings
-        # to avoid type conversion errors when comparing mixed types (e.g., int and string)
-        condition = text(conditions).bindparams(**{key: str(value) for key, value in prompt_metadata.items()})
-        return [condition]
+        json_conditions: list[str] = []
+        bind_values: dict[str, str] = {}
+        for key_index, (key, value) in enumerate(prompt_metadata.items()):
+            path_param = f"meta_path_{key_index}"
+            value_param = f"meta_value_{key_index}"
+            json_conditions.append(f"JSON_VALUE(prompt_metadata, :{path_param}) = :{value_param}")
+            bind_values[path_param] = f'$."{key}"'
+            # JSON_VALUE always returns nvarchar in SQL Server, so values are converted
+            # to strings to avoid type conversion errors when comparing mixed types.
+            bind_values[value_param] = str(value)
+        conditions = f"{json_validation} AND {' AND '.join(json_conditions)}"
+        return [text(conditions).bindparams(**bind_values)]
 
     def _get_message_pieces_prompt_metadata_conditions(
         self, *, prompt_metadata: dict[str, str | int]

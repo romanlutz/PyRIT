@@ -1313,3 +1313,47 @@ async def test_json_match_conditions_fold_non_ascii_case_async(
     async with await sqlite_instance.get_session_async() as session:
         rows = (await session.execute(select(PromptMemoryEntry.id).where(condition))).all()
     assert len(rows) == expected
+
+
+async def test_seed_metadata_filter_accepts_keys_with_special_characters(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Metadata filter keys with dots or hyphens stay one literal key (#3179)."""
+    await sqlite_instance.add_seeds_to_memory_async(
+        seeds=[
+            SeedPrompt(value="dotted", data_type="text", dataset_name="t", metadata={"a.b": "v1"}),
+            SeedPrompt(value="nested", data_type="text", dataset_name="t", metadata={"a": {"b": "v1"}}),
+            SeedPrompt(value="hyphen", data_type="text", dataset_name="t", metadata={"prompt-type": "v2"}),
+        ],
+        added_by="test",
+    )
+
+    dotted = await sqlite_instance.get_seeds_async(metadata={"a.b": "v1"})
+    assert [seed.value for seed in dotted] == ["dotted"]
+
+    hyphen = await sqlite_instance.get_seeds_async(metadata={"prompt-type": "v2"})
+    assert [seed.value for seed in hyphen] == ["hyphen"]
+
+
+async def test_message_piece_metadata_filter_accepts_keys_with_special_characters(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Prompt metadata filters on message pieces match literal dotted keys (#3179)."""
+    dotted = MessagePiece(
+        conversation_id=str(uuid.uuid4()),
+        role="assistant",
+        original_value="dotted",
+        prompt_metadata={"request.id": "r1"},
+    )
+    nested = MessagePiece(
+        conversation_id=str(uuid.uuid4()),
+        role="assistant",
+        original_value="nested",
+        prompt_metadata={"request": {"id": "r1"}},
+    )
+    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=[dotted, nested])
+
+    retrieved = await sqlite_instance.get_message_pieces_async(prompt_metadata={"request.id": "r1"})
+
+    assert len(retrieved) == 1
+    assert retrieved[0].original_value == "dotted"
