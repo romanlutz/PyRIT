@@ -850,3 +850,36 @@ async def test_preparation_failure_stays_separate_from_result_role_async(sqlite_
     assert mapped.outcome is AttackOutcome.UNDETERMINED
     assert mapped.child_attack_result_ids == []
     assert AttackPreparationFailure.from_result(result=stored) == failure
+
+
+async def test_get_snapshot_replaces_reemitted_delta_instead_of_duplicating() -> None:
+    """A row re-emitted after a timestamp bump updates its cached attempt, not adds one (#3183)."""
+    memory = MagicMock(spec=MemoryInterface)
+    delta = _make_delta(run_id="run-state", index=0)
+    bumped = ScenarioAttackResultDelta(
+        attack_result_id=delta.attack_result_id,
+        conversation_id=delta.conversation_id,
+        objective=delta.objective,
+        objective_sha256=delta.objective_sha256,
+        outcome=AttackOutcome.FAILURE,
+        execution_time_ms=delta.execution_time_ms,
+        timestamp=delta.timestamp + timedelta(seconds=99),
+        attribution_data=delta.attribution_data,
+    )
+    memory.get_scenario_attack_result_deltas_async = AsyncMock(side_effect=[([delta], False), ([bumped], False)])
+    read_model = ScenarioProgressReadModel(memory=memory)
+
+    kwargs: dict = dict(
+        plan=None,
+        plan_complete=False,
+        active_group_ids=(),
+        terminal=False,
+        objective_scorer_identifier=None,
+    )
+    first = await read_model.get_snapshot_async(scenario_result_id="run-state", **kwargs)
+    second = await read_model.get_snapshot_async(scenario_result_id="run-state", **kwargs)
+
+    assert len(first.results) == 1
+    assert len(second.results) == 1
+    assert [result.attack_result_id for result in second.results] == [delta.attack_result_id]
+    assert second.results[0].outcome == AttackOutcome.FAILURE
