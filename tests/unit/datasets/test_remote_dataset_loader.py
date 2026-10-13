@@ -5,7 +5,7 @@ import inspect
 import io
 import json
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
@@ -219,6 +219,13 @@ class TestRemoteDatasetLoader:
             (
                 "2025-09-20T04:09:11.080923+00:00",
                 datetime(2025, 9, 20, 4, 9, 11, 80923, tzinfo=UTC),
+            ),
+            # Z without fractional seconds (common API format, native 3.11 parsing)
+            ("2026-01-15T00:00:00Z", datetime(2026, 1, 15, 0, 0, 0, tzinfo=UTC)),
+            # Non-UTC timezone offset
+            (
+                "2025-03-10T12:30:00+05:30",
+                datetime(2025, 3, 10, 12, 30, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))),
             ),
         ],
     )

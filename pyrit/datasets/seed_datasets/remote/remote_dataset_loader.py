@@ -188,7 +188,7 @@ class _RemoteDatasetLoader(SeedDatasetProvider, ABC):
         if not date_str:
             return None
         try:
-            return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return datetime.fromisoformat(date_str)
         except (ValueError, AttributeError):
             return None
 
