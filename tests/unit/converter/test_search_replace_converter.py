@@ -54,7 +54,23 @@ async def test_search_replace_input_not_supported():
         await converter.convert_async(prompt="hello", input_type="image_path")
 
 
-@pytest.mark.parametrize("invalid_pattern", ["", None, 123, r"[unclosed"])
+@pytest.mark.parametrize(
+    ("prompt", "replace", "expected"),
+    [
+        ("ab", "-", "-a-b-"),
+        ("", "-", "-"),
+        ("ab", "", "ab"),
+        ("ab", ["-"], "-a-b-"),
+    ],
+)
+async def test_search_replace_empty_pattern_async(*, prompt: str, replace: str | list[str], expected: str) -> None:
+    converter = SearchReplaceConverter(pattern="", replace=replace)
+    result = await converter.convert_async(prompt=prompt)
+    assert result.output_text == expected
+    assert result.output_type == "text"
+
+
+@pytest.mark.parametrize("invalid_pattern", [None, 123, r"[unclosed"])
 def test_search_replace_invalid_pattern(invalid_pattern):
     with pytest.raises(ValueError):
         SearchReplaceConverter(pattern=invalid_pattern, replace="world")
