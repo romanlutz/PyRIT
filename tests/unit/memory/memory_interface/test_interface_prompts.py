@@ -1092,7 +1092,16 @@ async def test_get_message_pieces_prompt_metadata_multiple_non_identifier_keys(s
 
 @pytest.mark.parametrize(
     ("literal_key", "other_metadata"),
-    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+    [
+        ('branch"."leaf', {"branch": {"leaf": "value"}}),
+        (r"\u0061", {"a": "value"}),
+        ("plain", {"plain ": "value"}),
+        ("plain ", {"plain": "value"}),
+        ("", {" ": "value"}),
+        (" ", {"": "value"}),
+        ("café", {"café ": "value"}),
+        ("café ", {"café": "value"}),
+    ],
 )
 async def test_get_message_pieces_prompt_metadata_matches_literal_json_keys(
     sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
@@ -1118,7 +1127,16 @@ async def test_get_message_pieces_prompt_metadata_matches_literal_json_keys(
 
 @pytest.mark.parametrize(
     ("literal_key", "other_metadata"),
-    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+    [
+        ('branch"."leaf', {"branch": {"leaf": "value"}}),
+        (r"\u0061", {"a": "value"}),
+        ("plain", {"plain ": "value"}),
+        ("plain ", {"plain": "value"}),
+        ("", {" ": "value"}),
+        (" ", {"": "value"}),
+        ("café", {"café ": "value"}),
+        ("café ", {"café": "value"}),
+    ],
 )
 async def test_seed_metadata_retrieval_matches_literal_json_keys(
     sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
@@ -1152,7 +1170,16 @@ async def test_seed_metadata_retrieval_matches_literal_json_keys(
 
 @pytest.mark.parametrize(
     ("literal_key", "other_metadata"),
-    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+    [
+        ('branch"."leaf', {"branch": {"leaf": "value"}}),
+        (r"\u0061", {"a": "value"}),
+        ("plain", {"plain ": "value"}),
+        ("plain ", {"plain": "value"}),
+        ("", {" ": "value"}),
+        (" ", {"": "value"}),
+        ("café", {"café ": "value"}),
+        ("café ", {"café": "value"}),
+    ],
 )
 async def test_seed_removal_matches_literal_json_keys(
     sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]
@@ -1172,7 +1199,16 @@ async def test_seed_removal_matches_literal_json_keys(
 
 @pytest.mark.parametrize(
     ("literal_key", "other_metadata"),
-    [('branch"."leaf', {"branch": {"leaf": "value"}}), (r"\u0061", {"a": "value"})],
+    [
+        ('branch"."leaf', {"branch": {"leaf": "value"}}),
+        (r"\u0061", {"a": "value"}),
+        ("plain", {"plain ": "value"}),
+        ("plain ", {"plain": "value"}),
+        ("", {" ": "value"}),
+        (" ", {"": "value"}),
+        ("café", {"café ": "value"}),
+        ("café ", {"café": "value"}),
+    ],
 )
 async def test_seed_group_removal_matches_literal_json_keys(
     sqlite_instance: MemoryInterface, literal_key: str, other_metadata: dict[str, object]

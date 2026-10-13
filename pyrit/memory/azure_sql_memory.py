@@ -389,7 +389,9 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             alias = f"metadata_{index}"
             json_conditions.append(
                 f"EXISTS (SELECT 1 FROM OPENJSON(prompt_metadata) AS [{alias}] "
-                f"WHERE [{alias}].[key] = :{key_param} AND [{alias}].[value] = :{value_param})"
+                f"WHERE [{alias}].[key] = :{key_param} "
+                f"AND DATALENGTH([{alias}].[key]) = DATALENGTH(CAST(:{key_param} AS NVARCHAR(MAX))) "
+                f"AND [{alias}].[value] = :{value_param})"
             )
             bindparams[key_param] = key
             bindparams[value_param] = str(value)
