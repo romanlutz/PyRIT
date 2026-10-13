@@ -7,6 +7,7 @@ import json
 import zipfile
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
@@ -231,6 +232,10 @@ class TestRemoteDatasetLoader:
     )
     def test_parse_datetime(self, value: str | None, expected: datetime | None) -> None:
         assert ConcreteRemoteLoader._parse_datetime(value) == expected
+
+    @pytest.mark.parametrize("value", [1720000000, True, {"timestamp": "invalid"}, ["2026-01-15"]])
+    def test_parse_datetime_non_string_returns_none(self, value: Any) -> None:
+        assert ConcreteRemoteLoader._parse_datetime(value) is None
 
     def test_fetch_from_url_invalid_file_type_raises(self):
         loader = ConcreteRemoteLoader()
