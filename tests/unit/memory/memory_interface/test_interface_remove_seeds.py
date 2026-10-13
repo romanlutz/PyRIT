@@ -290,6 +290,36 @@ async def test_remove_seeds_by_list_filters_matches_non_ascii_values(sqlite_inst
     assert [seed.value for seed in remaining] == ["p3"]
 
 
+@pytest.mark.parametrize("field", ["authors", "harm_categories", "groups", "parameters"])
+@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize("remove_groups", [False, True])
+async def test_remove_seeds_by_list_filters_preserves_literal_escape_values(
+    sqlite_instance: MemoryInterface, field: str, exact: bool, remove_groups: bool
+) -> None:
+    groups = [
+        SeedGroup(
+            seeds=[
+                SeedPrompt(value=label, data_type="text", sequence=0, role="user", **{field: [value]}),
+                SeedPrompt(value=f"{label}-companion", data_type="text", sequence=1, role="assistant"),
+            ]
+        )
+        for label, value in [("match", "\u00e9"), ("literal", r"\u00e9")]
+    ]
+    await sqlite_instance.add_seed_groups_to_memory_async(prompt_groups=groups, added_by="test")
+    remove = (
+        sqlite_instance.remove_seed_groups_from_memory_async
+        if remove_groups
+        else sqlite_instance.remove_seeds_from_memory_async
+    )
+
+    assert await remove(exact=exact, **{field: ["\u00e9"]}) == (2 if remove_groups else 1)
+    remaining = {seed.value for seed in await sqlite_instance.get_seeds_async()}
+    expected = {"literal", "literal-companion"}
+    if not remove_groups:
+        expected.add("match-companion")
+    assert remaining == expected
+
+
 async def test_remove_seeds_by_groups_authors_parameters_match_whole_elements(sqlite_instance: MemoryInterface):
     seed_prompts = [
         SeedPrompt(value="p1", groups=["team"], authors=["Ann"], parameters=["goal"], data_type="text"),

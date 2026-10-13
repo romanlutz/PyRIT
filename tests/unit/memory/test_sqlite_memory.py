@@ -8,8 +8,9 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +35,7 @@ from pyrit.models import (
     EmbeddingUsageInformation,
     Message,
     MessagePiece,
+    SeedPrompt,
     flatten_to_message_pieces,
 )
 from pyrit.prompt_target.text_target import TextTarget
@@ -1217,6 +1219,35 @@ async def test_file_backed_database_is_not_serialized_async(isolated_memory_fact
         assert memory._connection_lock is None
         # Windows cannot remove the temp directory while the engine still holds the file open.
         await memory.dispose_engine_async()
+
+
+async def test_seed_list_substring_filters_after_reopening_database_async(
+    isolated_memory_factory: Callable[..., SQLiteMemory], tmp_path: Path
+) -> None:
+    database = tmp_path / "seeds.db"
+    memory = isolated_memory_factory(db_path=database, silent=True)
+    try:
+        await memory.add_seeds_to_memory_async(
+            seeds=[
+                SeedPrompt(value="match", authors=["\u00e9"], data_type="text"),
+                SeedPrompt(value="literal", authors=[r"\u00e9"], data_type="text"),
+            ],
+            added_by="test",
+        )
+        async with await memory.get_session_async() as session:
+            rows = (await session.execute(text("SELECT value, authors FROM SeedPromptEntries"))).all()
+        assert dict(rows) == {"match": '["\\u00e9"]', "literal": '["\\\\u00e9"]'}
+    finally:
+        await memory.dispose_engine_async()
+
+    reopened = isolated_memory_factory(db_path=database, skip_schema_migration=True)
+    try:
+        result = await reopened.get_seeds_async(authors=["\u00e9"])
+        assert [seed.value for seed in result] == ["match"]
+        assert await reopened.remove_seeds_from_memory_async(authors=["\u00e9"], exact=False) == 1
+        assert [seed.value for seed in await reopened.get_seeds_async()] == ["literal"]
+    finally:
+        await reopened.dispose_engine_async()
 
 
 async def test_get_message_pieces_filters_on_integer_prompt_metadata_async(sqlite_instance: SQLiteMemory) -> None:
