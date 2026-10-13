@@ -982,3 +982,25 @@ def test_scenario_role_match_condition_uses_binary_collation_and_datalength_guar
     compiled_mssql = str(condition.compile(dialect=mssql.dialect(), compile_kwargs={"literal_binds": True}))
     assert "(result_role COLLATE Latin1_General_100_BIN2) = 'target_facing'" in compiled_mssql
     assert "datalength(result_role) = datalength(N'target_facing')" in compiled_mssql
+
+
+def test_scenario_attack_result_deltas_by_ids_statement_compiles_mssql(
+    memory_interface: AzureSQLMemory,
+) -> None:
+    import uuid
+
+    from sqlalchemy.dialects import mssql
+
+    scenario_id = str(uuid.uuid4())
+    child_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+
+    stmt = memory_interface._build_scenario_attack_result_deltas_by_ids_statement(
+        scenario_result_id=scenario_id,
+        attack_result_ids=child_ids,
+    )
+    compiled = stmt.compile(dialect=mssql.dialect())
+    compiled_str = str(compiled)
+
+    assert "[AttackResultEntries].attribution_parent_id =" in compiled_str
+    assert "[AttackResultEntries].id IN (" in compiled_str
+    assert "LEFT OUTER JOIN [ScoreEntries]" in compiled_str

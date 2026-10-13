@@ -110,6 +110,8 @@ from pyrit.models import (
     PromptDataType,
     RetryEvent,
     ScenarioAttackResultDelta,
+    ScenarioConversationMessageProjection,
+    ScenarioConversationProjection,
     ScenarioIdentifier,
     ScenarioProgressScore,
     ScenarioResult,
@@ -6583,6 +6585,257 @@ class MemoryInterface(abc.ABC):
             )
         return deltas, has_more
 
+    def _build_scenario_attack_result_deltas_by_ids_statement(
+        self,
+        *,
+        scenario_result_id: str,
+        attack_result_ids: Sequence[str],
+    ) -> Select:
+        """
+        Build the batched SELECT statement for scenario result deltas by ID.
+
+        Ensures cross-run references are rejected by constraining
+        attribution_parent_id to the scenario UUID.
+
+        Returns:
+            Select: The constructed select statement.
+        """
+        scenario_uuid = uuid.UUID(scenario_result_id)
+        valid_uuids: list[uuid.UUID] = []
+        for aid in attack_result_ids:
+            try:
+                valid_uuids.append(uuid.UUID(str(aid)))
+            except (ValueError, TypeError):
+                continue
+
+        return (
+            select(
+                AttackResultEntry.id,
+                AttackResultEntry.conversation_id,
+                AttackResultEntry.objective,
+                AttackResultEntry.objective_sha256,
+                AttackResultEntry.atomic_attack_identifier,
+                AttackResultEntry.outcome,
+                AttackResultEntry.execution_time_ms,
+                AttackResultEntry.timestamp,
+                AttackResultEntry.retry_events_json,
+                AttackResultEntry.total_retries,
+                AttackResultEntry.error_type,
+                AttackResultEntry.error_message,
+                AttackResultEntry.attribution_data,
+                AttackResultEntry.attack_metadata,
+                ScoreEntry.id.label("score_id"),
+                ScoreEntry.score_value,
+                ScoreEntry.score_type,
+                ScoreEntry.status.label("score_status"),
+                ScoreEntry.score_rationale,
+                ScoreEntry.scorer_class_identifier,
+            )
+            .outerjoin(
+                ScoreEntry,
+                func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
+            )
+            .where(
+                and_(
+                    AttackResultEntry.attribution_parent_id == scenario_uuid,
+                    AttackResultEntry.id.in_(valid_uuids),
+                )
+            )
+        )
+
+    def _execute_get_scenario_attack_result_deltas_by_ids(
+        self,
+        *,
+        scenario_result_id: str,
+        attack_result_ids: Sequence[str],
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return lightweight scenario-linked result deltas for specific attack results in a single query.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched deltas.
+        """
+        valid_uuids: list[uuid.UUID] = []
+        for aid in attack_result_ids:
+            try:
+                valid_uuids.append(uuid.UUID(str(aid)))
+            except (ValueError, TypeError):
+                continue
+
+        if not valid_uuids:
+            return []
+
+        statement = self._build_scenario_attack_result_deltas_by_ids_statement(
+            scenario_result_id=scenario_result_id,
+            attack_result_ids=attack_result_ids,
+        )
+        with closing(self._get_session()) as session:
+            rows = session.execute(statement).mappings().all()
+
+        deltas: list[ScenarioAttackResultDelta] = []
+        for row in rows:
+            retry_events = [
+                RetryEvent.model_validate(event)
+                for event in (json.loads(row["retry_events_json"]) if row["retry_events_json"] else [])
+            ]
+            atomic_identifier = (
+                AtomicAttackIdentifier.model_validate(row["atomic_attack_identifier"])
+                if row["atomic_attack_identifier"]
+                else None
+            )
+            score = None
+            if row["score_id"] is not None:
+                scorer_identifier = (
+                    ComponentIdentifier.model_validate(row["scorer_class_identifier"])
+                    if row["scorer_class_identifier"]
+                    else None
+                )
+                score = ScenarioProgressScore(
+                    scorer_name=scorer_identifier.class_name if scorer_identifier else "Unknown",
+                    score_type=row["score_type"],
+                    status=ScoreStatus(row["score_status"]),
+                    score_value=row["score_value"],
+                    score_rationale=row["score_rationale"],
+                )
+            deltas.append(
+                ScenarioAttackResultDelta(
+                    attack_result_id=str(row["id"]),
+                    conversation_id=row["conversation_id"],
+                    objective=row["objective"],
+                    objective_sha256=row["objective_sha256"],
+                    atomic_attack_identifier=atomic_identifier,
+                    outcome=AttackOutcome(row["outcome"]),
+                    execution_time_ms=row["execution_time_ms"],
+                    timestamp=row["timestamp"],
+                    retry_events=retry_events,
+                    total_retries=row["total_retries"] or 0,
+                    error_type=row["error_type"],
+                    error_message=row["error_message"],
+                    attribution_data=row["attribution_data"] or {},
+                    attack_metadata=row["attack_metadata"] or {},
+                    score=score,
+                )
+            )
+        return deltas
+
+    def _execute_get_attack_result_conversation_projections(
+        self,
+        *,
+        attack_result_id: str,
+        include_messages: bool = False,
+        limit_messages_per_conversation: int = 100,
+    ) -> list[ScenarioConversationProjection]:
+        """
+        Read generic conversation projections for an attack result without full-run hydration.
+
+        Returns:
+            list[ScenarioConversationProjection]: Generic read-only conversation projections.
+        """
+        try:
+            ar_uuid = uuid.UUID(attack_result_id)
+        except (ValueError, TypeError):
+            return []
+
+        entries = self._query_entries(
+            AttackResultEntry,
+            conditions=AttackResultEntry.id == ar_uuid,
+        )
+        if not entries:
+            return []
+
+        entry = entries[0]
+        conversations: list[ScenarioConversationProjection] = []
+        conv_ids_to_fetch: list[str] = []
+
+        if entry.conversation_id:
+            conv_ids_to_fetch.append(entry.conversation_id)
+
+        pruned_ids = entry.pruned_conversation_ids or []
+        adversarial_ids = entry.adversarial_chat_conversation_ids or []
+        preparation_ids = entry.preparation_conversation_ids or []
+
+        for c_id in pruned_ids + adversarial_ids + preparation_ids:
+            if c_id and c_id not in conv_ids_to_fetch:
+                conv_ids_to_fetch.append(c_id)
+
+        if not conv_ids_to_fetch:
+            return []
+
+        stats_map = self._execute_get_conversation_stats(conversation_ids=conv_ids_to_fetch)
+
+        if entry.conversation_id:
+            stats = stats_map.get(entry.conversation_id)
+            msg_count = stats.message_count if stats else 0
+            messages: list[ScenarioConversationMessageProjection] = []
+            truncated = False
+            if include_messages and entry.conversation_id:
+                pyrit_messages = self._execute_get_conversation_messages(conversation_id=entry.conversation_id)
+                truncated = len(pyrit_messages) > limit_messages_per_conversation
+                for msg in pyrit_messages[:limit_messages_per_conversation]:
+                    content = msg.get_value()
+                    piece = msg.message_pieces[0] if msg.message_pieces else None
+                    seq = piece.sequence if piece else 0
+                    ts = piece.timestamp if piece else None
+                    messages.append(
+                        ScenarioConversationMessageProjection(
+                            role=msg.api_role,
+                            content=content,
+                            sequence=seq,
+                            timestamp=ts,
+                        )
+                    )
+            conversations.append(
+                ScenarioConversationProjection(
+                    conversation_id=entry.conversation_id,
+                    conversation_type="main",
+                    description="Main objective target conversation",
+                    message_count=msg_count,
+                    messages=messages,
+                    messages_truncated=truncated,
+                )
+            )
+
+        related_convs = (
+            [(c_id, "pruned", "Pruned conversation") for c_id in pruned_ids]
+            + [(c_id, "adversarial_chat", "Adversarial chat conversation") for c_id in adversarial_ids]
+            + [(c_id, "preparation", "Preparation conversation") for c_id in preparation_ids]
+        )
+        for c_id, conv_type, desc in related_convs:
+            if not c_id:
+                continue
+            stats = stats_map.get(c_id)
+            msg_count = stats.message_count if stats else 0
+            messages = []
+            truncated = False
+            if include_messages:
+                pyrit_messages = self._execute_get_conversation_messages(conversation_id=c_id)
+                truncated = len(pyrit_messages) > limit_messages_per_conversation
+                for msg in pyrit_messages[:limit_messages_per_conversation]:
+                    content = msg.get_value()
+                    piece = msg.message_pieces[0] if msg.message_pieces else None
+                    seq = piece.sequence if piece else 0
+                    ts = piece.timestamp if piece else None
+                    messages.append(
+                        ScenarioConversationMessageProjection(
+                            role=msg.api_role,
+                            content=content,
+                            sequence=seq,
+                            timestamp=ts,
+                        )
+                    )
+            conversations.append(
+                ScenarioConversationProjection(
+                    conversation_id=c_id,
+                    conversation_type=conv_type,
+                    description=desc,
+                    message_count=msg_count,
+                    messages=messages,
+                    messages_truncated=truncated,
+                )
+            )
+
+        return conversations
+
     def _execute_get_scenario_results(
         self,
         *,
@@ -10053,6 +10306,55 @@ class MemoryInterface(abc.ABC):
             scenario_result_id=scenario_result_id,
             cursor=cursor,
             limit=limit,
+        )
+
+    async def get_scenario_attack_result_deltas_by_ids_async(
+        self,
+        *,
+        scenario_result_id: str,
+        attack_result_ids: Sequence[str],
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return lightweight scenario-linked result deltas for specific attack results in a single query.
+
+        Ensures child results belonging to other scenarios or non-existent IDs are isolated safely.
+
+        Args:
+            scenario_result_id: The ID of the scenario run.
+            attack_result_ids: Sequence of attack result IDs to retrieve.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched deltas.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_scenario_attack_result_deltas_by_ids,
+            scenario_result_id=scenario_result_id,
+            attack_result_ids=attack_result_ids,
+        )
+
+    async def get_attack_result_conversation_projections_async(
+        self,
+        *,
+        attack_result_id: str,
+        include_messages: bool = False,
+        limit_messages_per_conversation: int = 100,
+    ) -> list[ScenarioConversationProjection]:
+        """
+        Read generic conversation projections for an attack result without full-run hydration.
+
+        Args:
+            attack_result_id: The attack result ID.
+            include_messages: Whether to populate message pieces or only metadata/counts.
+            limit_messages_per_conversation: Bound on message pieces per conversation.
+
+        Returns:
+            list[ScenarioConversationProjection]: Generic read-only conversation projections.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_attack_result_conversation_projections,
+            attack_result_id=attack_result_id,
+            include_messages=include_messages,
+            limit_messages_per_conversation=limit_messages_per_conversation,
         )
 
     def get_scenario_results(
