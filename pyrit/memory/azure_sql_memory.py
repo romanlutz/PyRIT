@@ -385,8 +385,7 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             list: List containing a single SQLAlchemy text condition with bound parameters.
         """
         json_validation = "ISJSON(prompt_metadata) = 1"
-        json_conditions: list[str] = []
-        bindparams: dict[str, str] = {}
+        json_conditions, bindparams = [], {}
         for index, (key, value) in enumerate(prompt_metadata.items()):
             key_param, value_param = f"md_key_{index}", f"md_value_{index}"
             alias = f"metadata_{index}"
@@ -399,8 +398,14 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
             )
             bindparams[key_param] = key
             bindparams[value_param] = str(value)
+
+        # Combine both conditions
         conditions = f"{json_validation} AND " + " AND ".join(json_conditions)
-        return [text(conditions).bindparams(**bindparams)]
+
+        # Create SQL condition using SQLAlchemy's text() with bindparams
+        # for safe parameter passing, preventing SQL injection
+        condition = text(conditions).bindparams(**bindparams)
+        return [condition]
 
     def _get_message_pieces_prompt_metadata_conditions(
         self, *, prompt_metadata: dict[str, str | int]
