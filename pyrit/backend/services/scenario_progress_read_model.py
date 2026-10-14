@@ -135,9 +135,7 @@ class ScenarioProgressReadModel:
         async with self._cache_lock:
             entry = self._get_cache_entry(scenario_result_id=scenario_result_id, plan=plan, terminal=terminal)
             first_new_index = len(entry.results)
-            deltas_updated = await self._hydrate_new_deltas_async(
-                scenario_result_id=scenario_result_id, entry=entry
-            )
+            deltas_updated = await self._hydrate_new_deltas_async(scenario_result_id=scenario_result_id, entry=entry)
             return self._build_snapshot(
                 entry=entry,
                 first_new_index=first_new_index,
@@ -225,7 +223,8 @@ class ScenarioProgressReadModel:
         )
 
     async def _hydrate_new_deltas_async(self, *, scenario_result_id: str, entry: _ProgressCacheEntry) -> bool:
-        """Hydrate every persisted delta after the cached keyset cursor.
+        """
+        Hydrate persisted deltas while preserving their timestamp/ID keyset order.
 
         Returns:
             bool: Whether any delta was appended or replaced, so the summary rebuilds.
@@ -251,8 +250,11 @@ class ScenarioProgressReadModel:
                     changed = True
                     replaced_from = position if replaced_from is None else min(replaced_from, position)
             if replaced_from is not None:
-                # Drop the mapped results from the first replaced attempt onward so
-                # they are remapped from the updated deltas.
+                # Timestamp bumps move attempts forward; paging and latest-attempt
+                # selection need the affected suffix in keyset order.
+                entry.deltas[replaced_from:] = sorted(
+                    entry.deltas[replaced_from:], key=lambda delta: (delta.timestamp, delta.attack_result_id)
+                )
                 del entry.results[replaced_from:]
             if page:
                 last = page[-1]
