@@ -32,7 +32,10 @@ def _version(root: Path) -> str:
     project_file = root / "pyproject.toml"
     if project_file.is_file():
         project_data = tomllib.loads(project_file.read_text(encoding="utf-8"))
-        project_version = project_data.get("project", {}).get("version")
+        project = project_data.get("project", {})
+        if not isinstance(project, dict):
+            raise ValueError("Python package and project versions differ")
+        project_version = project.get("version")
         if not isinstance(project_version, str) or project_version != version:
             raise ValueError("Python package and project versions differ")
     return version
