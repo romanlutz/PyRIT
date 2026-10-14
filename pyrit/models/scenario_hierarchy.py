@@ -41,11 +41,23 @@ class ScenarioOrchestrationParentSummary(BaseModel):
     retries_truncated: bool = False
 
 
+class ScenarioConversationMessagePieceProjection(BaseModel):
+    """
+    Projection of an individual message piece preserving data type and multimodal content.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    data_type: str = "text"
+    content: str = ""
+    converted_value: str = ""
+
+
 class ScenarioConversationMessageProjection(BaseModel):
     """
     Generic, read-only message projection for conversation views.
 
-    Contains display text, conversation role, sequence order, and linked score indicators.
+    Contains display text, conversation role, sequence order, multimodal pieces, and linked score indicators.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -55,6 +67,7 @@ class ScenarioConversationMessageProjection(BaseModel):
     sequence: int
     timestamp: AwareDatetime | None = None
     scores: list[ScenarioProgressScore] = Field(default_factory=list)
+    pieces: list[ScenarioConversationMessagePieceProjection] = Field(default_factory=list)
 
 
 class ScenarioConversationProjection(BaseModel):
@@ -170,6 +183,7 @@ class ScenarioHierarchyProjection(BaseModel):
     groups: list[ScenarioHierarchyGroup] = Field(default_factory=list)
     overall_counts: ScenarioProgressCounts
     diagnostics: ScenarioHierarchyDiagnostics = Field(default_factory=ScenarioHierarchyDiagnostics)
+    truncated: bool = False
 
 
 ScenarioHierarchyNode.model_rebuild()

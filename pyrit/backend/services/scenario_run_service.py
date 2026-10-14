@@ -1476,11 +1476,16 @@ class ScenarioRunService:
                 retry_events = getattr(attack_result, "retry_events", None)
                 if isinstance(retry_events, list) and retry_events:
                     overload_events.extend(retry_events)
+                    truncated_retries = retry_events[:100]
+                    retries_truncated = len(retry_events) > 100
+                    total_r = max(0, retries) if isinstance(retries, int) else len(retry_events)
                     attack_retries.append(
                         AttackRetrySummary(
                             attack_result_id=str(attack_result.attack_result_id),
                             atomic_attack_name=atomic_attack_name,
-                            retries=retry_events,
+                            total_retries=total_r,
+                            retries=truncated_retries,
+                            retries_truncated=retries_truncated,
                         )
                     )
 
@@ -2234,12 +2239,14 @@ class ScenarioRunService:
         self,
         *,
         scenario_result_id: str,
+        max_nodes: int = 1000,
     ) -> ScenarioHierarchyProjection | None:
         """
         Get the bounded result hierarchy projection for a scenario run.
 
         Args:
             scenario_result_id: The persisted scenario run ID.
+            max_nodes: Maximum nodes to assemble in the hierarchy tree.
 
         Returns:
             ScenarioHierarchyProjection | None: The hierarchy projection, or None if the run does not exist.
@@ -2282,6 +2289,7 @@ class ScenarioRunService:
             scenario_version=header_result.scenario_version,
             status=header_result.scenario_run_state,
             snapshot=progress_snapshot,
+            max_nodes=max_nodes,
         )
 
     async def get_run_hierarchy_node_async(

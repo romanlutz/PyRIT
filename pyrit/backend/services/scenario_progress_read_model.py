@@ -42,7 +42,6 @@ from pyrit.models import (
     ScenarioObjectiveScorer,
     ScenarioObjectiveScorerMetrics,
     ScenarioOrchestrationParentSummary,
-    ScenarioProducerCounts,
     ScenarioProgressCounts,
     ScenarioProgressResult,
     ScenarioProgressSummary,
@@ -75,6 +74,7 @@ __all__ = ["ResultUnitIdentity", "ScenarioPlanLookup", "ScenarioProgressReadMode
 _TECHNIQUE_SEEDS_CHILD = "technique_seeds"
 _TECHNIQUE_SEED_DISPLAY_PARAMS = ("value", "data_type")
 _MAX_HIERARCHY_DEPTH = 10
+_MAX_HIERARCHY_NODES = 1000
 _MAX_DIAGNOSTIC_ITEMS = 100
 _MAX_RETRIES_PER_NODE = 100
 
@@ -777,9 +777,10 @@ class ScenarioProgressReadModel:
         scenario_version: int,
         status: ScenarioRunState,
         snapshot: ScenarioProgressSnapshot,
+        max_nodes: int = _MAX_HIERARCHY_NODES,
     ) -> ScenarioHierarchyProjection:
         """
-        Assemble the scenario result hierarchy projection with cycle and depth guards.
+        Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
 
         Args:
             scenario_result_id: Persisted scenario run ID.
@@ -787,6 +788,7 @@ class ScenarioProgressReadModel:
             scenario_version: Scenario version.
             status: Terminal or running state of the scenario.
             snapshot: Hydrated progress snapshot containing deltas, mapped results, and summary.
+            max_nodes: Maximum nodes to assemble in the hierarchy tree.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -800,8 +802,10 @@ class ScenarioProgressReadModel:
                 referenced_child_ids.add(child_id)
 
         root_results = [r for r in snapshot.results if r.attack_result_id not in referenced_child_ids]
-        if not root_results and snapshot.results:
-            root_results = list(snapshot.results)
+
+        visited_ids: set[str] = set()
+        total_nodes_count = 0
+        hierarchy_truncated = False
 
         def _build_node(
             *,
@@ -811,16 +815,31 @@ class ScenarioProgressReadModel:
             active_path: set[str],
             depth: int,
         ) -> ScenarioHierarchyNode | None:
+            nonlocal total_nodes_count, hierarchy_truncated
             delta = deltas_by_id.get(attack_result_id)
             result = results_by_id.get(attack_result_id)
             if delta is None or result is None:
                 return None
+
+            if total_nodes_count >= max_nodes:
+                hierarchy_truncated = True
+                return None
+
+            total_nodes_count += 1
+            visited_ids.add(attack_result_id)
 
             retries = result.retries
             retries_truncated = False
             if len(retries) > _MAX_RETRIES_PER_NODE:
                 retries = retries[:_MAX_RETRIES_PER_NODE]
                 retries_truncated = True
+
+            executed_turns = delta.executed_turns or int(delta.attack_metadata.get("executed_turns") or 0)
+            outcome_reason = (
+                delta.outcome_reason
+                or delta.attribution_data.get("outcome_reason")
+                or delta.attack_metadata.get("outcome_reason")
+            )
 
             orchestration: ScenarioOrchestrationParentSummary | None = None
             if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
@@ -829,11 +848,10 @@ class ScenarioProgressReadModel:
                     attack_result_id=result.attack_result_id,
                     result_role=result.result_role,
                     outcome=result.outcome,
-                    outcome_reason=delta.attribution_data.get("outcome_reason")
-                    or delta.attack_metadata.get("outcome_reason"),
+                    outcome_reason=outcome_reason,
                     attempt_index=result.attempt_index,
                     execution_time_ms=result.execution_time_ms,
-                    executed_turns=int(delta.attack_metadata.get("executed_turns") or 0),
+                    executed_turns=executed_turns,
                     completion_policy=str(completion_policy) if completion_policy is not None else None,
                     child_attack_result_ids=list(result.child_attack_result_ids),
                     error_type=result.error_type,
@@ -850,6 +868,9 @@ class ScenarioProgressReadModel:
 
             for idx, c_id in enumerate(result.child_attack_result_ids):
                 if c_id in current_active_path or depth >= _MAX_HIERARCHY_DEPTH or c_id not in deltas_by_id:
+                    unresolved_children.append(c_id)
+                elif total_nodes_count >= max_nodes:
+                    hierarchy_truncated = True
                     unresolved_children.append(c_id)
                 else:
                     child_node = _build_node(
@@ -887,10 +908,9 @@ class ScenarioProgressReadModel:
                 seed_group_id=result.seed_group_id,
                 objective=delta.objective,
                 outcome=result.outcome,
-                outcome_reason=delta.attribution_data.get("outcome_reason")
-                or delta.attack_metadata.get("outcome_reason"),
+                outcome_reason=outcome_reason,
                 execution_time_ms=result.execution_time_ms,
-                executed_turns=int(delta.attack_metadata.get("executed_turns") or 0),
+                executed_turns=executed_turns,
                 timestamp=result.timestamp,
                 score=result.score,
                 error_type=result.error_type,
@@ -917,6 +937,24 @@ class ScenarioProgressReadModel:
             if root_node is not None:
                 roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
 
+        # Handle unreached/disconnected components (including detached cycles)
+        unreached = [r for r in snapshot.results if r.attack_result_id not in visited_ids]
+        while unreached:
+            unreached.sort(key=lambda r: r.timestamp)
+            next_root = unreached[0]
+            root_node = _build_node(
+                attack_result_id=next_root.attack_result_id,
+                parent_id=None,
+                child_index=None,
+                active_path=set(),
+                depth=0,
+            )
+            if root_node is not None:
+                roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
+            else:
+                visited_ids.add(next_root.attack_result_id)
+            unreached = [r for r in snapshot.results if r.attack_result_id not in visited_ids]
+
         for g_roots in roots_by_group.values():
             g_roots.sort(key=lambda n: n.timestamp)
 
@@ -934,6 +972,7 @@ class ScenarioProgressReadModel:
                 errors=ag.errors,
                 retries=ag.retries,
                 producer_counts=ag.producer_counts,
+                outcomes=ag.outcomes,
             )
             groups.append(
                 ScenarioHierarchyGroup(
@@ -950,22 +989,16 @@ class ScenarioProgressReadModel:
             if gid not in seen_group_ids:
                 first_root = group_roots[0]
                 group_results = [r for r in snapshot.results if r.atomic_group_id == gid]
-                completed = sum(1 for r in group_results if r.outcome != AttackOutcome.ERROR)
-                succeeded = sum(1 for r in group_results if r.outcome == AttackOutcome.SUCCESS)
-                errors = sum(1 for r in group_results if r.outcome == AttackOutcome.ERROR)
-                retries = sum(r.total_retries for r in group_results)
-                producer_counts = ScenarioProducerCounts(
-                    attempts=len(group_results),
-                    errors=errors,
-                )
-                counts = ScenarioProgressCounts(
-                    completed=completed,
+                attempts_by_unit: dict[ResultUnitIdentity, list[ScenarioProgressResult]] = {}
+                for r in group_results:
+                    unit = ResultUnitIdentity(atomic_group_id=r.atomic_group_id, seed_group_id=r.seed_group_id)
+                    attempts_by_unit.setdefault(unit, []).append(r)
+
+                counts = count_execution_units(
+                    units=list(attempts_by_unit.keys()),
+                    attempts_by_unit=attempts_by_unit,
                     planned=None,
-                    succeeded=succeeded,
-                    success_percentage=int((succeeded / completed) * 100) if completed > 0 else 0,
-                    errors=errors,
-                    retries=retries,
-                    producer_counts=producer_counts,
+                    producer_attempts=group_results,
                 )
                 groups.append(
                     ScenarioHierarchyGroup(
@@ -995,11 +1028,18 @@ class ScenarioProgressReadModel:
                     )
                 )
             if result.retries:
+                retries_list = result.retries
+                retries_truncated = False
+                if len(retries_list) > _MAX_RETRIES_PER_NODE:
+                    retries_list = retries_list[:_MAX_RETRIES_PER_NODE]
+                    retries_truncated = True
                 all_attack_retries.append(
                     AttackRetrySummary(
                         attack_result_id=result.attack_result_id,
                         atomic_attack_name=result.atomic_attack_name,
-                        retries=result.retries,
+                        total_retries=result.total_retries,
+                        retries=retries_list,
+                        retries_truncated=retries_truncated,
                     )
                 )
 
@@ -1029,6 +1069,7 @@ class ScenarioProgressReadModel:
             groups=groups,
             overall_counts=snapshot.summary.overall,
             diagnostics=diagnostics,
+            truncated=hierarchy_truncated,
         )
 
     @staticmethod
@@ -1062,6 +1103,13 @@ class ScenarioProgressReadModel:
             retries = retries[:_MAX_RETRIES_PER_NODE]
             retries_truncated = True
 
+        executed_turns = delta.executed_turns or int(delta.attack_metadata.get("executed_turns") or 0)
+        outcome_reason = (
+            delta.outcome_reason
+            or delta.attribution_data.get("outcome_reason")
+            or delta.attack_metadata.get("outcome_reason")
+        )
+
         orchestration: ScenarioOrchestrationParentSummary | None = None
         if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
             completion_policy = delta.attack_metadata.get("completion_policy")
@@ -1069,11 +1117,10 @@ class ScenarioProgressReadModel:
                 attack_result_id=result.attack_result_id,
                 result_role=result.result_role,
                 outcome=result.outcome,
-                outcome_reason=delta.attribution_data.get("outcome_reason")
-                or delta.attack_metadata.get("outcome_reason"),
+                outcome_reason=outcome_reason,
                 attempt_index=result.attempt_index,
                 execution_time_ms=result.execution_time_ms,
-                executed_turns=int(delta.attack_metadata.get("executed_turns") or 0),
+                executed_turns=executed_turns,
                 completion_policy=str(completion_policy) if completion_policy is not None else None,
                 child_attack_result_ids=list(result.child_attack_result_ids),
                 error_type=result.error_type,
@@ -1099,6 +1146,13 @@ class ScenarioProgressReadModel:
                     c_retries = c_retries[:_MAX_RETRIES_PER_NODE]
                     c_retries_truncated = True
 
+                c_executed_turns = c_delta.executed_turns or int(c_delta.attack_metadata.get("executed_turns") or 0)
+                c_outcome_reason = (
+                    c_delta.outcome_reason
+                    or c_delta.attribution_data.get("outcome_reason")
+                    or c_delta.attack_metadata.get("outcome_reason")
+                )
+
                 c_orchestration: ScenarioOrchestrationParentSummary | None = None
                 if c_res.result_role == AttackResultRole.ORCHESTRATION or c_res.child_attack_result_ids:
                     c_policy = c_delta.attack_metadata.get("completion_policy")
@@ -1106,11 +1160,10 @@ class ScenarioProgressReadModel:
                         attack_result_id=c_res.attack_result_id,
                         result_role=c_res.result_role,
                         outcome=c_res.outcome,
-                        outcome_reason=c_delta.attribution_data.get("outcome_reason")
-                        or c_delta.attack_metadata.get("outcome_reason"),
+                        outcome_reason=c_outcome_reason,
                         attempt_index=c_res.attempt_index,
                         execution_time_ms=c_res.execution_time_ms,
-                        executed_turns=int(c_delta.attack_metadata.get("executed_turns") or 0),
+                        executed_turns=c_executed_turns,
                         completion_policy=str(c_policy) if c_policy is not None else None,
                         child_attack_result_ids=list(c_res.child_attack_result_ids),
                         error_type=c_res.error_type,
@@ -1134,10 +1187,9 @@ class ScenarioProgressReadModel:
                         seed_group_id=c_res.seed_group_id,
                         objective=c_delta.objective,
                         outcome=c_res.outcome,
-                        outcome_reason=c_delta.attribution_data.get("outcome_reason")
-                        or c_delta.attack_metadata.get("outcome_reason"),
+                        outcome_reason=c_outcome_reason,
                         execution_time_ms=c_res.execution_time_ms,
-                        executed_turns=int(c_delta.attack_metadata.get("executed_turns") or 0),
+                        executed_turns=c_executed_turns,
                         timestamp=c_res.timestamp,
                         score=c_res.score,
                         error_type=c_res.error_type,
@@ -1165,9 +1217,9 @@ class ScenarioProgressReadModel:
             seed_group_id=result.seed_group_id,
             objective=delta.objective,
             outcome=result.outcome,
-            outcome_reason=delta.attribution_data.get("outcome_reason") or delta.attack_metadata.get("outcome_reason"),
+            outcome_reason=outcome_reason,
             execution_time_ms=result.execution_time_ms,
-            executed_turns=int(delta.attack_metadata.get("executed_turns") or 0),
+            executed_turns=executed_turns,
             timestamp=result.timestamp,
             score=result.score,
             error_type=result.error_type,

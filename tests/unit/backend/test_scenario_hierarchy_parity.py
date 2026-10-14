@@ -5,12 +5,14 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from pyrit.analytics import compute_outcome_statistics
 from pyrit.backend.main import app
 from pyrit.backend.services.scenario_progress_read_model import (
     ScenarioProgressReadModel,
@@ -25,6 +27,7 @@ from pyrit.models import (
     AttackResultRole,
     MessagePiece,
     RetryEvent,
+    ScenarioAtomicGroupProgress,
     ScenarioAttackResultDelta,
     ScenarioAttackTechniqueDetails,
     ScenarioConversationMessageProjection,
@@ -95,6 +98,8 @@ def _make_test_snapshot(
     *,
     deltas: list[ScenarioAttackResultDelta],
     plan: ScenarioRunPlan | None = None,
+    atomic_groups: list[ScenarioAtomicGroupProgress] | None = None,
+    summary: ScenarioProgressSummary | None = None,
 ) -> ScenarioProgressSnapshot:
     results: list[ScenarioProgressResult] = []
     for d in deltas:
@@ -134,7 +139,7 @@ def _make_test_snapshot(
         ],
         seed_groups=[ScenarioRunPlanSeedGroup(id="seed_1", objective_sha256="hash123", objective="Test objective")],
     )
-    summary = ScenarioProgressSummary(
+    effective_summary = summary or ScenarioProgressSummary(
         overall=ScenarioProgressCounts(
             completed=len([r for r in results if r.outcome != AttackOutcome.ERROR]),
             planned=1,
@@ -142,12 +147,12 @@ def _make_test_snapshot(
             errors=len([r for r in results if r.outcome == AttackOutcome.ERROR]),
             retries=sum(r.total_retries for r in results),
         ),
-        atomic_groups=[],
+        atomic_groups=atomic_groups or [],
     )
     return ScenarioProgressSnapshot(
         deltas=tuple(deltas),
         results=tuple(results),
-        summary=summary,
+        summary=effective_summary,
         plan=effective_plan,
     )
 
@@ -643,3 +648,429 @@ async def test_sqlite_memory_batched_reads_and_projections_parity(sqlite_instanc
     assert node.children[0].attack_result_id == child_id
     # Cross-run child is safely recognized as unresolved without failing the run
     assert node.unresolved_child_attack_result_ids == [cross_run_id]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_canonical_columns_round_trip(sqlite_instance: SQLiteMemory) -> None:
+    """Test real SQLite round-trip of canonical executed_turns and outcome_reason columns."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="CanonicalScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id="conv_canonical",
+        objective="Probe objective",
+        outcome=AttackOutcome.FAILURE,
+        executed_turns=7,
+        outcome_reason="Target actively refused harmful request",
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={},  # Explicitly empty metadata to ensure canonical DB columns are read
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # 1. Delta query directly from SQLite selects canonical columns
+    deltas = await sqlite_instance.get_scenario_attack_result_deltas_by_ids_async(
+        scenario_result_id=scenario_id,
+        attack_result_ids=[ar_id],
+    )
+    assert len(deltas) == 1
+    delta = deltas[0]
+    assert delta.executed_turns == 7
+    assert delta.outcome_reason == "Target actively refused harmful request"
+    assert "executed_turns" not in delta.attack_metadata
+    assert "outcome_reason" not in delta.attack_metadata
+
+    # 2. Hierarchy node query through service projects canonical values
+    service = ScenarioRunService(memory=sqlite_instance)
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert node is not None
+    assert node.executed_turns == 7
+    assert node.outcome_reason == "Target actively refused harmful request"
+
+
+def test_hierarchy_disconnected_cyclic_component_mixed() -> None:
+    """Test that disconnected cyclic components (e.g. A <-> B) are not dropped when standard roots exist."""
+    # 1. Ordinary tree: root-1 -> child-1
+    root1 = _make_test_delta(
+        attack_result_id="root-1",
+        role=AttackResultRole.ORCHESTRATION,
+        child_ids=["child-1"],
+        seconds_offset=1,
+    )
+    child1 = _make_test_delta(
+        attack_result_id="child-1",
+        role=AttackResultRole.TARGET_FACING,
+        seconds_offset=2,
+    )
+
+    # 2. Detached cyclic component: cycle-a -> cycle-b and cycle-b -> cycle-a
+    # Neither cycle-a nor cycle-b is reachable from root-1, and both are in each other's child_ids
+    cycle_a = _make_test_delta(
+        attack_result_id="cycle-a",
+        role=AttackResultRole.ORCHESTRATION,
+        child_ids=["cycle-b"],
+        seconds_offset=3,
+    )
+    cycle_b = _make_test_delta(
+        attack_result_id="cycle-b",
+        role=AttackResultRole.ORCHESTRATION,
+        child_ids=["cycle-a"],
+        seconds_offset=4,
+    )
+
+    snapshot = _make_test_snapshot(deltas=[root1, child1, cycle_a, cycle_b])
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    # All 4 nodes must be accounted for in the hierarchy!
+    all_node_ids = set()
+
+    def _collect_ids(nodes: list[ScenarioHierarchyNode]) -> None:
+        for n in nodes:
+            all_node_ids.add(n.attack_result_id)
+            _collect_ids(n.children)
+
+    for g in projection.groups:
+        _collect_ids(g.roots)
+
+    assert "root-1" in all_node_ids
+    assert "child-1" in all_node_ids
+    assert "cycle-a" in all_node_ids
+    assert "cycle-b" in all_node_ids
+    assert len(all_node_ids) == 4
+
+    # Verify root-1 has child-1
+    group = projection.groups[0]
+    root_node = next(r for r in group.roots if r.attack_result_id == "root-1")
+    assert len(root_node.children) == 1
+    assert root_node.children[0].attack_result_id == "child-1"
+
+    # Verify cycle was guarded and placed in unresolved_child_attack_result_ids without infinite loop
+    cycle_root = next(r for r in group.roots if r.attack_result_id in ("cycle-a", "cycle-b"))
+    assert len(cycle_root.children) == 1
+    cycle_child = cycle_root.children[0]
+    assert cycle_root.attack_result_id in cycle_child.unresolved_child_attack_result_ids
+
+
+def test_hierarchy_bounded_node_budget() -> None:
+    """Test that max_nodes bounds tree traversal and sets truncated=True while preserving exact overall counts."""
+    # Create 6 deltas in a chain: node-0 -> node-1 -> node-2 -> node-3 -> node-4 -> node-5
+    deltas = [
+        _make_test_delta(
+            attack_result_id=f"node-{i}",
+            role=AttackResultRole.ORCHESTRATION if i < 5 else AttackResultRole.TARGET_FACING,
+            child_ids=[f"node-{i + 1}"] if i < 5 else [],
+            seconds_offset=i,
+        )
+        for i in range(6)
+    ]
+
+    snapshot = _make_test_snapshot(deltas=deltas)
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+        max_nodes=3,
+    )
+
+    assert projection.truncated is True
+
+    # Count nodes projected in hierarchy
+    node_count = 0
+
+    def _count_nodes(nodes: list[ScenarioHierarchyNode]) -> None:
+        nonlocal node_count
+        for n in nodes:
+            node_count += 1
+            _count_nodes(n.children)
+
+    for g in projection.groups:
+        _count_nodes(g.roots)
+
+    assert node_count == 3
+    # Top-level aggregate totals must remain exact (not clipped)
+    assert projection.overall_counts.completed == 6
+
+
+def test_hierarchy_group_progress_outcomes_parity() -> None:
+    """Test that group.counts.outcomes is preserved from atomic group progress."""
+    outcomes = compute_outcome_statistics({AttackOutcome.SUCCESS: 1, AttackOutcome.UNDETERMINED: 1})
+    ag_progress = ScenarioAtomicGroupProgress(
+        id="attack_group",
+        atomic_attack_name="attack_group",
+        display_group="attack_group",
+        status="COMPLETED",
+        completed=2,
+        planned=2,
+        succeeded=1,
+        success_percentage=50,
+        errors=0,
+        retries=0,
+        outcomes=outcomes,
+    )
+
+    delta1 = _make_test_delta(attack_result_id="a-1", outcome=AttackOutcome.SUCCESS, seconds_offset=1)
+    delta2 = _make_test_delta(attack_result_id="a-2", outcome=AttackOutcome.UNDETERMINED, seconds_offset=2)
+
+    plan = ScenarioRunPlan(
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="attack_group",
+                atomic_attack_name="attack_group",
+                display_group="attack_group",
+                technique_eval_hash="",
+                seed_group_ids=["seed_1"],
+            )
+        ],
+        seed_groups=[ScenarioRunPlanSeedGroup(id="seed_1", objective_sha256="hash123", objective="Test objective")],
+    )
+
+    summary = ScenarioProgressSummary(
+        overall=ScenarioProgressCounts(
+            completed=2,
+            planned=2,
+            succeeded=1,
+            success_percentage=50,
+            errors=0,
+            retries=0,
+            outcomes=outcomes,
+        ),
+        atomic_groups=[ag_progress],
+    )
+
+    snapshot = ScenarioProgressSnapshot(
+        deltas=(delta1, delta2),
+        results=tuple(
+            ScenarioProgressResult(
+                attack_result_id=d.attack_result_id,
+                conversation_id=d.conversation_id,
+                atomic_group_id="attack_group",
+                atomic_attack_name="attack_group",
+                seed_group_id="seed_1",
+                outcome=d.outcome,
+                execution_time_ms=d.execution_time_ms,
+                timestamp=d.timestamp,
+                total_retries=d.total_retries,
+                result_role=AttackResultRole.TARGET_FACING,
+            )
+            for d in [delta1, delta2]
+        ),
+        summary=summary,
+        plan=plan,
+    )
+
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    assert len(projection.groups) == 1
+    group = projection.groups[0]
+    assert group.counts.outcomes is not None
+    assert group.counts.outcomes.success_rate_decided == 1.0
+    assert group.counts.outcomes.success_rate_all == 0.5
+
+
+def test_hierarchy_unplanned_groups_shared_counting() -> None:
+    """Test that unplanned groups use shared counting policy (latest attempt resolution + valid producer counts)."""
+    # 2 attempts on the same unit in an unplanned group:
+    # Attempt 1 failed, Attempt 2 succeeded
+    delta1 = _make_test_delta(
+        attack_result_id="unplanned-1",
+        outcome=AttackOutcome.ERROR,
+        role=AttackResultRole.TARGET_FACING,
+        parent_collection="unplanned_group",
+        seed_group_id="seed_u",
+        attempt_index=1,
+        seconds_offset=1,
+    )
+    delta2 = _make_test_delta(
+        attack_result_id="unplanned-2",
+        outcome=AttackOutcome.SUCCESS,
+        role=AttackResultRole.TARGET_FACING,
+        parent_collection="unplanned_group",
+        seed_group_id="seed_u",
+        attempt_index=2,
+        seconds_offset=2,
+    )
+
+    # Empty plan (no planned atomic groups)
+    plan = ScenarioRunPlan(atomic_groups=[], seed_groups=[])
+    snapshot = _make_test_snapshot(deltas=[delta1, delta2], plan=plan)
+
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    assert len(projection.groups) == 1
+    group = projection.groups[0]
+    assert group.atomic_group_id == "unplanned_group"
+    # Latest attempt succeeded, so 1 completed unit, 1 success, 1 historical error
+    assert group.counts.completed == 1
+    assert group.counts.succeeded == 1
+    assert group.counts.errors == 1
+    # Producer counts include both historical attempts
+    assert group.counts.producer_counts.target_facing.attempts == 2
+    assert group.counts.producer_counts.target_facing.errors == 1
+    assert group.counts.producer_counts.target_facing.retries == 0
+
+
+def test_hierarchy_diagnostics_cap_retries_per_item() -> None:
+    """Test that retries list inside individual AttackRetrySummary is bounded to 100 with retries_truncated=True."""
+    retries = [RetryEvent(exception_type="RateLimitError", attempt_number=i) for i in range(250)]
+    delta = _make_test_delta(
+        attack_result_id="heavy-retry",
+        outcome=AttackOutcome.SUCCESS,
+        retries=retries,
+    )
+
+    snapshot = _make_test_snapshot(deltas=[delta])
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    diag = projection.diagnostics
+    assert len(diag.attack_retries) == 1
+    item = diag.attack_retries[0]
+    assert item.attack_result_id == "heavy-retry"
+    assert item.total_retries == 250
+    assert len(item.retries) == 100
+    assert item.retries_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance: SQLiteMemory, tmp_path: Path) -> None:
+    """Test multimodal piece projection, raw role preservation, and database-level SQL LIMIT bounding."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="MultimodalScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    conv_id = str(uuid.uuid4())
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Multimodal test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # Create real image on disk
+    img_file = tmp_path / "diagram.png"
+    img_file.write_bytes(b"dummy_png_bytes")
+    img_path = str(img_file)
+
+    # Sequence 0: 2 pieces (text + image)
+    p0_text = MessagePiece(
+        id=uuid.uuid4(),
+        conversation_id=conv_id,
+        role="user",
+        original_value_data_type="text",
+        original_value="Analyze blueprint image",
+        converted_value="Analyze blueprint image",
+        sequence=0,
+    )
+    p0_img = MessagePiece(
+        id=uuid.uuid4(),
+        conversation_id=conv_id,
+        role="user",
+        original_value_data_type="image_path",
+        original_value=img_path,
+        converted_value=img_path,
+        sequence=0,
+    )
+    # Sequence 1: simulated_assistant role
+    p1 = MessagePiece(
+        id=uuid.uuid4(),
+        conversation_id=conv_id,
+        role="simulated_assistant",
+        original_value_data_type="text",
+        original_value="I detect architectural blueprints.",
+        converted_value="I detect architectural blueprints.",
+        sequence=1,
+    )
+    # Sequence 2: 3rd message
+    p2 = MessagePiece(
+        id=uuid.uuid4(),
+        conversation_id=conv_id,
+        role="user",
+        original_value_data_type="text",
+        original_value="Proceed with analysis.",
+        converted_value="Proceed with analysis.",
+        sequence=2,
+    )
+
+    for p in [p0_text, p0_img, p1, p2]:
+        await set_message_piece_sha256_async(p)
+        await sqlite_instance._run_database_operation_async(sqlite_instance._insert_entry, PromptMemoryEntry(entry=p))
+
+    # Read with limit=2
+    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+        attack_result_id=ar_id,
+        include_messages=True,
+        limit_messages_per_conversation=2,
+    )
+
+    assert len(projs) == 1
+    proj = projs[0]
+    assert proj.conversation_id == conv_id
+    assert proj.message_count == 3  # Exact count from COUNT query
+    assert proj.messages_truncated is True
+    assert len(proj.messages) == 2  # Bounded by SQL LIMIT
+
+    # Verify multimodal pieces in message 0
+    msg0 = proj.messages[0]
+    assert msg0.role == "user"
+    assert len(msg0.pieces) == 2
+    assert msg0.pieces[0].data_type == "text"
+    assert msg0.pieces[0].content == "Analyze blueprint image"
+    assert msg0.pieces[1].data_type == "image_path"
+    assert msg0.pieces[1].content == img_path
+    assert msg0.pieces[1].converted_value == img_path
+
+    # Verify raw custom role in message 1
+    msg1 = proj.messages[1]
+    assert msg1.role == "simulated_assistant"
+    assert msg1.content == "I detect architectural blueprints."

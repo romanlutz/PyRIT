@@ -352,6 +352,7 @@ async def get_scenario_run_progress(  # pyrit-async-suffix-exempt
 async def get_scenario_run_hierarchy(  # pyrit-async-suffix-exempt
     *,
     scenario_result_id: IdentifierStr,
+    max_nodes: int = Query(1000, ge=1, le=5000, description="Maximum nodes to assemble in the hierarchy tree"),
 ) -> ScenarioHierarchyProjection:
     """
     Get the bounded result hierarchy projection for a scenario run.
@@ -361,7 +362,10 @@ async def get_scenario_run_hierarchy(  # pyrit-async-suffix-exempt
         target-facing children, and generic read-only conversations.
     """
     service = get_scenario_run_service()
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_result_id)
+    hierarchy = await service.get_run_hierarchy_async(
+        scenario_result_id=scenario_result_id,
+        max_nodes=max_nodes,
+    )
     if hierarchy is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

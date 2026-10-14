@@ -11,6 +11,7 @@ from pyrit.models import (
     AttackResultRole,
     RetryEvent,
     ScenarioAttackTechniqueDetails,
+    ScenarioConversationMessagePieceProjection,
     ScenarioConversationMessageProjection,
     ScenarioConversationProjection,
     ScenarioHierarchyDiagnostics,
@@ -240,3 +241,60 @@ def test_scenario_hierarchy_projection_envelope() -> None:
     assert len(projection.groups) == 1
     assert projection.groups[0].roots[0].attack_result_id == "node-1"
     assert projection.overall_counts.completed == 1
+    assert projection.truncated is False
+
+
+def test_scenario_conversation_multimodal_pieces() -> None:
+    now = datetime.now(UTC)
+    pieces = [
+        ScenarioConversationMessagePieceProjection(
+            data_type="text",
+            content="Look at this image:",
+            converted_value="Look at this image:",
+        ),
+        ScenarioConversationMessagePieceProjection(
+            data_type="image_path",
+            content="/path/to/img.png",
+            converted_value="/path/to/img.png",
+        ),
+    ]
+    msg = ScenarioConversationMessageProjection(
+        role="simulated_assistant",
+        content="Look at this image:",
+        sequence=1,
+        timestamp=now,
+        pieces=pieces,
+    )
+    assert msg.role == "simulated_assistant"
+    assert len(msg.pieces) == 2
+    assert msg.pieces[0].data_type == "text"
+    assert msg.pieces[1].data_type == "image_path"
+
+
+def test_attack_retry_summary_bounded_fields() -> None:
+    summary = AttackRetrySummary(
+        attack_result_id="att-1",
+        atomic_attack_name="attack",
+        total_retries=250,
+        retries=[RetryEvent(exception_type="RateLimit", attempt_number=i) for i in range(100)],
+        retries_truncated=True,
+    )
+    assert summary.total_retries == 250
+    assert len(summary.retries) == 100
+    assert summary.retries_truncated is True
+
+
+def test_scenario_hierarchy_projection_truncated_flag() -> None:
+    projection = ScenarioHierarchyProjection(
+        scenario_result_id="scen-123",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        groups=[],
+        overall_counts=ScenarioProgressCounts(
+            completed=0, planned=0, succeeded=0, success_percentage=0, errors=0, retries=0
+        ),
+        diagnostics=ScenarioHierarchyDiagnostics(),
+        truncated=True,
+    )
+    assert projection.truncated is True
