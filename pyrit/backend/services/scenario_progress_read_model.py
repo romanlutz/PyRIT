@@ -29,6 +29,7 @@ from pyrit.models import (
     AttackTechniqueIdentifier,
     ComponentIdentifier,
     ScenarioAtomicGroupProgress,
+    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
     ScenarioAttackTechniqueDetails,
     ScenarioComponentIdentity,
@@ -922,11 +923,16 @@ class ScenarioProgressReadModel:
                 children=children,
                 unresolved_child_attack_result_ids=unresolved_children,
                 conversations=conversations,
+                conversations_count=len(conversations),
+                conversations_truncated=False,
                 orchestration=orchestration,
             )
 
         roots_by_group: dict[str, list[ScenarioHierarchyNode]] = {}
         for root_result in root_results:
+            if total_nodes_count >= max_nodes:
+                hierarchy_truncated = True
+                break
             root_node = _build_node(
                 attack_result_id=root_result.attack_result_id,
                 parent_id=None,
@@ -937,23 +943,30 @@ class ScenarioProgressReadModel:
             if root_node is not None:
                 roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
 
-        # Handle unreached/disconnected components (including detached cycles)
-        unreached = [r for r in snapshot.results if r.attack_result_id not in visited_ids]
-        while unreached:
-            unreached.sort(key=lambda r: r.timestamp)
-            next_root = unreached[0]
-            root_node = _build_node(
-                attack_result_id=next_root.attack_result_id,
-                parent_id=None,
-                child_index=None,
-                active_path=set(),
-                depth=0,
-            )
-            if root_node is not None:
-                roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
-            else:
-                visited_ids.add(next_root.attack_result_id)
+        # Handle unreached/disconnected components (including detached cycles) in a single linear pass
+        if total_nodes_count < max_nodes:
             unreached = [r for r in snapshot.results if r.attack_result_id not in visited_ids]
+            unreached.sort(key=lambda r: r.timestamp)
+            for next_root in unreached:
+                if total_nodes_count >= max_nodes:
+                    hierarchy_truncated = True
+                    break
+                if next_root.attack_result_id in visited_ids:
+                    continue
+                root_node = _build_node(
+                    attack_result_id=next_root.attack_result_id,
+                    parent_id=None,
+                    child_index=None,
+                    active_path=set(),
+                    depth=0,
+                )
+                if root_node is not None:
+                    roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
+                else:
+                    visited_ids.add(next_root.attack_result_id)
+
+        if not hierarchy_truncated and any(r.attack_result_id not in visited_ids for r in snapshot.results):
+            hierarchy_truncated = True
 
         for g_roots in roots_by_group.values():
             g_roots.sort(key=lambda n: n.timestamp)
@@ -1013,10 +1026,8 @@ class ScenarioProgressReadModel:
 
         all_failed_attacks: list[AttackErrorSummary] = []
         all_attack_retries: list[AttackRetrySummary] = []
-        total_retries_count = 0
 
         for delta, result in zip(snapshot.deltas, snapshot.results, strict=True):
-            total_retries_count += result.total_retries
             if result.outcome == AttackOutcome.ERROR:
                 all_failed_attacks.append(
                     AttackErrorSummary(
@@ -1058,7 +1069,7 @@ class ScenarioProgressReadModel:
             attack_retries=attack_retries,
             attack_retries_count=attack_retries_count,
             attack_retries_truncated=attack_retries_truncated,
-            total_retries=total_retries_count,
+            total_retries=snapshot.summary.overall.retries,
         )
 
         return ScenarioHierarchyProjection(
@@ -1079,7 +1090,11 @@ class ScenarioProgressReadModel:
         result: ScenarioProgressResult,
         children_deltas: Sequence[ScenarioAttackResultDelta] = (),
         children_results: Sequence[ScenarioProgressResult] = (),
-        conversations: Sequence[ScenarioConversationProjection] = (),
+        conversations: Sequence[ScenarioConversationProjection]
+        | ScenarioAttackResultConversations
+        | tuple[Sequence[ScenarioConversationProjection], int, bool] = (),
+        conversations_count: int | None = None,
+        conversations_truncated: bool = False,
     ) -> ScenarioHierarchyNode:
         """
         Assemble a single hierarchy node with its immediate children and generic conversations.
@@ -1090,10 +1105,31 @@ class ScenarioProgressReadModel:
             children_deltas: Deltas for immediate children resolved in a single batch.
             children_results: Mapped results for immediate children.
             conversations: Generic read-only conversation projections.
+            conversations_count: Total conversations count for this node.
+            conversations_truncated: Flag indicating if conversations list was truncated.
 
         Returns:
             ScenarioHierarchyNode: The assembled node.
         """
+        conv_list: list[ScenarioConversationProjection] = []
+        if isinstance(conversations, ScenarioAttackResultConversations):
+            conv_list = list(conversations.conversations)
+            if conversations_count is None:
+                conversations_count = conversations.total_count
+            conversations_truncated = conversations_truncated or conversations.truncated
+        elif isinstance(conversations, tuple) and len(conversations) == 3:
+            first, second, third = conversations
+            if isinstance(first, Sequence):
+                conv_list = [c for c in first if isinstance(c, ScenarioConversationProjection)]
+            if conversations_count is None and isinstance(second, int):
+                conversations_count = second
+            if isinstance(third, bool):
+                conversations_truncated = conversations_truncated or third
+        else:
+            conv_list = list(conversations)
+
+        resolved_conversations_count: int = conversations_count if conversations_count is not None else len(conv_list)
+
         children_deltas_by_id = {d.attack_result_id: d for d in children_deltas}
         children_results_by_id = {r.attack_result_id: r for r in children_results}
 
@@ -1201,6 +1237,8 @@ class ScenarioProgressReadModel:
                         children=[],
                         unresolved_child_attack_result_ids=[],
                         conversations=[],
+                        conversations_count=0,
+                        conversations_truncated=False,
                         orchestration=c_orchestration,
                     )
                 )
@@ -1230,6 +1268,8 @@ class ScenarioProgressReadModel:
             child_attack_result_ids=list(result.child_attack_result_ids),
             children=children,
             unresolved_child_attack_result_ids=unresolved_children,
-            conversations=list(conversations),
+            conversations=conv_list,
+            conversations_count=resolved_conversations_count,
+            conversations_truncated=conversations_truncated,
             orchestration=orchestration,
         )

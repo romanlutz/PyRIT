@@ -25,9 +25,12 @@ from pyrit.models import (
     AttackOutcome,
     AttackResult,
     AttackResultRole,
+    ConversationReference,
+    ConversationType,
     MessagePiece,
     RetryEvent,
     ScenarioAtomicGroupProgress,
+    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
     ScenarioAttackTechniqueDetails,
     ScenarioConversationMessageProjection,
@@ -139,16 +142,28 @@ def _make_test_snapshot(
         ],
         seed_groups=[ScenarioRunPlanSeedGroup(id="seed_1", objective_sha256="hash123", objective="Test objective")],
     )
-    effective_summary = summary or ScenarioProgressSummary(
-        overall=ScenarioProgressCounts(
-            completed=len([r for r in results if r.outcome != AttackOutcome.ERROR]),
-            planned=1,
-            succeeded=len([r for r in results if r.outcome == AttackOutcome.SUCCESS]),
-            errors=len([r for r in results if r.outcome == AttackOutcome.ERROR]),
-            retries=sum(r.total_retries for r in results),
-        ),
-        atomic_groups=atomic_groups or [],
-    )
+    if summary is None:
+        attempts_by_unit: dict[tuple[str, str], list[ScenarioProgressResult]] = {}
+        for r in results:
+            unit_key = (r.atomic_group_id, r.seed_group_id)
+            attempts_by_unit.setdefault(unit_key, []).append(r)
+
+        calculated_retries = 0
+        for attempts in attempts_by_unit.values():
+            calculated_retries += max(len(attempts) - 1, 0) + sum(a.total_retries for a in attempts)
+
+        effective_summary = ScenarioProgressSummary(
+            overall=ScenarioProgressCounts(
+                completed=len([r for r in results if r.outcome != AttackOutcome.ERROR]),
+                planned=1,
+                succeeded=len([r for r in results if r.outcome == AttackOutcome.SUCCESS]),
+                errors=len([r for r in results if r.outcome == AttackOutcome.ERROR]),
+                retries=calculated_retries,
+            ),
+            atomic_groups=atomic_groups or [],
+        )
+    else:
+        effective_summary = summary
     return ScenarioProgressSnapshot(
         deltas=tuple(deltas),
         results=tuple(results),
@@ -357,6 +372,7 @@ def test_hierarchy_diagnostics_bounding_at_100() -> None:
                 error_type="TestError",
                 error_message=f"Error {i}",
                 retries=retries,
+                seed_group_id=f"seed_{i}",
                 seconds_offset=i,
             )
         )
@@ -365,6 +381,7 @@ def test_hierarchy_diagnostics_bounding_at_100() -> None:
             attack_result_id=f"retry-{i}",
             outcome=AttackOutcome.SUCCESS,
             retries=[RetryEvent(exception_type="RateLimit", attempt_number=1)],
+            seed_group_id=f"seed_{i}",
             seconds_offset=i,
         )
         for i in range(105, 120)
@@ -417,20 +434,24 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
     memory.get_scenario_attack_result_deltas_by_ids_async = AsyncMock(side_effect=mock_get_deltas)
     memory.get_scenario_result_header_async = AsyncMock(return_value=None)
     memory.get_attack_result_conversation_projections_async = AsyncMock(
-        return_value=[
-            ScenarioConversationProjection(
-                conversation_id="conv_1",
-                conversation_type="main",
-                message_count=1,
-                messages=[
-                    ScenarioConversationMessageProjection(
-                        role="user",
-                        content="Test prompt",
-                        sequence=1,
-                    )
-                ],
-            )
-        ]
+        return_value=ScenarioAttackResultConversations(
+            conversations=[
+                ScenarioConversationProjection(
+                    conversation_id="conv_1",
+                    conversation_type="main",
+                    message_count=1,
+                    messages=[
+                        ScenarioConversationMessageProjection(
+                            role="user",
+                            content="Test prompt",
+                            sequence=1,
+                        )
+                    ],
+                )
+            ],
+            total_count=1,
+            truncated=False,
+        )
     )
 
     read_model = ScenarioProgressReadModel(memory=memory)
@@ -626,8 +647,10 @@ async def test_sqlite_memory_batched_reads_and_projections_parity(sqlite_instanc
         attack_result_id=child_id,
         include_messages=True,
     )
-    assert len(conv_projections) == 1
-    proj = conv_projections[0]
+    assert conv_projections.total_count == 1
+    assert conv_projections.truncated is False
+    assert len(conv_projections.conversations) == 1
+    proj = conv_projections.conversations[0]
     assert proj.conversation_id == child_conv_id
     assert proj.message_count == 2
     assert len(proj.messages) == 2
@@ -1053,8 +1076,10 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         limit_messages_per_conversation=2,
     )
 
-    assert len(projs) == 1
-    proj = projs[0]
+    assert projs.total_count == 1
+    assert projs.truncated is False
+    assert len(projs.conversations) == 1
+    proj = projs.conversations[0]
     assert proj.conversation_id == conv_id
     assert proj.message_count == 3  # Exact count from COUNT query
     assert proj.messages_truncated is True
@@ -1074,3 +1099,133 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
     msg1 = proj.messages[1]
     assert msg1.role == "simulated_assistant"
     assert msg1.content == "I detect architectural blueprints."
+
+
+def test_hierarchy_repeated_attempt_diagnostic_retries_consistency() -> None:
+    """Test that units with repeated attempts without row retries match overall_counts and diagnostics retries."""
+    # 2 attempts on the same unit: attempt 1 error, attempt 2 success, both with total_retries=0
+    delta1 = _make_test_delta(
+        attack_result_id="attempt-1",
+        outcome=AttackOutcome.ERROR,
+        role=AttackResultRole.TARGET_FACING,
+        parent_collection="group_1",
+        seed_group_id="seed_1",
+        attempt_index=1,
+        seconds_offset=1,
+    )
+    delta2 = _make_test_delta(
+        attack_result_id="attempt-2",
+        outcome=AttackOutcome.SUCCESS,
+        role=AttackResultRole.TARGET_FACING,
+        parent_collection="group_1",
+        seed_group_id="seed_1",
+        attempt_index=2,
+        seconds_offset=2,
+    )
+
+    snapshot = _make_test_snapshot(deltas=[delta1, delta2])
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    # Re-attempt of same unit causes retry pressure of 1
+    assert projection.overall_counts.retries == 1
+    # Diagnostics total_retries must be consistent with overall_counts.retries
+    assert projection.diagnostics.total_retries == 1
+    assert projection.diagnostics.total_retries == projection.overall_counts.retries
+
+
+def test_hierarchy_traversal_halts_immediately_on_budget_exhaustion() -> None:
+    """Test that with 1,000 root results and max_nodes=1, traversal stops immediately without quadratic loop."""
+    deltas = [
+        _make_test_delta(
+            attack_result_id=f"root-{i}",
+            role=AttackResultRole.TARGET_FACING,
+            parent_collection="group_1",
+            seed_group_id=f"seed_{i}",
+            seconds_offset=i,
+        )
+        for i in range(1000)
+    ]
+
+    snapshot = _make_test_snapshot(deltas=deltas)
+
+    import time
+
+    start_time = time.perf_counter()
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+        max_nodes=1,
+    )
+    elapsed = time.perf_counter() - start_time
+
+    assert elapsed < 0.05, f"Expected <0.05s, got {elapsed:.4f}s"
+    assert projection.truncated is True
+    # Count total nodes in projection
+    node_count = sum(len(g.roots) for g in projection.groups)
+    assert node_count == 1
+    # Aggregate total remains exact
+    assert projection.overall_counts.completed == 1000
+
+
+@pytest.mark.asyncio
+async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLiteMemory) -> None:
+    """Test explicit conversation-list clipping flags and exact count with 55 conversations."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ConversationClippingScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    main_conv_id = str(uuid.uuid4())
+    # 54 preparation conversations + 1 main conversation = 55 total conversations
+    prep_conv_ids = [str(uuid.uuid4()) for _ in range(54)]
+
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=main_conv_id,
+        related_conversations={
+            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PREPARATION)
+            for cid in prep_conv_ids
+        },
+        objective="Conversation clipping test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # 1. Direct memory read returns ScenarioAttackResultConversations with total_count=55 and truncated=True
+    conv_result = await sqlite_instance.get_attack_result_conversation_projections_async(
+        attack_result_id=ar_id,
+        max_conversations=50,
+    )
+    assert conv_result.total_count == 55
+    assert conv_result.truncated is True
+    assert len(conv_result.conversations) == 50
+
+    # 2. Service single-node read projects exact count and truncation flag on node
+    service = ScenarioRunService(memory=sqlite_instance)
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert node is not None
+    assert node.conversations_count == 55
+    assert node.conversations_truncated is True
+    assert len(node.conversations) == 50

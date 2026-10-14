@@ -10,6 +10,7 @@ from pyrit.models import (
     AttackOutcome,
     AttackResultRole,
     RetryEvent,
+    ScenarioAttackResultConversations,
     ScenarioAttackTechniqueDetails,
     ScenarioConversationMessagePieceProjection,
     ScenarioConversationMessageProjection,
@@ -298,3 +299,41 @@ def test_scenario_hierarchy_projection_truncated_flag() -> None:
         truncated=True,
     )
     assert projection.truncated is True
+
+
+def test_scenario_hierarchy_node_conversations_count_and_truncated() -> None:
+    now = datetime.now(UTC)
+    node = ScenarioHierarchyNode(
+        attack_result_id="att-1",
+        atomic_attack_name="attack",
+        atomic_group_id="group-1",
+        seed_group_id="seed-1",
+        objective="obj",
+        outcome=AttackOutcome.SUCCESS,
+        timestamp=now,
+        conversations=[
+            ScenarioConversationProjection(conversation_id="conv-1"),
+        ],
+        conversations_count=55,
+        conversations_truncated=True,
+    )
+    assert node.conversations_count == 55
+    assert node.conversations_truncated is True
+    assert len(node.conversations) == 1
+
+
+def test_scenario_attack_result_conversations_namedtuple() -> None:
+    conv = ScenarioConversationProjection(conversation_id="conv-1")
+    result = ScenarioAttackResultConversations(
+        conversations=[conv],
+        total_count=55,
+        truncated=True,
+    )
+    assert result.conversations == [conv]
+    assert result.total_count == 55
+    assert result.truncated is True
+    # Verify tuple unpacking works
+    c_list, count, trunc = result
+    assert c_list == [conv]
+    assert count == 55
+    assert trunc is True

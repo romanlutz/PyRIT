@@ -148,6 +148,7 @@ if TYPE_CHECKING:
         scenario_dataset_size_from_limit,
     )
     from pyrit.models.scenario_hierarchy import (
+        ScenarioAttackResultConversations,
         ScenarioConversationMessagePieceProjection,
         ScenarioConversationMessageProjection,
         ScenarioConversationProjection,
@@ -447,6 +448,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ScenarioExecutionStatistics": "pyrit.models.scenario_progress",
     "ScenarioExecutionUnit": "pyrit.models.scenario_progress",
     "ScenarioConversationMessagePieceProjection": "pyrit.models.scenario_hierarchy",
+    "ScenarioAttackResultConversations": "pyrit.models.scenario_hierarchy",
     "ScenarioConversationMessageProjection": "pyrit.models.scenario_hierarchy",
     "ScenarioConversationProjection": "pyrit.models.scenario_hierarchy",
     "ScenarioHierarchyDiagnostics": "pyrit.models.scenario_hierarchy",

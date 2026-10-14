@@ -14,7 +14,7 @@ from sqlalchemy.dialects import mssql
 
 from pyrit.common.singleton import Singleton
 from pyrit.converter.base64_converter import Base64Converter
-from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, PromptMemoryEntry
+from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, MemoryInterface, PromptMemoryEntry
 from pyrit.memory.memory_interface import AttackResultKeysetCursor
 from pyrit.memory.memory_models import ScenarioResultEntry
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
@@ -1037,3 +1037,13 @@ def test_scenario_attack_result_deltas_by_ids_chunks_over_2100_ids_mssql(
         chunk_stmt = call.args[0]
         chunk_compiled = chunk_stmt.compile(dialect=mssql.dialect())
         assert len(chunk_compiled.params) <= 2000
+
+
+def test_scenario_attack_result_deltas_by_ids_statement_type_hints() -> None:
+    """Test that type annotations on _build_scenario_attack_result_deltas_by_ids_statement evaluate cleanly."""
+    import typing
+
+    from sqlalchemy.sql import Select
+
+    hints = typing.get_type_hints(MemoryInterface._build_scenario_attack_result_deltas_by_ids_statement)
+    assert hints.get("return") is Select

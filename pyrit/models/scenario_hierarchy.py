@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from typing import NamedTuple
+
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from pyrit.models.catalog.scenario import AttackErrorSummary, AttackRetrySummary
@@ -130,9 +132,19 @@ class ScenarioHierarchyNode(BaseModel):
 
     # Generic read-only conversations for this attack
     conversations: list[ScenarioConversationProjection] = Field(default_factory=list)
+    conversations_count: int = 0
+    conversations_truncated: bool = False
 
     # Orchestration details if role is ORCHESTRATION or has children
     orchestration: ScenarioOrchestrationParentSummary | None = None
+
+
+class ScenarioAttackResultConversations(NamedTuple):
+    """Container for bounded conversation projections, total count, and list truncation flag."""
+
+    conversations: list[ScenarioConversationProjection]
+    total_count: int
+    truncated: bool
 
 
 class ScenarioHierarchyGroup(BaseModel):

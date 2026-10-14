@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import (
     MetaData,
+    Select,
     String,
     Unicode,
     and_,
@@ -109,6 +110,7 @@ from pyrit.models import (
     Observation,
     PromptDataType,
     RetryEvent,
+    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
     ScenarioConversationMessagePieceProjection,
     ScenarioConversationMessageProjection,
@@ -6832,45 +6834,47 @@ class MemoryInterface(abc.ABC):
         include_messages: bool = False,
         limit_messages_per_conversation: int = 100,
         max_conversations: int = 50,
-    ) -> list[ScenarioConversationProjection]:
+    ) -> ScenarioAttackResultConversations:
         """
         Read generic conversation projections for an attack result without full-run hydration.
 
         Applies bounded conversation budget and SQL LIMIT queries.
 
         Returns:
-            list[ScenarioConversationProjection]: Generic read-only conversation projections.
+            ScenarioAttackResultConversations: Container with projections, total count, and truncation flag.
         """
         try:
             ar_uuid = uuid.UUID(attack_result_id)
         except (ValueError, TypeError):
-            return []
+            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
 
         entries = self._query_entries(
             AttackResultEntry,
             conditions=AttackResultEntry.id == ar_uuid,
         )
         if not entries:
-            return []
+            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
 
         entry = entries[0]
         conversations: list[ScenarioConversationProjection] = []
-        conv_ids_to_fetch: list[str] = []
+        all_conv_ids: list[str] = []
 
         if entry.conversation_id:
-            conv_ids_to_fetch.append(entry.conversation_id)
+            all_conv_ids.append(entry.conversation_id)
 
         pruned_ids = entry.pruned_conversation_ids or []
         adversarial_ids = entry.adversarial_chat_conversation_ids or []
         preparation_ids = entry.preparation_conversation_ids or []
 
         for c_id in pruned_ids + adversarial_ids + preparation_ids:
-            if c_id and c_id not in conv_ids_to_fetch:
-                conv_ids_to_fetch.append(c_id)
+            if c_id and c_id not in all_conv_ids:
+                all_conv_ids.append(c_id)
 
-        conv_ids_to_fetch = conv_ids_to_fetch[:max_conversations]
+        total_conversations = len(all_conv_ids)
+        conversations_truncated = total_conversations > max_conversations
+        conv_ids_to_fetch = all_conv_ids[:max_conversations]
         if not conv_ids_to_fetch:
-            return []
+            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
 
         stats_map = self._execute_get_conversation_stats(conversation_ids=conv_ids_to_fetch)
 
@@ -6897,12 +6901,28 @@ class MemoryInterface(abc.ABC):
 
         remaining_budget = max(0, max_conversations - (1 if entry.conversation_id else 0))
         related_convs = (
-            [(c_id, "pruned", "Pruned conversation") for c_id in pruned_ids]
-            + [(c_id, "adversarial_chat", "Adversarial chat conversation") for c_id in adversarial_ids]
-            + [(c_id, "preparation", "Preparation conversation") for c_id in preparation_ids]
-        )[:remaining_budget]
+            [(c_id, "pruned", "Pruned conversation") for c_id in pruned_ids if c_id != entry.conversation_id]
+            + [
+                (c_id, "adversarial_chat", "Adversarial chat conversation")
+                for c_id in adversarial_ids
+                if c_id != entry.conversation_id
+            ]
+            + [
+                (c_id, "preparation", "Preparation conversation")
+                for c_id in preparation_ids
+                if c_id != entry.conversation_id
+            ]
+        )
+        seen_related: set[str] = set()
+        deduped_related: list[tuple[str, str, str]] = []
+        for item in related_convs:
+            if item[0] not in seen_related:
+                seen_related.add(item[0])
+                deduped_related.append(item)
 
-        for c_id, conv_type, desc in related_convs:
+        bounded_related = deduped_related[:remaining_budget]
+
+        for c_id, conv_type, desc in bounded_related:
             if not c_id:
                 continue
             stats = stats_map.get(c_id)
@@ -6925,7 +6945,11 @@ class MemoryInterface(abc.ABC):
                 )
             )
 
-        return conversations
+        return ScenarioAttackResultConversations(
+            conversations=conversations,
+            total_count=total_conversations,
+            truncated=conversations_truncated,
+        )
 
     def _execute_get_scenario_results(
         self,
@@ -10430,7 +10454,7 @@ class MemoryInterface(abc.ABC):
         include_messages: bool = False,
         limit_messages_per_conversation: int = 100,
         max_conversations: int = 50,
-    ) -> list[ScenarioConversationProjection]:
+    ) -> ScenarioAttackResultConversations:
         """
         Read generic conversation projections for an attack result without full-run hydration.
 
@@ -10441,7 +10465,7 @@ class MemoryInterface(abc.ABC):
             max_conversations: Maximum number of conversations to retrieve for this attack result.
 
         Returns:
-            list[ScenarioConversationProjection]: Generic read-only conversation projections.
+            ScenarioAttackResultConversations: Container with projections, total count, and truncation flag.
         """
         return await self._run_database_operation_async(
             self._execute_get_attack_result_conversation_projections,
