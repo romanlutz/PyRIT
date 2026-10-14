@@ -175,6 +175,7 @@ class AttackAnalyticsQueryCompiler:
         self._converter_arrays: dict[
             AttackAnalyticsConverterDirection, tuple[ColumnElement[Any], ColumnElement[Any]]
         ] = {}
+        self._filter_projections: dict[int, ColumnElement[Any]] = {}
 
     def totals(self) -> Select[*tuple[Any, ...]]:
         """
@@ -1005,13 +1006,20 @@ class AttackAnalyticsQueryCompiler:
             return or_(*matches)
         raw = source.value
         if self.dialect == "mssql" and (missing or no_converters):
-            self._from, projected = self._grouping_projection(
-                origin=self._from,
-                values=[raw.label(f"filter_source_{index}")],
-                name=f"filter_source_{index}",
-                force=True,
-            )
-            raw = projected[0]
+            # The lateral join belongs to the compiler, not to one statement:
+            # report_async runs totals() and then groups()/matrix() on the same
+            # instance, so re-adding it would duplicate the correlation name.
+            if index in self._filter_projections:
+                raw = self._filter_projections[index]
+            else:
+                self._from, projected = self._grouping_projection(
+                    origin=self._from,
+                    values=[raw.label(f"filter_source_{index}")],
+                    name=f"filter_source_{index}",
+                    force=True,
+                )
+                self._filter_projections[index] = projected[0]
+                raw = projected[0]
         items = JsonArrayItems(raw).table_valued(column("key"), column("value"), column("type"))
         items = items.alias(f"filter_items_{index}")
         kind, value, _ = self._array_key(source=source, raw=raw, items=items)
