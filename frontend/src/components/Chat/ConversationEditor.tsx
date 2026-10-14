@@ -107,7 +107,7 @@ function DraftPieceEditor({ piece, disabled, onChange, onAttachments, onConverte
       if (!nextUrls.has(current.url) && current.url.startsWith('blob:')) URL.revokeObjectURL(current.url)
     }
     onAttachments(piece.draftId, attachments)
-  }, [media, piece, onAttachments, piece.draftId])
+  }, [media, piece, onAttachments])
   const clearConversion = (): void => onChange(piece.draftId, (current: ConversationDraftPiece) => ({
     ...current, converted_value: undefined, converted_value_data_type: undefined, applied_converter_ids: [],
   }))
