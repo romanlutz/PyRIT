@@ -46,18 +46,20 @@ def _font_renders_character(character: str, font: str) -> bool:
 
     ``text2art`` silently omits characters without a glyph, so renderability
     is detected by rendering the single character and checking for any
-    non-whitespace output. Only ``" "`` and ``"\\n"`` are layout for
-    ``text2art``; other whitespace (tab, carriage return, no-break space)
-    has no glyph and would be dropped, so it goes through the same probe.
+    non-whitespace output. ``" "``, ``"\\n"`` and ``"\\r"`` are layout rather
+    than content: the first two are laid out by ``text2art``, and ``"\\r"`` is
+    line-ending encoding, so passing it through would splice a control
+    character into the art block. Other whitespace (tab, no-break space) has
+    no glyph and would be dropped, so it goes through the same probe.
 
     Args:
         character (str): The character to check.
         font (str): The art font to render with.
 
     Returns:
-        bool: True if the font renders the character, or it is a space or newline.
+        bool: True if the font renders the character, or it is layout rather than content.
     """
-    if character in " \n":
+    if character in " \n\r":
         return True
     return bool(text2art(character, font=font).strip())
 

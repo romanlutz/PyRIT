@@ -13,6 +13,7 @@ from art import FONT_NAMES, text2art
 from art.params import RANDOM_FILTERED_FONTS
 
 from pyrit.converter import AsciiArtConverter, ConverterResult
+from pyrit.converter.ascii_art_converter import _ART_RANDOM_FONTS
 
 _LOGGER_NAME = "pyrit.converter.ascii_art_converter"
 
@@ -31,6 +32,12 @@ async def test_ascii_art_converter_default_random_font():
     result = await converter.convert_async(prompt="test", input_type="text")
     assert isinstance(result, ConverterResult)
     assert len(result.output_text) > 0
+
+
+def test_art_random_font_pool_matches_art_random_filter():
+    # the exclusion list is hardcoded, so it has to be re-derived whenever `art`
+    # changes which fonts it filters out of its own random choice
+    assert set(_ART_RANDOM_FONTS) == set(FONT_NAMES) - set(RANDOM_FILTERED_FONTS)
 
 
 async def test_ascii_art_converter_random_font_chooses_from_fonts_that_render_the_prompt():
@@ -102,6 +109,21 @@ async def test_ascii_art_converter_passes_through_accented_character(caplog):
         result = await converter.convert_async(prompt="café", input_type="text")
     assert "é" in result.output_text
     assert "é" in caplog.text
+
+
+async def test_ascii_art_converter_passthrough_keeps_rendering_art_around_the_passed_character():
+    # the renderable run still has to be laid out as art: returning the prompt
+    # verbatim would also satisfy a bare `"é" in output_text` assertion
+    converter = AsciiArtConverter(font="block")
+    result = await converter.convert_async(prompt="café", input_type="text")
+
+    art_rows = text2art("caf", font="block").strip("\n").splitlines()
+    output_rows = result.output_text.strip("\n").splitlines()
+
+    assert len(output_rows) == len(art_rows)
+    assert all(output_row.startswith(art_row) for art_row, output_row in zip(art_rows, output_rows, strict=True))
+    # the one-row passed-through character is centered against the art block
+    assert output_rows[len(output_rows) // 2].endswith("é")
 
 
 async def test_ascii_art_converter_passes_through_cjk_prompt(caplog):
@@ -187,9 +209,9 @@ async def test_ascii_art_converter_random_font_falls_back_when_no_pool_font_rend
 
 
 async def test_ascii_art_converter_passes_through_whitespace_the_font_drops():
-    # art only lays out " " and "\n"; tab and no-break space have no glyph in
-    # art fonts and would be silently dropped, so they go through the same
-    # pass-through path instead of an isspace() exemption.
+    # " ", "\n" and "\r" are treated as layout; tab and no-break space have no
+    # glyph in art fonts and would be silently dropped, so they go through the
+    # same pass-through path instead of an isspace() exemption.
     converter = AsciiArtConverter(font="block")
 
     result = await converter.convert_async(prompt="a\tb", input_type="text")
@@ -197,6 +219,19 @@ async def test_ascii_art_converter_passes_through_whitespace_the_font_drops():
 
     result = await converter.convert_async(prompt="a\u00a0b", input_type="text")
     assert "\u00a0" in result.output_text
+
+
+async def test_ascii_art_converter_treats_carriage_return_as_a_line_ending(caplog):
+    # \r is CRLF line-ending encoding rather than prompt content; passing it through
+    # would splice a control character into the art block and warn on every prompt
+    # authored on Windows, so CRLF prompts stay byte-identical to raw text2art
+    converter = AsciiArtConverter(font="small")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="hi\r\nyo", input_type="text")
+
+    assert "\r" not in result.output_text
+    assert caplog.text == ""
+    assert result.output_text == text2art("hi\r\nyo", font="small")
 
 
 async def test_ascii_art_converter_warning_mentions_remedies(caplog):
@@ -223,3 +258,7 @@ async def test_ascii_art_converter_passes_through_across_multiple_lines():
     result = await converter.convert_async(prompt="café\nnaïve", input_type="text")
     assert "é" in result.output_text
     assert "ï" in result.output_text
+    # both lines keep their renderable runs laid out as art
+    for segment in ("caf", "na", "ve"):
+        for row in text2art(segment, font="small").strip("\n").splitlines():
+            assert row in result.output_text
