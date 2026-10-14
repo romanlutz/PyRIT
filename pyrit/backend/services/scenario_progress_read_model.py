@@ -78,6 +78,25 @@ _MAX_HIERARCHY_DEPTH = 10
 _MAX_HIERARCHY_NODES = 1000
 _MAX_DIAGNOSTIC_ITEMS = 100
 _MAX_RETRIES_PER_NODE = 100
+_MAX_CHILD_REFERENCES = 500
+
+
+def _resolve_executed_turns(delta: ScenarioAttackResultDelta) -> int:
+    """
+    Safely resolve executed turns without falling through on 0 or crashing on invalid metadata.
+
+    Returns:
+        int: The resolved turn count.
+    """
+    if delta.executed_turns is not None:
+        return delta.executed_turns
+    raw_val = delta.attack_metadata.get("executed_turns")
+    if raw_val is not None:
+        try:
+            return int(raw_val)
+        except (ValueError, TypeError):
+            pass
+    return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +732,9 @@ class ScenarioProgressReadModel:
             child_attack_result_ids=ScenarioProgressReadModel._read_child_attack_result_ids(
                 attack_metadata=delta.attack_metadata
             ),
+            related_conversation_ids=list(
+                delta.related_conversation_ids or delta.attack_metadata.get("related_conversation_ids") or []
+            ),
             attempt_index=result_metadata.attempt_index,
         )
 
@@ -835,12 +857,16 @@ class ScenarioProgressReadModel:
                 retries = retries[:_MAX_RETRIES_PER_NODE]
                 retries_truncated = True
 
-            executed_turns = delta.executed_turns or int(delta.attack_metadata.get("executed_turns") or 0)
+            executed_turns = _resolve_executed_turns(delta)
             outcome_reason = (
                 delta.outcome_reason
                 or delta.attribution_data.get("outcome_reason")
                 or delta.attack_metadata.get("outcome_reason")
             )
+
+            raw_child_ids = list(result.child_attack_result_ids)
+            child_refs_truncated = len(raw_child_ids) > _MAX_CHILD_REFERENCES
+            bounded_child_ids = raw_child_ids[:_MAX_CHILD_REFERENCES] if child_refs_truncated else raw_child_ids
 
             orchestration: ScenarioOrchestrationParentSummary | None = None
             if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
@@ -854,7 +880,8 @@ class ScenarioProgressReadModel:
                     execution_time_ms=result.execution_time_ms,
                     executed_turns=executed_turns,
                     completion_policy=str(completion_policy) if completion_policy is not None else None,
-                    child_attack_result_ids=list(result.child_attack_result_ids),
+                    child_attack_result_ids=bounded_child_ids,
+                    child_references_truncated=child_refs_truncated,
                     error_type=result.error_type,
                     error_message=result.error_message,
                     timestamp=result.timestamp,
@@ -897,6 +924,20 @@ class ScenarioProgressReadModel:
                     )
                 )
 
+            related_conv_ids = (
+                delta.related_conversation_ids
+                or getattr(result, "related_conversations", None)
+                or getattr(result, "related_conversation_ids", None)
+                or delta.attack_metadata.get("related_conversation_ids")
+                or []
+            )
+            if related_conv_ids:
+                node_conversations_count = None
+                node_conversations_truncated = True
+            else:
+                node_conversations_count = len(conversations)
+                node_conversations_truncated = False
+
             return ScenarioHierarchyNode(
                 attack_result_id=result.attack_result_id,
                 conversation_id=result.conversation_id or "",
@@ -919,12 +960,14 @@ class ScenarioProgressReadModel:
                 total_retries=result.total_retries,
                 retries=retries,
                 retries_truncated=retries_truncated,
-                child_attack_result_ids=list(result.child_attack_result_ids),
+                child_attack_result_ids=bounded_child_ids,
+                child_references_truncated=child_refs_truncated,
                 children=children,
+                children_truncated=False,
                 unresolved_child_attack_result_ids=unresolved_children,
                 conversations=conversations,
-                conversations_count=len(conversations),
-                conversations_truncated=False,
+                conversations_count=node_conversations_count,
+                conversations_truncated=node_conversations_truncated,
                 orchestration=orchestration,
             )
 
@@ -1062,6 +1105,19 @@ class ScenarioProgressReadModel:
         attack_retries_truncated = attack_retries_count > _MAX_DIAGNOSTIC_ITEMS
         attack_retries = all_attack_retries[:_MAX_DIAGNOSTIC_ITEMS]
 
+        attempts_by_unit: dict[tuple[str, str], list[ScenarioProgressResult]] = {}
+        for r in snapshot.results:
+            attempts_by_unit.setdefault((r.atomic_group_id, r.seed_group_id), []).append(r)
+
+        total_retry_pressure = 0
+        for attempts in attempts_by_unit.values():
+            total_retry_pressure += max(0, len(attempts) - 1) + sum(
+                max(a.total_retries, len(a.retries)) for a in attempts
+            )
+
+        diagnostic_items_retries = sum(max(r.total_retries, len(r.retries)) for r in all_attack_retries)
+        diagnostic_retries = max(snapshot.summary.overall.retries, total_retry_pressure, diagnostic_items_retries)
+
         diagnostics = ScenarioHierarchyDiagnostics(
             failed_attacks=failed_attacks,
             failed_attacks_count=failed_attacks_count,
@@ -1069,7 +1125,7 @@ class ScenarioProgressReadModel:
             attack_retries=attack_retries,
             attack_retries_count=attack_retries_count,
             attack_retries_truncated=attack_retries_truncated,
-            total_retries=snapshot.summary.overall.retries,
+            total_retries=diagnostic_retries,
         )
 
         return ScenarioHierarchyProjection(
@@ -1090,11 +1146,11 @@ class ScenarioProgressReadModel:
         result: ScenarioProgressResult,
         children_deltas: Sequence[ScenarioAttackResultDelta] = (),
         children_results: Sequence[ScenarioProgressResult] = (),
-        conversations: Sequence[ScenarioConversationProjection]
-        | ScenarioAttackResultConversations
-        | tuple[Sequence[ScenarioConversationProjection], int, bool] = (),
+        conversations: Sequence[ScenarioConversationProjection] | ScenarioAttackResultConversations = (),
         conversations_count: int | None = None,
         conversations_truncated: bool = False,
+        children_truncated: bool = False,
+        max_child_references: int = _MAX_CHILD_REFERENCES,
     ) -> ScenarioHierarchyNode:
         """
         Assemble a single hierarchy node with its immediate children and generic conversations.
@@ -1107,6 +1163,8 @@ class ScenarioProgressReadModel:
             conversations: Generic read-only conversation projections.
             conversations_count: Total conversations count for this node.
             conversations_truncated: Flag indicating if conversations list was truncated.
+            children_truncated: Flag indicating if immediate children list was truncated.
+            max_child_references: Maximum number of child references to retain before truncating.
 
         Returns:
             ScenarioHierarchyNode: The assembled node.
@@ -1117,18 +1175,12 @@ class ScenarioProgressReadModel:
             if conversations_count is None:
                 conversations_count = conversations.total_count
             conversations_truncated = conversations_truncated or conversations.truncated
-        elif isinstance(conversations, tuple) and len(conversations) == 3:
-            first, second, third = conversations
-            if isinstance(first, Sequence):
-                conv_list = [c for c in first if isinstance(c, ScenarioConversationProjection)]
-            if conversations_count is None and isinstance(second, int):
-                conversations_count = second
-            if isinstance(third, bool):
-                conversations_truncated = conversations_truncated or third
         else:
             conv_list = list(conversations)
 
-        resolved_conversations_count: int = conversations_count if conversations_count is not None else len(conv_list)
+        resolved_conversations_count: int | None = (
+            conversations_count if conversations_count is not None else len(conv_list)
+        )
 
         children_deltas_by_id = {d.attack_result_id: d for d in children_deltas}
         children_results_by_id = {r.attack_result_id: r for r in children_results}
@@ -1139,12 +1191,16 @@ class ScenarioProgressReadModel:
             retries = retries[:_MAX_RETRIES_PER_NODE]
             retries_truncated = True
 
-        executed_turns = delta.executed_turns or int(delta.attack_metadata.get("executed_turns") or 0)
+        executed_turns = _resolve_executed_turns(delta)
         outcome_reason = (
             delta.outcome_reason
             or delta.attribution_data.get("outcome_reason")
             or delta.attack_metadata.get("outcome_reason")
         )
+
+        raw_child_ids = list(result.child_attack_result_ids)
+        child_refs_truncated = len(raw_child_ids) > max_child_references
+        bounded_child_ids = raw_child_ids[:max_child_references] if child_refs_truncated else raw_child_ids
 
         orchestration: ScenarioOrchestrationParentSummary | None = None
         if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
@@ -1158,7 +1214,8 @@ class ScenarioProgressReadModel:
                 execution_time_ms=result.execution_time_ms,
                 executed_turns=executed_turns,
                 completion_policy=str(completion_policy) if completion_policy is not None else None,
-                child_attack_result_ids=list(result.child_attack_result_ids),
+                child_attack_result_ids=bounded_child_ids,
+                child_references_truncated=child_refs_truncated,
                 error_type=result.error_type,
                 error_message=result.error_message,
                 timestamp=result.timestamp,
@@ -1182,12 +1239,16 @@ class ScenarioProgressReadModel:
                     c_retries = c_retries[:_MAX_RETRIES_PER_NODE]
                     c_retries_truncated = True
 
-                c_executed_turns = c_delta.executed_turns or int(c_delta.attack_metadata.get("executed_turns") or 0)
+                c_executed_turns = _resolve_executed_turns(c_delta)
                 c_outcome_reason = (
                     c_delta.outcome_reason
                     or c_delta.attribution_data.get("outcome_reason")
                     or c_delta.attack_metadata.get("outcome_reason")
                 )
+
+                c_child_ids = list(c_res.child_attack_result_ids)
+                c_child_refs_truncated = len(c_child_ids) > max_child_references
+                c_bounded_child_ids = c_child_ids[:max_child_references] if c_child_refs_truncated else c_child_ids
 
                 c_orchestration: ScenarioOrchestrationParentSummary | None = None
                 if c_res.result_role == AttackResultRole.ORCHESTRATION or c_res.child_attack_result_ids:
@@ -1201,7 +1262,8 @@ class ScenarioProgressReadModel:
                         execution_time_ms=c_res.execution_time_ms,
                         executed_turns=c_executed_turns,
                         completion_policy=str(c_policy) if c_policy is not None else None,
-                        child_attack_result_ids=list(c_res.child_attack_result_ids),
+                        child_attack_result_ids=c_bounded_child_ids,
+                        child_references_truncated=c_child_refs_truncated,
                         error_type=c_res.error_type,
                         error_message=c_res.error_message,
                         timestamp=c_res.timestamp,
@@ -1233,12 +1295,14 @@ class ScenarioProgressReadModel:
                         total_retries=c_res.total_retries,
                         retries=c_retries,
                         retries_truncated=c_retries_truncated,
-                        child_attack_result_ids=list(c_res.child_attack_result_ids),
+                        child_attack_result_ids=c_bounded_child_ids,
+                        child_references_truncated=c_child_refs_truncated,
                         children=[],
+                        children_truncated=False,
                         unresolved_child_attack_result_ids=[],
                         conversations=[],
-                        conversations_count=0,
-                        conversations_truncated=False,
+                        conversations_count=None,
+                        conversations_truncated=True,
                         orchestration=c_orchestration,
                     )
                 )
@@ -1265,8 +1329,10 @@ class ScenarioProgressReadModel:
             total_retries=result.total_retries,
             retries=retries,
             retries_truncated=retries_truncated,
-            child_attack_result_ids=list(result.child_attack_result_ids),
+            child_attack_result_ids=bounded_child_ids,
+            child_references_truncated=child_refs_truncated,
             children=children,
+            children_truncated=children_truncated,
             unresolved_child_attack_result_ids=unresolved_children,
             conversations=conv_list,
             conversations_count=resolved_conversations_count,

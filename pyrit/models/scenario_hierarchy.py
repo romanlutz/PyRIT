@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from pyrit.models.catalog.scenario import AttackErrorSummary, AttackRetrySummary
 from pyrit.models.results.attack_result import AttackOutcome, AttackResultRole
@@ -26,6 +26,8 @@ class ScenarioOrchestrationParentSummary(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    max_child_references: ClassVar[int] = 500
+
     attack_result_id: str
     result_role: AttackResultRole = AttackResultRole.UNKNOWN
     outcome: AttackOutcome
@@ -35,12 +37,20 @@ class ScenarioOrchestrationParentSummary(BaseModel):
     executed_turns: int = 0
     completion_policy: str | None = None
     child_attack_result_ids: list[str] = Field(default_factory=list)
+    child_references_truncated: bool = False
     error_type: str | None = None
     error_message: str | None = None
     timestamp: AwareDatetime
     total_retries: int = 0
     retries: list[RetryEvent] = Field(default_factory=list)
     retries_truncated: bool = False
+
+    @model_validator(mode="after")
+    def _bound_child_references(self) -> Self:
+        if len(self.child_attack_result_ids) > self.max_child_references:
+            self.child_attack_result_ids = self.child_attack_result_ids[: self.max_child_references]
+            self.child_references_truncated = True
+        return self
 
 
 class ScenarioConversationMessagePieceProjection(BaseModel):
@@ -70,6 +80,7 @@ class ScenarioConversationMessageProjection(BaseModel):
     timestamp: AwareDatetime | None = None
     scores: list[ScenarioProgressScore] = Field(default_factory=list)
     pieces: list[ScenarioConversationMessagePieceProjection] = Field(default_factory=list)
+    pieces_truncated: bool = False
 
 
 class ScenarioConversationProjection(BaseModel):
@@ -99,6 +110,8 @@ class ScenarioHierarchyNode(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    max_child_references: ClassVar[int] = 500
+
     attack_result_id: str
     conversation_id: str = ""
     parent_attack_result_id: str | None = None
@@ -123,20 +136,29 @@ class ScenarioHierarchyNode(BaseModel):
 
     # Stored references from producer
     child_attack_result_ids: list[str] = Field(default_factory=list)
+    child_references_truncated: bool = False
 
     # Resolved children in stored order (bounded traversal)
     children: list["ScenarioHierarchyNode"] = Field(default_factory=list)
+    children_truncated: bool = False
 
     # Missing, malformed, cyclic, or cross-run references that could not be safely resolved
     unresolved_child_attack_result_ids: list[str] = Field(default_factory=list)
 
     # Generic read-only conversations for this attack
     conversations: list[ScenarioConversationProjection] = Field(default_factory=list)
-    conversations_count: int = 0
+    conversations_count: int | None = None
     conversations_truncated: bool = False
 
     # Orchestration details if role is ORCHESTRATION or has children
     orchestration: ScenarioOrchestrationParentSummary | None = None
+
+    @model_validator(mode="after")
+    def _bound_child_references(self) -> Self:
+        if len(self.child_attack_result_ids) > self.max_child_references:
+            self.child_attack_result_ids = self.child_attack_result_ids[: self.max_child_references]
+            self.child_references_truncated = True
+        return self
 
 
 class ScenarioAttackResultConversations(NamedTuple):

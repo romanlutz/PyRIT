@@ -97,6 +97,41 @@ def _make_test_delta(
     )
 
 
+def _make_test_result(
+    *,
+    attack_result_id: str,
+    atomic_group_id: str = "group-1",
+    atomic_attack_name: str = "attack",
+    seed_group_id: str = "seed-1",
+    outcome: AttackOutcome = AttackOutcome.SUCCESS,
+    conversation_id: str = "conv_1",
+    total_retries: int = 0,
+    retries: list[RetryEvent] | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    child_attack_result_ids: list[str] | None = None,
+    related_conversation_ids: list[str] | None = None,
+    role: AttackResultRole = AttackResultRole.TARGET_FACING,
+) -> ScenarioProgressResult:
+    return ScenarioProgressResult(
+        attack_result_id=attack_result_id,
+        conversation_id=conversation_id,
+        atomic_group_id=atomic_group_id,
+        atomic_attack_name=atomic_attack_name,
+        seed_group_id=seed_group_id,
+        outcome=outcome,
+        execution_time_ms=100,
+        timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+        total_retries=total_retries,
+        retries=retries or [],
+        error_type=error_type,
+        error_message=error_message,
+        result_role=role,
+        child_attack_result_ids=child_attack_result_ids or [],
+        related_conversation_ids=related_conversation_ids or [],
+    )
+
+
 def _make_test_snapshot(
     *,
     deltas: list[ScenarioAttackResultDelta],
@@ -1229,3 +1264,353 @@ async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLit
     assert node.conversations_count == 55
     assert node.conversations_truncated is True
     assert len(node.conversations) == 50
+
+
+async def test_executed_turns_zero_vs_invalid_metadata(sqlite_instance: SQLiteMemory) -> None:
+    """Test that executed_turns=0 with invalid string in metadata safely projects 0 without ValueError."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ExecutedTurnsZeroScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Executed turns zero test",
+        outcome=AttackOutcome.SUCCESS,
+        executed_turns=0,
+        metadata={"executed_turns": "invalid"},
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert node is not None
+    assert node.executed_turns == 0
+
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    assert len(hierarchy.groups) == 1
+    assert hierarchy.groups[0].roots[0].executed_turns == 0
+
+
+def test_eliminate_tuple_duck_typing_raw_tuples() -> None:
+    """Test passing 2, 3, and 4 conversation projections as a raw Python tuple preserves all items."""
+    delta = _make_test_delta(
+        attack_result_id="test-node",
+        outcome=AttackOutcome.SUCCESS,
+    )
+    result = _make_test_result(
+        attack_result_id="test-node",
+        atomic_group_id="group-1",
+        atomic_attack_name="attack",
+        seed_group_id="seed-1",
+        outcome=AttackOutcome.SUCCESS,
+    )
+    conv1 = ScenarioConversationProjection(conversation_id="conv-1")
+    conv2 = ScenarioConversationProjection(conversation_id="conv-2")
+    conv3 = ScenarioConversationProjection(conversation_id="conv-3")
+    conv4 = ScenarioConversationProjection(conversation_id="conv-4")
+
+    # 2-tuple
+    node2 = ScenarioProgressReadModel.build_hierarchy_node(
+        delta=delta,
+        result=result,
+        conversations=(conv1, conv2),
+    )
+    assert len(node2.conversations) == 2
+    assert node2.conversations == [conv1, conv2]
+    assert node2.conversations_count == 2
+    assert node2.conversations_truncated is False
+
+    # 3-tuple (specifically targeted in Roman's review comment 14)
+    node3 = ScenarioProgressReadModel.build_hierarchy_node(
+        delta=delta,
+        result=result,
+        conversations=(conv1, conv2, conv3),
+    )
+    assert len(node3.conversations) == 3
+    assert node3.conversations == [conv1, conv2, conv3]
+    assert node3.conversations_count == 3
+    assert node3.conversations_truncated is False
+
+    # 4-tuple
+    node4 = ScenarioProgressReadModel.build_hierarchy_node(
+        delta=delta,
+        result=result,
+        conversations=(conv1, conv2, conv3, conv4),
+    )
+    assert len(node4.conversations) == 4
+    assert node4.conversations == [conv1, conv2, conv3, conv4]
+    assert node4.conversations_count == 4
+    assert node4.conversations_truncated is False
+
+
+async def test_sqlite_message_pieces_bounding(sqlite_instance: SQLiteMemory) -> None:
+    """Test persisting 1 message sequence with 150 pieces and verifying piece truncation at max_pieces_per_message."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="MessagePiecesBoundingScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    conv_id = str(uuid.uuid4())
+
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Message pieces bounding test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # Insert 150 pieces for sequence 0
+    now = datetime.now(UTC)
+    for i in range(150):
+        piece = MessagePiece(
+            id=uuid.uuid4(),
+            conversation_id=conv_id,
+            role="user",
+            original_value_data_type="text",
+            original_value=f"Piece content {i}",
+            converted_value=f"Piece content {i}",
+            sequence=0,
+            timestamp=now + timedelta(milliseconds=i),
+        )
+        await set_message_piece_sha256_async(piece)
+        await sqlite_instance._run_database_operation_async(
+            sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
+        )
+
+    # 1. Fetch with default max_pieces_per_message=100
+    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+        attack_result_id=ar_id,
+        include_messages=True,
+        max_pieces_per_message=100,
+    )
+    assert len(projs.conversations) == 1
+    assert len(projs.conversations[0].messages) == 1
+    msg = projs.conversations[0].messages[0]
+    assert len(msg.pieces) == 100
+    assert msg.pieces_truncated is True
+
+    # 2. Fetch with higher limit max_pieces_per_message=200
+    projs_untruncated = await sqlite_instance.get_attack_result_conversation_projections_async(
+        attack_result_id=ar_id,
+        include_messages=True,
+        max_pieces_per_message=200,
+    )
+    assert len(projs_untruncated.conversations[0].messages) == 1
+    msg_untruncated = projs_untruncated.conversations[0].messages[0]
+    assert len(msg_untruncated.pieces) == 150
+    assert msg_untruncated.pieces_truncated is False
+
+
+async def test_unloaded_conversations_in_full_hierarchy(sqlite_instance: SQLiteMemory) -> None:
+    """Test that full hierarchy marks nodes with unhydrated related conversations as truncated with count=None."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="UnloadedConversationsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    main_conv_id = str(uuid.uuid4())
+    prep_conv_ids = [str(uuid.uuid4()) for _ in range(55)]
+
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=main_conv_id,
+        related_conversations={
+            ConversationReference(conversation_id=cid, conversation_type=ConversationType.PREPARATION)
+            for cid in prep_conv_ids
+        },
+        objective="Unloaded conversations test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    assert len(hierarchy.groups) == 1
+    root_node = hierarchy.groups[0].roots[0]
+    assert root_node.attack_result_id == ar_id
+    assert root_node.conversations_count is None
+    assert root_node.conversations_truncated is True
+    assert len(root_node.conversations) == 1
+
+
+def test_diagnostic_total_retries_scope_unmatched_attempt() -> None:
+    """Test that diagnostics.total_retries reconciles with unmatched attempts having retry events."""
+    plan = ScenarioRunPlan(
+        atomic_groups=[
+            ScenarioRunPlanAtomicGroup(
+                id="group-1",
+                atomic_attack_name="planned_attack",
+                display_group="Group 1",
+                technique_eval_hash="",
+                seed_group_ids=["seed-1"],
+            )
+        ],
+        seed_groups=[ScenarioRunPlanSeedGroup(id="seed-1", objective_sha256="hash123", objective="Planned objective")],
+    )
+
+    planned_delta = _make_test_delta(
+        attack_result_id="att-planned",
+        outcome=AttackOutcome.SUCCESS,
+        parent_collection="planned_attack",
+        seed_group_id="seed-1",
+    )
+    planned_result = _make_test_result(
+        attack_result_id="att-planned",
+        atomic_group_id="group-1",
+        atomic_attack_name="planned_attack",
+        seed_group_id="seed-1",
+        outcome=AttackOutcome.SUCCESS,
+        total_retries=0,
+        retries=[],
+    )
+
+    # Unmatched error attempt with 3 retry events
+    retry_events = [
+        RetryEvent(exception_type="RateLimitError", attempt_number=1),
+        RetryEvent(exception_type="RateLimitError", attempt_number=2),
+        RetryEvent(exception_type="TimeoutError", attempt_number=3),
+    ]
+    unmatched_delta = _make_test_delta(
+        attack_result_id="att-unmatched",
+        outcome=AttackOutcome.ERROR,
+        retries=retry_events,
+        error_type="TimeoutError",
+        error_message="Timed out",
+        parent_collection="unmatched_attack",
+        seed_group_id="unmatched-seed",
+    )
+    unmatched_result = _make_test_result(
+        attack_result_id="att-unmatched",
+        atomic_group_id="unmatched-group",
+        atomic_attack_name="unmatched_attack",
+        seed_group_id="unmatched-seed",
+        outcome=AttackOutcome.ERROR,
+        total_retries=3,
+        retries=retry_events,
+    )
+
+    summary = ScenarioProgressSummary(
+        overall=ScenarioProgressCounts(
+            completed=1,
+            planned=1,
+            succeeded=1,
+            success_percentage=100,
+            errors=0,
+            retries=0,  # Canonical planned summary had 0 retries
+        ),
+        atomic_groups=[],
+    )
+
+    snapshot = ScenarioProgressSnapshot(
+        deltas=(planned_delta, unmatched_delta),
+        results=(planned_result, unmatched_result),
+        summary=summary,
+        plan=plan,
+    )
+
+    hierarchy = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scen-1",
+        scenario_name="RetryScopeScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+    )
+
+    assert hierarchy.diagnostics.total_retries == 3
+    assert hierarchy.diagnostics.attack_retries_count == 1
+    assert len(hierarchy.diagnostics.attack_retries) == 1
+    assert hierarchy.diagnostics.attack_retries[0].attack_result_id == "att-unmatched"
+    assert hierarchy.diagnostics.attack_retries[0].total_retries == 3
+
+
+async def test_immediate_children_bounding_in_run_service(sqlite_instance: SQLiteMemory) -> None:
+    """
+    Test that get_run_hierarchy_node_async bounds immediate children to
+    max_immediate_children with children_truncated=True.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ImmediateChildrenBoundingScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 250 child attack results
+    child_ids = [str(uuid.uuid4()) for _ in range(250)]
+    parent_id = str(uuid.uuid4())
+
+    parent_ar = AttackResult(
+        attack_result_id=parent_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Orchestration parent with 250 children",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.ORCHESTRATION.value},
+        metadata={"child_attack_result_ids": child_ids},
+    )
+    child_ars = [
+        AttackResult(
+            attack_result_id=cid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Child {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        )
+        for i, cid in enumerate(child_ids)
+    ]
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[parent_ar] + child_ars)
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=parent_id,
+        max_immediate_children=200,
+    )
+
+    assert node is not None
+    assert node.children_truncated is True
+    assert len(node.children) == 200

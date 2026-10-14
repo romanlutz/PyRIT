@@ -337,3 +337,61 @@ def test_scenario_attack_result_conversations_namedtuple() -> None:
     assert c_list == [conv]
     assert count == 55
     assert trunc is True
+
+
+def test_scenario_hierarchy_node_child_references_bounding() -> None:
+    now = datetime.now(UTC)
+    child_ids = [f"child-{i}" for i in range(600)]
+    node = ScenarioHierarchyNode(
+        attack_result_id="att-1",
+        atomic_attack_name="attack",
+        atomic_group_id="group-1",
+        seed_group_id="seed-1",
+        objective="obj",
+        outcome=AttackOutcome.SUCCESS,
+        timestamp=now,
+        child_attack_result_ids=child_ids,
+    )
+    assert ScenarioHierarchyNode.max_child_references == 500
+    assert node.max_child_references == 500
+    assert len(node.child_attack_result_ids) == 500
+    assert node.child_references_truncated is True
+    assert node.child_attack_result_ids == child_ids[:500]
+
+
+def test_scenario_orchestration_parent_summary_child_references_bounding() -> None:
+    now = datetime.now(UTC)
+    child_ids = [f"child-{i}" for i in range(600)]
+    summary = ScenarioOrchestrationParentSummary(
+        attack_result_id="parent-1",
+        outcome=AttackOutcome.SUCCESS,
+        timestamp=now,
+        child_attack_result_ids=child_ids,
+    )
+    assert ScenarioOrchestrationParentSummary.max_child_references == 500
+    assert summary.max_child_references == 500
+    assert len(summary.child_attack_result_ids) == 500
+    assert summary.child_references_truncated is True
+    assert summary.child_attack_result_ids == child_ids[:500]
+
+
+def test_scenario_conversation_message_pieces_truncated_flag() -> None:
+    now = datetime.now(UTC)
+    pieces = [
+        ScenarioConversationMessagePieceProjection(
+            data_type="text",
+            content=f"piece-{i}",
+            converted_value=f"piece-{i}",
+        )
+        for i in range(100)
+    ]
+    msg = ScenarioConversationMessageProjection(
+        role="user",
+        content="test prompt",
+        sequence=0,
+        timestamp=now,
+        pieces=pieces,
+        pieces_truncated=True,
+    )
+    assert len(msg.pieces) == 100
+    assert msg.pieces_truncated is True

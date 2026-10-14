@@ -6525,6 +6525,9 @@ class MemoryInterface(abc.ABC):
                 AttackResultEntry.error_message,
                 AttackResultEntry.attribution_data,
                 AttackResultEntry.attack_metadata,
+                AttackResultEntry.pruned_conversation_ids,
+                AttackResultEntry.adversarial_chat_conversation_ids,
+                AttackResultEntry.preparation_conversation_ids,
                 ScoreEntry.id.label("score_id"),
                 ScoreEntry.score_value,
                 ScoreEntry.score_type,
@@ -6569,6 +6572,15 @@ class MemoryInterface(abc.ABC):
                     score_value=row["score_value"],
                     score_rationale=row["score_rationale"],
                 )
+            related_cids = [
+                str(c)
+                for c in (
+                    list(row["pruned_conversation_ids"] or [])
+                    + list(row["adversarial_chat_conversation_ids"] or [])
+                    + list(row["preparation_conversation_ids"] or [])
+                )
+                if c
+            ]
             deltas.append(
                 ScenarioAttackResultDelta(
                     attack_result_id=str(row["id"]),
@@ -6578,7 +6590,7 @@ class MemoryInterface(abc.ABC):
                     atomic_attack_identifier=atomic_identifier,
                     outcome=AttackOutcome(row["outcome"]),
                     execution_time_ms=row["execution_time_ms"],
-                    executed_turns=row["executed_turns"] or 0,
+                    executed_turns=row["executed_turns"],
                     outcome_reason=row["outcome_reason"],
                     timestamp=row["timestamp"],
                     retry_events=retry_events,
@@ -6587,6 +6599,7 @@ class MemoryInterface(abc.ABC):
                     error_message=row["error_message"],
                     attribution_data=row["attribution_data"] or {},
                     attack_metadata=row["attack_metadata"] or {},
+                    related_conversation_ids=related_cids,
                     score=score,
                 )
             )
@@ -6642,6 +6655,9 @@ class MemoryInterface(abc.ABC):
                 AttackResultEntry.error_message,
                 AttackResultEntry.attribution_data,
                 AttackResultEntry.attack_metadata,
+                AttackResultEntry.pruned_conversation_ids,
+                AttackResultEntry.adversarial_chat_conversation_ids,
+                AttackResultEntry.preparation_conversation_ids,
                 ScoreEntry.id.label("score_id"),
                 ScoreEntry.score_value,
                 ScoreEntry.score_type,
@@ -6723,6 +6739,15 @@ class MemoryInterface(abc.ABC):
                             score_value=row["score_value"],
                             score_rationale=row["score_rationale"],
                         )
+                    related_cids = [
+                        str(c)
+                        for c in (
+                            list(row["pruned_conversation_ids"] or [])
+                            + list(row["adversarial_chat_conversation_ids"] or [])
+                            + list(row["preparation_conversation_ids"] or [])
+                        )
+                        if c
+                    ]
                     deltas.append(
                         ScenarioAttackResultDelta(
                             attack_result_id=str(row["id"]),
@@ -6732,7 +6757,7 @@ class MemoryInterface(abc.ABC):
                             atomic_attack_identifier=atomic_identifier,
                             outcome=AttackOutcome(row["outcome"]),
                             execution_time_ms=row["execution_time_ms"],
-                            executed_turns=row["executed_turns"] or 0,
+                            executed_turns=row["executed_turns"],
                             outcome_reason=row["outcome_reason"],
                             timestamp=row["timestamp"],
                             retry_events=retry_events,
@@ -6741,6 +6766,7 @@ class MemoryInterface(abc.ABC):
                             error_message=row["error_message"],
                             attribution_data=row["attribution_data"] or {},
                             attack_metadata=row["attack_metadata"] or {},
+                            related_conversation_ids=related_cids,
                             score=score,
                         )
                     )
@@ -6751,6 +6777,7 @@ class MemoryInterface(abc.ABC):
         *,
         conversation_id: str,
         limit: int,
+        max_pieces_per_message: int = 100,
     ) -> tuple[list[ScenarioConversationMessageProjection], bool]:
         """
         Fetch conversation messages applying SQL LIMIT directly at the database layer.
@@ -6801,13 +6828,16 @@ class MemoryInterface(abc.ABC):
 
             messages: list[ScenarioConversationMessageProjection] = []
             for msg in grouped_messages:
+                pieces_count = len(msg.message_pieces)
+                pieces_truncated = pieces_count > max_pieces_per_message
+                bounded_pieces = msg.message_pieces[:max_pieces_per_message] if pieces_truncated else msg.message_pieces
                 pieces_proj = [
                     ScenarioConversationMessagePieceProjection(
                         data_type=piece.converted_value_data_type,
                         content=piece.original_value,
                         converted_value=piece.converted_value,
                     )
-                    for piece in msg.message_pieces
+                    for piece in bounded_pieces
                 ]
                 first_piece = msg.message_pieces[0] if msg.message_pieces else None
                 raw_role = str(first_piece.role) if first_piece else "unknown"
@@ -6822,6 +6852,7 @@ class MemoryInterface(abc.ABC):
                         sequence=seq,
                         timestamp=ts,
                         pieces=pieces_proj,
+                        pieces_truncated=pieces_truncated,
                     )
                 )
 
@@ -6834,6 +6865,7 @@ class MemoryInterface(abc.ABC):
         include_messages: bool = False,
         limit_messages_per_conversation: int = 100,
         max_conversations: int = 50,
+        max_pieces_per_message: int = 100,
     ) -> ScenarioAttackResultConversations:
         """
         Read generic conversation projections for an attack result without full-run hydration.
@@ -6887,6 +6919,7 @@ class MemoryInterface(abc.ABC):
                 messages, truncated = self._fetch_bounded_conversation_messages(
                     conversation_id=entry.conversation_id,
                     limit=limit_messages_per_conversation,
+                    max_pieces_per_message=max_pieces_per_message,
                 )
             conversations.append(
                 ScenarioConversationProjection(
@@ -6933,6 +6966,7 @@ class MemoryInterface(abc.ABC):
                 messages, truncated = self._fetch_bounded_conversation_messages(
                     conversation_id=c_id,
                     limit=limit_messages_per_conversation,
+                    max_pieces_per_message=max_pieces_per_message,
                 )
             conversations.append(
                 ScenarioConversationProjection(
@@ -10454,6 +10488,7 @@ class MemoryInterface(abc.ABC):
         include_messages: bool = False,
         limit_messages_per_conversation: int = 100,
         max_conversations: int = 50,
+        max_pieces_per_message: int = 100,
     ) -> ScenarioAttackResultConversations:
         """
         Read generic conversation projections for an attack result without full-run hydration.
@@ -10463,6 +10498,7 @@ class MemoryInterface(abc.ABC):
             include_messages: Whether to populate message pieces or only metadata/counts.
             limit_messages_per_conversation: Bound on message pieces per conversation.
             max_conversations: Maximum number of conversations to retrieve for this attack result.
+            max_pieces_per_message: Bound on message pieces within a single message.
 
         Returns:
             ScenarioAttackResultConversations: Container with projections, total count, and truncation flag.
@@ -10473,6 +10509,7 @@ class MemoryInterface(abc.ABC):
             include_messages=include_messages,
             limit_messages_per_conversation=limit_messages_per_conversation,
             max_conversations=max_conversations,
+            max_pieces_per_message=max_pieces_per_message,
         )
 
     def get_scenario_results(

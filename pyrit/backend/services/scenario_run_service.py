@@ -2297,6 +2297,7 @@ class ScenarioRunService:
         *,
         scenario_result_id: str,
         attack_result_id: str,
+        max_immediate_children: int = 200,
     ) -> ScenarioHierarchyNode | None:
         """
         Get bounded single-node hierarchy details and generic conversation projections without full-run hydration.
@@ -2304,6 +2305,7 @@ class ScenarioRunService:
         Args:
             scenario_result_id: The persisted scenario run ID.
             attack_result_id: The target attack result ID.
+            max_immediate_children: Maximum number of immediate child nodes to resolve.
 
         Returns:
             ScenarioHierarchyNode | None: The node details, or None if the node is not found in this run.
@@ -2334,11 +2336,18 @@ class ScenarioRunService:
         child_ids = target_result.child_attack_result_ids
         children_deltas: list[ScenarioAttackResultDelta] = []
         children_results: list[ScenarioProgressResult] = []
+        children_truncated = False
         if child_ids:
+            if len(child_ids) > max_immediate_children:
+                children_truncated = True
+                fetch_child_ids = child_ids[:max_immediate_children]
+            else:
+                fetch_child_ids = child_ids
+
             children_deltas = list(
                 await self._memory.get_scenario_attack_result_deltas_by_ids_async(
                     scenario_result_id=scenario_result_id,
-                    attack_result_ids=child_ids,
+                    attack_result_ids=fetch_child_ids,
                 )
             )
             children_results = [
@@ -2356,6 +2365,7 @@ class ScenarioRunService:
             children_deltas=children_deltas,
             children_results=children_results,
             conversations=conversations,
+            children_truncated=children_truncated,
         )
 
     async def get_run_results_async(self, *, scenario_result_id: str) -> ScenarioResult | None:
