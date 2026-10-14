@@ -1747,3 +1747,25 @@ async def test_sqlite_group_query_uses_the_computed_identifier_index(sqlite_inst
     async with sqlite_instance._get_async_engine().connect() as connection:
         plan = (await connection.exec_driver_sql(f"EXPLAIN QUERY PLAN {sql}")).all()
     assert any("ix_AttackResultEntries_analytics_facts_sqlite" in row[-1] for row in plan)
+
+
+def test_mssql_filter_source_lateral_is_added_once_per_compiler() -> None:
+    """Reusing one compiler for several statements must not duplicate the filter lateral (#3177)."""
+    filters = AttackAnalyticsFilters(
+        dimensions=[
+            AttackAnalyticsFilter(
+                dimension=AttackAnalyticsDimension(name="converter_type"),
+                values=[AttackAnalyticsValue(kind="missing")],
+            )
+        ]
+    )
+    query = AttackAnalyticsQuery(filters=filters, group_by=AttackAnalyticsDimension(name="operation"))
+    compiler = AttackAnalyticsQueryCompiler(dialect="mssql", filters=filters)
+    dialect = mssql.dialect(deprecate_large_types=True)
+
+    totals_sql = str(compiler.totals().compile(dialect=dialect))
+    groups_sql = str(compiler.groups(query).compile(dialect=dialect))
+
+    lateral = re.compile(r"OUTER APPLY \(SELECT.*?\) AS (filter_source_\d+)", re.DOTALL)
+    assert lateral.findall(totals_sql) == ["filter_source_0"]
+    assert lateral.findall(groups_sql) == ["filter_source_0"]
