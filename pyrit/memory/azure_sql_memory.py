@@ -374,11 +374,9 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         """
         Generate SQL conditions for filtering by prompt metadata.
 
-        Uses JSON_VALUE() function specific to SQL Azure to query metadata fields in JSON format.
-
-        Keys are bound as quoted JSON path parameters and matched by indexed value
-        parameters, so keys containing dots, hyphens or spaces stay one literal key
-        and never become bind-parameter names (#3179, same shape as the label fix in #3063).
+        Uses OPENJSON() to compare free-form metadata keys literally rather than
+        interpreting them as JSON path expressions. Only strings, numbers, and
+        booleans match, preserving JSON_VALUE() scalar filtering semantics.
 
         Args:
             prompt_metadata (dict[str, str | int]): Dictionary of metadata key-value pairs to filter by.
@@ -388,17 +386,21 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         """
         json_validation = "ISJSON(prompt_metadata) = 1"
         json_conditions: list[str] = []
-        bind_values: dict[str, str] = {}
-        for key_index, (key, value) in enumerate(prompt_metadata.items()):
-            path_param = f"meta_path_{key_index}"
-            value_param = f"meta_value_{key_index}"
-            json_conditions.append(f"JSON_VALUE(prompt_metadata, :{path_param}) = :{value_param}")
-            bind_values[path_param] = f'$."{key}"'
-            # JSON_VALUE always returns nvarchar in SQL Server, so values are converted
-            # to strings to avoid type conversion errors when comparing mixed types.
-            bind_values[value_param] = str(value)
-        conditions = f"{json_validation} AND {' AND '.join(json_conditions)}"
-        return [text(conditions).bindparams(**bind_values)]
+        bindparams: dict[str, str] = {}
+        for index, (key, value) in enumerate(prompt_metadata.items()):
+            key_param, value_param = f"md_key_{index}", f"md_value_{index}"
+            alias = f"metadata_{index}"
+            json_conditions.append(
+                f"EXISTS (SELECT 1 FROM OPENJSON(prompt_metadata) AS [{alias}] "
+                f"WHERE [{alias}].[key] = :{key_param} "
+                f"AND DATALENGTH([{alias}].[key]) = DATALENGTH(CAST(:{key_param} AS NVARCHAR(MAX))) "
+                f"AND [{alias}].[type] IN (1, 2, 3) "
+                f"AND [{alias}].[value] = :{value_param})"
+            )
+            bindparams[key_param] = key
+            bindparams[value_param] = str(value)
+        conditions = f"{json_validation} AND " + " AND ".join(json_conditions)
+        return [text(conditions).bindparams(**bindparams)]
 
     def _get_message_pieces_prompt_metadata_conditions(
         self, *, prompt_metadata: dict[str, str | int]

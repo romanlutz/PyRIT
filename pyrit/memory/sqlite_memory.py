@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlalchemy.orm import InstrumentedAttribute, sessionmaker
 from sqlalchemy.orm.session import Session
 from sqlalchemy.pool import StaticPool
-from sqlalchemy.sql.expression import TextClause
 from sqlalchemy.util.concurrency import greenlet_spawn
 
 from pyrit.common.path import DB_DATA_PATH
@@ -36,6 +35,7 @@ from pyrit.memory.memory_models import (
     Base,
     PromptMemoryEntry,
     ScenarioResultEntry,
+    SeedEntry,
 )
 from pyrit.memory.memory_session import MemorySession
 from pyrit.memory.storage import DiskStorageIO
@@ -395,47 +395,46 @@ class SQLiteMemory(MemoryInterface, metaclass=Singleton):
             )
         ]
 
-    def _get_message_pieces_prompt_metadata_conditions(
-        self, *, prompt_metadata: dict[str, str | int]
-    ) -> list[TextClause]:
+    def _get_message_pieces_prompt_metadata_conditions(self, *, prompt_metadata: dict[str, str | int]) -> list[Any]:
         """
         Generate SQLAlchemy filter conditions for filtering conversation pieces by prompt metadata.
+
+        Match literal object keys through json_each(), without interpreting keys as JSON paths.
 
         Returns:
             list: A list of SQLAlchemy conditions.
         """
-        return self._get_metadata_conditions(prompt_metadata=prompt_metadata)
+        conditions = []
+        metadata_entries = func.json_each(PromptMemoryEntry.prompt_metadata).table_valued("key", "value")
+        for key, value in prompt_metadata.items():
+            conditions.append(
+                select(1)
+                .select_from(metadata_entries)
+                .where(metadata_entries.c.key == key, metadata_entries.c.value == value)
+                .correlate(PromptMemoryEntry)
+                .exists()
+            )
+        return conditions
 
     def _get_seed_metadata_conditions(self, *, metadata: dict[str, str | int]) -> Any:
         """
         Generate SQLAlchemy filter conditions for filtering seed prompts by metadata.
 
-        Returns:
-            Any: A SQLAlchemy text condition with bound parameters.
-        """
-        return self._get_metadata_conditions(prompt_metadata=metadata)[0]
-
-    def _get_metadata_conditions(self, *, prompt_metadata: dict[str, str | int]) -> list[TextClause]:
-        """
-        Generate SQLAlchemy filter conditions for prompt metadata with arbitrary keys.
-
-        Keys are bound as quoted JSON path parameters and matched by indexed value
-        parameters, so keys containing dots, hyphens or spaces stay one literal key
-        and never become bind-parameter names (#3179, same shape as the label fix in #3063).
+        Match literal object keys through json_each(), without interpreting keys as JSON paths.
 
         Returns:
-            list: A list of SQLAlchemy conditions.
+            Any: A SQLAlchemy condition matching every requested metadata key and value.
         """
-        json_conditions: list[str] = []
-        bind_values: dict[str, str | int] = {}
-        for key_index, (key, value) in enumerate(prompt_metadata.items()):
-            path_param = f"meta_path_{key_index}"
-            value_param = f"meta_value_{key_index}"
-            json_conditions.append(f"JSON_EXTRACT(prompt_metadata, :{path_param}) = :{value_param}")
-            bind_values[path_param] = f'$."{key}"'
-            # Values stay unconverted so integer comparison in JSON keeps working.
-            bind_values[value_param] = value
-        return [text(" AND ".join(json_conditions)).bindparams(**bind_values)]
+        metadata_entries = func.json_each(SeedEntry.prompt_metadata).table_valued("key", "value")
+        conditions = [
+            select(1)
+            .select_from(metadata_entries)
+            .where(metadata_entries.c.key == key, metadata_entries.c.value == value)
+            .correlate(SeedEntry)
+            .exists()
+            for key, value in metadata.items()
+        ]
+        return and_(*conditions)
 
     def _get_condition_json_property_match(
         self,
