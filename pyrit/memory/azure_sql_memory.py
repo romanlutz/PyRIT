@@ -374,7 +374,8 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
         Generate SQL conditions for filtering by prompt metadata.
 
         Uses OPENJSON() to compare free-form metadata keys literally rather than
-        interpreting them as JSON path expressions.
+        interpreting them as JSON path expressions. Only strings, numbers, and
+        booleans match, preserving JSON_VALUE() scalar filtering semantics.
 
         Args:
             prompt_metadata (dict[str, str | int]): Dictionary of metadata key-value pairs to filter by.
@@ -391,6 +392,7 @@ class AzureSQLMemory(MemoryInterface, metaclass=Singleton):
                 f"EXISTS (SELECT 1 FROM OPENJSON(prompt_metadata) AS [{alias}] "
                 f"WHERE [{alias}].[key] = :{key_param} "
                 f"AND DATALENGTH([{alias}].[key]) = DATALENGTH(CAST(:{key_param} AS NVARCHAR(MAX))) "
+                f"AND [{alias}].[type] IN (1, 2, 3) "
                 f"AND [{alias}].[value] = :{value_param})"
             )
             bindparams[key_param] = key
