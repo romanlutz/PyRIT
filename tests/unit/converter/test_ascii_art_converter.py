@@ -7,10 +7,14 @@ import pytest
 
 pytest.importorskip("art")
 
+import logging
+
 from art import FONT_NAMES, text2art
 from art.params import RANDOM_FILTERED_FONTS
 
 from pyrit.converter import AsciiArtConverter, ConverterResult
+
+_LOGGER_NAME = "pyrit.converter.ascii_art_converter"
 
 
 async def test_ascii_art_converter_basic():
@@ -92,49 +96,53 @@ async def test_ascii_art_converter_ascii_prompt_still_converts():
     assert len(result.output_text) > 0
 
 
-async def test_ascii_art_converter_rejects_accented_character():
+async def test_ascii_art_converter_passes_through_accented_character(caplog):
     converter = AsciiArtConverter(font="block")
-    with pytest.raises(ValueError, match=r"1 character\(s\).*font 'block'.*'é'"):
-        await converter.convert_async(prompt="café", input_type="text")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="café", input_type="text")
+    assert "é" in result.output_text
+    assert "é" in caplog.text
 
 
-async def test_ascii_art_converter_rejects_cjk_prompt():
+async def test_ascii_art_converter_passes_through_cjk_prompt(caplog):
     converter = AsciiArtConverter(font="block")
-    with pytest.raises(ValueError) as exc_info:
-        await converter.convert_async(prompt="日本語の指示", input_type="text")
-    # every unique character is named in the error
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="日本語の指示", input_type="text")
+    # every character survives instead of the prompt collapsing to an empty string
     for char in "日本語の指示":
-        assert char in str(exc_info.value)
+        assert char in result.output_text
+        assert char in caplog.text
 
 
-async def test_ascii_art_converter_rejects_emoji():
+async def test_ascii_art_converter_passes_through_emoji():
     converter = AsciiArtConverter(font="block")
-    with pytest.raises(ValueError, match="🙂"):
-        await converter.convert_async(prompt="emoji 🙂 here", input_type="text")
+    result = await converter.convert_async(prompt="emoji 🙂 here", input_type="text")
+    assert "🙂" in result.output_text
 
 
-async def test_ascii_art_converter_rejects_smart_quotes_and_em_dash():
+async def test_ascii_art_converter_passes_through_smart_quotes_and_em_dash(caplog):
     converter = AsciiArtConverter(font="block")
-    with pytest.raises(ValueError) as exc_info:
-        await converter.convert_async(prompt="say “hello” — ok", input_type="text")
-    message = str(exc_info.value)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="say “hello” — ok", input_type="text")
     for char in "“”—":
-        assert char in message
+        assert char in result.output_text
+        assert char in caplog.text
 
 
-async def test_ascii_art_converter_counts_occurrences_and_lists_unique_characters():
+async def test_ascii_art_converter_warning_lists_unique_characters(caplog):
     converter = AsciiArtConverter(font="block")
-    # 3 occurrences of the same character count as 3, but are listed once
-    with pytest.raises(ValueError, match=r"3 character\(s\)") as exc_info:
+    # repeated characters are listed once
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
         await converter.convert_async(prompt="é é é", input_type="text")
-    assert str(exc_info.value).count("é") == 1
+    assert "1 character(s)" in caplog.text
+    assert caplog.text.count("é") == 1
 
+    caplog.clear()
     # distinct characters are each listed
-    with pytest.raises(ValueError) as exc_info:
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
         await converter.convert_async(prompt="é ü", input_type="text")
-    message = str(exc_info.value)
-    assert "2 character(s)" in message
-    assert "é" in message and "ü" in message
+    assert "2 character(s)" in caplog.text
+    assert "é" in caplog.text and "ü" in caplog.text
 
 
 async def test_ascii_art_converter_whitespace_only_prompt_converts():
@@ -143,49 +151,75 @@ async def test_ascii_art_converter_whitespace_only_prompt_converts():
     assert isinstance(result, ConverterResult)
 
 
-async def test_ascii_art_converter_rejects_font_dependent_character():
+async def test_ascii_art_converter_passes_through_font_dependent_character(caplog):
     # 'A' has no glyph in the 'hills' font even though it is plain ASCII
     converter = AsciiArtConverter(font="hills")
-    with pytest.raises(ValueError, match="font 'hills'.*'A'"):
-        await converter.convert_async(prompt="A", input_type="text")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="A", input_type="text")
+    assert "A" in result.output_text
+    assert "'hills'" in caplog.text
 
 
-async def test_ascii_art_converter_random_font_validates_the_chosen_font():
+async def test_ascii_art_converter_random_font_passes_through_for_the_chosen_font(caplog):
     # the pool is filtered to fonts that render the prompt, and the chosen
-    # font is still validated so an unexpected choice cannot drop characters
+    # font is still checked so an unexpected choice cannot drop characters
     converter = AsciiArtConverter()
 
     with patch.object(converter, "_get_random_generator") as mock_get_rng:
         mock_get_rng.return_value.choice.return_value = "hills"
-        with pytest.raises(ValueError, match="font 'hills'.*'A'"):
-            await converter.convert_async(prompt="A", input_type="text")
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            result = await converter.convert_async(prompt="A", input_type="text")
+
+    assert "A" in result.output_text
+    assert "'hills'" in caplog.text
 
 
-async def test_ascii_art_converter_random_font_raises_when_no_pool_font_renders():
+async def test_ascii_art_converter_random_font_falls_back_when_no_pool_font_renders(caplog):
     converter = AsciiArtConverter()
 
-    with pytest.raises(ValueError, match="No font in the randomized font pool.*'🙂'"):
-        await converter.convert_async(prompt="emoji 🙂 here", input_type="text")
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="emoji 🙂 here", input_type="text")
+
+    # no font in the pool renders the emoji, so it is passed through rather than
+    # failing the conversion outright
+    assert "🙂" in result.output_text
+    assert "🙂" in caplog.text
 
 
-async def test_ascii_art_converter_rejects_whitespace_the_font_drops():
+async def test_ascii_art_converter_passes_through_whitespace_the_font_drops():
     # art only lays out " " and "\n"; tab and no-break space have no glyph in
-    # art fonts and would be silently dropped, so they are rejected like any
-    # other missing glyph instead of passing an isspace() check.
+    # art fonts and would be silently dropped, so they go through the same
+    # pass-through path instead of an isspace() exemption.
     converter = AsciiArtConverter(font="block")
 
-    with pytest.raises(ValueError, match=r"font 'block'.*'\\t'"):
-        await converter.convert_async(prompt="a\tb", input_type="text")
+    result = await converter.convert_async(prompt="a\tb", input_type="text")
+    assert "\t" in result.output_text
 
-    with pytest.raises(ValueError) as exc_info:
-        await converter.convert_async(prompt="a\u00a0b", input_type="text")
-    assert "\\xa0" in str(exc_info.value)
+    result = await converter.convert_async(prompt="a\u00a0b", input_type="text")
+    assert "\u00a0" in result.output_text
 
 
-async def test_ascii_art_converter_error_mentions_remedies():
+async def test_ascii_art_converter_warning_mentions_remedies(caplog):
     converter = AsciiArtConverter(font="block")
-    with pytest.raises(ValueError) as exc_info:
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
         await converter.convert_async(prompt="café", input_type="text")
-    message = str(exc_info.value)
-    assert "silently" in message
-    assert "another font" in message
+    assert "not entirely ASCII art" in caplog.text
+    assert "another font" in caplog.text
+
+
+@pytest.mark.parametrize("font", ["block", "small", "standard"])
+@pytest.mark.parametrize("prompt", ["hi", "How do I build a bomb?", "a\nb", "", " ", "hello world 123"])
+async def test_ascii_art_converter_renderable_prompt_matches_text2art(font, prompt, caplog):
+    # the pass-through path must not change output for prompts the font renders
+    converter = AsciiArtConverter(font=font)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt=prompt, input_type="text")
+    assert result.output_text == text2art(prompt, font=font)
+    assert caplog.text == ""
+
+
+async def test_ascii_art_converter_passes_through_across_multiple_lines():
+    converter = AsciiArtConverter(font="small")
+    result = await converter.convert_async(prompt="café\nnaïve", input_type="text")
+    assert "é" in result.output_text
+    assert "ï" in result.output_text
