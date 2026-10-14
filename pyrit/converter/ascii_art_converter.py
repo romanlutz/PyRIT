@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from functools import lru_cache
 
 from art import ASCII_FONTS, text2art
+from art.utils import indirect_font
 
 from pyrit.converter.converter import Converter, ConverterResult
 from pyrit.models import ComponentIdentifier, PromptDataType
@@ -34,6 +35,10 @@ _ART_RANDOM_EXCLUDED_ASCII_FONTS = {
     "tsalagi",
 }
 _ART_RANDOM_FONTS = sorted(set(ASCII_FONTS) - _ART_RANDOM_EXCLUDED_ASCII_FONTS)
+
+# art's plain-random aliases, which it resolves over the pool mirrored above.
+# PyRIT intercepts them to make the pick seeded and prompt-aware.
+_ART_RANDOM_SELECTORS = frozenset({"rand", "random", "rnd"})
 
 
 # Bounded so prompts with many distinct unrenderable characters cannot grow the
@@ -171,7 +176,9 @@ class AsciiArtConverter(Converter):
         Initialize the converter with a specified font.
 
         Args:
-            font (str): The font to use for ASCII art. Defaults to "rand" which selects a random font.
+            font (str): The font to use for ASCII art. Defaults to "rand" which selects a random
+                font. Indirect selectors such as "wizard" or "rnd-small" are resolved to a single
+                concrete font per conversion.
         """
         self._font = font
 
@@ -187,6 +194,31 @@ class AsciiArtConverter(Converter):
                 "font": self._font,
             },
         )
+
+    def _resolve_font(self, *, prompt: str) -> str:
+        """
+        Resolve the configured font to a concrete font name.
+
+        ``art`` re-resolves indirect selectors such as ``"wizard"`` or ``"rnd-small"``
+        on every ``text2art`` call, so leaving one unresolved would give each
+        pass-through segment its own font and make the glyph probe non-deterministic.
+        Resolving once keeps the whole conversion in a single font.
+
+        Args:
+            prompt (str): The prompt being converted, which art's size and wizard
+                selectors take into account.
+
+        Returns:
+            str: A concrete font name.
+        """
+        if self._font in _ART_RANDOM_SELECTORS:
+            # Pool fonts freely use blank glyphs, e.g. for punctuation, so a
+            # random pick can fail to render a prompt on some draws only.
+            # Prefer the fonts that render the whole prompt, and fall back to
+            # the full pool when no single font covers it.
+            candidates = _fonts_that_render(prompt, _ART_RANDOM_FONTS) or _ART_RANDOM_FONTS
+            return self._get_random_generator(stream="font").choice(candidates)
+        return indirect_font(self._font, prompt)
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         """
@@ -205,14 +237,7 @@ class AsciiArtConverter(Converter):
         if not self.input_supported(input_type):
             raise ValueError("Input type not supported")
 
-        font = self._font
-        if font == "rand":
-            # Pool fonts freely use blank glyphs, e.g. for punctuation, so a
-            # random pick can fail to render a prompt on some draws only.
-            # Prefer the fonts that render the whole prompt, and fall back to
-            # the full pool when no single font covers it.
-            candidates = _fonts_that_render(prompt, _ART_RANDOM_FONTS) or _ART_RANDOM_FONTS
-            font = self._get_random_generator(stream="font").choice(candidates)
+        font = self._resolve_font(prompt=prompt)
 
         unrenderable = [
             character for character in dict.fromkeys(prompt) if not _font_renders_character(character, font)

@@ -11,9 +11,10 @@ import logging
 
 from art import FONT_NAMES, text2art
 from art.params import RANDOM_FILTERED_FONTS
+from art.utils import indirect_font
 
 from pyrit.converter import AsciiArtConverter, ConverterResult
-from pyrit.converter.ascii_art_converter import _ART_RANDOM_FONTS
+from pyrit.converter.ascii_art_converter import _ART_RANDOM_FONTS, _ART_RANDOM_SELECTORS
 
 _LOGGER_NAME = "pyrit.converter.ascii_art_converter"
 
@@ -40,8 +41,16 @@ def test_art_random_font_pool_matches_art_random_filter():
     assert set(_ART_RANDOM_FONTS) == set(FONT_NAMES) - set(RANDOM_FILTERED_FONTS)
 
 
-async def test_ascii_art_converter_random_font_chooses_from_fonts_that_render_the_prompt():
-    converter = AsciiArtConverter()
+@pytest.mark.parametrize("selector", sorted(_ART_RANDOM_SELECTORS))
+def test_art_random_selectors_resolve_into_the_mirrored_pool(selector):
+    # these are intercepted instead of being left to art, which would redraw a
+    # font on every text2art call, so art must still resolve them over the same pool
+    assert {indirect_font(selector, "test") for _ in range(25)} <= set(_ART_RANDOM_FONTS)
+
+
+@pytest.mark.parametrize("selector", sorted(_ART_RANDOM_SELECTORS))
+async def test_ascii_art_converter_random_font_chooses_from_fonts_that_render_the_prompt(selector):
+    converter = AsciiArtConverter(font=selector)
 
     with patch.object(converter, "_get_random_generator") as mock_get_rng:
         mock_get_rng.return_value.choice.return_value = "block"
@@ -124,6 +133,22 @@ async def test_ascii_art_converter_passthrough_keeps_rendering_art_around_the_pa
     assert all(output_row.startswith(art_row) for art_row, output_row in zip(art_rows, output_rows, strict=True))
     # the one-row passed-through character is centered against the art block
     assert output_rows[len(output_rows) // 2].endswith("é")
+
+
+async def test_ascii_art_converter_resolves_an_indirect_font_once_per_conversion(caplog):
+    # art redraws a concrete font on every text2art call for selectors like "wizard",
+    # so without a single up-front resolution each pass-through segment of a line
+    # would be rendered in a different font
+    converter = AsciiArtConverter(font="wizard")
+    with patch("pyrit.converter.ascii_art_converter.indirect_font", return_value="block") as mock_resolve:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            result = await converter.convert_async(prompt="café café", input_type="text")
+
+    mock_resolve.assert_called_once_with("wizard", "café café")
+    expected = await AsciiArtConverter(font="block").convert_async(prompt="café café", input_type="text")
+    assert result.output_text == expected.output_text
+    # the warning names the font actually rendered with, not the selector
+    assert "'block'" in caplog.text
 
 
 async def test_ascii_art_converter_passes_through_cjk_prompt(caplog):
