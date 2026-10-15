@@ -1863,3 +1863,142 @@ async def test_persisted_result_with_non_numeric_conversation_message_count_meta
     # Real SQLite has 0 messages for this new conversation, so count is 0 and not truncated
     assert root_node.conversations[0].message_count == 0
     assert root_node.conversations[0].messages_truncated is False
+
+
+async def test_bounded_conversation_messages_piece_budget_applied_at_sql_layer(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Test that piece budget is applied at SQL layer, preventing hydration of unbounded pieces (e.g. 1,001 rows)."""
+    ar_id = str(uuid.uuid4())
+    conv_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+
+    # Insert 1,001 pieces for sequence 0
+    pieces_seq0 = [
+        MessagePiece(
+            role="user",
+            original_value=f"piece-{i}",
+            converted_value=f"piece-{i}",
+            conversation_id=conv_id,
+            sequence=0,
+            timestamp=now + timedelta(milliseconds=i),
+        )
+        for i in range(1001)
+    ]
+    # Insert 5 pieces for sequence 1
+    pieces_seq1 = [
+        MessagePiece(
+            role="assistant",
+            original_value=f"response-{i}",
+            converted_value=f"response-{i}",
+            conversation_id=conv_id,
+            sequence=1,
+            timestamp=now + timedelta(seconds=1, milliseconds=i),
+        )
+        for i in range(5)
+    ]
+    for p in pieces_seq0 + pieces_seq1:
+        await set_message_piece_sha256_async(p)
+    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces_seq0 + pieces_seq1)
+
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Piece bounding test",
+        outcome=AttackOutcome.SUCCESS,
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # 1. Fetch via get_attack_result_conversation_projections_async with max_pieces_per_message=100
+    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+        attack_result_id=ar_id,
+        include_messages=True,
+        max_pieces_per_message=100,
+    )
+    assert len(projs.conversations) == 1
+    messages = projs.conversations[0].messages
+    assert len(messages) == 2
+
+    # Sequence 0 (1,001 pieces) is capped at 100 with pieces_truncated=True
+    msg0 = messages[0]
+    assert msg0.sequence == 0
+    assert len(msg0.pieces) == 100
+    assert msg0.pieces_truncated is True
+
+    # Sequence 1 (5 pieces) is fully returned with pieces_truncated=False
+    msg1 = messages[1]
+    assert msg1.sequence == 1
+    assert len(msg1.pieces) == 5
+    assert msg1.pieces_truncated is False
+
+    # 2. Verify SQL-level row bounding: _fetch_bounded_conversation_messages only fetches
+    # at most (max_pieces_per_message + 1) rows per sequence directly from the DB.
+    # Testing directly with max_pieces_per_message=10:
+    messages_capped_10, _ = sqlite_instance._fetch_bounded_conversation_messages(
+        conversation_id=conv_id,
+        limit=10,
+        max_pieces_per_message=10,
+    )
+    assert len(messages_capped_10[0].pieces) == 10
+    assert messages_capped_10[0].pieces_truncated is True
+    assert len(messages_capped_10[1].pieces) == 5
+    assert messages_capped_10[1].pieces_truncated is False
+
+
+async def test_diagnostics_total_retries_count_event_mismatch_parity(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that when total_retries=0 but retry events exist, run detail,
+    producer counts, diagnostic item, and diagnostics.total_retries all agree on 0.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="MismatchRetryScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    retry_events = [
+        RetryEvent(exception_type="RateLimitError", attempt_number=1),
+        RetryEvent(exception_type="RateLimitError", attempt_number=2),
+        RetryEvent(exception_type="TimeoutError", attempt_number=3),
+    ]
+    ar_id = str(uuid.uuid4())
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Retry mismatch test",
+        outcome=AttackOutcome.ERROR,
+        total_retries=0,  # Persisted count is 0
+        retry_events=retry_events,  # 3 retry events recorded
+        error_type="TimeoutError",
+        error_message="Timed out",
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Run summary / detail reports total_retries = 0
+    run_summary = await service.get_run_async(scenario_result_id=scenario_id)
+    assert run_summary is not None
+    assert run_summary.total_retries == 0
+
+    # 2. Hierarchy diagnostics and overall counts report total_retries = 0
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    assert hierarchy.overall_counts.retries == 0
+    assert hierarchy.diagnostics.total_retries == 0
+    assert hierarchy.diagnostics.attack_retries_count == 1
+    assert len(hierarchy.diagnostics.attack_retries) == 1
+
+    # The individual diagnostic item reports total_retries = 0 while preserving the 3 events
+    diag_item = hierarchy.diagnostics.attack_retries[0]
+    assert diag_item.total_retries == 0
+    assert len(diag_item.retries) == 3

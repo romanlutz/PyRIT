@@ -6811,43 +6811,60 @@ class MemoryInterface(abc.ABC):
             truncated = len(seqs) > limit
             target_seqs = seqs[:limit]
 
-            pieces_stmt = (
-                select(PromptMemoryEntry)
+            piece_budget = max(1, max_pieces_per_message)
+            subq = (
+                select(
+                    PromptMemoryEntry.id.label("entry_id"),
+                    func.row_number()
+                    .over(
+                        partition_by=PromptMemoryEntry.sequence,
+                        order_by=(
+                            PromptMemoryEntry.timestamp.asc(),
+                            PromptMemoryEntry.id.asc(),
+                        ),
+                    )
+                    .label("rn"),
+                )
                 .where(
                     and_(
                         PromptMemoryEntry.conversation_id == str(conversation_id),
                         PromptMemoryEntry.sequence.in_(target_seqs),
                     )
                 )
+                .subquery()
+            )
+            pieces_stmt = (
+                select(PromptMemoryEntry, subq.c.rn)
+                .join(subq, PromptMemoryEntry.id == subq.c.entry_id)
+                .where(subq.c.rn <= piece_budget + 1)
                 .order_by(
                     PromptMemoryEntry.sequence.asc(),
                     PromptMemoryEntry.timestamp.asc(),
                     PromptMemoryEntry.id.asc(),
                 )
             )
-            entries = session.execute(pieces_stmt).scalars().all()
-            if not entries:
+            rows = session.execute(pieces_stmt).all()
+            if not rows:
                 return [], False
 
-            message_pieces = [e.get_message_piece() for e in entries]
-            grouped_messages = group_conversation_message_pieces_by_sequence(message_pieces=message_pieces)
+            truncated_seqs = {entry.sequence for entry, rn in rows if rn > piece_budget}
+            bounded_pieces = [entry.get_message_piece() for entry, rn in rows if rn <= piece_budget]
+            grouped_messages = group_conversation_message_pieces_by_sequence(message_pieces=bounded_pieces)
 
             messages: list[ScenarioConversationMessageProjection] = []
             for msg in grouped_messages:
-                pieces_count = len(msg.message_pieces)
-                pieces_truncated = pieces_count > max_pieces_per_message
-                bounded_pieces = msg.message_pieces[:max_pieces_per_message] if pieces_truncated else msg.message_pieces
+                seq = msg.message_pieces[0].sequence if msg.message_pieces else 0
+                pieces_truncated = seq in truncated_seqs
                 pieces_proj = [
                     ScenarioConversationMessagePieceProjection(
                         data_type=piece.converted_value_data_type,
                         content=piece.original_value,
                         converted_value=piece.converted_value,
                     )
-                    for piece in bounded_pieces
+                    for piece in msg.message_pieces
                 ]
                 first_piece = msg.message_pieces[0] if msg.message_pieces else None
                 raw_role = str(first_piece.role) if first_piece else "unknown"
-                seq = first_piece.sequence if first_piece else 0
                 ts = first_piece.timestamp if first_piece else None
                 content = msg.get_value()
 

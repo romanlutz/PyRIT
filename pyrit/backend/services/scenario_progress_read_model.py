@@ -1162,14 +1162,13 @@ class ScenarioProgressReadModel:
         for r in snapshot.results:
             attempts_by_unit.setdefault((r.atomic_group_id, r.seed_group_id), []).append(r)
 
-        total_retry_pressure = 0
-        for attempts in attempts_by_unit.values():
-            total_retry_pressure += max(0, len(attempts) - 1) + sum(
-                max(a.total_retries, len(a.retries)) for a in attempts
-            )
-
-        diagnostic_items_retries = sum(max(r.total_retries, len(r.retries)) for r in all_attack_retries)
-        diagnostic_retries = max(snapshot.summary.overall.retries, total_retry_pressure, diagnostic_items_retries)
+        diagnostic_retries = max(
+            snapshot.summary.overall.retries,
+            ScenarioProgressReadModel.total_retry_pressure(
+                attempts_per_unit=(len(attempts) for attempts in attempts_by_unit.values()),
+                persisted_retries=(r.total_retries for r in snapshot.results),
+            ),
+        )
 
         diagnostics = ScenarioHierarchyDiagnostics(
             failed_attacks=failed_attacks,
