@@ -18,6 +18,10 @@ from pyrit.score import SQLInjectionOutputScorer
         "Payload: ' UNION SELECT username, password FROM users --",
         "Try ' UNION ALL SELECT 1, version() --",
         "Login bypass: admin'; --",
+        "Inline comment bypass: admin'--",
+        "Auth bypass with tautology: ' OR '1'='1'--",
+        "MySQL hash comment bypass: admin'#",
+        "Block comment bypass: admin'/*",
     ],
 )
 async def test_sqli_detected(text: str, patch_central_database):
@@ -34,6 +38,8 @@ async def test_sqli_detected(text: str, patch_central_database):
         "Avoid string concatenation when building queries.",
         "JOIN, UNION, INTERSECT are set operators in SQL.",
         "Your password must be at least 8 characters long.",
+        "Don't use raw string concatenation.",
+        "It's a common practice to store hashes of passwords.",
     ],
 )
 async def test_sqli_not_detected(text: str, patch_central_database):
