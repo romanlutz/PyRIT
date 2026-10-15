@@ -5,6 +5,7 @@
 import logging
 from collections.abc import Sequence
 from functools import lru_cache
+from typing import cast
 
 from art import ASCII_FONTS, text2art
 from art.utils import indirect_font
@@ -218,7 +219,7 @@ class AsciiArtConverter(Converter):
             # the full pool when no single font covers it.
             candidates = _fonts_that_render(prompt, _ART_RANDOM_FONTS) or _ART_RANDOM_FONTS
             return self._get_random_generator(stream="font").choice(candidates)
-        return indirect_font(self._font, prompt)
+        return cast("str", indirect_font(self._font, prompt))
 
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         """
