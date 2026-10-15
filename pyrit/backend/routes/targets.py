@@ -23,6 +23,20 @@ from pyrit.models.catalog.target import TargetInstance
 router = APIRouter(prefix="/targets", tags=["targets"])
 
 
+def _target_upload_directory(request: Request) -> str | None:
+    """
+    Return the folder the server lets API-created targets upload files from.
+
+    Args:
+        request: The incoming FastAPI request.
+
+    Returns:
+        str | None: The configured folder, or None when the server configures none.
+    """
+    directory: str | None = getattr(request.app.state, "target_upload_directory", None)
+    return directory
+
+
 @router.get(
     "",
     response_model=TargetListResponse,
@@ -53,7 +67,7 @@ async def list_targets(  # pyrit-async-suffix-exempt
         500: {"model": ProblemDetail, "description": "Internal server error"},
     },
 )
-async def list_target_types() -> TargetTypeResponse:  # pyrit-async-suffix-exempt
+async def list_target_types(request: Request) -> TargetTypeResponse:  # pyrit-async-suffix-exempt
     """
     List target types projected from ``TargetRegistry`` metadata.
 
@@ -61,7 +75,7 @@ async def list_target_types() -> TargetTypeResponse:  # pyrit-async-suffix-exemp
         TargetTypeResponse: Available target types and build parameters.
     """
     service = get_target_service()
-    return await service.list_target_types_async()
+    return await service.list_target_types_async(upload_directory=_target_upload_directory(request))
 
 
 @router.post(
@@ -80,6 +94,7 @@ async def list_target_types() -> TargetTypeResponse:  # pyrit-async-suffix-exemp
     },
 )
 async def create_target(
+    *,
     body: CreateTargetRequest,
     request: Request,
 ) -> TargetInstance:  # pyrit-async-suffix-exempt
@@ -97,7 +112,11 @@ async def create_target(
     service = get_target_service()
 
     try:
-        return await service.create_target_async(request=body, is_admin=has_admin_access(request))
+        return await service.create_target_async(
+            request=body,
+            upload_directory=_target_upload_directory(request),
+            is_admin=has_admin_access(request),
+        )
     except PermissionError as e:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
