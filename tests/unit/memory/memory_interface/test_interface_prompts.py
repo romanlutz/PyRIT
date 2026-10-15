@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 
+import json
 import uuid
 from collections.abc import MutableSequence, Sequence
 from datetime import UTC, datetime
@@ -398,6 +399,77 @@ async def test_duplicate_conversation_excluding_last_turn(sqlite_instance: Memor
 
     for piece in duplicate_conversation:
         assert piece.sequence < 2
+
+
+async def test_duplicate_conversation_excluding_last_turn_with_tool_calls(sqlite_instance: MemoryInterface):
+    conversation_id = str(uuid4())
+
+    def tool_calling_turn(*, sequence: int, prompt: str, call_id: str, answer: str) -> list[MessagePiece]:
+        function_call = {"type": "function_call", "call_id": call_id, "name": "lookup", "arguments": "{}"}
+        function_call_output = {"type": "function_call_output", "call_id": call_id, "output": "result"}
+        return [
+            MessagePiece(role="user", original_value=prompt, conversation_id=conversation_id, sequence=sequence),
+            MessagePiece(
+                role="assistant",
+                original_value=json.dumps(function_call),
+                original_value_data_type="function_call",
+                conversation_id=conversation_id,
+                sequence=sequence + 1,
+            ),
+            MessagePiece(
+                role="tool",
+                original_value=json.dumps(function_call_output),
+                original_value_data_type="function_call_output",
+                conversation_id=conversation_id,
+                sequence=sequence + 2,
+            ),
+            MessagePiece(
+                role="assistant", original_value=answer, conversation_id=conversation_id, sequence=sequence + 3
+            ),
+        ]
+
+    pieces = tool_calling_turn(sequence=0, prompt="first question", call_id="call_1", answer="first answer")
+    pieces += tool_calling_turn(sequence=4, prompt="refused question", call_id="call_2", answer="I can't help")
+    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
+
+    new_conversation_id = await sqlite_instance.duplicate_conversation_excluding_last_turn_async(
+        conversation_id=conversation_id,
+    )
+
+    duplicate_conversation = await sqlite_instance.get_message_pieces_async(conversation_id=new_conversation_id)
+    assert [piece.original_value for piece in duplicate_conversation] == [piece.original_value for piece in pieces[:4]]
+
+
+@pytest.mark.parametrize(
+    "roles, kept",
+    [
+        (["user", "assistant"], 0),
+        (["system", "user", "assistant"], 1),
+        (["user", "assistant", "user"], 2),
+        (["user", "assistant", "user", "assistant"], 2),
+        (["assistant", "assistant"], 0),
+    ],
+)
+async def test_duplicate_conversation_excluding_last_turn_without_tool_calls(
+    sqlite_instance: MemoryInterface, roles: list[str], kept: int
+):
+    conversation_id = str(uuid4())
+    pieces = [
+        MessagePiece(
+            role=role, original_value=f"message {sequence}", conversation_id=conversation_id, sequence=sequence
+        )
+        for sequence, role in enumerate(roles)
+    ]
+    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
+
+    new_conversation_id = await sqlite_instance.duplicate_conversation_excluding_last_turn_async(
+        conversation_id=conversation_id,
+    )
+
+    duplicate_conversation = await sqlite_instance.get_message_pieces_async(conversation_id=new_conversation_id)
+    assert [piece.original_value for piece in duplicate_conversation] == [
+        piece.original_value for piece in pieces[:kept]
+    ]
 
 
 async def test_duplicate_conversation_excluding_last_turn_not_score(sqlite_instance: MemoryInterface):
