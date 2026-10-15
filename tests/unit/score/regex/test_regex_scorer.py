@@ -9,6 +9,7 @@ import pytest
 
 import pyrit.score as score_package
 import pyrit.score.true_false.regex as regex_package
+from pyrit.memory import SQLiteMemory
 from pyrit.models import ComponentIdentifier, ScorerEvaluationIdentifier
 from pyrit.score import (
     AnsiEscapeOutputScorer,
@@ -180,6 +181,46 @@ def test_regex_scorer_identity_follows_its_patterns() -> None:
 
 
 @pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("scorer_class", (RegexScorer, *_CONFIGURABLE_SCORERS))
+@pytest.mark.parametrize(
+    ("left_patterns", "right_patterns", "text"),
+    [
+        ({"a": "x\0b\0y", "c": "z"}, {"a": "x", "b": "y\0c\0z"}, "x"),
+        ({"a": "x\0b"}, {"a\0x": "b"}, "b"),
+    ],
+)
+async def test_nul_patterns_keep_distinct_persisted_identities_async(
+    *,
+    scorer_class: type[RegexScorer],
+    left_patterns: dict[str, str],
+    right_patterns: dict[str, str],
+    text: str,
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    left = _scorer_factory(scorer_class)(patterns=left_patterns)
+    right = _scorer_factory(scorer_class)(patterns=right_patterns)
+
+    left_score = (await left.score_text_async(text))[0]
+    right_score = (await right.score_text_async(text))[0]
+
+    assert left_score.get_value() is False
+    assert right_score.get_value() is True
+    assert _identity(left)[0] != _identity(right)[0]
+    assert _identity(left)[1] != _identity(right)[1]
+
+    stored = await sqlite_instance.get_scores_async(score_ids=[str(left_score.id), str(right_score.id)])
+    assert len(stored) == 2
+    assert {score.scorer_class_identifier.hash for score in stored} == {
+        left.get_identifier().hash,
+        right.get_identifier().hash,
+    }
+    assert {score.scorer_class_identifier.eval_hash for score in stored} == {
+        left.get_identifier().eval_hash,
+        right.get_identifier().eval_hash,
+    }
+
+
+@pytest.mark.usefixtures("patch_central_database")
 @pytest.mark.parametrize("scorer_class", _DEFAULT_SCORERS)
 def test_default_patterns_keep_their_existing_identity(scorer_class: type[RegexScorer]) -> None:
     # Stored metrics and scores for default configurations must keep matching.
@@ -194,4 +235,4 @@ def test_custom_patterns_get_their_own_identity(scorer_class: type[RegexScorer])
     other = _scorer_factory(scorer_class)(patterns={"custom": "something-else"})
 
     assert len({_identity(default), _identity(custom), _identity(other)}) == 3
-    assert custom.get_identifier().params["patterns_digest"] == hashlib.sha256(b"custom\0only-this").hexdigest()
+    assert custom.get_identifier().params["patterns_digest"] == hashlib.sha256(b'{"custom":"only-this"}').hexdigest()

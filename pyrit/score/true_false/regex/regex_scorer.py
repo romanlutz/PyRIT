@@ -1,11 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import hashlib
 import re
 from typing import cast
 
-from pyrit.models import ComponentIdentifier, MessagePiece, Score
+from pyrit.models import ComponentIdentifier, MessagePiece, Score, config_hash
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_score_aggregator import (
     TrueFalseAggregatorFunc,
@@ -22,9 +21,9 @@ def _patterns_digest(patterns: dict[str, str]) -> str:
         patterns (dict[str, str]): Pattern names mapped to regex strings.
 
     Returns:
-        str: A SHA-256 hex digest over the sorted name/pattern pairs.
+        str: A SHA-256 hex digest over canonical JSON that preserves name and pattern boundaries.
     """
-    return hashlib.sha256("\0".join(f"{name}\0{patterns[name]}" for name in sorted(patterns)).encode()).hexdigest()
+    return config_hash(patterns)
 
 
 class RegexScorer(MessageTrueFalseScorer):
