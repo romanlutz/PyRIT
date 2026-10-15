@@ -1614,3 +1614,126 @@ async def test_immediate_children_bounding_in_run_service(sqlite_instance: SQLit
     assert node is not None
     assert node.children_truncated is True
     assert len(node.children) == 200
+
+
+async def test_persisted_result_with_malformed_related_conversations_metadata(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Test that malformed related_conversation_ids metadata does not cause TypeError in progress or node reader."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="MalformedRelatedConvScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Malformed related_conversation_ids test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={"related_conversation_ids": 7},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. get_run_progress_async should succeed without raising TypeError
+    progress = await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=25)
+    assert progress is not None
+    assert len(progress.results) == 1
+    assert progress.results[0].related_conversation_ids == []
+
+    # 2. get_run_hierarchy_node_async should succeed without raising TypeError
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert node is not None
+    assert node.conversations_count == 1
+    assert node.conversations_truncated is False
+    assert len(node.conversations) == 1
+
+    # 3. get_run_hierarchy_async should also succeed without raising TypeError
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    assert len(hierarchy.groups) == 1
+    root_node = hierarchy.groups[0].roots[0]
+    assert root_node.conversations_count == 1
+    assert root_node.conversations_truncated is False
+
+
+def test_read_related_conversation_ids_shapes() -> None:
+    """Test _read_related_conversation_ids with typed list, legacy valid list, and malformed fallbacks."""
+    # Typed list
+    delta1 = _make_test_delta(attack_result_id="d1")
+    delta1.related_conversation_ids = ["conv-1", "conv-2"]
+    assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta1) == ["conv-1", "conv-2"]
+
+    # Legacy valid metadata list
+    delta2 = _make_test_delta(attack_result_id="d2")
+    delta2.related_conversation_ids = []
+    delta2.attack_metadata = {"related_conversation_ids": ["conv-3", "conv-4"]}
+    assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta2) == ["conv-3", "conv-4"]
+
+    # Legacy metadata with non-string elements filtered out
+    delta3 = _make_test_delta(attack_result_id="d3")
+    delta3.related_conversation_ids = []
+    delta3.attack_metadata = {"related_conversation_ids": ["conv-5", 42, None, "conv-6"]}
+    assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta3) == ["conv-5", "conv-6"]
+
+    # Typed list with non-string elements filtered
+    delta4 = _make_test_delta(attack_result_id="d4")
+    delta4.related_conversation_ids = ["conv-7", 100, None]  # type: ignore[list-item]
+    assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta4) == ["conv-7"]
+
+    # Malformed typed non-list fallbacks safely
+    delta5 = _make_test_delta(attack_result_id="d5")
+    delta5.related_conversation_ids = 123  # type: ignore[assignment]
+    delta5.attack_metadata = {"related_conversation_ids": ["conv-fallback"]}
+    assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta5) == ["conv-fallback"]
+
+    # Malformed metadata shapes (int, str, dict) return empty list
+    for malformed in [7, "conv-single", {"id": "conv-1"}, None, True]:
+        delta_bad = _make_test_delta(attack_result_id="dbad")
+        delta_bad.related_conversation_ids = []
+        delta_bad.attack_metadata = {"related_conversation_ids": malformed}
+        assert ScenarioProgressReadModel._read_related_conversation_ids(delta=delta_bad) == []
+
+
+async def test_invalid_scenario_id_returns_empty_deltas(sqlite_instance: SQLiteMemory) -> None:
+    """Test that non-UUID scenario_result_id returns empty list without raising ValueError."""
+    deltas = await sqlite_instance.get_scenario_attack_result_deltas_by_ids_async(
+        scenario_result_id="not-a-valid-uuid",
+        attack_result_ids=["bad-id"],
+    )
+    assert deltas == []
+
+
+def test_build_hierarchy_node_deduplicates_duplicate_child_ids() -> None:
+    """Test that duplicate child IDs in stored order are deduplicated and tracked as unresolved."""
+    delta = _make_test_delta(attack_result_id="parent")
+    result = _make_test_result(
+        attack_result_id="parent",
+        child_attack_result_ids=["child-1", "child-1"],
+    )
+    c1_delta = _make_test_delta(attack_result_id="child-1")
+    c1_result = _make_test_result(attack_result_id="child-1")
+
+    node = ScenarioProgressReadModel.build_hierarchy_node(
+        delta=delta,
+        result=result,
+        children_deltas=[c1_delta],
+        children_results=[c1_result],
+    )
+    assert len(node.children) == 1
+    assert node.children[0].attack_result_id == "child-1"
+    assert node.unresolved_child_attack_result_ids == ["child-1"]

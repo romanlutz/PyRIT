@@ -6572,15 +6572,14 @@ class MemoryInterface(abc.ABC):
                     score_value=row["score_value"],
                     score_rationale=row["score_rationale"],
                 )
-            related_cids = [
-                str(c)
-                for c in (
-                    list(row["pruned_conversation_ids"] or [])
-                    + list(row["adversarial_chat_conversation_ids"] or [])
-                    + list(row["preparation_conversation_ids"] or [])
-                )
-                if c
-            ]
+            related_cids: list[str] = []
+            for col in (
+                row["pruned_conversation_ids"],
+                row["adversarial_chat_conversation_ids"],
+                row["preparation_conversation_ids"],
+            ):
+                if isinstance(col, list):
+                    related_cids.extend(str(c) for c in col if c)
             deltas.append(
                 ScenarioAttackResultDelta(
                     attack_result_id=str(row["id"]),
@@ -6621,7 +6620,10 @@ class MemoryInterface(abc.ABC):
         Returns:
             Select: The constructed select statement.
         """
-        scenario_uuid = uuid.UUID(scenario_result_id)
+        try:
+            scenario_uuid = uuid.UUID(scenario_result_id)
+        except (ValueError, TypeError):
+            scenario_uuid = uuid.UUID(int=0)
         valid_uuids: list[uuid.UUID] = []
         seen: set[uuid.UUID] = set()
         for aid in attack_result_ids:
@@ -6691,6 +6693,11 @@ class MemoryInterface(abc.ABC):
         Returns:
             list[ScenarioAttackResultDelta]: The matched deltas.
         """
+        try:
+            uuid.UUID(scenario_result_id)
+        except (ValueError, TypeError):
+            return []
+
         valid_uuids: list[uuid.UUID] = []
         seen: set[uuid.UUID] = set()
         for aid in attack_result_ids:
@@ -6739,15 +6746,14 @@ class MemoryInterface(abc.ABC):
                             score_value=row["score_value"],
                             score_rationale=row["score_rationale"],
                         )
-                    related_cids = [
-                        str(c)
-                        for c in (
-                            list(row["pruned_conversation_ids"] or [])
-                            + list(row["adversarial_chat_conversation_ids"] or [])
-                            + list(row["preparation_conversation_ids"] or [])
-                        )
-                        if c
-                    ]
+                    related_cids: list[str] = []
+                    for col in (
+                        row["pruned_conversation_ids"],
+                        row["adversarial_chat_conversation_ids"],
+                        row["preparation_conversation_ids"],
+                    ):
+                        if isinstance(col, list):
+                            related_cids.extend(str(c) for c in col if c)
                     deltas.append(
                         ScenarioAttackResultDelta(
                             attack_result_id=str(row["id"]),
@@ -6894,9 +6900,17 @@ class MemoryInterface(abc.ABC):
         if entry.conversation_id:
             all_conv_ids.append(entry.conversation_id)
 
-        pruned_ids = entry.pruned_conversation_ids or []
-        adversarial_ids = entry.adversarial_chat_conversation_ids or []
-        preparation_ids = entry.preparation_conversation_ids or []
+        raw_pruned: Any = entry.pruned_conversation_ids
+        raw_adversarial: Any = entry.adversarial_chat_conversation_ids
+        raw_preparation: Any = entry.preparation_conversation_ids
+
+        pruned_ids = [c for c in raw_pruned if isinstance(c, str)] if isinstance(raw_pruned, list) else []
+        adversarial_ids = (
+            [c for c in raw_adversarial if isinstance(c, str)] if isinstance(raw_adversarial, list) else []
+        )
+        preparation_ids = (
+            [c for c in raw_preparation if isinstance(c, str)] if isinstance(raw_preparation, list) else []
+        )
 
         for c_id in pruned_ids + adversarial_ids + preparation_ids:
             if c_id and c_id not in all_conv_ids:

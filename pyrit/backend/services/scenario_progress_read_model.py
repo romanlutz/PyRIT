@@ -732,11 +732,27 @@ class ScenarioProgressReadModel:
             child_attack_result_ids=ScenarioProgressReadModel._read_child_attack_result_ids(
                 attack_metadata=delta.attack_metadata
             ),
-            related_conversation_ids=list(
-                delta.related_conversation_ids or delta.attack_metadata.get("related_conversation_ids") or []
-            ),
+            related_conversation_ids=ScenarioProgressReadModel._read_related_conversation_ids(delta=delta),
             attempt_index=result_metadata.attempt_index,
         )
+
+    @staticmethod
+    def _read_related_conversation_ids(*, delta: ScenarioAttackResultDelta) -> list[str]:
+        """
+        Read related conversation IDs from typed delta or validate legacy metadata fallback.
+
+        Returns:
+            list[str]: Validated list of string conversation IDs.
+        """
+        raw_ids: Any = delta.related_conversation_ids
+        if isinstance(raw_ids, (list, tuple, set)):
+            valid: list[str] = [str(cid) for cid in raw_ids if isinstance(cid, str) and cid]
+            if valid:
+                return valid
+        fallback: Any = delta.attack_metadata.get("related_conversation_ids")
+        if isinstance(fallback, (list, tuple, set)):
+            return [str(cid) for cid in fallback if isinstance(cid, str) and cid]
+        return []
 
     @staticmethod
     def _read_child_attack_result_ids(*, attack_metadata: dict[str, Any]) -> list[str]:
@@ -924,14 +940,19 @@ class ScenarioProgressReadModel:
                     )
                 )
 
-            related_conv_ids = (
-                delta.related_conversation_ids
+            candidate_ids = (
+                result.related_conversation_ids
                 or getattr(result, "related_conversations", None)
-                or getattr(result, "related_conversation_ids", None)
-                or delta.attack_metadata.get("related_conversation_ids")
-                or []
+                or ScenarioProgressReadModel._read_related_conversation_ids(delta=delta)
             )
-            if related_conv_ids:
+            has_other_conversations = False
+            if candidate_ids:
+                for c in candidate_ids:
+                    cid = getattr(c, "conversation_id", c)
+                    if isinstance(cid, str) and cid and cid != result.conversation_id:
+                        has_other_conversations = True
+                        break
+            if has_other_conversations:
                 node_conversations_count = None
                 node_conversations_truncated = True
             else:
@@ -1227,10 +1248,12 @@ class ScenarioProgressReadModel:
         children: list[ScenarioHierarchyNode] = []
         unresolved_children: list[str] = []
 
+        seen_child_ids: set[str] = set()
         for idx, c_id in enumerate(result.child_attack_result_ids):
-            if c_id == result.attack_result_id or c_id not in children_deltas_by_id:
+            if c_id == result.attack_result_id or c_id in seen_child_ids or c_id not in children_deltas_by_id:
                 unresolved_children.append(c_id)
             else:
+                seen_child_ids.add(c_id)
                 c_delta = children_deltas_by_id[c_id]
                 c_res = children_results_by_id[c_id]
                 c_retries = c_res.retries
@@ -1272,6 +1295,17 @@ class ScenarioProgressReadModel:
                         retries_truncated=c_retries_truncated,
                     )
 
+                c_has_related = bool(
+                    c_res.related_conversation_ids
+                    or ScenarioProgressReadModel._read_related_conversation_ids(delta=c_delta)
+                )
+                if c_res.conversation_id or c_has_related:
+                    c_conv_count = None
+                    c_conv_truncated = True
+                else:
+                    c_conv_count = 0
+                    c_conv_truncated = False
+
                 children.append(
                     ScenarioHierarchyNode(
                         attack_result_id=c_res.attack_result_id,
@@ -1301,8 +1335,8 @@ class ScenarioProgressReadModel:
                         children_truncated=False,
                         unresolved_child_attack_result_ids=[],
                         conversations=[],
-                        conversations_count=None,
-                        conversations_truncated=True,
+                        conversations_count=c_conv_count,
+                        conversations_truncated=c_conv_truncated,
                         orchestration=c_orchestration,
                     )
                 )
