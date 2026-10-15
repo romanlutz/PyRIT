@@ -1737,3 +1737,129 @@ def test_build_hierarchy_node_deduplicates_duplicate_child_ids() -> None:
     assert len(node.children) == 1
     assert node.children[0].attack_result_id == "child-1"
     assert node.unresolved_child_attack_result_ids == ["child-1"]
+
+
+async def test_persisted_conversation_statistics_parity_between_hierarchy_and_node(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Test that real conversation message counts are reported in both full hierarchy and node detail."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="RealStatsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    conv_id = str(uuid.uuid4())
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Real conversation stats test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={},  # No count metadata!
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    # Insert 3 saved messages into SQLite
+    for seq in range(3):
+        piece = MessagePiece(
+            id=uuid.uuid4(),
+            conversation_id=conv_id,
+            role="user" if seq % 2 == 0 else "assistant",
+            original_value_data_type="text",
+            original_value=f"Message {seq}",
+            converted_value=f"Message {seq}",
+            sequence=seq,
+        )
+        await set_message_piece_sha256_async(piece)
+        await sqlite_instance._run_database_operation_async(
+            sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
+        )
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Node detail endpoint: full messages loaded, exact count=3, messages_truncated=False
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert node is not None
+    assert len(node.conversations) == 1
+    assert node.conversations[0].message_count == 3
+    assert len(node.conversations[0].messages) == 3
+    assert node.conversations[0].messages_truncated is False
+
+    # 2. Full hierarchy endpoint: real count=3 via bounded stats read, empty messages list, messages_truncated=True
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    root_node = hierarchy.groups[0].roots[0]
+    assert len(root_node.conversations) == 1
+    assert root_node.conversations[0].message_count == 3
+    assert len(root_node.conversations[0].messages) == 0
+    assert root_node.conversations[0].messages_truncated is True
+
+    # 3. Setting metadata={"conversation_message_count": 99} does not override real database stats
+    ar2_uuid = uuid.uuid4()
+    ar2_id = str(ar2_uuid)
+    ar2 = AttackResult(
+        attack_result_id=ar2_id,
+        conversation_id=conv_id,
+        objective="Metadata precedence test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={"conversation_message_count": 99},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar2])
+    hierarchy2 = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy2 is not None
+    root_node2 = [r for r in hierarchy2.groups[0].roots if r.attack_result_id == ar2_id][0]
+    assert root_node2.conversations[0].message_count == 3  # Still real count 3, not 99!
+
+
+async def test_persisted_result_with_non_numeric_conversation_message_count_metadata(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Test that metadata={'conversation_message_count': 'unknown'} does not raise ValueError in hierarchy."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="NonNumericMetadataScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_uuid = uuid.uuid4()
+    ar_id = str(ar_uuid)
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Non-numeric metadata test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={"conversation_message_count": "unknown"},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # Must succeed without raising ValueError
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    root_node = hierarchy.groups[0].roots[0]
+    assert len(root_node.conversations) == 1
+    # Real SQLite has 0 messages for this new conversation, so count is 0 and not truncated
+    assert root_node.conversations[0].message_count == 0
+    assert root_node.conversations[0].messages_truncated is False

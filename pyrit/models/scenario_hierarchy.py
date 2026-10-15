@@ -95,7 +95,7 @@ class ScenarioConversationProjection(BaseModel):
     conversation_id: str
     conversation_type: str = "main"
     description: str | None = None
-    message_count: int = 0
+    message_count: int | None = None
     messages: list[ScenarioConversationMessageProjection] = Field(default_factory=list)
     messages_truncated: bool = False
 

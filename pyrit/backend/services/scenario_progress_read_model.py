@@ -6,7 +6,7 @@
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -817,6 +817,7 @@ class ScenarioProgressReadModel:
         status: ScenarioRunState,
         snapshot: ScenarioProgressSnapshot,
         max_nodes: int = _MAX_HIERARCHY_NODES,
+        conversation_stats: Mapping[str, Any] | None = None,
     ) -> ScenarioHierarchyProjection:
         """
         Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
@@ -828,6 +829,7 @@ class ScenarioProgressReadModel:
             status: Terminal or running state of the scenario.
             snapshot: Hydrated progress snapshot containing deltas, mapped results, and summary.
             max_nodes: Maximum nodes to assemble in the hierarchy tree.
+            conversation_stats: Optional mapping of conversation IDs to stats for real message count previews.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -931,12 +933,42 @@ class ScenarioProgressReadModel:
 
             conversations: list[ScenarioConversationProjection] = []
             if result.conversation_id:
+                msg_count: int | None = None
+                messages_truncated: bool = True
+                if conversation_stats is not None:
+                    if result.conversation_id in conversation_stats:
+                        stat = conversation_stats[result.conversation_id]
+                        c = getattr(stat, "message_count", None)
+                        if c is None and isinstance(stat, int):
+                            c = stat
+                        if isinstance(c, int):
+                            msg_count = c
+                            messages_truncated = c > 0
+                    else:
+                        msg_count = 0
+                        messages_truncated = False
+                else:
+                    raw_count = delta.attack_metadata.get("conversation_message_count")
+                    if raw_count is not None:
+                        try:
+                            parsed_count = int(raw_count)
+                            msg_count = parsed_count
+                            messages_truncated = parsed_count > 0
+                        except (ValueError, TypeError):
+                            msg_count = None
+                            messages_truncated = True
+                    else:
+                        msg_count = None
+                        messages_truncated = True
+
                 conversations.append(
                     ScenarioConversationProjection(
                         conversation_id=result.conversation_id,
                         conversation_type=str(delta.attack_metadata.get("conversation_type") or "main"),
                         description=str(delta.attack_metadata.get("conversation_description") or "") or None,
-                        message_count=int(delta.attack_metadata.get("conversation_message_count") or 0),
+                        message_count=msg_count,
+                        messages=[],
+                        messages_truncated=messages_truncated,
                     )
                 )
 

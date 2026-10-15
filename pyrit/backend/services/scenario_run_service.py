@@ -2283,6 +2283,24 @@ class ScenarioRunService:
             objective_scorer_identifier=objective_scorer_identifier,
         )
 
+        # Obtain real conversation counts through a bounded batch of conversation statistics
+        seen_conv_ids: set[str] = set()
+        conv_ids_to_fetch: list[str] = []
+        for r in progress_snapshot.results:
+            if r.conversation_id and r.conversation_id not in seen_conv_ids:
+                seen_conv_ids.add(r.conversation_id)
+                conv_ids_to_fetch.append(r.conversation_id)
+                if len(conv_ids_to_fetch) >= max_nodes:
+                    break
+
+        conversation_stats: dict[str, Any] = {}
+        if conv_ids_to_fetch:
+            try:
+                conversation_stats = await self._memory.get_conversation_stats_async(conversation_ids=conv_ids_to_fetch)
+            except Exception:
+                logger.warning("Could not fetch conversation statistics for hierarchy preview.", exc_info=True)
+                conversation_stats = {}
+
         return self._progress_read_model.build_scenario_hierarchy(
             scenario_result_id=scenario_result_id,
             scenario_name=header_result.scenario_name,
@@ -2290,6 +2308,7 @@ class ScenarioRunService:
             status=header_result.scenario_run_state,
             snapshot=progress_snapshot,
             max_nodes=max_nodes,
+            conversation_stats=conversation_stats,
         )
 
     async def get_run_hierarchy_node_async(
