@@ -2281,35 +2281,72 @@ class ScenarioRunService:
             active_group_ids=snapshot.active_group_ids,
             terminal=terminal,
             objective_scorer_identifier=objective_scorer_identifier,
+            max_deltas=max(max_nodes, self._progress_read_model._STORAGE_PAGE_SIZE),
         )
 
-        # Obtain real conversation counts through a bounded batch of conversation statistics
-        seen_conv_ids: set[str] = set()
-        conv_ids_to_fetch: list[str] = []
-        for r in progress_snapshot.results:
-            if r.conversation_id and r.conversation_id not in seen_conv_ids:
-                seen_conv_ids.add(r.conversation_id)
-                conv_ids_to_fetch.append(r.conversation_id)
-                if len(conv_ids_to_fetch) >= max_nodes:
-                    break
-
-        conversation_stats: dict[str, Any] = {}
-        if conv_ids_to_fetch:
-            try:
-                conversation_stats = await self._memory.get_conversation_stats_async(conversation_ids=conv_ids_to_fetch)
-            except Exception:
-                logger.warning("Could not fetch conversation statistics for hierarchy preview.", exc_info=True)
-                conversation_stats = {}
-
-        return self._progress_read_model.build_scenario_hierarchy(
+        hierarchy = self._progress_read_model.build_scenario_hierarchy(
             scenario_result_id=scenario_result_id,
             scenario_name=header_result.scenario_name,
             scenario_version=header_result.scenario_version,
             status=header_result.scenario_run_state,
             snapshot=progress_snapshot,
             max_nodes=max_nodes,
-            conversation_stats=conversation_stats,
+            conversation_stats=None,
         )
+
+        # Obtain real conversation counts for the actual bounded preview nodes
+        seen_conv_ids: set[str] = set()
+        actual_conv_ids: list[str] = []
+
+        def _collect_node_conv_ids(node: ScenarioHierarchyNode) -> None:
+            if node.conversation_id and node.conversation_id not in seen_conv_ids:
+                seen_conv_ids.add(node.conversation_id)
+                actual_conv_ids.append(node.conversation_id)
+            for c in node.conversations:
+                if c.conversation_id and c.conversation_id not in seen_conv_ids:
+                    seen_conv_ids.add(c.conversation_id)
+                    actual_conv_ids.append(c.conversation_id)
+            for child in node.children:
+                _collect_node_conv_ids(child)
+
+        for group in hierarchy.groups:
+            for root in group.roots:
+                _collect_node_conv_ids(root)
+
+        if actual_conv_ids:
+            conversation_stats: dict[str, Any] | None = None
+            try:
+                conversation_stats = await self._memory.get_conversation_stats_async(conversation_ids=actual_conv_ids)
+            except Exception:
+                logger.warning("Could not fetch conversation statistics for hierarchy preview.", exc_info=True)
+                conversation_stats = None
+
+            if conversation_stats is not None:
+                queried_set = set(actual_conv_ids)
+
+                def _apply_stats(node: ScenarioHierarchyNode) -> None:
+                    for conv in node.conversations:
+                        if conv.conversation_id in queried_set:
+                            if conv.conversation_id in conversation_stats:
+                                stat = conversation_stats[conv.conversation_id]
+                                c = getattr(stat, "message_count", None)
+                                if c is None and isinstance(stat, int):
+                                    c = stat
+                                if isinstance(c, int):
+                                    conv.message_count = c
+                                    conv.messages_truncated = c > 0
+                            else:
+                                # Queried successfully, but no messages exist in memory
+                                conv.message_count = 0
+                                conv.messages_truncated = False
+                    for child in node.children:
+                        _apply_stats(child)
+
+                for group in hierarchy.groups:
+                    for root in group.roots:
+                        _apply_stats(root)
+
+        return hierarchy
 
     async def get_run_hierarchy_node_async(
         self,

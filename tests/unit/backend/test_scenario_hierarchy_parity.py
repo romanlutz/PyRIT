@@ -6,6 +6,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2002,3 +2003,249 @@ async def test_diagnostics_total_retries_count_event_mismatch_parity(
     diag_item = hierarchy.diagnostics.attack_retries[0]
     assert diag_item.total_retries == 0
     assert len(diag_item.retries) == 3
+
+
+@pytest.mark.asyncio
+async def test_clipped_tree_queries_actual_preview_node_conversation_stats(sqlite_instance: SQLiteMemory) -> None:
+    """Test that when child is saved before parent and max_nodes=1, the actual returned parent gets real stats."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ClippedTreeStatsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 1. Parent with its own 3-message conversation
+    parent_conv_id = str(uuid.uuid4())
+    for seq in range(3):
+        piece = MessagePiece(
+            id=uuid.uuid4(),
+            conversation_id=parent_conv_id,
+            role="user" if seq % 2 == 0 else "assistant",
+            original_value_data_type="text",
+            original_value=f"Parent message {seq}",
+            converted_value=f"Parent message {seq}",
+            sequence=seq,
+        )
+        await set_message_piece_sha256_async(piece)
+        await sqlite_instance._run_database_operation_async(
+            sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
+        )
+
+    child_conv_id = str(uuid.uuid4())
+    child_id = str(uuid.uuid4())
+    parent_id = str(uuid.uuid4())
+
+    # Child is saved FIRST in memory
+    child_ar = AttackResult(
+        attack_result_id=child_id,
+        conversation_id=child_conv_id,
+        objective="Child attack",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    # Parent references child
+    parent_ar = AttackResult(
+        attack_result_id=parent_id,
+        conversation_id=parent_conv_id,
+        objective="Parent attack",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.ORCHESTRATION.value},
+        metadata={"child_attack_result_ids": [child_id]},
+    )
+    # Add child first, then parent
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[child_ar, parent_ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # With max_nodes=1, parent root is returned. It must report real count=3, not 0!
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy is not None
+    assert hierarchy.truncated is True
+    assert len(hierarchy.groups[0].roots) == 1
+    root = hierarchy.groups[0].roots[0]
+    assert root.attack_result_id == parent_id
+    assert len(root.conversations) == 1
+    assert root.conversations[0].conversation_id == parent_conv_id
+    assert root.conversations[0].message_count == 3
+    assert root.conversations[0].messages_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_conversation_stats_query_failure_does_not_become_false_zero(sqlite_instance: SQLiteMemory) -> None:
+    """Test that a failed stats query does not turn uncounted conversations into message_count=0."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="FailedStatsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    conv_id = str(uuid.uuid4())
+    ar_id = str(uuid.uuid4())
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Failed stats test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    # Mock get_conversation_stats_async to fail with an exception
+    sqlite_instance.get_conversation_stats_async = AsyncMock(side_effect=RuntimeError("Database error"))
+
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    root = hierarchy.groups[0].roots[0]
+    assert len(root.conversations) == 1
+    # Must NOT become 0! Must be None and marked truncated/incomplete
+    assert root.conversations[0].message_count is None
+    assert root.conversations[0].messages_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_parent_with_2500_children_bounds_unresolved_references(sqlite_instance: SQLiteMemory) -> None:
+    """Test that a parent with 2,500 children bounds unresolved references to 500 in both detail and full hierarchy."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="MassiveChildrenScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    parent_id = str(uuid.uuid4())
+    child_ids = [str(uuid.uuid4()) for _ in range(2500)]
+
+    # Add parent and the first 200 children into memory
+    children = [
+        AttackResult(
+            attack_result_id=cid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Child {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        )
+        for i, cid in enumerate(child_ids[:200])
+    ]
+    parent = AttackResult(
+        attack_result_id=parent_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Parent with 2500 children",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.ORCHESTRATION.value},
+        metadata={"child_attack_result_ids": child_ids},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[parent, *children])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Single node detail: with 200 immediate children loaded, unresolved references are capped at 500 (not 2,300)
+    node = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=parent_id,
+        max_immediate_children=200,
+    )
+    assert node is not None
+    assert len(node.children) == 200
+    assert len(node.unresolved_child_attack_result_ids) == 500
+    assert node.unresolved_child_references_truncated is True
+
+    # 2. Full hierarchy with max_nodes=1: parent has 2,500 unresolved children capped at 500 (not 2,500)
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy is not None
+    root = hierarchy.groups[0].roots[0]
+    assert len(root.unresolved_child_attack_result_ids) == 500
+    assert root.unresolved_child_references_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_cold_hierarchy_hydration_bounded_by_max_nodes(sqlite_instance: SQLiteMemory) -> None:
+    """Test that a cold max_nodes=1 request only fetches 1 delta and does not hydrate 1,001 results across 3 pages."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ColdHydrationScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # Insert 1,001 attack results
+    results = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Attack {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        )
+        for i in range(1001)
+    ]
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+
+    # Track delta queries
+    original_get_deltas = sqlite_instance.get_scenario_attack_result_deltas_async
+    query_limits: list[int] = []
+
+    async def tracking_get_deltas(*args: Any, **kwargs: Any) -> Any:
+        query_limits.append(kwargs.get("limit", 0))
+        return await original_get_deltas(*args, **kwargs)
+
+    sqlite_instance.get_scenario_attack_result_deltas_async = tracking_get_deltas  # type: ignore[assignment]
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # Cold max_nodes=1 hierarchy call
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy is not None
+    assert hierarchy.truncated is True
+    # Must only have executed 1 page query (capped at storage page size), NOT 3 page queries (500, 500, 1)!
+    assert len(query_limits) == 1
+    assert query_limits[0] == 500
+
+
+def test_build_scenario_hierarchy_unqueried_conversation_not_false_zero() -> None:
+    """Test that missing-key branch in build_scenario_hierarchy produces None and truncated=True, never false zero."""
+    delta = _make_test_delta(
+        attack_result_id="root-1",
+        role=AttackResultRole.TARGET_FACING,
+        parent_collection="group_1",
+        seed_group_id="seed_1",
+        conversation_id="conv-unqueried",
+    )
+    snapshot = _make_test_snapshot(deltas=[delta])
+    # Empty stats passed (e.g. stats read failure or unqueried)
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+        conversation_stats={},
+    )
+    conv = projection.groups[0].roots[0].conversations[0]
+    # Must NOT report 0 and False!
+    assert conv.message_count is None
+    assert conv.messages_truncated is True

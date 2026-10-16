@@ -107,6 +107,7 @@ class ScenarioProgressSnapshot:
     results: tuple[ScenarioProgressResult, ...]
     summary: ScenarioProgressSummary
     plan: ScenarioRunPlan
+    has_more: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,7 @@ class _ProgressCacheEntry:
     cursor: AttackResultKeysetCursor | None = None
     summary: ScenarioProgressSummary | None = None
     summary_state: _ProgressSummaryState | None = None
+    has_more: bool = True
 
 
 class ScenarioProgressReadModel:
@@ -151,6 +153,7 @@ class ScenarioProgressReadModel:
         active_group_ids: Sequence[str],
         terminal: bool,
         objective_scorer_identifier: ComponentIdentifier | None,
+        max_deltas: int | None = None,
     ) -> ScenarioProgressSnapshot:
         """
         Refresh and return the mapped progress state for one run.
@@ -162,6 +165,7 @@ class ScenarioProgressReadModel:
             active_group_ids (Sequence[str]): Groups that are running.
             terminal (bool): Whether the run has stopped.
             objective_scorer_identifier (ComponentIdentifier | None): Objective scorer identity.
+            max_deltas (int | None): Maximum deltas to hydrate, bounding cold queries.
 
         Returns:
             ScenarioProgressSnapshot: Deltas, mapped results, summary, and effective plan.
@@ -169,7 +173,12 @@ class ScenarioProgressReadModel:
         async with self._cache_lock:
             entry = self._get_cache_entry(scenario_result_id=scenario_result_id, plan=plan, terminal=terminal)
             first_new_index = len(entry.results)
-            await self._hydrate_new_deltas_async(scenario_result_id=scenario_result_id, entry=entry)
+            await self._hydrate_new_deltas_async(
+                scenario_result_id=scenario_result_id,
+                entry=entry,
+                terminal=terminal,
+                max_deltas=max_deltas,
+            )
             return self._build_snapshot(
                 entry=entry,
                 first_new_index=first_new_index,
@@ -247,13 +256,32 @@ class ScenarioProgressReadModel:
             results=tuple(entry.results),
             summary=entry.summary,
             plan=summary_plan,
+            has_more=entry.has_more,
         )
 
-    async def _hydrate_new_deltas_async(self, *, scenario_result_id: str, entry: _ProgressCacheEntry) -> None:
-        """Hydrate every persisted delta after the cached keyset cursor."""
+    async def _hydrate_new_deltas_async(
+        self,
+        *,
+        scenario_result_id: str,
+        entry: _ProgressCacheEntry,
+        terminal: bool = False,
+        max_deltas: int | None = None,
+    ) -> None:
+        """Hydrate persisted deltas after the cached keyset cursor up to max_deltas if specified."""
+        if not entry.has_more and max_deltas is not None and len(entry.deltas) >= max_deltas:
+            return
+        if not entry.has_more and max_deltas is None and terminal:
+            return
         while True:
+            if max_deltas is not None and len(entry.deltas) >= max_deltas:
+                return
+            fetch_limit = (
+                min(self._STORAGE_PAGE_SIZE, max_deltas - len(entry.deltas))
+                if max_deltas is not None
+                else self._STORAGE_PAGE_SIZE
+            )
             page, has_more = await self._memory.get_scenario_attack_result_deltas_async(
-                scenario_result_id=scenario_result_id, cursor=entry.cursor, limit=self._STORAGE_PAGE_SIZE
+                scenario_result_id=scenario_result_id, cursor=entry.cursor, limit=fetch_limit
             )
             entry.deltas.extend(page)
             if page:
@@ -263,6 +291,8 @@ class ScenarioProgressReadModel:
                     attack_result_id=last.attack_result_id,
                 )
             if not has_more:
+                if terminal:
+                    entry.has_more = False
                 return
             if not page:
                 raise RuntimeError("Scenario progress storage returned an empty page with has_more=True.")
@@ -846,7 +876,7 @@ class ScenarioProgressReadModel:
 
         visited_ids: set[str] = set()
         total_nodes_count = 0
-        hierarchy_truncated = False
+        hierarchy_truncated = bool(snapshot.has_more)
 
         def _build_node(
             *,
@@ -935,18 +965,14 @@ class ScenarioProgressReadModel:
             if result.conversation_id:
                 msg_count: int | None = None
                 messages_truncated: bool = True
-                if conversation_stats is not None:
-                    if result.conversation_id in conversation_stats:
-                        stat = conversation_stats[result.conversation_id]
-                        c = getattr(stat, "message_count", None)
-                        if c is None and isinstance(stat, int):
-                            c = stat
-                        if isinstance(c, int):
-                            msg_count = c
-                            messages_truncated = c > 0
-                    else:
-                        msg_count = 0
-                        messages_truncated = False
+                if conversation_stats is not None and result.conversation_id in conversation_stats:
+                    stat = conversation_stats[result.conversation_id]
+                    c = getattr(stat, "message_count", None)
+                    if c is None and isinstance(stat, int):
+                        c = stat
+                    if isinstance(c, int):
+                        msg_count = c
+                        messages_truncated = c > 0
                 else:
                     raw_count = delta.attack_metadata.get("conversation_message_count")
                     if raw_count is not None:
@@ -991,6 +1017,11 @@ class ScenarioProgressReadModel:
                 node_conversations_count = len(conversations)
                 node_conversations_truncated = False
 
+            unresolved_refs_truncated = len(unresolved_children) > _MAX_CHILD_REFERENCES
+            bounded_unresolved_children = (
+                unresolved_children[:_MAX_CHILD_REFERENCES] if unresolved_refs_truncated else unresolved_children
+            )
+
             return ScenarioHierarchyNode(
                 attack_result_id=result.attack_result_id,
                 conversation_id=result.conversation_id or "",
@@ -1017,7 +1048,8 @@ class ScenarioProgressReadModel:
                 child_references_truncated=child_refs_truncated,
                 children=children,
                 children_truncated=False,
-                unresolved_child_attack_result_ids=unresolved_children,
+                unresolved_child_attack_result_ids=bounded_unresolved_children,
+                unresolved_child_references_truncated=unresolved_refs_truncated,
                 conversations=conversations,
                 conversations_count=node_conversations_count,
                 conversations_truncated=node_conversations_truncated,
@@ -1372,6 +1404,11 @@ class ScenarioProgressReadModel:
                     )
                 )
 
+        unresolved_refs_truncated = len(unresolved_children) > max_child_references
+        bounded_unresolved_children = (
+            unresolved_children[:max_child_references] if unresolved_refs_truncated else unresolved_children
+        )
+
         return ScenarioHierarchyNode(
             attack_result_id=result.attack_result_id,
             conversation_id=result.conversation_id or "",
@@ -1398,7 +1435,8 @@ class ScenarioProgressReadModel:
             child_references_truncated=child_refs_truncated,
             children=children,
             children_truncated=children_truncated,
-            unresolved_child_attack_result_ids=unresolved_children,
+            unresolved_child_attack_result_ids=bounded_unresolved_children,
+            unresolved_child_references_truncated=unresolved_refs_truncated,
             conversations=conv_list,
             conversations_count=resolved_conversations_count,
             conversations_truncated=conversations_truncated,

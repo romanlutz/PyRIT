@@ -395,3 +395,21 @@ def test_scenario_conversation_message_pieces_truncated_flag() -> None:
     )
     assert len(msg.pieces) == 100
     assert msg.pieces_truncated is True
+
+
+def test_scenario_hierarchy_node_unresolved_child_references_bounding() -> None:
+    now = datetime.now(UTC)
+    unresolved_ids = [f"unresolved-{i}" for i in range(600)]
+    node = ScenarioHierarchyNode(
+        attack_result_id="node-1",
+        atomic_attack_name="attack",
+        atomic_group_id="group-1",
+        seed_group_id="seed-1",
+        objective="obj",
+        outcome=AttackOutcome.SUCCESS,
+        timestamp=now,
+        unresolved_child_attack_result_ids=unresolved_ids,
+    )
+    assert len(node.unresolved_child_attack_result_ids) == 500
+    assert node.unresolved_child_references_truncated is True
+    assert node.unresolved_child_attack_result_ids == unresolved_ids[:500]

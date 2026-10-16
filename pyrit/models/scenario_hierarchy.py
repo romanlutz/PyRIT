@@ -144,6 +144,7 @@ class ScenarioHierarchyNode(BaseModel):
 
     # Missing, malformed, cyclic, or cross-run references that could not be safely resolved
     unresolved_child_attack_result_ids: list[str] = Field(default_factory=list)
+    unresolved_child_references_truncated: bool = False
 
     # Generic read-only conversations for this attack
     conversations: list[ScenarioConversationProjection] = Field(default_factory=list)
@@ -158,6 +159,11 @@ class ScenarioHierarchyNode(BaseModel):
         if len(self.child_attack_result_ids) > self.max_child_references:
             self.child_attack_result_ids = self.child_attack_result_ids[: self.max_child_references]
             self.child_references_truncated = True
+        if len(self.unresolved_child_attack_result_ids) > self.max_child_references:
+            self.unresolved_child_attack_result_ids = self.unresolved_child_attack_result_ids[
+                : self.max_child_references
+            ]
+            self.unresolved_child_references_truncated = True
         return self
 
 
