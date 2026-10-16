@@ -10,11 +10,17 @@ pytest.importorskip("art")
 import logging
 
 from art import FONT_NAMES, text2art
+from art.functions import get_font_dic
 from art.params import RANDOM_FILTERED_FONTS
 from art.utils import indirect_font
+from wcwidth import wcswidth
 
 from pyrit.converter import AsciiArtConverter, ConverterResult
-from pyrit.converter.ascii_art_converter import _ART_RANDOM_FONTS, _ART_RANDOM_SELECTORS
+from pyrit.converter.ascii_art_converter import (
+    _ART_RANDOM_FONTS,
+    _ART_RANDOM_SELECTORS,
+    _fonts_that_render,
+)
 
 _LOGGER_NAME = "pyrit.converter.ascii_art_converter"
 
@@ -287,3 +293,114 @@ async def test_ascii_art_converter_passes_through_across_multiple_lines():
     for segment in ("caf", "na", "ve"):
         for row in text2art(segment, font="small").strip("\n").splitlines():
             assert row in result.output_text
+
+
+@pytest.mark.parametrize("font", ["BLOCK", "SMALL", "STANDARD"])
+async def test_ascii_art_converter_uppercase_fixed_font_async(font: str) -> None:
+    result = await AsciiArtConverter(font=font).convert_async(prompt="hello")
+    assert result.output_text == text2art("hello", font=font)
+
+
+@pytest.mark.parametrize("selector", ["WIZARD", "WIZ", "MAGIC", "RND-SMALL", "RANDOM-LARGE", "RAND-NA"])
+async def test_ascii_art_converter_uppercase_indirect_font_async(selector: str) -> None:
+    with patch("pyrit.converter.ascii_art_converter.indirect_font", wraps=indirect_font) as resolve:
+        result = await AsciiArtConverter(font=selector).convert_async(prompt="hello")
+
+    resolve.assert_called_once_with(selector.lower(), "hello")
+    assert result.output_text
+
+
+@pytest.mark.parametrize("selector", ["RAND", "RANDOM", "RND"])
+async def test_ascii_art_converter_uppercase_random_font_async(selector: str) -> None:
+    converter = AsciiArtConverter(font=selector)
+    with patch.object(converter, "_get_random_generator") as get_rng:
+        get_rng.return_value.choice.return_value = "block"
+        result = await converter.convert_async(prompt="hello")
+
+    get_rng.assert_called_once_with(stream="font")
+    assert result.output_text == text2art("hello", font="block")
+
+
+@pytest.mark.parametrize("font", ["block", "1row", "4max"])
+async def test_ascii_art_converter_preserves_partially_rendered_character_async(
+    font: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    converter = AsciiArtConverter(font=font)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        result = await converter.convert_async(prompt="a\u0130b")
+
+    assert "\u0130" in result.output_text
+    assert "\u0130" in caplog.text
+    assert result.output_text != text2art("aib", font=font)
+
+    caplog.clear()
+    control = await converter.convert_async(prompt="aib")
+    assert control.output_text == text2art("aib", font=font)
+    assert not caplog.text
+
+
+def test_ascii_art_converter_random_pool_excludes_partial_character_fonts() -> None:
+    candidates = _fonts_that_render(text="\u0130", fonts=["block", "1row", "4max", "small"])
+    assert candidates == []
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["\u65e5", "\U0001f642", "e\u0301", "\u2764\ufe0f", "\U0001f469\u200d\U0001f4bb", "\U0001f1fa\U0001f1f8"],
+)
+async def test_ascii_art_converter_preserves_grapheme_and_neighbor_alignment_async(literal: str) -> None:
+    result = await AsciiArtConverter(font="small").convert_async(prompt=f"a{literal}b")
+    rows = result.output_text.strip("\n").splitlines()
+    left = text2art("a", font="small").strip("\n").splitlines()
+    right = text2art("b", font="small").strip("\n").splitlines()
+    left_width = max(map(wcswidth, left))
+    right_width = max(map(wcswidth, right))
+    expected_width = left_width + wcswidth(literal) + right_width
+
+    assert literal in result.output_text
+    assert len(rows) == len(left)
+    assert all(wcswidth(row) == expected_width for row in rows)
+    assert all(
+        row.startswith(prefix) and row.endswith(suffix) for row, prefix, suffix in zip(rows, left, right, strict=True)
+    )
+
+
+@pytest.mark.parametrize("font", ["mix", "MIX", "Mix"])
+@pytest.mark.parametrize("prompt", ["hello", "aAzZ 09!", "hi\nyo", "", " ", "hi\n"])
+async def test_ascii_art_converter_mix_matches_library_glyphs_async(font: str, prompt: str) -> None:
+    converter = AsciiArtConverter(font=font)
+    glyphs = get_font_dic("fancy1")
+    with patch.object(converter, "_get_random_generator") as get_rng:
+        get_rng.return_value.choice.return_value = "fancy1"
+        result = await converter.convert_async(prompt=prompt)
+    with patch("art.functions.mix_letters", return_value=glyphs):
+        expected = text2art(prompt, font="mix")
+
+    assert result.output_text == expected
+
+
+async def test_ascii_art_converter_mix_reuses_glyphs_and_preserves_unsupported_clusters_async(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    converter = AsciiArtConverter(font="mix")
+    glyphs = get_font_dic("fancy1")
+    with patch.object(converter, "_get_random_generator") as get_rng:
+        get_rng.return_value.choice.return_value = "fancy1"
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            result = await converter.convert_async(prompt="aba\u00e9aba e\u0301 \U0001f469\u200d\U0001f4bb")
+
+    assert result.output_text == (
+        glyphs["a"]
+        + glyphs["b"]
+        + glyphs["a"]
+        + "\u00e9"
+        + glyphs["a"]
+        + glyphs["b"]
+        + glyphs["a"]
+        + glyphs[" "]
+        + "e\u0301"
+        + glyphs[" "]
+        + "\U0001f469\u200d\U0001f4bb"
+    )
+    assert get_rng.return_value.choice.call_count == len(glyphs)
+    assert "'mix'" in caplog.text
