@@ -58,6 +58,9 @@ from pyrit.models import (
     ScenarioHierarchyNode,
     ScenarioHierarchyProjection,
     ScenarioIdentifier,
+    ScenarioProducerCategoryCounts,
+    ScenarioProducerCounts,
+    ScenarioProgressCounts,
     ScenarioProgressHeader,
     ScenarioProgressResult,
     ScenarioQueueEntry,
@@ -2284,6 +2287,54 @@ class ScenarioRunService:
             max_deltas=max(max_nodes, self._progress_read_model._STORAGE_PAGE_SIZE),
         )
 
+        exact_overall_counts: ScenarioProgressCounts | None = None
+        exact_total_errors: int | None = None
+        exact_total_retries: int | None = None
+
+        if progress_snapshot.has_more:
+            plan_ids = [scenario_result_id] if plan is not None else []
+            aggregates = await self._memory.get_scenario_history_aggregates_async(
+                scenario_result_ids=[scenario_result_id],
+                plan_scenario_ids=plan_ids,
+            )
+            plans_map = {scenario_result_id: plan.atomic_groups if plan is not None else None}
+            aggregates = await self._recount_with_sdk_statistics_async(
+                aggregates=aggregates,
+                plans=plans_map,
+            )
+            agg = aggregates.get(scenario_result_id)
+            if agg is not None:
+                producer_counts = ScenarioProducerCounts(
+                    target_facing=ScenarioProducerCategoryCounts(
+                        attempts=agg.target_facing_attempts,
+                        errors=agg.target_facing_error_attempts,
+                        retries=agg.target_facing_retries,
+                    ),
+                    orchestration=ScenarioProducerCategoryCounts(
+                        attempts=agg.orchestration_attempts,
+                        errors=agg.orchestration_error_attempts,
+                        retries=agg.orchestration_retries,
+                    ),
+                    unknown=ScenarioProducerCategoryCounts(
+                        attempts=agg.unknown_role_attempts,
+                        errors=agg.unknown_role_error_attempts,
+                        retries=agg.unknown_role_retries,
+                    ),
+                )
+                exact_overall_counts = ScenarioProgressCounts(
+                    planned=progress_snapshot.summary.overall.planned,
+                    completed=agg.completed_units,
+                    succeeded=agg.successful_units,
+                    success_percentage=success_percentage(
+                        succeeded=agg.successful_units, completed=agg.completed_units
+                    ),
+                    errors=agg.error_attempts,
+                    retries=agg.total_retries,
+                    producer_counts=producer_counts,
+                )
+                exact_total_errors = agg.error_attempts
+                exact_total_retries = agg.total_retries
+
         hierarchy = self._progress_read_model.build_scenario_hierarchy(
             scenario_result_id=scenario_result_id,
             scenario_name=header_result.scenario_name,
@@ -2292,6 +2343,9 @@ class ScenarioRunService:
             snapshot=progress_snapshot,
             max_nodes=max_nodes,
             conversation_stats=None,
+            overall_counts=exact_overall_counts,
+            exact_total_errors=exact_total_errors,
+            exact_total_retries=exact_total_retries,
         )
 
         # Obtain real conversation counts for the actual bounded preview nodes

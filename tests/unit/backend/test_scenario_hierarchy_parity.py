@@ -2249,3 +2249,226 @@ def test_build_scenario_hierarchy_unqueried_conversation_not_false_zero() -> Non
     # Must NOT report 0 and False!
     assert conv.message_count is None
     assert conv.messages_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_cold_hierarchy_preserves_run_wide_totals_for_tail_error(sqlite_instance: SQLiteMemory) -> None:
+    """Test that max_nodes=1 on cold run with 501 results accurately reports 501 units, 1 error, and 7 retries."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="TailErrorScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 successes, 501st has an error and 7 retries
+    now = datetime.now(UTC)
+    results = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Attack {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={"parent_collection": f"group_{i}", "result_role": AttackResultRole.TARGET_FACING.value},
+            timestamp=now + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+    retry_events = [
+        RetryEvent(
+            attempt_number=r,
+            timestamp=now + timedelta(seconds=500 + r),
+            exception_message="Network glitch",
+            exception_type="NetworkError",
+        )
+        for r in range(1, 8)
+    ]
+    tail_error = AttackResult(
+        attack_result_id=str(uuid.uuid4()),
+        conversation_id=str(uuid.uuid4()),
+        objective="Attack 500 (failed)",
+        outcome=AttackOutcome.ERROR,
+        error_type="FatalError",
+        error_message="Failed after retries",
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_500", "result_role": AttackResultRole.TARGET_FACING.value},
+        timestamp=now + timedelta(seconds=510),
+        retry_events=retry_events,
+        total_retries=7,
+    )
+    results.append(tail_error)
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Cold hierarchy with max_nodes=1
+    hierarchy_cold = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_cold is not None
+    assert hierarchy_cold.truncated is True
+    assert len(hierarchy_cold.groups[0].roots) == 1
+
+    # Exact run-wide totals must be retained!
+    assert hierarchy_cold.overall_counts.completed == 501
+    assert hierarchy_cold.overall_counts.errors == 1
+    assert hierarchy_cold.overall_counts.retries == 7
+    assert hierarchy_cold.overall_counts.producer_counts.target_facing.attempts == 501
+    assert hierarchy_cold.diagnostics.failed_attacks_count == 1
+    assert hierarchy_cold.diagnostics.failed_attacks_truncated is True
+    assert hierarchy_cold.diagnostics.total_retries == 7
+    assert hierarchy_cold.diagnostics.attack_retries_truncated is True
+
+    # 2. Read progress (which hydrates all 501 deltas into cache)
+    progress = await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=1000)
+    assert progress is not None
+
+    # 3. Repeat hierarchy with max_nodes=1 on warm cache
+    hierarchy_warm = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_warm is not None
+
+    # Cold and warm hierarchy calls must have identical totals without any database writes!
+    assert hierarchy_warm.overall_counts == hierarchy_cold.overall_counts
+    assert hierarchy_warm.diagnostics.total_retries == hierarchy_cold.diagnostics.total_retries == 7
+    assert hierarchy_warm.diagnostics.failed_attacks_count == hierarchy_cold.diagnostics.failed_attacks_count == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_attempts_latest_error_beyond_cap_reported_correctly(sqlite_instance: SQLiteMemory) -> None:
+    """Test that a latest error beyond the 500 cap is reported as an error, not earlier success."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="RepeatedAttemptsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    now = datetime.now(UTC)
+    results: list[AttackResult] = []
+    # Unit 0 Attempt 1: SUCCESS at time 0
+    results.append(
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective="Unit 0",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "unit_0",
+                "seed_group_id": "seed_0",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=now,
+        )
+    )
+    # Units 1..499: SUCCESS at times 1..499
+    results.extend(
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Unit {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": f"unit_{i}",
+                "seed_group_id": f"seed_{i}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=now + timedelta(seconds=i),
+        )
+        for i in range(1, 500)
+    )
+    # Unit 0 Attempt 2: ERROR at time 501 (beyond the 500-delta cap)
+    results.append(
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective="Unit 0",
+            outcome=AttackOutcome.ERROR,
+            error_type="Attempt2Error",
+            error_message="Attempt 2 failed",
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "unit_0",
+                "seed_group_id": "seed_0",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=now + timedelta(seconds=501),
+        )
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy is not None
+    # Latest attempt for unit_0 was an error, so overall errors must be 1 (not 0)!
+    assert hierarchy.overall_counts.errors == 1
+    assert hierarchy.overall_counts.succeeded == 499
+    assert hierarchy.overall_counts.completed == 500
+
+
+@pytest.mark.asyncio
+async def test_failed_conversation_stats_read_never_falls_back_to_metadata(sqlite_instance: SQLiteMemory) -> None:
+    """Test that a failed stats query leaves counts unknown/incomplete even if count metadata is present."""
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="FailedStatsMetadataScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    conv_id = str(uuid.uuid4())
+    ar_id = str(uuid.uuid4())
+    # 3 saved messages in SQLite
+    now = datetime.now(UTC)
+    for i in range(3):
+        piece = MessagePiece(
+            id=uuid.uuid4(),
+            conversation_id=conv_id,
+            role="user",
+            original_value_data_type="text",
+            original_value=f"msg {i}",
+            converted_value=f"msg {i}",
+            sequence=i,
+            timestamp=now + timedelta(seconds=i),
+        )
+        await set_message_piece_sha256_async(piece)
+        await sqlite_instance._run_database_operation_async(
+            sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
+        )
+
+    # Attack result with metadata={"conversation_message_count": 0}
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=conv_id,
+        objective="Failed stats metadata fallback test",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={"conversation_message_count": 0},
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    # Simulate DB query failure
+    sqlite_instance.get_conversation_stats_async = AsyncMock(side_effect=RuntimeError("DB query failure"))
+
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    root = hierarchy.groups[0].roots[0]
+    assert len(root.conversations) == 1
+    # Must NOT return 0 or False from metadata! Must be None and truncated=True!
+    assert root.conversations[0].message_count is None
+    assert root.conversations[0].messages_truncated is True

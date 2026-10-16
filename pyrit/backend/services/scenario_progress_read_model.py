@@ -848,6 +848,9 @@ class ScenarioProgressReadModel:
         snapshot: ScenarioProgressSnapshot,
         max_nodes: int = _MAX_HIERARCHY_NODES,
         conversation_stats: Mapping[str, Any] | None = None,
+        overall_counts: ScenarioProgressCounts | None = None,
+        exact_total_errors: int | None = None,
+        exact_total_retries: int | None = None,
     ) -> ScenarioHierarchyProjection:
         """
         Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
@@ -860,6 +863,9 @@ class ScenarioProgressReadModel:
             snapshot: Hydrated progress snapshot containing deltas, mapped results, and summary.
             max_nodes: Maximum nodes to assemble in the hierarchy tree.
             conversation_stats: Optional mapping of conversation IDs to stats for real message count previews.
+            overall_counts: Optional exact run-wide progress counts overriding truncated snapshot totals.
+            exact_total_errors: Optional exact run-wide error count from database aggregates.
+            exact_total_retries: Optional exact run-wide retry count from database aggregates.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -973,19 +979,6 @@ class ScenarioProgressReadModel:
                     if isinstance(c, int):
                         msg_count = c
                         messages_truncated = c > 0
-                else:
-                    raw_count = delta.attack_metadata.get("conversation_message_count")
-                    if raw_count is not None:
-                        try:
-                            parsed_count = int(raw_count)
-                            msg_count = parsed_count
-                            messages_truncated = parsed_count > 0
-                        except (ValueError, TypeError):
-                            msg_count = None
-                            messages_truncated = True
-                    else:
-                        msg_count = None
-                        messages_truncated = True
 
                 conversations.append(
                     ScenarioConversationProjection(
@@ -1182,13 +1175,12 @@ class ScenarioProgressReadModel:
                     )
                 )
 
-        failed_attacks_count = len(all_failed_attacks)
-        failed_attacks_truncated = failed_attacks_count > _MAX_DIAGNOSTIC_ITEMS
+        failed_attacks_count = exact_total_errors if exact_total_errors is not None else len(all_failed_attacks)
+        failed_attacks_truncated = bool(
+            (snapshot.has_more and failed_attacks_count > len(all_failed_attacks))
+            or failed_attacks_count > _MAX_DIAGNOSTIC_ITEMS
+        )
         failed_attacks = all_failed_attacks[:_MAX_DIAGNOSTIC_ITEMS]
-
-        attack_retries_count = len(all_attack_retries)
-        attack_retries_truncated = attack_retries_count > _MAX_DIAGNOSTIC_ITEMS
-        attack_retries = all_attack_retries[:_MAX_DIAGNOSTIC_ITEMS]
 
         attempts_by_unit: dict[tuple[str, str], list[ScenarioProgressResult]] = {}
         for r in snapshot.results:
@@ -1201,6 +1193,16 @@ class ScenarioProgressReadModel:
                 persisted_retries=(r.total_retries for r in snapshot.results),
             ),
         )
+        if exact_total_retries is not None:
+            diagnostic_retries = max(diagnostic_retries, exact_total_retries)
+
+        total_persisted_retries = sum(r.total_retries for r in snapshot.results)
+        attack_retries_count = len(all_attack_retries)
+        attack_retries_truncated = bool(
+            (snapshot.has_more and diagnostic_retries > total_persisted_retries)
+            or attack_retries_count > _MAX_DIAGNOSTIC_ITEMS
+        )
+        attack_retries = all_attack_retries[:_MAX_DIAGNOSTIC_ITEMS]
 
         diagnostics = ScenarioHierarchyDiagnostics(
             failed_attacks=failed_attacks,
@@ -1212,13 +1214,15 @@ class ScenarioProgressReadModel:
             total_retries=diagnostic_retries,
         )
 
+        effective_overall_counts = overall_counts if overall_counts is not None else snapshot.summary.overall
+
         return ScenarioHierarchyProjection(
             scenario_result_id=scenario_result_id,
             scenario_name=scenario_name,
             scenario_version=scenario_version,
             status=status,
             groups=groups,
-            overall_counts=snapshot.summary.overall,
+            overall_counts=effective_overall_counts,
             diagnostics=diagnostics,
             truncated=hierarchy_truncated,
         )
