@@ -2472,3 +2472,108 @@ async def test_failed_conversation_stats_read_never_falls_back_to_metadata(sqlit
     # Must NOT return 0 or False from metadata! Must be None and truncated=True!
     assert root.conversations[0].message_count is None
     assert root.conversations[0].messages_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_cold_hierarchy_projection_preserves_parent_beyond_delta_page_limit(sqlite_instance):
+    """
+    Test that a sequential orchestration parent persisted after 500 children is correctly
+    identified as the root on a cold request (where delta pagination only loads 500 deltas),
+    matching warm cache behavior and never mistaking child 0 for an independent root.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime.now(UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="Cold Page Limit Test",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # Persist 500 children first
+    child_ids = [str(uuid.uuid4()) for _ in range(500)]
+    child_results = [
+        AttackResult(
+            attack_result_id=cid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Child attack {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "seq_group",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+                "attempt_index": i + 1,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i, cid in enumerate(child_ids)
+    ]
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=child_results)
+
+    # Persist 1 Sequential orchestration parent after the 500 children
+    parent_id = str(uuid.uuid4())
+    parent_result = AttackResult(
+        attack_result_id=parent_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Sequential parent attack",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "seq_group",
+            "result_role": AttackResultRole.ORCHESTRATION.value,
+        },
+        metadata={"child_attack_result_ids": child_ids},
+        timestamp=base_time + timedelta(seconds=501),
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[parent_result])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Cold hierarchy request with max_nodes=1
+    hierarchy_cold = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_cold is not None
+    assert len(hierarchy_cold.groups) == 1
+    cold_roots = hierarchy_cold.groups[0].roots
+    assert len(cold_roots) == 1
+
+    cold_root = cold_roots[0]
+    # The root MUST be the parent, NOT child 0!
+    assert cold_root.attack_result_id == parent_id
+    assert cold_root.parent_attack_result_id is None
+    assert cold_root.child_index is None
+    assert cold_root.result_role == AttackResultRole.ORCHESTRATION
+    assert cold_root.attempt_index is None
+
+    # 2. Warm cache: read progress to hydrate all deltas into cache
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=500)
+
+    # 3. Warm hierarchy request with max_nodes=1 must match cold exactly
+    hierarchy_warm = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_warm is not None
+    warm_roots = hierarchy_warm.groups[0].roots
+    assert len(warm_roots) == 1
+    warm_root = warm_roots[0]
+    assert warm_root.attack_result_id == parent_id
+    assert warm_root.parent_attack_result_id is None
+    assert warm_root.child_index is None
+    assert warm_root.result_role == AttackResultRole.ORCHESTRATION
+
+    # 4. Request with max_nodes=5 must nest children properly under the parent
+    hierarchy_expanded = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=5)
+    assert hierarchy_expanded is not None
+    expanded_root = hierarchy_expanded.groups[0].roots[0]
+    assert expanded_root.attack_result_id == parent_id
+    # 1 root + 4 children = 5 nodes
+    assert len(expanded_root.children) == 4
+    for idx, child in enumerate(expanded_root.children):
+        assert child.attack_result_id == child_ids[idx]
+        assert child.parent_attack_result_id == parent_id
+        assert child.child_index == idx
+        assert child.attempt_index == idx + 1
+        assert child.result_role == AttackResultRole.TARGET_FACING
+    assert len(expanded_root.unresolved_child_attack_result_ids) == 496
+    assert hierarchy_expanded.truncated is True

@@ -2290,8 +2290,12 @@ class ScenarioRunService:
         exact_overall_counts: ScenarioProgressCounts | None = None
         exact_total_errors: int | None = None
         exact_total_retries: int | None = None
+        parent_deltas: list[ScenarioAttackResultDelta] = []
 
         if progress_snapshot.has_more:
+            parent_deltas = await self._memory.get_scenario_orchestration_parent_deltas_async(
+                scenario_result_id=scenario_result_id
+            )
             plan_ids = [scenario_result_id] if plan is not None else []
             aggregates = await self._memory.get_scenario_history_aggregates_async(
                 scenario_result_ids=[scenario_result_id],
@@ -2346,6 +2350,7 @@ class ScenarioRunService:
             overall_counts=exact_overall_counts,
             exact_total_errors=exact_total_errors,
             exact_total_retries=exact_total_retries,
+            parent_deltas=parent_deltas,
         )
 
         # Obtain real conversation counts for the actual bounded preview nodes

@@ -851,6 +851,7 @@ class ScenarioProgressReadModel:
         overall_counts: ScenarioProgressCounts | None = None,
         exact_total_errors: int | None = None,
         exact_total_retries: int | None = None,
+        parent_deltas: Sequence[ScenarioAttackResultDelta] = (),
     ) -> ScenarioHierarchyProjection:
         """
         Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
@@ -866,6 +867,8 @@ class ScenarioProgressReadModel:
             overall_counts: Optional exact run-wide progress counts overriding truncated snapshot totals.
             exact_total_errors: Optional exact run-wide error count from database aggregates.
             exact_total_retries: Optional exact run-wide retry count from database aggregates.
+            parent_deltas: Optional orchestration parent deltas to resolve roots and child references
+                beyond delta limits.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -873,12 +876,28 @@ class ScenarioProgressReadModel:
         deltas_by_id: dict[str, ScenarioAttackResultDelta] = {d.attack_result_id: d for d in snapshot.deltas}
         results_by_id: dict[str, ScenarioProgressResult] = {r.attack_result_id: r for r in snapshot.results}
 
+        plan_lookup = ScenarioPlanLookup.from_plan(plan=snapshot.plan)
+        for p_delta in parent_deltas:
+            if p_delta.attack_result_id not in deltas_by_id:
+                deltas_by_id[p_delta.attack_result_id] = p_delta
+            if p_delta.attack_result_id not in results_by_id:
+                results_by_id[p_delta.attack_result_id] = ScenarioProgressReadModel._map_progress_delta(
+                    delta=p_delta, plan_lookup=plan_lookup
+                )
+
         referenced_child_ids: set[str] = set()
-        for result in snapshot.results:
+        for result in results_by_id.values():
             for child_id in result.child_attack_result_ids:
                 referenced_child_ids.add(child_id)
 
-        root_results = [r for r in snapshot.results if r.attack_result_id not in referenced_child_ids]
+        # A true root is not referenced as a child by any parent and does not carry an attempt_index
+        # (which designates a child attempt dispatched by an orchestration parent).
+        root_results = [
+            r
+            for r in results_by_id.values()
+            if r.attack_result_id not in referenced_child_ids and r.attempt_index is None
+        ]
+        root_results.sort(key=lambda r: (r.timestamp, r.attack_result_id))
 
         visited_ids: set[str] = set()
         total_nodes_count = 0
@@ -1066,18 +1085,21 @@ class ScenarioProgressReadModel:
 
         # Handle unreached/disconnected components (including detached cycles) in a single linear pass
         if total_nodes_count < max_nodes:
-            unreached = [r for r in snapshot.results if r.attack_result_id not in visited_ids]
-            unreached.sort(key=lambda r: r.timestamp)
+            unreached = [r for r in results_by_id.values() if r.attack_result_id not in visited_ids]
+            unreached.sort(key=lambda r: (r.timestamp, r.attack_result_id))
             for next_root in unreached:
                 if total_nodes_count >= max_nodes:
                     hierarchy_truncated = True
                     break
                 if next_root.attack_result_id in visited_ids:
                     continue
+                fallback_child_index = (
+                    next_root.attempt_index - 1 if next_root.attempt_index is not None else None
+                )
                 root_node = _build_node(
                     attack_result_id=next_root.attack_result_id,
                     parent_id=None,
-                    child_index=None,
+                    child_index=fallback_child_index,
                     active_path=set(),
                     depth=0,
                 )
@@ -1086,7 +1108,7 @@ class ScenarioProgressReadModel:
                 else:
                     visited_ids.add(next_root.attack_result_id)
 
-        if not hierarchy_truncated and any(r.attack_result_id not in visited_ids for r in snapshot.results):
+        if not hierarchy_truncated and any(r.attack_result_id not in visited_ids for r in results_by_id.values()):
             hierarchy_truncated = True
 
         for g_roots in roots_by_group.values():

@@ -492,6 +492,51 @@ def test_get_conversation_stats_uses_one_latest_row_apply(
     assert "p2.converted_value_data_type AS last_data_type" in sql
 
 
+def test_get_conversation_stats_chunks_within_bind_budget(
+    uninitialized_memory_interface: AzureSQLMemory,
+) -> None:
+    """Conversation statistics query chunks parameters within _MAX_BIND_VARS and combines results."""
+    session = MagicMock()
+    session.execute.side_effect = lambda sql, params: MagicMock(
+        fetchall=lambda: [
+            (cid, 3, "preview", "text", "2026-10-16T12:00:00+00:00")
+            for cid in params.values()
+        ]
+    )
+
+    max_vars = uninitialized_memory_interface._MAX_BIND_VARS
+    assert max_vars == 2000
+
+    # 1. At the limit: exactly 2,000 IDs -> 1 query, 2,000 parameters
+    at_limit_ids = [f"conv_{i}" for i in range(max_vars)]
+    with patch.object(uninitialized_memory_interface, "_get_session", return_value=session):
+        stats_at_limit = uninitialized_memory_interface._execute_get_conversation_stats(
+            conversation_ids=at_limit_ids
+        )
+    assert len(stats_at_limit) == max_vars
+    assert session.execute.call_count == 1
+    params_at_limit = session.execute.call_args[0][1]
+    assert len(params_at_limit) == max_vars
+    assert len(params_at_limit) <= 2100
+
+    session.reset_mock()
+
+    # 2. Above the limit: 2,101 IDs -> exactly 2 queries (2,000 and 101 parameters)
+    above_limit_ids = [f"conv_{i}" for i in range(2101)]
+    with patch.object(uninitialized_memory_interface, "_get_session", return_value=session):
+        stats_above_limit = uninitialized_memory_interface._execute_get_conversation_stats(
+            conversation_ids=above_limit_ids
+        )
+    assert len(stats_above_limit) == 2101
+    assert session.execute.call_count == 2
+    first_call_params = session.execute.call_args_list[0][0][1]
+    second_call_params = session.execute.call_args_list[1][0][1]
+    assert len(first_call_params) == 2000
+    assert len(second_call_params) == 101
+    assert len(first_call_params) <= max_vars
+    assert len(second_call_params) <= max_vars
+
+
 def test_scenario_history_conditions_bind_or_within_label_and_registry_values(
     memory_interface: AzureSQLMemory,
 ) -> None:

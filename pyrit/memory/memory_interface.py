@@ -6466,6 +6466,60 @@ class MemoryInterface(abc.ABC):
                     label_values.setdefault(key, set()).add(value)
         return {key: sorted(values) for key, values in sorted(label_values.items())}
 
+    @staticmethod
+    def _row_to_scenario_attack_result_delta(row: Mapping[str, Any]) -> ScenarioAttackResultDelta:
+        retry_events = [
+            RetryEvent.model_validate(event)
+            for event in (json.loads(row["retry_events_json"]) if row["retry_events_json"] else [])
+        ]
+        atomic_identifier = (
+            AtomicAttackIdentifier.model_validate(row["atomic_attack_identifier"])
+            if row["atomic_attack_identifier"]
+            else None
+        )
+        score = None
+        if row["score_id"] is not None:
+            scorer_identifier = (
+                ComponentIdentifier.model_validate(row["scorer_class_identifier"])
+                if row["scorer_class_identifier"]
+                else None
+            )
+            score = ScenarioProgressScore(
+                scorer_name=scorer_identifier.class_name if scorer_identifier else "Unknown",
+                score_type=row["score_type"],
+                status=ScoreStatus(row["score_status"]),
+                score_value=row["score_value"],
+                score_rationale=row["score_rationale"],
+            )
+        related_cids: list[str] = []
+        for col in (
+            row["pruned_conversation_ids"],
+            row["adversarial_chat_conversation_ids"],
+            row["preparation_conversation_ids"],
+        ):
+            if isinstance(col, list):
+                related_cids.extend(str(c) for c in col if c)
+        return ScenarioAttackResultDelta(
+            attack_result_id=str(row["id"]),
+            conversation_id=row["conversation_id"],
+            objective=row["objective"],
+            objective_sha256=row["objective_sha256"],
+            atomic_attack_identifier=atomic_identifier,
+            outcome=AttackOutcome(row["outcome"]),
+            execution_time_ms=row["execution_time_ms"],
+            executed_turns=row["executed_turns"],
+            outcome_reason=row["outcome_reason"],
+            timestamp=row["timestamp"],
+            retry_events=retry_events,
+            total_retries=row["total_retries"] or 0,
+            error_type=row["error_type"],
+            error_message=row["error_message"],
+            attribution_data=row["attribution_data"] or {},
+            attack_metadata=row["attack_metadata"] or {},
+            related_conversation_ids=related_cids,
+            score=score,
+        )
+
     def _execute_get_scenario_attack_result_deltas(
         self,
         *,
@@ -6547,61 +6601,9 @@ class MemoryInterface(abc.ABC):
             rows = session.execute(statement).mappings().all()
 
         has_more = len(rows) > limit
-        deltas: list[ScenarioAttackResultDelta] = []
-        for row in rows[:limit]:
-            retry_events = [
-                RetryEvent.model_validate(event)
-                for event in (json.loads(row["retry_events_json"]) if row["retry_events_json"] else [])
-            ]
-            atomic_identifier = (
-                AtomicAttackIdentifier.model_validate(row["atomic_attack_identifier"])
-                if row["atomic_attack_identifier"]
-                else None
-            )
-            score = None
-            if row["score_id"] is not None:
-                scorer_identifier = (
-                    ComponentIdentifier.model_validate(row["scorer_class_identifier"])
-                    if row["scorer_class_identifier"]
-                    else None
-                )
-                score = ScenarioProgressScore(
-                    scorer_name=scorer_identifier.class_name if scorer_identifier else "Unknown",
-                    score_type=row["score_type"],
-                    status=ScoreStatus(row["score_status"]),
-                    score_value=row["score_value"],
-                    score_rationale=row["score_rationale"],
-                )
-            related_cids: list[str] = []
-            for col in (
-                row["pruned_conversation_ids"],
-                row["adversarial_chat_conversation_ids"],
-                row["preparation_conversation_ids"],
-            ):
-                if isinstance(col, list):
-                    related_cids.extend(str(c) for c in col if c)
-            deltas.append(
-                ScenarioAttackResultDelta(
-                    attack_result_id=str(row["id"]),
-                    conversation_id=row["conversation_id"],
-                    objective=row["objective"],
-                    objective_sha256=row["objective_sha256"],
-                    atomic_attack_identifier=atomic_identifier,
-                    outcome=AttackOutcome(row["outcome"]),
-                    execution_time_ms=row["execution_time_ms"],
-                    executed_turns=row["executed_turns"],
-                    outcome_reason=row["outcome_reason"],
-                    timestamp=row["timestamp"],
-                    retry_events=retry_events,
-                    total_retries=row["total_retries"] or 0,
-                    error_type=row["error_type"],
-                    error_message=row["error_message"],
-                    attribution_data=row["attribution_data"] or {},
-                    attack_metadata=row["attack_metadata"] or {},
-                    related_conversation_ids=related_cids,
-                    score=score,
-                )
-            )
+        deltas: list[ScenarioAttackResultDelta] = [
+            self._row_to_scenario_attack_result_delta(row) for row in rows[:limit]
+        ]
         return deltas, has_more
 
     def _build_scenario_attack_result_deltas_by_ids_statement(
@@ -6722,61 +6724,82 @@ class MemoryInterface(abc.ABC):
                     attack_result_ids=[str(u) for u in chunk],
                 )
                 rows = session.execute(statement).mappings().all()
-                for row in rows:
-                    retry_events = [
-                        RetryEvent.model_validate(event)
-                        for event in (json.loads(row["retry_events_json"]) if row["retry_events_json"] else [])
-                    ]
-                    atomic_identifier = (
-                        AtomicAttackIdentifier.model_validate(row["atomic_attack_identifier"])
-                        if row["atomic_attack_identifier"]
-                        else None
-                    )
-                    score = None
-                    if row["score_id"] is not None:
-                        scorer_identifier = (
-                            ComponentIdentifier.model_validate(row["scorer_class_identifier"])
-                            if row["scorer_class_identifier"]
-                            else None
-                        )
-                        score = ScenarioProgressScore(
-                            scorer_name=scorer_identifier.class_name if scorer_identifier else "Unknown",
-                            score_type=row["score_type"],
-                            status=ScoreStatus(row["score_status"]),
-                            score_value=row["score_value"],
-                            score_rationale=row["score_rationale"],
-                        )
-                    related_cids: list[str] = []
-                    for col in (
-                        row["pruned_conversation_ids"],
-                        row["adversarial_chat_conversation_ids"],
-                        row["preparation_conversation_ids"],
-                    ):
-                        if isinstance(col, list):
-                            related_cids.extend(str(c) for c in col if c)
-                    deltas.append(
-                        ScenarioAttackResultDelta(
-                            attack_result_id=str(row["id"]),
-                            conversation_id=row["conversation_id"],
-                            objective=row["objective"],
-                            objective_sha256=row["objective_sha256"],
-                            atomic_attack_identifier=atomic_identifier,
-                            outcome=AttackOutcome(row["outcome"]),
-                            execution_time_ms=row["execution_time_ms"],
-                            executed_turns=row["executed_turns"],
-                            outcome_reason=row["outcome_reason"],
-                            timestamp=row["timestamp"],
-                            retry_events=retry_events,
-                            total_retries=row["total_retries"] or 0,
-                            error_type=row["error_type"],
-                            error_message=row["error_message"],
-                            attribution_data=row["attribution_data"] or {},
-                            attack_metadata=row["attack_metadata"] or {},
-                            related_conversation_ids=related_cids,
-                            score=score,
-                        )
-                    )
+                deltas.extend(self._row_to_scenario_attack_result_delta(row) for row in rows)
         return deltas
+
+    def _execute_get_scenario_orchestration_parent_deltas(
+        self,
+        *,
+        scenario_result_id: str,
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return bounded scenario-linked orchestration parent result deltas for a run.
+
+        Finds results that have result_role == ORCHESTRATION or have child_attack_result_ids in metadata.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched orchestration parent deltas.
+        """
+        try:
+            scenario_uuid = uuid.UUID(scenario_result_id)
+        except (ValueError, TypeError):
+            return []
+
+        role_match = self._get_scenario_role_match_condition(
+            role_expression=JsonScalar(AttackResultEntry.attribution_data, literal("$.result_role")),
+            role=AttackResultRole.ORCHESTRATION,
+        )
+        metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
+        child_ids_match = metadata_text.like("%child_attack_result_ids%")
+
+        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
+
+        statement = (
+            select(
+                AttackResultEntry.id,
+                AttackResultEntry.conversation_id,
+                AttackResultEntry.objective,
+                AttackResultEntry.objective_sha256,
+                AttackResultEntry.atomic_attack_identifier,
+                AttackResultEntry.outcome,
+                AttackResultEntry.execution_time_ms,
+                AttackResultEntry.executed_turns,
+                AttackResultEntry.outcome_reason,
+                AttackResultEntry.timestamp,
+                AttackResultEntry.retry_events_json,
+                AttackResultEntry.total_retries,
+                AttackResultEntry.error_type,
+                AttackResultEntry.error_message,
+                AttackResultEntry.attribution_data,
+                AttackResultEntry.attack_metadata,
+                AttackResultEntry.pruned_conversation_ids,
+                AttackResultEntry.adversarial_chat_conversation_ids,
+                AttackResultEntry.preparation_conversation_ids,
+                ScoreEntry.id.label("score_id"),
+                ScoreEntry.score_value,
+                ScoreEntry.score_type,
+                ScoreEntry.status.label("score_status"),
+                ScoreEntry.score_rationale,
+                ScoreEntry.scorer_class_identifier,
+            )
+            .outerjoin(
+                ScoreEntry,
+                func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
+            )
+            .where(
+                and_(
+                    AttackResultEntry.attribution_parent_id == scenario_uuid,
+                    or_(role_match, child_ids_match),
+                )
+            )
+            .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+            .limit(self._MAX_BIND_VARS)
+        )
+
+        with closing(self._get_session()) as session:
+            rows = session.execute(statement).mappings().all()
+
+        return [self._row_to_scenario_attack_result_delta(row) for row in rows]
 
     def _fetch_bounded_conversation_messages(
         self,
@@ -10510,6 +10533,27 @@ class MemoryInterface(abc.ABC):
             self._execute_get_scenario_attack_result_deltas_by_ids,
             scenario_result_id=scenario_result_id,
             attack_result_ids=attack_result_ids,
+        )
+
+    async def get_scenario_orchestration_parent_deltas_async(
+        self,
+        *,
+        scenario_result_id: str,
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return lightweight scenario-linked orchestration parent result deltas for a run.
+
+        Finds results that have result_role == ORCHESTRATION or have child_attack_result_ids in metadata.
+
+        Args:
+            scenario_result_id: The ID of the scenario run.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched orchestration parent deltas.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_scenario_orchestration_parent_deltas,
+            scenario_result_id=scenario_result_id,
         )
 
     async def get_attack_result_conversation_projections_async(
