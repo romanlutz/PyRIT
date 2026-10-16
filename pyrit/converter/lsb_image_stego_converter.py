@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import base64
+import asyncio
 import math
 from io import BytesIO
+from pathlib import Path  # noqa: TC003 - registry annotation resolution
 from typing import TYPE_CHECKING, Literal
 
 from PIL import Image
@@ -14,8 +15,6 @@ from pyrit.converter.converter import Converter, ConverterResult
 from pyrit.memory import data_serializer_factory
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pyrit.models import ComponentIdentifier, PromptDataType
 
 StegoChannelMode = Literal["RGB", "RGBA"]
@@ -139,6 +138,11 @@ class LSBImageStegoConverter(Converter):
 
         return Image.frombytes(self._channels, carrier.size, bytes(raw_bytes))
 
+    def _encode_png(self, prompt: str) -> bytes:
+        with self._embed_lsb(prompt=prompt) as stego_image, BytesIO() as image_bytes:
+            stego_image.save(fp=image_bytes, format="PNG")
+            return image_bytes.getvalue()
+
     async def convert_async(self, *, prompt: str, input_type: PromptDataType = "text") -> ConverterResult:
         """
         Convert the given text prompt into a lossless PNG image with an LSB-encoded payload.
@@ -158,13 +162,11 @@ class LSBImageStegoConverter(Converter):
         if prompt.strip() == "":
             raise ValueError("Please provide valid text value")
 
-        stego_image = self._embed_lsb(prompt=prompt)
+        image_bytes = await asyncio.to_thread(self._encode_png, prompt)
         img_serializer = data_serializer_factory(
             category="prompt-memory-entries", data_type="image_path", extension="png"
         )
-        image_bytes = BytesIO()
-        stego_image.save(image_bytes, format="PNG")
-        await img_serializer.save_b64_image_async(data=base64.b64encode(image_bytes.getvalue()))
+        await img_serializer.save_data_async(data=image_bytes)
         return ConverterResult(output_text=str(img_serializer.value), output_type="image_path")
 
     @classmethod
@@ -265,7 +267,10 @@ class LSBImageStegoDecodeConverter(Converter):
 
         img_serializer = data_serializer_factory(category="prompt-memory-entries", value=prompt, data_type="image_path")
         img_bytes = await img_serializer.read_data_async()
-        decoded_text = LSBImageStegoConverter.decode_image(
-            BytesIO(img_bytes), channels=self._channels, delimiter=self._delimiter
+        decoded_text = await asyncio.to_thread(
+            LSBImageStegoConverter.decode_image,
+            BytesIO(img_bytes),
+            channels=self._channels,
+            delimiter=self._delimiter,
         )
         return ConverterResult(output_text=decoded_text, output_type="text")

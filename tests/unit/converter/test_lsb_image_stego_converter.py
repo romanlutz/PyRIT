@@ -4,28 +4,41 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import warnings
 from io import BytesIO
 from pathlib import Path
+from threading import Event, get_ident
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from PIL import Image
 
 from pyrit.converter import LSBImageStegoConverter, LSBImageStegoDecodeConverter
+from pyrit.memory import DataTypeSerializer
+from pyrit.registry import ConverterRegistry
+
+if TYPE_CHECKING:
+    from pyrit.converter.lsb_image_stego_converter import StegoChannelMode
 
 
 def _make_serializer_mock(output_file: Path) -> MagicMock:
-    """Create a mock ImagePathDataTypeSerializer that writes the base64 PNG to ``output_file``."""
-    serializer = MagicMock()
+    """Create a mock image serializer that writes PNG bytes to ``output_file``."""
+    serializer = MagicMock(spec=DataTypeSerializer)
     serializer.value = str(output_file)
 
-    async def _save_b64_image_async(*, data: bytes) -> None:
-        output_file.write_bytes(base64.b64decode(data))
+    async def _save_data_async(*, data: bytes) -> None:
+        await asyncio.to_thread(output_file.write_bytes, data)
 
-    serializer.save_b64_image_async = AsyncMock(side_effect=_save_b64_image_async)
+    serializer.save_data_async = AsyncMock(side_effect=_save_data_async)
     return serializer
+
+
+def _assert_event_loop_responsive(*, loop: asyncio.AbstractEventLoop, event_loop_thread_id: int) -> None:
+    assert get_ident() != event_loop_thread_id
+    progressed = Event()
+    loop.call_soon_threadsafe(progressed.set)
+    assert progressed.wait(timeout=5), "The event loop did not progress while image processing was paused"
 
 
 @pytest.mark.asyncio
@@ -296,3 +309,86 @@ async def test_lsb_converter_validation_and_identifier() -> None:
 
     with pytest.raises(ValueError, match="background_color must be an RGB or RGBA tuple"):
         LSBImageStegoConverter(background_color=(True, 0, 0, 255))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("use_path", [False, True])
+def test_lsb_converter_registry_accepts_carrier_image_path(tmp_path: Path, *, use_path: bool) -> None:
+    carrier_path = tmp_path / "registry_carrier.png"
+    with Image.new("RGB", (64, 64)) as carrier:
+        carrier.save(carrier_path, format="PNG")
+
+    registry = ConverterRegistry()
+    metadata = registry.get_registered_class_metadata("LSBImageStegoConverter")
+    assert metadata is not None
+    parameter = next(parameter for parameter in metadata.parameters if parameter.name == "carrier_image_path")
+    assert parameter.is_external_input
+    assert parameter.is_path_or_str
+
+    converter = registry.create_instance_from_external_input(
+        "LSBImageStegoConverter",
+        params={"carrier_image_path": carrier_path if use_path else str(carrier_path)},
+    )
+    assert isinstance(converter, LSBImageStegoConverter)
+    assert converter.get_identifier().params["carrier_image_path"] == str(carrier_path)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+async def test_lsb_converter_image_processing_keeps_event_loop_responsive() -> None:
+    converter = LSBImageStegoConverter()
+    loop = asyncio.get_running_loop()
+    event_loop_thread_id = get_ident()
+    embed_lsb = converter._embed_lsb
+    save_image = Image.Image.save
+
+    def embed_in_worker(prompt: str) -> Image.Image:
+        _assert_event_loop_responsive(loop=loop, event_loop_thread_id=event_loop_thread_id)
+        return embed_lsb(prompt)
+
+    def save_in_worker(image: Image.Image, *, fp: BytesIO, **params: str) -> None:
+        _assert_event_loop_responsive(loop=loop, event_loop_thread_id=event_loop_thread_id)
+        save_image(image, fp=fp, **params)
+
+    with (
+        patch.object(converter, "_embed_lsb", side_effect=embed_in_worker) as embed_mock,
+        patch.object(Image.Image, "save", autospec=True, side_effect=save_in_worker) as save_mock,
+    ):
+        result = await converter.convert_async(prompt="Responsive encoder fixture.")
+
+    embed_mock.assert_called_once()
+    save_mock.assert_called_once()
+    decoded = await LSBImageStegoDecodeConverter().convert_async(prompt=result.output_text)
+    assert decoded.output_text == "Responsive encoder fixture."
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("has_payload", [True, False])
+async def test_lsb_decode_converter_keeps_event_loop_responsive(tmp_path: Path, *, has_payload: bool) -> None:
+    prompt = "Responsive decoder fixture."
+    if has_payload:
+        encoded = await LSBImageStegoConverter().convert_async(prompt=prompt)
+        image_path = encoded.output_text
+    else:
+        blank_path = tmp_path / "blank.png"
+        with Image.new("RGBA", (16, 16), (255, 255, 255, 255)) as image:
+            await asyncio.to_thread(image.save, blank_path, format="PNG")
+        image_path = str(blank_path)
+
+    loop = asyncio.get_running_loop()
+    event_loop_thread_id = get_ident()
+    decode_image = LSBImageStegoConverter.decode_image
+
+    def decode_in_worker(image_path: BytesIO, *, channels: StegoChannelMode, delimiter: str) -> str:
+        _assert_event_loop_responsive(loop=loop, event_loop_thread_id=event_loop_thread_id)
+        return decode_image(image_path, channels=channels, delimiter=delimiter)
+
+    with patch.object(LSBImageStegoConverter, "decode_image", side_effect=decode_in_worker) as decode_mock:
+        decoder = LSBImageStegoDecodeConverter()
+        if has_payload:
+            result = await decoder.convert_async(prompt=image_path)
+            assert result.output_text == prompt
+            assert result.output_type == "text"
+        else:
+            with pytest.raises(ValueError, match="not found in image LSB stream"):
+                await decoder.convert_async(prompt=image_path)
+
+    decode_mock.assert_called_once()
