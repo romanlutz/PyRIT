@@ -1609,6 +1609,7 @@ class ScenarioRunService:
         *,
         aggregates: dict[str, ScenarioHistoryAggregate],
         plans: Mapping[str, list[ScenarioRunPlanAtomicGroup] | None],
+        max_deltas: int | None = None,
     ) -> dict[str, ScenarioHistoryAggregate]:
         """
         Recount runs the SQL aggregate can't resolve with the shared statistics.
@@ -1628,30 +1629,32 @@ class ScenarioRunService:
             cursor: AttackResultKeysetCursor | None = None
             all_deltas: list[ScenarioAttackResultDelta] = []
             while True:
+                remaining_limit = min(500, max_deltas - len(all_deltas)) if max_deltas is not None else 500
+                if remaining_limit <= 0:
+                    break
                 page, has_more = await self._memory.get_scenario_attack_result_deltas_async(
                     scenario_result_id=run_id,
                     cursor=cursor,
-                    limit=500,
+                    limit=remaining_limit,
                 )
                 all_deltas.extend(page)
-                if not has_more or not page:
+                if not has_more or not page or (max_deltas is not None and len(all_deltas) >= max_deltas):
                     break
                 cursor = AttackResultKeysetCursor(
                     timestamp=page[-1].timestamp, attack_result_id=page[-1].attack_result_id
                 )
 
-            use_plan = plans.get(run_id) is not None
-            atomic_groups = plans.get(run_id) or [] if use_plan else []
-            groups_by_identity: dict[tuple[str, str], ScenarioRunPlanAtomicGroup] = {}
-            grouped_by_name: dict[str, list[ScenarioRunPlanAtomicGroup]] = {}
-            for group in atomic_groups:
-                groups_by_identity[(group.atomic_attack_name, group.technique_eval_hash)] = group
-                grouped_by_name.setdefault(group.atomic_attack_name, []).append(group)
-            plan_lookup = ScenarioPlanLookup(
-                groups_by_identity=groups_by_identity,
-                groups_by_name={name: tuple(g) for name, g in grouped_by_name.items()},
-                seed_ids_by_group_and_objective={},
-            )
+            saved_plan: ScenarioRunPlan | None = None
+            header = await self._memory.get_scenario_result_header_async(scenario_result_id=run_id)
+            if header is not None:
+                try:
+                    saved_plan = self._load_run_plan(scenario_result=header)
+                except (ValidationError, ValueError):
+                    logger.warning(
+                        "Scenario run %s has an invalid saved run plan; recounting as legacy run.",
+                        run_id,
+                    )
+            plan_lookup = ScenarioPlanLookup.from_plan(plan=saved_plan)
             attempts: list[ScenarioAttempt] = []
             for delta in all_deltas:
                 atomic_name = str(delta.attribution_data.get("parent_collection") or "")
@@ -1688,12 +1691,85 @@ class ScenarioRunService:
             for a in attempts:
                 attempts_by_unit.setdefault(a.unit, []).append(a)
 
+            if saved_plan is not None:
+                planned_units = list(
+                    dict.fromkeys(
+                        ScenarioExecutionUnit(atomic_group_id=group.id, seed_group_id=seed_id)
+                        for group in saved_plan.atomic_groups
+                        for seed_id in group.seed_group_ids
+                    )
+                )
+                counted_units = planned_units
+                planned = len(planned_units)
+            else:
+                counted_units = list(attempts_by_unit.keys())
+                planned = None
+
             overall = count_execution_units(
-                units=list(attempts_by_unit.keys()),
+                units=counted_units,
                 attempts_by_unit=attempts_by_unit,
-                planned=None,
+                planned=planned,
                 producer_attempts=attempts,
             )
+
+            recounted_group_counts: dict[str, ScenarioProgressCounts] = {}
+            if saved_plan is not None:
+                for group in saved_plan.atomic_groups:
+                    g_units = [
+                        ScenarioExecutionUnit(atomic_group_id=group.id, seed_group_id=seed_id)
+                        for seed_id in group.seed_group_ids
+                    ]
+                    g_producer_attempts = [a for a in attempts if a.unit.atomic_group_id == group.id]
+                    g_counts = count_execution_units(
+                        units=g_units,
+                        attempts_by_unit=attempts_by_unit,
+                        planned=len(g_units),
+                        producer_attempts=g_producer_attempts,
+                    )
+                    recounted_group_counts[group.id] = g_counts
+
+                unplanned_group_ids = {a.unit.atomic_group_id for a in attempts} - {
+                    g.id for g in saved_plan.atomic_groups
+                }
+                for gid in unplanned_group_ids:
+                    g_units = [u for u in attempts_by_unit if u.atomic_group_id == gid]
+                    g_producer_attempts = [a for a in attempts if a.unit.atomic_group_id == gid]
+                    g_counts = count_execution_units(
+                        units=g_units,
+                        attempts_by_unit=attempts_by_unit,
+                        planned=None,
+                        producer_attempts=g_producer_attempts,
+                    )
+                    recounted_group_counts[gid] = g_counts
+            else:
+                for gid in {a.unit.atomic_group_id for a in attempts}:
+                    g_units = [u for u in attempts_by_unit if u.atomic_group_id == gid]
+                    g_producer_attempts = [a for a in attempts if a.unit.atomic_group_id == gid]
+                    g_counts = count_execution_units(
+                        units=g_units,
+                        attempts_by_unit=attempts_by_unit,
+                        planned=None,
+                        producer_attempts=g_producer_attempts,
+                    )
+                    recounted_group_counts[gid] = g_counts
+
+            is_truncated = max_deltas is not None and len(all_deltas) >= max_deltas
+            raw_total_errors = (
+                aggregates[run_id].raw_total_errors
+                if is_truncated
+                else sum(1 for d in all_deltas if d.outcome == AttackOutcome.ERROR)
+            )
+            raw_total_retries = (
+                aggregates[run_id].raw_total_retries if is_truncated else sum(d.total_retries for d in all_deltas)
+            )
+            raw_retrying_attacks_count = (
+                aggregates[run_id].raw_retrying_attacks_count
+                if is_truncated
+                else sum(1 for d in all_deltas if d.total_retries > 0 or bool(d.retry_events))
+            )
+
+            merged_group_counts = {**aggregates[run_id].group_counts, **recounted_group_counts}
+
             recounted[run_id] = replace(
                 aggregates[run_id],
                 unit_count=overall.completed,
@@ -1705,6 +1781,10 @@ class ScenarioRunService:
                 outcome_failures=overall.outcomes.failures if overall.outcomes else 0,
                 outcome_errors=overall.outcomes.errors if overall.outcomes else 0,
                 outcome_undetermined=overall.outcomes.undetermined if overall.outcomes else 0,
+                raw_total_errors=raw_total_errors,
+                raw_total_retries=raw_total_retries,
+                raw_retrying_attacks_count=raw_retrying_attacks_count,
+                group_counts=merged_group_counts,
                 target_facing_attempts=overall.producer_counts.target_facing.attempts,
                 target_facing_error_attempts=overall.producer_counts.target_facing.errors,
                 target_facing_retries=overall.producer_counts.target_facing.retries,
@@ -2385,19 +2465,36 @@ class ScenarioRunService:
                 for cid in r.child_attack_result_ids:
                     referenced_child_ids.add(cid)
 
-            current_candidates = [
+            unreferenced_roots = [
                 r.attack_result_id for r in all_results_map.values() if r.attack_result_id not in referenced_child_ids
             ]
+            reachable: set[str] = set()
+            queue = list(unreferenced_roots)
+            while queue:
+                curr = queue.pop()
+                if curr not in reachable:
+                    reachable.add(curr)
+                    res = all_results_map.get(curr)
+                    if res:
+                        queue.extend(res.child_attack_result_ids)
 
+            unreached_cyclic = [cid for cid in all_results_map if cid not in reachable]
+            current_candidates = list(unreferenced_roots) if unreferenced_roots else list(unreached_cyclic)
+
+            parent_budget = self._progress_read_model._STORAGE_PAGE_SIZE
+            checked_child_ids: set[str] = set()
             depth = 0
-            while current_candidates and depth < 10:
+            while current_candidates and depth < 10 and len(parent_deltas) < parent_budget:
                 depth += 1
+                remaining_budget = max(0, parent_budget - len(parent_deltas))
+                if remaining_budget <= 0:
+                    break
                 new_parents = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
                     scenario_result_id=scenario_result_id,
                     child_ids=current_candidates,
+                    limit=remaining_budget,
                 )
-                if not new_parents:
-                    break
+                checked_child_ids.update(current_candidates)
                 next_candidates: list[str] = []
                 for p in new_parents:
                     if p.attack_result_id not in all_deltas_map:
@@ -2406,7 +2503,13 @@ class ScenarioRunService:
                         p_res = self._progress_read_model._map_progress_delta(delta=p, plan_lookup=plan_lookup)
                         all_results_map[p.attack_result_id] = p_res
                         next_candidates.append(p.attack_result_id)
+                        if len(parent_deltas) >= parent_budget:
+                            break
                 current_candidates = next_candidates
+                if not current_candidates and len(parent_deltas) < parent_budget and depth < 10:
+                    remaining_cyclic = [cid for cid in unreached_cyclic if cid not in checked_child_ids]
+                    if remaining_cyclic:
+                        current_candidates = remaining_cyclic
 
             plan_ids = [scenario_result_id] if plan is not None else []
             aggregates = await self._memory.get_scenario_history_aggregates_async(
@@ -2417,6 +2520,7 @@ class ScenarioRunService:
             aggregates = await self._recount_with_sdk_statistics_async(
                 aggregates=aggregates,
                 plans=plans_map,
+                max_deltas=max(max_nodes, self._progress_read_model._STORAGE_PAGE_SIZE),
             )
             agg = aggregates.get(scenario_result_id)
             if agg is not None:

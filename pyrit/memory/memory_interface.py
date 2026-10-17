@@ -6335,6 +6335,8 @@ class MemoryInterface(abc.ABC):
             units.c.unit_group_id,
             units.c.timestamp,
             units.c.outcome.label("latest_outcome"),
+            units.c.outcome.label("attempt_outcome"),
+            units.c.has_retries.label("has_retries"),
             func.max(units.c.is_planned).over(partition_by=unit_partition).label("is_planned"),
             unit_retries.label("unit_retries"),
             func.sum(case((is_error, 1), else_=0)).over(partition_by=unit_partition).label("unit_errors"),
@@ -6404,26 +6406,11 @@ class MemoryInterface(abc.ABC):
                 func.sum(
                     case((and_(counted, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
                 ).label("outcome_undetermined"),
-                func.sum(case((ranked.c.unit_rank == 1, ranked.c.unit_errors), else_=0)).label("raw_total_errors"),
-                func.sum(
-                    case((and_(ranked.c.unit_rank == 1, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)
-                ).label("raw_total_retries"),
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                ranked.c.unit_rank == 1,
-                                or_(
-                                    ranked.c.unit_retries > 0,
-                                    ranked.c.attempt_retries > 0,
-                                    ranked.c.unit_has_retries == 1,
-                                ),
-                            ),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ).label("raw_retrying_attacks_count"),
+                func.sum(case((ranked.c.attempt_outcome == AttackOutcome.ERROR.value, 1), else_=0)).label(
+                    "raw_total_errors"
+                ),
+                func.sum(ranked.c.attempt_retries).label("raw_total_retries"),
+                func.sum(case((ranked.c.has_retries == 1, 1), else_=0)).label("raw_retrying_attacks_count"),
                 func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
                 func.sum(
                     case(
@@ -7033,6 +7020,7 @@ class MemoryInterface(abc.ABC):
         *,
         scenario_result_id: str,
         child_ids: Sequence[str],
+        limit: int = 500,
     ) -> list[ScenarioAttackResultDelta]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
@@ -7040,6 +7028,7 @@ class MemoryInterface(abc.ABC):
         Args:
             scenario_result_id: Persisted scenario run ID.
             child_ids: Child attack result IDs to find parents for.
+            limit: Maximum number of parent deltas to return.
 
         Returns:
             list[ScenarioAttackResultDelta]: The matched parent deltas.
@@ -7049,16 +7038,20 @@ class MemoryInterface(abc.ABC):
         except (ValueError, TypeError):
             return []
         valid_child_ids = [cid for cid in child_ids if cid]
-        if not valid_child_ids:
+        if not valid_child_ids or limit <= 0:
             return []
 
-        deltas: list[ScenarioAttackResultDelta] = []
+        seen_ids: set[str] = set()
+        unique_deltas: list[ScenarioAttackResultDelta] = []
         metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
         attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
 
         chunk_size = min(len(valid_child_ids), max(1, self._MAX_BIND_VARS - 10))
         with closing(self._get_session()) as session:
             for i in range(0, len(valid_child_ids), chunk_size):
+                remaining_limit = max(0, limit - len(unique_deltas))
+                if remaining_limit <= 0:
+                    break
                 chunk = valid_child_ids[i : i + chunk_size]
                 child_matches = [metadata_text.like(f'%"{cid}"%') for cid in chunk]
                 statement = (
@@ -7101,17 +7094,20 @@ class MemoryInterface(abc.ABC):
                         )
                     )
                     .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+                    .limit(remaining_limit + 1)
                 )
                 rows = session.execute(statement).mappings().all()
-                deltas.extend(self._row_to_scenario_attack_result_delta(row) for row in rows)
+                for row in rows:
+                    delta = self._row_to_scenario_attack_result_delta(row)
+                    if delta.attack_result_id not in seen_ids:
+                        seen_ids.add(delta.attack_result_id)
+                        unique_deltas.append(delta)
+                        if len(unique_deltas) >= limit:
+                            break
+                if len(unique_deltas) >= limit:
+                    break
 
-        seen_ids: set[str] = set()
-        unique_deltas: list[ScenarioAttackResultDelta] = []
-        for d in deltas:
-            if d.attack_result_id not in seen_ids:
-                seen_ids.add(d.attack_result_id)
-                unique_deltas.append(d)
-        return unique_deltas
+        return unique_deltas[:limit]
 
     def _fetch_bounded_conversation_messages(
         self,
@@ -10873,6 +10869,7 @@ class MemoryInterface(abc.ABC):
         *,
         scenario_result_id: str,
         child_ids: Sequence[str],
+        limit: int = 500,
     ) -> list[ScenarioAttackResultDelta]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
@@ -10880,6 +10877,7 @@ class MemoryInterface(abc.ABC):
         Args:
             scenario_result_id: The ID of the scenario run.
             child_ids: Child attack result IDs to find parents for.
+            limit: Maximum number of parent deltas to return.
 
         Returns:
             list[ScenarioAttackResultDelta]: The matched parent deltas.
@@ -10888,6 +10886,7 @@ class MemoryInterface(abc.ABC):
             self._execute_get_scenario_parent_deltas_for_child_ids,
             scenario_result_id=scenario_result_id,
             child_ids=child_ids,
+            limit=limit,
         )
 
     async def get_attack_result_conversation_projections_async(
