@@ -77,6 +77,13 @@ CI workers. These are deadlock backstops, not expected runtimes. Production dead
 are unchanged. Deadline and cancellation tests use explicit controls and keep their
 separate timing assertions.
 
+Async correctness tests can use `TEST_WATCHDOG_SECONDS` from `tests/unit/async_utils.py`
+for a finite 300-second deadlock backstop. Tests that start background tasks must
+release any test-controlled waits and join their tasks before removing mocks or
+disposing fixtures, including when a watchdog expires. When waiting for a task to
+signal readiness, also watch for that task finishing so an early exception is not
+hidden by the readiness timeout.
+
   * To run every test under a subdirectory:
 
       ```bash
