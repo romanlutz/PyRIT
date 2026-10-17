@@ -10,7 +10,7 @@ import hashlib
 import io
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -18,10 +18,19 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from inspect_ai.log import read_eval_log
 
+from pyrit.backend.middleware.auth import AuthenticatedUser
+from pyrit.backend.routes import evaluation_jobs
+from pyrit.backend.services.evaluation_job_application import create_remote_original_evaluation_application_async
 from pyrit.backend.services.evaluation_job_service import RemoteEvaluationJobSettings
-from pyrit.executor.jobs.inspect import OriginalInspectArtifactWriter, PublicOriginalInspectJobRuntime
+from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalScorePolicy
+from pyrit.executor.jobs.inspect import (
+    ApprovedOriginalInspectBinding,
+    OriginalInspectArtifactWriter,
+    PublicOriginalInspectJobRuntime,
+)
 from pyrit.executor.jobs.port import EvaluationJobError, EvaluationJobErrorCode, EvaluationRuntimeArtifacts
 from pyrit.executor.jobs.remote import (
     RemoteEvaluationArtifactWriter,
@@ -82,6 +91,10 @@ from pyrit.models.native_cyber_evidence import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from starlette.middleware.base import RequestResponseEndpoint
+    from starlette.requests import Request
+    from starlette.responses import Response
+
     from pyrit.memory import SQLiteMemory
 
 ACTOR = "00000000-0000-4000-8000-000000000001"
@@ -104,6 +117,43 @@ class _Credentials:
     async def close_async(self) -> None:
         self.close_calls += 1
         self.closed = True
+
+
+@pytest.mark.parametrize(
+    ("poll", "cancel_join", "valid"),
+    [
+        (0.05, 0.05, True),
+        (1860, 360, True),
+        (1860.01, 360, False),
+        (1860, 360.01, False),
+        (0.049, None, False),
+        (60, 0.049, False),
+        (True, None, False),
+        (60, True, False),
+        (float("inf"), None, False),
+        (60, float("inf"), False),
+        (float("nan"), None, False),
+        (60, float("nan"), False),
+    ],
+)
+def test_explicit_host_poll_and_cleanup_budgets_are_finite_and_bounded(
+    *, poll: float, cancel_join: float | None, valid: bool
+) -> None:
+    defaults = EvaluationWorkerHttpSettings(
+        base_url="https://worker.example.invalid",
+        audience="public-fixture",
+        service_id="public_fixture",
+        schema_sha256=evaluation_worker_schema_sha256(),
+    )
+    if valid:
+        configured = replace(defaults, poll_deadline_seconds=poll, cancel_join_timeout_seconds=cancel_join)
+        assert configured.poll_deadline_seconds == poll and configured.cancel_join_timeout_seconds == cancel_join
+        assert configured.request_timeout_seconds == 10 and configured.settlement_timeout_seconds == 10
+    else:
+        with pytest.raises(ValueError, match="finite and bounded"):
+            replace(defaults, poll_deadline_seconds=poll, cancel_join_timeout_seconds=cancel_join)
+    assert defaults.poll_deadline_seconds == 60 and defaults.cancel_join_timeout_seconds is None
+    assert evaluation_worker_schema_sha256() == "1bec6625595424c4b5d1305e8b592c177a2181324b0a0f7422ed2c0c9e0f2fdc"
 
 
 @pytest.mark.parametrize(
@@ -555,6 +605,125 @@ async def test_mock_transport_exact_archive_is_imported_only_into_api_canonical_
     finally:
         await port.shutdown_async()
     assert credentials.closed
+
+
+@pytest.mark.parametrize("mode", ["", "held", "held_default", "settlement"])
+async def test_installed_opaque_application_reuses_worker_v1_and_original_api_canonical_writer_async(
+    *, sqlite_instance: SQLiteMemory, tmp_path: Path, mode: str
+) -> None:
+    original = await PublicOriginalInspectJobRuntime.create_async()
+    binding = ApprovedOriginalInspectBinding(
+        case=original.source.case,
+        spec=original.source.spec,
+        score_policy=InspectOriginalScorePolicy(
+            task_name=original.source.case.task_name,
+            task_version=original.source.case.task_version,
+            primary_scorer="original_inert_scorer",
+        ),
+    )
+    held = mode.startswith("held")
+    worker = _WorkerMock(
+        runtime=original,
+        root=tmp_path / "source",
+        mode="held" if held else mode,
+        real_original=not held,
+    )
+
+    async def worker_transport_async(request: httpx.Request) -> httpx.Response:
+        if held and request.url.path.endswith("/cancel"):
+            await asyncio.sleep(0.1)
+        return await worker.handle_async(request)
+
+    credentials = _Credentials()
+    application = await create_remote_original_evaluation_application_async(
+        memory=sqlite_instance,
+        root=tmp_path / "api",
+        case_ref="public-original-fixture",
+        binding=binding,
+        allowed_actor_ids=frozenset({ACTOR}),
+        settings=EvaluationWorkerHttpSettings(
+            base_url="http://127.0.0.1",
+            audience=credentials.audience,
+            service_id="public_fixture",
+            schema_sha256=evaluation_worker_schema_sha256(),
+            allow_loopback_http=True,
+            request_timeout_seconds=30,
+            poll_interval_seconds=0.01,
+            poll_deadline_seconds=1860,
+            settlement_timeout_seconds=0.05 if held else 10,
+            cancel_join_timeout_seconds=None if mode == "held_default" else 1,
+        ),
+        credentials=credentials,
+        transport=httpx.MockTransport(worker_transport_async),
+    )
+    port = application.port
+    assert isinstance(port, RemoteEvaluationJobGateway)
+    assert application.writer.canonical_memory is sqlite_instance
+    assert application.writer._runtime is None
+    assert port._writers[binding.registration.runtime].writer is application.writer
+    app = FastAPI()
+    app.state.evaluation_job_port = port
+    app.state.evaluation_job_application = application
+    app.include_router(evaluation_jobs.router, prefix="/api")
+
+    @app.middleware("http")
+    async def trusted_fixture_identity_async(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        request.state.user = AuthenticatedUser(oid=ACTOR, name="Public fixture", email="", groups=[])
+        return await call_next(request)
+
+    await port.startup_async()
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/evaluation-jobs/cases/public-original-fixture", json={"request_id": str(uuid4())}
+            )
+            assert response.status_code == 202 and worker.executions == 0
+            job_id = UUID(response.json()["job_id"])
+            port.start_consumer()
+            if held:
+                await asyncio.wait_for(worker.started.wait(), 5)
+                assert (await client.post(f"/api/evaluation-jobs/{job_id}/cancel")).status_code == 200
+            terminal = await port.wait_async(job_id=job_id, actor_id=ACTOR)
+            assert terminal.request.source == binding.case.package
+            assert terminal.request.execution_profile_sha256 == binding.spec.spec_sha256
+            result = await client.get(f"/api/evaluation-jobs/{job_id}/result")
+            archive = await client.get(f"/api/evaluation-jobs/{job_id}/archive")
+            if held:
+                assert terminal.state is EvaluationJobState.CANCELLED and terminal.canonical is None
+                expected_cleanup = (
+                    EvaluationCleanupState.UNKNOWN if mode == "held_default" else EvaluationCleanupState.VERIFIED
+                )
+                assert terminal.cleanup is expected_cleanup
+                assert result.status_code == archive.status_code == 409
+                assert await sqlite_instance.get_attack_results_async() == []
+                if mode == "held":
+                    assert worker.cancelled and len(worker.settlements) == 1
+                else:
+                    assert not worker.cancelled and worker.settlements == []
+            else:
+                assert terminal.canonical and terminal.manifest and worker.manifest
+                assert terminal.state is (
+                    EvaluationJobState.FAILED if mode == "settlement" else EvaluationJobState.SUCCEEDED
+                )
+                expected_cleanup = (
+                    EvaluationCleanupState.UNKNOWN if mode == "settlement" else EvaluationCleanupState.VERIFIED
+                )
+                assert terminal.cleanup is expected_cleanup
+                assert result.status_code == archive.status_code == 200
+                assert result.json()["cleanup"] == expected_cleanup
+                assert result.json()["state"] == terminal.state
+                assert result.json()["original_score"] == "1.0"
+                assert result.json()["pyrit_attack_outcome"] == AttackOutcome.UNDETERMINED
+                assert archive.content == worker.content
+                assert terminal.manifest.fence_id != worker.manifest.fence_id
+                assert terminal.manifest.artifacts == worker.manifest.artifacts
+                row = await asyncio.to_thread(port.journal.read, job_id)
+                assert row["worker_manifest_json"] == worker.manifest.model_dump_json().encode()
+                assert row["canonical_json"] == terminal.canonical.model_dump_json()
+                assert worker.executions == 1
+    finally:
+        await port.shutdown_async()
+    assert credentials.close_calls == 1
 
 
 @pytest.mark.parametrize(

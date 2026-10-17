@@ -912,6 +912,13 @@ corresponding `REMOTE_REQUEST_TIMEOUT_SECONDS`, `REMOTE_ARTIFACT_TIMEOUT_SECONDS
 `REMOTE_SETTLEMENT_TIMEOUT_SECONDS` suffixes use the same
 `PYRIT_EVALUATION_JOB_` prefix. All limits must be finite and bounded.
 Partial settings and incompatible versions/schemas fail before execution.
+Trusted host composition can explicitly raise `poll_deadline_seconds` up to
+1860 seconds, without changing the 60-second default. Its optional
+`cancel_join_timeout_seconds` bounds the entire cancellation/closure join
+separately, up to 360 seconds. If absent, the existing settlement timeout
+still bounds that join. Request and settlement ACK caps remain 30 and
+60 seconds. These are host transport limits, not producer input, guest
+command timeouts, or permission to extend an execution budget.
 
 CoPyRIT/framework clients still use the public `/api/evaluation-jobs` producer
 surface. The gateway intersects authenticated per-operator worker grants with
@@ -1000,6 +1007,93 @@ termination/reset guarantees, managed agent controls, or production isolation.
 Those must be supplied and independently reviewed before private-platform
 execution. No cloud/model/private-original authority follows from configuring
 a URL.
+
+### Opaque original-case application pilot
+
+A trusted host can install one reviewed original case on the existing
+application job API using `install_evaluation_job_application(app=app,
+factory=...)` before the ordinary `pyrit.backend.main.app` lifespan starts.
+The async `EvaluationJobApplicationFactory` receives only the actual API
+`MemoryInterface`; `create_remote_original_evaluation_application_async`
+constructs an unstarted facade over the same generic remote gateway and
+API-owned `OriginalInspectArtifactWriter`. Startup checks canonical memory
+ownership, starts the port, then starts its consumer only after readiness.
+The port drains before canonical memory closes. Multiple API owners,
+environment-selected job backends, and original-preview composition conflict
+with this installation and fail closed.
+
+`ApprovedOriginalInspectBinding` contains only reviewed `EvalCaseRef`,
+`EvalSpecRef` and `InspectOriginalScorePolicy` metadata. It requires matching
+source packages and Task/version, no input overlay, and no inferred success
+threshold. It does not load a Task or attest that a remote worker executed
+particular source. The host and worker must separately approve and pin that
+execution. No remote catalog, browser request, import path or package registry
+can install the binding, writer, private Task, model route or credentials.
+Ordinary public startup remains unchanged and original-only.
+Here, original means the unchanged lifecycle of the selected pinned source,
+not upstream benchmark or runtime-image parity. This binding does not assert
+parity or promote negative/unknown source-reference facts to true.
+
+The installed application accepts only an opaque alias and a retry UUID:
+
+```text
+POST /api/evaluation-jobs/cases/{case_ref}
+Content-Type: application/json
+{"request_id": "<UUID>"}
+```
+
+The response is a prompt `202` queue acknowledgment, not execution or a
+grade. Job/run/attempt/source/profile identities are server-resolved. A retry
+is scoped to both authenticated actor and installed case; the same UUID
+cannot replay another actor's job or a different alias. A fresh UUID admits
+a new run. A profile change conflicts with the retained request rather than
+silently reusing an old run. Unknown aliases, query parameters, extra JSON
+execution fields and arbitrary source/profile choices are rejected.
+In this installation the legacy raw catalog is empty and raw
+`POST /api/evaluation-jobs` is refused.
+
+Use the existing application's Graph-backed `EntraAuthMiddleware`, configured
+with `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` and `ENTRA_ALLOWED_GROUP_IDS`,
+and a real operator's delegated Graph access token in the Authorization
+header. This does not install a new authentication provider. Application
+group authorization, the installed case's explicit `allowed_actor_ids`,
+and per-job actor ownership are separate checks. Disabled authentication,
+actor headers and worker-service/delegation credentials do not authorize
+these operator routes. Worker service authentication remains a separate
+host-installed responsibility.
+The existing middleware uses the configured client/tenant IDs for complete
+startup configuration and frontend MSAL metadata; it does not compare them
+with bearer client/audience/tenant claims. Actual Graph acceptance and current
+group membership are the API authentication checks. API-only use of an
+existing token-acquiring client does not qualify browser login or add
+independent token-client/tenant validation.
+
+The owner reuses `GET /api/evaluation-jobs/{job_id}` and
+`POST /api/evaluation-jobs/{job_id}/cancel`. After canonical import,
+`GET /api/evaluation-jobs/{job_id}/result` verifies and returns separate
+original scalar/status, PyRIT attack outcome, source-event provenance,
+canonical receipt, evidence and cleanup state. `GET
+/api/evaluation-jobs/{job_id}/archive` returns the exact retained `.eval`,
+with its SHA256 ETag. Both are authorized, no-store reads, not import or
+rescore operations. They reverify the bounded archive, original events,
+and linked canonical Score/AttackResult through the same importer/store.
+Changed receipts, archive bytes, event rows or linked results are refused,
+not repaired during GET.
+
+An original COMPLETE score can still map to UNDETERMINED without an explicit
+reviewed success threshold. A retained canonical result can remain readable
+after a failed settlement, but its response preserves failed state and unknown
+cleanup instead of promoting it to success. Pending jobs and absent canonical
+evidence have no result/archive view. Worker terminal state, authenticated
+artifact durability, original source completeness, canonical publication and
+physical closure remain distinct.
+
+This is a default-off, one-case, trusted-host API pilot. It does not modify
+Scenario orchestration, original preview, GUI selection/editing, conversation
+history, private source access, or production hosting. Offline tests use only
+public harmless Tasks and explicitly synthetic identity/worker transports.
+They do not qualify private source execution, live models, platform cleanup
+or production authentication.
 
 ## Supported execution and qualification
 

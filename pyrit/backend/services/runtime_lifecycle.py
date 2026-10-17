@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from pyrit.backend.models.initializers import ConfiguredInitializerSetting
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
 from pyrit.backend.services.environment_file_service import EnvironmentFileService
+from pyrit.backend.services.evaluation_job_application import EvaluationJobApplication
 from pyrit.backend.services.evaluation_job_service import evaluation_job_settings_from_environment
 from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.original_worker_runtime import OriginalWorkerRuntime
@@ -55,6 +56,7 @@ class RuntimeLifecycle:
         self.evaluation_jobs: LocalEvaluationJobPort | None = None
         self.app.state.original_worker_runtime = None
         self.app.state.evaluation_job_port = None
+        self.app.state.evaluation_job_application = None
         self.source = source
         self.edit_lock = asyncio.Lock()
         self.state = "initializing"
@@ -125,7 +127,12 @@ class RuntimeLifecycle:
             config = await self._load_async()
             preflight = await CohostPreflight.from_environment_async()
             job_settings = await asyncio.to_thread(evaluation_job_settings_from_environment, os.environ)
-            if job_settings is not None and (preflight is not None or not self.topology_supported):
+            job_factory = getattr(self.app.state, "evaluation_job_application_factory", None)
+            if job_factory is not None and job_settings is not None:
+                raise ValueError("Installed job composition cannot replace an environment-selected backend.")
+            if (job_settings is not None or job_factory is not None) and (
+                preflight is not None or not self.topology_supported
+            ):
                 raise ValueError("Evaluation jobs require one backend owner and cannot share original preview.")
             if preflight is not None:
                 preflight.validate_configuration(loader=config, environment=os.environ)
@@ -149,10 +156,21 @@ class RuntimeLifecycle:
                 self.original_worker = OriginalWorkerRuntime(preflight=preflight)
                 await self.original_worker.startup_async()
                 self.app.state.original_worker_runtime = self.original_worker
-            if job_settings is not None:
+            application: EvaluationJobApplication | None = None
+            if job_factory is not None:
+                memory = CentralMemory.get_memory_instance()
+                application = await job_factory(memory=memory)
+                if not isinstance(application, EvaluationJobApplication):
+                    raise ValueError("Installed job composition returned an unsupported application.")
+                self.evaluation_jobs = application.port
+                if application.writer.canonical_memory is not memory:
+                    raise ValueError("Installed original evidence must use this API's canonical memory handle.")
+            elif job_settings is not None:
                 self.evaluation_jobs = await job_settings.create_port_async(memory=CentralMemory.get_memory_instance())
+            if self.evaluation_jobs is not None:
                 await self.evaluation_jobs.startup_async()
                 self.app.state.evaluation_job_port = self.evaluation_jobs
+                self.app.state.evaluation_job_application = application
             await get_scenario_run_service().reconcile_interrupted_runs_async()
             _, self.version = await self.source.read_with_version_async()
             self._publish(config)
@@ -163,6 +181,7 @@ class RuntimeLifecycle:
                 await self.evaluation_jobs.shutdown_async()
                 self.evaluation_jobs = None
                 self.app.state.evaluation_job_port = None
+                self.app.state.evaluation_job_application = None
             if self.original_worker is not None:
                 await self.original_worker.shutdown_async()
                 self.original_worker = None
@@ -309,6 +328,7 @@ class RuntimeLifecycle:
                     if self.evaluation_jobs is not None:
                         await self.evaluation_jobs.shutdown_async()
                         self.app.state.evaluation_job_port = None
+                        self.app.state.evaluation_job_application = None
                         self.evaluation_jobs = None
                     await close_services_async()
                 finally:

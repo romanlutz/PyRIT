@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from inspect_ai.log import read_eval_log
+from sqlalchemy.exc import SQLAlchemyError
+
 from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.executor.benchmark.inspect_eval_source import EvalSourceFactory
-from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter
+from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalEvalImporter, InspectOriginalScorePolicy
 from pyrit.executor.benchmark.inspect_original_runner import run_original_inert_eval_async
 from pyrit.executor.jobs.local import LocalEvaluationJobPort
 from pyrit.executor.jobs.port import (
@@ -24,7 +29,7 @@ from pyrit.executor.jobs.port import (
     EvaluationRuntimeError,
 )
 from pyrit.memory import SQLiteMemory
-from pyrit.models import EvalRunRef, ScoreStatus
+from pyrit.models import EvalCaseRef, EvalRunRef, EvalSpecRef, ScoreStatus
 from pyrit.models.evaluation_job import (
     EvaluationArtifact,
     EvaluationArtifactKind,
@@ -41,8 +46,59 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pyrit.executor.benchmark.inspect_eval_source import ResolvedOriginalInspectTask
+    from pyrit.executor.benchmark.inspect_original_eval import InspectOriginalImport
     from pyrit.executor.jobs.port import EvaluationRuntimeContext
     from pyrit.memory import MemoryInterface
+
+
+@dataclass(frozen=True, kw_only=True)
+class ApprovedOriginalInspectBinding:
+    """Server-reviewed metadata only, not a Task loader or executable source."""
+
+    case: EvalCaseRef
+    spec: EvalSpecRef
+    score_policy: InspectOriginalScorePolicy
+
+    def __post_init__(self) -> None:
+        """
+        Require one unchanged case and an explicit original scorer.
+
+        Raises:
+            ValueError: If source, case, profile or original-scorer policy is inconsistent.
+        """
+        case = EvalCaseRef.model_validate_json(self.case.model_dump_json())
+        spec = EvalSpecRef.model_validate_json(self.spec.model_dump_json())
+        if (
+            case.package != spec.package
+            or spec.input_variant is not None
+            or not isinstance(self.score_policy, InspectOriginalScorePolicy)
+            or self.score_policy.task_name != case.task_name
+            or self.score_policy.task_version != case.task_version
+            or self.score_policy.success_direction is not None
+            or self.score_policy.success_threshold is not None
+        ):
+            raise ValueError("Approved original metadata requires one matching unchanged source and scorer policy.")
+        object.__setattr__(self, "case", case)
+        object.__setattr__(self, "spec", spec)
+
+    @property
+    def registration(self) -> EvaluationJobRegistration:
+        """The sole original source/case/profile authorized by this server installation."""
+        return EvaluationJobRegistration(
+            runtime=EvaluationRuntimeKind.ORIGINAL_INSPECT,
+            source=self.case.package,
+            case_id=self.case.case_id,
+            execution_profile_sha256=self.spec.spec_sha256,
+            artifact_kind=EvaluationArtifactKind.INSPECT_EVAL,
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class OriginalInspectArtifactReadback:
+    """Verified API-owned exact archive and its existing source-attributed canonical rows."""
+
+    archive: bytes
+    imported: InspectOriginalImport
 
 
 def _scratch_memory(root: Path) -> SQLiteMemory:
@@ -187,10 +243,44 @@ class PublicOriginalInspectJobRuntime:
 class OriginalInspectArtifactWriter:
     """Canonical API-side typed import, never a worker database merge or scorer rerun."""
 
-    def __init__(self, *, memory: MemoryInterface, runtime: PublicOriginalInspectJobRuntime) -> None:
-        """Bind canonical memory and the same server-approved source identity."""
+    def __init__(
+        self,
+        *,
+        memory: MemoryInterface,
+        runtime: PublicOriginalInspectJobRuntime | None = None,
+        binding: ApprovedOriginalInspectBinding | None = None,
+    ) -> None:
+        """
+        Bind either the existing public runtime or explicit server-reviewed metadata.
+
+        Raises:
+            ValueError: If neither or both installation paths are supplied.
+        """
+        if (runtime is None) == (binding is None):
+            raise ValueError("Select exactly one public original runtime or approved metadata binding.")
         self._memory = memory
         self._runtime = runtime
+        if runtime is not None:
+            self._case = runtime.source.case
+            self._spec = runtime.source.spec
+            self._score_policy: InspectOriginalScorePolicy | None = None
+            self._registration = runtime.registration
+        else:
+            assert binding is not None
+            self._case = binding.case
+            self._spec = binding.spec
+            self._score_policy = binding.score_policy
+            self._registration = binding.registration
+
+    @property
+    def registration(self) -> EvaluationJobRegistration:
+        """The source registration installed with this API-owned writer."""
+        return self._registration
+
+    @property
+    def canonical_memory(self) -> MemoryInterface:
+        """The API-owned canonical memory handle, never a worker-selected database."""
+        return self._memory
 
     async def import_async(
         self, *, request: EvaluationJobRequest, artifacts: EvaluationRuntimeArtifacts
@@ -207,38 +297,139 @@ class OriginalInspectArtifactWriter:
         request = EvaluationJobRequest.model_validate(request)
         artifacts.verify()
         if (
-            not self._runtime.registration.accepts(request)
+            not self.registration.accepts(request)
             or artifacts.manifest.request != request
             or len(artifacts.manifest.artifacts) != 1
             or artifacts.manifest.artifacts[0].kind is not EvaluationArtifactKind.INSPECT_EVAL
             or artifacts.cleanup is not EvaluationCleanupState.VERIFIED
         ):
             raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
-        await asyncio.to_thread(self._runtime.source.verify_unchanged)
+        if self._runtime is not None:
+            await asyncio.to_thread(self._runtime.source.verify_unchanged)
         artifact = artifacts.manifest.artifacts[0]
         imported = await InspectOriginalEvalImporter(memory=self._memory).import_eval_bytes_async(
             content=dict(artifacts.payloads)[artifact.name],
-            cases=(self._runtime.source.case,),
-            run=EvalRunRef(spec=self._runtime.source.spec, run_instance_id=request.run_id),
+            cases=(self._case,),
+            run=EvalRunRef(spec=self._spec, run_instance_id=request.run_id),
+            score_policy=self._score_policy,
         )
         if imported.archive_sha256 != artifact.sha256:
             raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
+        canonical = self._canonical_receipt(request=request, manifest=artifacts.manifest, imported=imported)
+        await self.readback_async(request=request, manifest=artifacts.manifest, canonical=canonical)
+        return canonical
+
+    async def readback_async(
+        self,
+        *,
+        request: EvaluationJobRequest,
+        manifest: EvaluationArtifactManifest,
+        canonical: EvaluationCanonicalReceipt,
+    ) -> OriginalInspectArtifactReadback:
+        """
+        Verify retained archive, events and linked rows without importing or writing on a read.
+
+        Returns:
+            OriginalInspectArtifactReadback: Exact API-retained source and verified original results.
+
+        Raises:
+            EvaluationJobError: If any source, run, manifest, archive or canonical row differs.
+        """
+        try:
+            request = EvaluationJobRequest.model_validate(request)
+            manifest = EvaluationArtifactManifest.model_validate(manifest)
+            canonical = EvaluationCanonicalReceipt.model_validate(canonical)
+            if (
+                not self.registration.accepts(request)
+                or manifest.request != request
+                or len(manifest.artifacts) != 1
+                or manifest.artifacts[0].kind is not EvaluationArtifactKind.INSPECT_EVAL
+                or canonical.job_id != request.job_id
+                or canonical.request_sha256 != request.request_sha256
+                or canonical.manifest_sha256 != manifest.manifest_sha256
+                or canonical.artifact_sha256 != manifest.artifacts[0].sha256
+            ):
+                raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH)
+            return await run_legacy_sync_async(self._readback, request=request, manifest=manifest, canonical=canonical)
+        except (KeyError, TypeError, ValueError, SQLAlchemyError) as error:
+            raise EvaluationJobError(EvaluationJobErrorCode.ARTIFACT_MISMATCH) from error
+
+    def _readback(
+        self,
+        *,
+        request: EvaluationJobRequest,
+        manifest: EvaluationArtifactManifest,
+        canonical: EvaluationCanonicalReceipt,
+    ) -> OriginalInspectArtifactReadback:
+        importer = InspectOriginalEvalImporter(memory=self._memory)
+        episode = self._memory.native_cyber_evidence.get_finalized_unscored_inspect_capture(
+            run_id=canonical.projection_id
+        )
+        streams = tuple(stream for stream in episode.raw_streams if stream.key == importer.ARCHIVE_KEY)
+        if len(streams) != 1:
+            raise ValueError("Original canonical archive stream is absent or ambiguous.")
+        artifact = manifest.artifacts[0]
+        archive = self._read_archive(
+            run_id=canonical.projection_id, stream_id=streams[0].stream_id, expected_bytes=artifact.bytes
+        )
+        if hashlib.sha256(archive).hexdigest() != artifact.sha256:
+            raise ValueError("Original canonical archive differs from its admitted hash.")
+        relogged = importer._validate_archive_bytes(content=archive)
+        log = read_eval_log(io.BytesIO(archive), resolve_attachments="full", format="eval")
+        run = EvalRunRef(spec=self._spec, run_instance_id=request.run_id)
+        importer._validate_log(log=log, cases=(self._case,), run=run)
+        importer._validate_score_policy(log=log, cases=(self._case,), score_policy=self._score_policy)
+        resolved = log.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
+        if len(resolved) > importer.MAX_RESOLVED_BYTES:
+            raise ValueError("Resolved original archive exceeds the existing import bound.")
+        imported = importer._existing_result(
+            log=log,
+            archive_sha=artifact.sha256,
+            resolved=resolved,
+            snapshot=episode,
+            case_run_ids=importer._case_run_ids(log=log, cases=(self._case,), run=run),
+            score_policy=self._score_policy,
+            relogged_samples=relogged,
+        )
+        if canonical != self._canonical_receipt(request=request, manifest=manifest, imported=imported):
+            raise ValueError("Original canonical receipt differs from retained source and linked rows.")
+        return OriginalInspectArtifactReadback(archive=archive, imported=imported)
+
+    def _read_archive(self, *, run_id: str, stream_id: UUID, expected_bytes: int) -> bytes:
+        content = bytearray()
+        after = 0
+        store = self._memory.native_cyber_evidence
+        while True:
+            chunks = store.read_raw_chunks(
+                run_id=run_id, stream_id=stream_id, allow_sensitive=True, after_sequence=after
+            )
+            for chunk in chunks:
+                content.extend(chunk.data)
+                if len(content) > expected_bytes:
+                    raise ValueError("Original canonical archive exceeds its admitted byte bound.")
+                after = chunk.sequence
+            if not chunks:
+                break
+        if len(content) != expected_bytes:
+            raise ValueError("Original canonical archive is truncated.")
+        return bytes(content)
+
+    @staticmethod
+    def _canonical_receipt(
+        *,
+        request: EvaluationJobRequest,
+        manifest: EvaluationArtifactManifest,
+        imported: InspectOriginalImport,
+    ) -> EvaluationCanonicalReceipt:
         score_ids = tuple(UUID(str(result.score.id)) for result in imported.case_results)
         attack_ids = tuple(UUID(result.attack_result.attack_result_id) for result in imported.case_results)
-        scores = await self._memory.get_scores_async(score_ids=[str(identifier) for identifier in score_ids])
-        results = await self._memory.get_attack_results_async(
-            attack_result_ids=[str(identifier) for identifier in attack_ids]
-        )
-        episode = await asyncio.to_thread(
-            self._memory.native_cyber_evidence.get_episode, run_id=imported.episode.run.run_id
-        )
+        episode = imported.episode
         streams = tuple(
             stream for stream in episode.raw_streams if stream.key == InspectOriginalEvalImporter.ARCHIVE_KEY
         )
+        artifact = manifest.artifacts[0]
         if (
             not score_ids
-            or {UUID(str(score.id)) for score in scores} != set(score_ids)
-            or {UUID(result.attack_result_id) for result in results} != set(attack_ids)
             or len(streams) != 1
             or streams[0].observed_sha256 != artifact.sha256
             or streams[0].stored_sha256 != artifact.sha256
@@ -247,13 +438,13 @@ class OriginalInspectArtifactWriter:
         return EvaluationCanonicalReceipt(
             job_id=request.job_id,
             request_sha256=request.request_sha256,
-            manifest_sha256=artifacts.manifest.manifest_sha256,
+            manifest_sha256=manifest.manifest_sha256,
             artifact_sha256=artifact.sha256,
             projection_id=episode.run.run_id,
             source_complete=(
                 episode.coverage_complete
                 and imported.log_status == "success"
-                and all(score.status is ScoreStatus.COMPLETE for score in scores)
+                and all(result.score.status is ScoreStatus.COMPLETE for result in imported.case_results)
             ),
             score_ids=score_ids,
             attack_result_ids=attack_ids,

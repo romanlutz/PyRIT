@@ -230,8 +230,11 @@ class RemoteEvaluationJobRuntime:
     async def _cancel_join_async(
         self, *, admission: EvaluationWorkerAdmission, binding: EvaluationWorkerBinding | None
     ) -> EvaluationCleanupState:
+        deadline = self.client.settings.cancel_join_timeout_seconds
+        if deadline is None:
+            deadline = self.client.settings.settlement_timeout_seconds
         try:
-            async with asyncio.timeout(self.client.settings.settlement_timeout_seconds):
+            async with asyncio.timeout(deadline):
                 snapshot = await self.client.cancel_async(admission=admission, binding=binding)
                 await run_legacy_sync_async(self.journal.bind, admission=admission, binding=snapshot.binding)
                 cursor = await run_legacy_sync_async(self.journal.observe, snapshot)

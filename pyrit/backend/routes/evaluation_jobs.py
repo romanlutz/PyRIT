@@ -10,8 +10,11 @@ from uuid import UUID  # noqa: TC003 (FastAPI resolves path annotations)
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
+from starlette.responses import Response
 
 from pyrit.backend.middleware.auth import get_authenticated_operator
+from pyrit.backend.models.evaluation_jobs import EvaluationCaseLaunch, EvaluationOriginalResult
+from pyrit.backend.services.evaluation_job_application import EvaluationJobApplication
 from pyrit.executor.jobs.local import LocalEvaluationJobPort
 from pyrit.executor.jobs.port import EvaluationJobError, EvaluationJobErrorCode
 from pyrit.models.evaluation_job import (
@@ -34,7 +37,20 @@ def _admission(request: Request) -> tuple[LocalEvaluationJobPort, str]:
     user = get_authenticated_operator(request)
     if user is None:
         raise HTTPException(status_code=401, detail=EvaluationJobErrorCode.NOT_AUTHORIZED.value)
+    application = getattr(request.app.state, "evaluation_job_application", None)
+    if isinstance(application, EvaluationJobApplication):
+        try:
+            application.authorize_actor(user.oid)
+        except EvaluationJobError as error:
+            raise _http_error(error) from error
     return port, user.oid
+
+
+def _application(request: Request) -> EvaluationJobApplication:
+    application = getattr(request.app.state, "evaluation_job_application", None)
+    if not isinstance(application, EvaluationJobApplication):
+        raise HTTPException(status_code=503, detail="evaluation_job_application_not_configured")
+    return application
 
 
 def _http_error(error: EvaluationJobError) -> HTTPException:
@@ -73,6 +89,8 @@ async def catalog_async(*, request: Request) -> tuple[EvaluationJobRegistration,
         tuple[EvaluationJobRegistration, ...]: The sole harmless binding in this local PoC.
     """
     port, actor = _admission(request)
+    if isinstance(getattr(request.app.state, "evaluation_job_application", None), EvaluationJobApplication):
+        return ()
     try:
         return await port.catalog_async(actor_id=actor)
     except EvaluationJobError as error:
@@ -88,9 +106,30 @@ async def submit_async(*, request: Request) -> EvaluationJobSubmission:
         EvaluationJobSubmission: Durable queue acknowledgment.
     """
     port, actor = _admission(request)
+    if isinstance(getattr(request.app.state, "evaluation_job_application", None), EvaluationJobApplication):
+        raise HTTPException(status_code=403, detail=EvaluationJobErrorCode.NOT_AUTHORIZED.value)
     message = await _message_async(request=request, model=EvaluationJobRequest)
     try:
         return await port.submit_async(request=message, actor_id=actor)
+    except EvaluationJobError as error:
+        raise _http_error(error) from error
+
+
+@router.post("/evaluation-jobs/cases/{case_ref}", response_model=EvaluationJobSubmission, status_code=202)
+async def launch_case_async(*, request: Request, case_ref: str) -> EvaluationJobSubmission:
+    """
+    Launch only an installed opaque logical case with an actor-bound idempotency key.
+
+    Returns:
+        EvaluationJobSubmission: Existing durable queue acknowledgment, not execution or a grade.
+    """
+    _, actor = _admission(request)
+    application = _application(request)
+    if request.query_params:
+        raise HTTPException(status_code=400, detail="evaluation_job_invalid_message")
+    launch = await _message_async(request=request, model=EvaluationCaseLaunch)
+    try:
+        return await application.submit_async(case_ref=case_ref, launch=launch, actor_id=actor)
     except EvaluationJobError as error:
         raise _http_error(error) from error
 
@@ -125,6 +164,47 @@ async def cancel_async(*, request: Request, job_id: UUID) -> EvaluationJobSnapsh
         return await port.cancel_async(job_id=job_id, actor_id=actor)
     except EvaluationJobError as error:
         raise _http_error(error) from error
+
+
+@router.get("/evaluation-jobs/{job_id}/result", response_model=EvaluationOriginalResult)
+async def result_async(*, request: Request, response: Response, job_id: UUID) -> EvaluationOriginalResult:
+    """
+    Reverify API-owned original evidence and linked rows before returning an authorized grade.
+
+    Returns:
+        EvaluationOriginalResult: Separate original grade, PyRIT outcome, custody and cleanup state.
+    """
+    _, actor = _admission(request)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await _application(request).result_async(job_id=job_id, actor_id=actor)
+    except EvaluationJobError as error:
+        raise _http_error(error) from error
+
+
+@router.get("/evaluation-jobs/{job_id}/archive", response_class=Response)
+async def archive_async(*, request: Request, job_id: UUID) -> Response:
+    """
+    Download only the authorized job's exact bounded original archive from canonical API storage.
+
+    Returns:
+        Response: Retained unchanged binary `.eval`, never a worker path or synthesized log.
+    """
+    _, actor = _admission(request)
+    try:
+        snapshot, retained = await _application(request).readback_async(job_id=job_id, actor_id=actor)
+    except EvaluationJobError as error:
+        raise _http_error(error) from error
+    assert snapshot.canonical is not None
+    return Response(
+        content=retained.archive,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'attachment; filename="original.eval"',
+            "ETag": f'"{snapshot.canonical.artifact_sha256}"',
+        },
+    )
 
 
 @router.post("/evaluation-jobs/{job_id}/control", response_model=EvaluationControlReceipt)

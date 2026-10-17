@@ -52,6 +52,7 @@ class EvaluationWorkerHttpSettings:
     poll_interval_seconds: float = 0.25
     poll_deadline_seconds: float = 60
     settlement_timeout_seconds: float = 10
+    cancel_join_timeout_seconds: float | None = None
     allow_loopback_http: bool = False
 
     def __post_init__(self) -> None:
@@ -83,9 +84,11 @@ class EvaluationWorkerHttpSettings:
             (self.request_timeout_seconds, 0.05, 30),
             (self.artifact_timeout_seconds, 0.05, 120),
             (self.poll_interval_seconds, 0.01, 5),
-            (self.poll_deadline_seconds, 0.05, 600),
+            (self.poll_deadline_seconds, 0.05, 1860),
             (self.settlement_timeout_seconds, 0.05, 60),
         )
+        if self.cancel_join_timeout_seconds is not None:
+            limits += ((self.cancel_join_timeout_seconds, 0.05, 360),)
         if any(
             isinstance(value, bool) or not math.isfinite(value) or not low <= value <= high
             for value, low, high in limits

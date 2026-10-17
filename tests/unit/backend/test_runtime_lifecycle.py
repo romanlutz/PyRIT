@@ -20,12 +20,19 @@ from pyrit.backend.middleware.auth import require_admin
 from pyrit.backend.middleware.runtime import RuntimeAdmissionMiddleware
 from pyrit.backend.routes import configuration, health
 from pyrit.backend.services.configuration_file_service import ConfigurationFileService
+from pyrit.backend.services.evaluation_job_application import (
+    EvaluationJobApplication,
+    EvaluationJobApplicationFactory,
+    install_evaluation_job_application,
+)
 from pyrit.backend.services.evaluation_job_service import LocalEvaluationJobSettings, RemoteEvaluationJobSettings
 from pyrit.backend.services.manual_send_scheduler import get_manual_send_scheduler
 from pyrit.backend.services.original_worker_preflight import CohostPreflight
 from pyrit.backend.services.runtime_lifecycle import RuntimeLifecycle
 from pyrit.backend.services.scenario_run_service import ScenarioRunService
+from pyrit.executor.jobs.inspect import OriginalInspectArtifactWriter, PublicOriginalInspectJobRuntime
 from pyrit.executor.jobs.local import LocalEvaluationJobPort
+from pyrit.executor.jobs.port import EvaluationJobRuntimeRegistry
 from pyrit.executor.jobs.remote import RemoteEvaluationJobGateway
 from pyrit.executor.jobs.worker_client import EvaluationWorkerHttpSettings
 from pyrit.memory import CentralMemory, MemoryInterface
@@ -462,3 +469,89 @@ async def test_remote_startup_installs_deliberate_canonical_facade_after_ready_a
     port.startup_async.assert_awaited_once()
     port.start_consumer.assert_called_once()
     assert runtime.begin_apply(version="unchanged")["outcome"] == "unsupported"
+
+
+@pytest.mark.parametrize("failure", [None, "memory_owner", "startup"])
+@pytest.mark.usefixtures("patch_central_database")
+async def test_installed_original_application_uses_api_memory_and_joins_failed_startup_async(
+    *, runtime: RuntimeLifecycle, failure: str | None
+) -> None:
+    config = await runtime._load_async()
+    memory = MagicMock(spec=MemoryInterface)
+    original = await PublicOriginalInspectJobRuntime.create_async()
+    writer = MagicMock(spec=OriginalInspectArtifactWriter)
+    writer.registration = original.registration
+    writer.canonical_memory = MagicMock(spec=MemoryInterface) if failure == "memory_owner" else memory
+    port = MagicMock(spec=LocalEvaluationJobPort)
+    port.registry = EvaluationJobRuntimeRegistry((original,))
+    application = EvaluationJobApplication(
+        port=port, writer=writer, case_ref="public-original-fixture", allowed_actor_ids=frozenset({"operator"})
+    )
+    app = FastAPI()
+    factory = AsyncMock(spec=EvaluationJobApplicationFactory, return_value=application)
+    install_evaluation_job_application(app=app, factory=factory)
+    with patch.dict(os.environ, {}, clear=True):
+        installed_runtime = RuntimeLifecycle(app=app, source=runtime.source)
+    app.state.runtime_lifecycle = installed_runtime
+
+    def start_consumer() -> None:
+        assert installed_runtime.state == "ready"
+        assert app.state.evaluation_job_port is port
+        assert app.state.evaluation_job_application is application
+
+    port.start_consumer.side_effect = start_consumer
+    if failure == "startup":
+        port.startup_async.side_effect = ValueError("Public fixture startup refusal")
+    with (
+        patch.object(installed_runtime, "_load_async", AsyncMock(return_value=config)),
+        patch.object(installed_runtime, "_management_async", AsyncMock()),
+        patch.object(CohostPreflight, "from_environment_async", AsyncMock(return_value=None)),
+        patch.object(lifecycle_module, "evaluation_job_settings_from_environment", return_value=None),
+        patch.object(config, "initialize_pyrit_async", AsyncMock()),
+        patch.object(CentralMemory, "get_memory_instance", return_value=memory),
+        patch.object(lifecycle_module, "get_scenario_run_service", return_value=MagicMock(spec=ScenarioRunService)),
+    ):
+        await installed_runtime.startup_async()
+    factory.assert_awaited_once()
+    assert factory.call_args.kwargs["memory"] is memory
+    if failure is None:
+        assert installed_runtime.state == "ready" and installed_runtime.evaluation_jobs is port
+        port.start_consumer.assert_called_once()
+        assert installed_runtime.begin_apply(version="unchanged")["outcome"] == "unsupported"
+        with patch.object(CentralMemory, "_memory_instance", None):
+            await installed_runtime.shutdown_async()
+    else:
+        assert installed_runtime.state == "restart-required" and installed_runtime.evaluation_jobs is None
+        port.start_consumer.assert_not_called()
+        if failure == "memory_owner":
+            port.startup_async.assert_not_awaited()
+    port.shutdown_async.assert_awaited_once()
+    assert app.state.evaluation_job_port is None and app.state.evaluation_job_application is None
+
+
+@pytest.mark.parametrize("conflict", ["environment", "original_preview", "multiple_workers"])
+@pytest.mark.usefixtures("patch_central_database")
+async def test_installed_application_refuses_conflicting_startup_before_factory_or_initialization_async(
+    *, runtime: RuntimeLifecycle, tmp_path: Path, conflict: str
+) -> None:
+    config = await runtime._load_async()
+    factory = AsyncMock(spec=EvaluationJobApplicationFactory)
+    runtime.app.state.evaluation_job_application_factory = factory
+    settings = (
+        LocalEvaluationJobSettings(root=tmp_path, allowed_actor_ids=frozenset({"operator"}))
+        if conflict == "environment"
+        else None
+    )
+    preflight = MagicMock(spec=CohostPreflight) if conflict == "original_preview" else None
+    runtime.topology_supported = conflict != "multiple_workers"
+    with (
+        patch.object(CohostPreflight, "from_environment_async", AsyncMock(return_value=preflight)),
+        patch.object(lifecycle_module, "evaluation_job_settings_from_environment", return_value=settings),
+        patch.object(config, "initialize_pyrit_async", new_callable=AsyncMock) as initialize,
+    ):
+        await runtime.startup_async()
+    assert runtime.state == "restart-required"
+    assert runtime.app.state.evaluation_job_port is None
+    assert runtime.app.state.evaluation_job_application is None
+    factory.assert_not_awaited()
+    initialize.assert_not_awaited()
