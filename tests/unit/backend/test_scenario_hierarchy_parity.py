@@ -23,6 +23,7 @@ from pyrit.backend.services.scenario_run_service import ScenarioRunService
 from pyrit.memory import MemoryInterface, PromptMemoryEntry, SQLiteMemory
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import (
+    AtomicAttackIdentifier,
     AttackOutcome,
     AttackResult,
     AttackResultRole,
@@ -46,6 +47,7 @@ from pyrit.models import (
     ScenarioRunPlanAtomicGroup,
     ScenarioRunPlanSeedGroup,
     ScenarioRunState,
+    SeedIdentifier,
 )
 from unit.mocks import get_mock_target_identifier, make_scenario_result
 
@@ -2577,3 +2579,547 @@ async def test_cold_hierarchy_projection_preserves_parent_beyond_delta_page_limi
         assert child.result_role == AttackResultRole.TARGET_FACING
     assert len(expanded_root.unresolved_child_attack_result_ids) == 496
     assert hierarchy_expanded.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_empty_child_array_metadata_parent_resolution_parity(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that when 500 children have empty metadata {"child_attack_result_ids": []},
+    they are not mistaken for orchestration parents and parent at 501 is resolved correctly.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="EmptyChildArrayScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    child_ids = [str(uuid.uuid4()) for _ in range(500)]
+    child_results = [
+        AttackResult(
+            attack_result_id=cid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Child attack {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "seq_group",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+                "attempt_index": i + 1,
+            },
+            metadata={"child_attack_result_ids": []},
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i, cid in enumerate(child_ids)
+    ]
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=child_results)
+
+    parent_id = str(uuid.uuid4())
+    parent_result = AttackResult(
+        attack_result_id=parent_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Sequential parent attack",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "seq_group",
+            "result_role": AttackResultRole.ORCHESTRATION.value,
+        },
+        metadata={"child_attack_result_ids": child_ids},
+        timestamp=base_time + timedelta(seconds=501),
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[parent_result])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Cold hierarchy request with max_nodes=1
+    hierarchy_cold = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_cold is not None
+    assert len(hierarchy_cold.groups) == 1
+    cold_roots = hierarchy_cold.groups[0].roots
+    assert len(cold_roots) == 1
+    cold_root = cold_roots[0]
+    assert cold_root.attack_result_id == parent_id
+    assert cold_root.parent_attack_result_id is None
+    assert cold_root.child_index is None
+    assert cold_root.result_role == AttackResultRole.ORCHESTRATION
+
+    # 2. Warm hierarchy request with max_nodes=1
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=500)
+    hierarchy_warm = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_warm is not None
+    warm_root = hierarchy_warm.groups[0].roots[0]
+    assert warm_root.attack_result_id == parent_id
+    assert warm_root.parent_attack_result_id is None
+    assert warm_root.child_index is None
+
+
+@pytest.mark.asyncio
+async def test_501_orchestration_parents_with_outer_parent_targeted_resolution(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test targeted parent resolution when there are 501 inner orchestration parents
+    and 1 outer parent referencing all of them.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ManyParentsScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 501 inner parents, each having 1 leaf child
+    inner_parent_ids = [str(uuid.uuid4()) for _ in range(501)]
+    all_results: list[AttackResult] = []
+    for i, pid in enumerate(inner_parent_ids):
+        leaf_id = str(uuid.uuid4())
+        leaf = AttackResult(
+            attack_result_id=leaf_id,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Leaf {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "group_orch",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+                "attempt_index": 1,
+            },
+            timestamp=base_time + timedelta(seconds=i * 2),
+        )
+        parent = AttackResult(
+            attack_result_id=pid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Inner parent {i}",
+            outcome=AttackOutcome.SUCCESS,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "group_orch",
+                "result_role": AttackResultRole.ORCHESTRATION.value,
+                "attempt_index": i + 1,
+            },
+            metadata={"child_attack_result_ids": [leaf_id]},
+            timestamp=base_time + timedelta(seconds=i * 2 + 1),
+        )
+        all_results.extend([leaf, parent])
+
+    # 1 Outer parent referencing all 501 inner parents
+    outer_id = str(uuid.uuid4())
+    outer_parent = AttackResult(
+        attack_result_id=outer_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Outer orchestration parent",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "group_orch",
+            "result_role": AttackResultRole.ORCHESTRATION.value,
+        },
+        metadata={"child_attack_result_ids": inner_parent_ids},
+        timestamp=base_time + timedelta(seconds=1100),
+    )
+    all_results.append(outer_parent)
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=all_results)
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # Cold max_nodes=1 hierarchy call: root MUST resolve to outer_parent!
+    hierarchy_cold = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert hierarchy_cold is not None
+    assert len(hierarchy_cold.groups) == 1
+    roots = hierarchy_cold.groups[0].roots
+    assert len(roots) == 1
+    assert roots[0].attack_result_id == outer_id
+    assert roots[0].parent_attack_result_id is None
+    assert roots[0].child_index is None
+
+
+@pytest.mark.asyncio
+async def test_unreached_node_zero_inference_attempt_index_parity(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test zero-inference on unreached nodes: when parent_id is None, child_index MUST be None,
+    and attempt_index must be preserved on both hierarchy and detail projections.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="UnreachedZeroInferenceScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    ar_id = str(uuid.uuid4())
+    ar = AttackResult(
+        attack_result_id=ar_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Disconnected node",
+        outcome=AttackOutcome.SUCCESS,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "group_1",
+            "result_role": AttackResultRole.TARGET_FACING.value,
+            "attempt_index": 7,
+        },
+    )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Hierarchy projection
+    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert hierarchy is not None
+    assert len(hierarchy.groups) == 1
+    node = hierarchy.groups[0].roots[0]
+    assert node.attack_result_id == ar_id
+    assert node.parent_attack_result_id is None
+    assert node.child_index is None
+    assert node.attempt_index == 7
+
+    # 2. Detail projection
+    detail = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=ar_id,
+    )
+    assert detail is not None
+    assert detail.attack_result_id == ar_id
+    assert detail.parent_attack_result_id is None
+    assert detail.child_index is None
+    assert detail.attempt_index == 7
+
+
+@pytest.mark.asyncio
+async def test_501_units_with_tail_error_and_unmatched_tail_error_diagnostics_parity(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test 501 planned units with tail error + unmatched tail error.
+    Verify cold max_nodes=1 overall counts, outcome breakdown, group counts,
+    and diagnostics match warm breakdown.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    # Plan with 501 units
+    seed_groups = [
+        ScenarioRunPlanSeedGroup(
+            id=f"seed_{i}",
+            objective=f"Objective {i}",
+            objective_sha256=f"hash_{i}",
+        )
+        for i in range(501)
+    ]
+    atomic_group = ScenarioRunPlanAtomicGroup(
+        id="group_1",
+        atomic_attack_name="attack_type_1",
+        display_group="Attack Type 1",
+        technique_eval_hash="hash_tech_1",
+        seed_group_ids=[s.id for s in seed_groups],
+    )
+    plan = ScenarioRunPlan(
+        atomic_groups=[atomic_group],
+        seed_groups=seed_groups,
+    )
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="TailErrorParityScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+        metadata={"run_plan": plan.model_dump(mode="json")},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 successful units
+    all_results: list[AttackResult] = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Objective {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "attack_type_1",
+                "parent_eval_hash": "hash_tech_1",
+                "seed_group_id": f"seed_{i}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+
+    # Unit 500 (the 501st unit): attempt fails with 10 retries
+    tail_planned_id = str(uuid.uuid4())
+    tail_planned_result = AttackResult(
+        attack_result_id=tail_planned_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Objective 500",
+        outcome=AttackOutcome.ERROR,
+        total_retries=10,
+        error_type="PlannedTailError",
+        error_message="Planned tail failure",
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "attack_type_1",
+            "parent_eval_hash": "hash_tech_1",
+            "seed_group_id": "seed_500",
+            "result_role": AttackResultRole.TARGET_FACING.value,
+        },
+        timestamp=base_time + timedelta(seconds=500),
+    )
+    all_results.append(tail_planned_result)
+
+    # Unmatched / unplanned tail attempt with 6 retries
+    unmatched_id = str(uuid.uuid4())
+    unmatched_result = AttackResult(
+        attack_result_id=unmatched_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Unmatched objective",
+        outcome=AttackOutcome.ERROR,
+        total_retries=6,
+        error_type="UnmatchedTailError",
+        error_message="Unmatched tail failure",
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "unmatched_collection",
+            "result_role": AttackResultRole.TARGET_FACING.value,
+        },
+        timestamp=base_time + timedelta(seconds=501),
+    )
+    all_results.append(unmatched_result)
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=all_results)
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Cold hierarchy request with max_nodes=1
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+    assert cold_hier.truncated is True
+
+    # 2. Warm hierarchy request with max_nodes=1
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=600)
+    warm_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert warm_hier is not None
+
+    # Parity checks:
+    # A. Overall logical outcomes: 500 successes, 1 error (unmatched attempt does not inflate logical unit error count)
+    assert cold_hier.overall_counts.completed == 501
+    assert cold_hier.overall_counts.succeeded == 500
+    assert cold_hier.overall_counts.errors == 1
+    assert cold_hier.overall_counts.outcomes is not None
+    assert warm_hier.overall_counts.outcomes is not None
+    assert cold_hier.overall_counts.outcomes.successes == 500
+    assert cold_hier.overall_counts.outcomes.errors == 1
+    assert cold_hier.overall_counts.outcomes.successes == warm_hier.overall_counts.outcomes.successes
+    assert cold_hier.overall_counts.outcomes.errors == warm_hier.overall_counts.outcomes.errors
+    assert (
+        cold_hier.overall_counts.outcomes.success_rate_decided == warm_hier.overall_counts.outcomes.success_rate_decided
+    )
+
+    # B. Diagnostics: raw diagnostics report ALL failed attacks (both planned and unmatched)
+    assert cold_hier.diagnostics.failed_attacks_count == 2
+    assert cold_hier.diagnostics.total_retries >= 16
+
+    # C. Per-group counts parity
+    assert cold_hier.groups[0].counts.completed == 501
+    assert cold_hier.groups[0].counts.succeeded == 500
+    assert cold_hier.groups[0].counts.errors == 1
+    assert cold_hier.groups[0].counts.completed == warm_hier.groups[0].counts.completed
+    assert cold_hier.groups[0].counts.succeeded == warm_hier.groups[0].counts.succeeded
+    assert cold_hier.groups[0].counts.errors == warm_hier.groups[0].counts.errors
+
+
+@pytest.mark.asyncio
+async def test_legacy_recount_paged_deltas_without_hydrating_scenario_results(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that legacy recount for runs needing SDK statistics pages deltas (batches of 500)
+    and does NOT call get_scenario_results_async (avoiding memory bloat).
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="LegacyRecountScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 501 results with seed identifiers (triggers needs_sdk_statistics)
+    results = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Atomic seed attack {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            atomic_attack_identifier=AtomicAttackIdentifier(
+                class_name="MockAttack",
+                seed_identifiers=[SeedIdentifier(class_name="SeedPrompt", value=f"seed_value_{i}")],
+            ),
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "group_legacy",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(501)
+    ]
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+
+    # Spy on memory methods
+    original_get_scenario_results = sqlite_instance.get_scenario_results_async
+    original_get_deltas = sqlite_instance.get_scenario_attack_result_deltas_async
+
+    scenario_results_called = False
+    delta_page_sizes: list[int] = []
+
+    async def tracking_get_scenario_results(*args: Any, **kwargs: Any) -> Any:
+        nonlocal scenario_results_called
+        scenario_results_called = True
+        return await original_get_scenario_results(*args, **kwargs)
+
+    async def tracking_get_deltas(*args: Any, **kwargs: Any) -> Any:
+        delta_page_sizes.append(kwargs.get("limit", 0))
+        return await original_get_deltas(*args, **kwargs)
+
+    sqlite_instance.get_scenario_results_async = tracking_get_scenario_results  # type: ignore[assignment]
+    sqlite_instance.get_scenario_attack_result_deltas_async = tracking_get_deltas  # type: ignore[assignment]
+
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # Fetch run summary list which triggers recount for runs needing SDK statistics
+    run_list = await service.list_runs_async(limit=10)
+    assert run_list is not None
+    matched_run = next((r for r in run_list.items if r.scenario_result_id == scenario_id), None)
+    assert matched_run is not None
+    assert matched_run.completed_attacks == 501
+
+    # Verified: full ScenarioResult was NOT loaded, deltas were paged!
+    assert scenario_results_called is False
+    assert len(delta_page_sizes) >= 2  # Paged in batches of 500
+
+
+@pytest.mark.asyncio
+async def test_501_unplanned_group_attempts_parity_between_cold_and_warm_cache(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that a scenario with 501 unplanned group attempts maintains exact parity
+    in group counts, overall counts, and outcomes between cold (max_nodes=1) and warm cache.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="UnplannedParityScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 successful unplanned attempts
+    all_results: list[AttackResult] = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Unplanned objective {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "unplanned_attack_group",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+
+    # 501st unplanned attempt is an error with retries
+    all_results.append(
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective="Unplanned objective 500",
+            outcome=AttackOutcome.ERROR,
+            total_retries=5,
+            error_type="UnplannedExecutionError",
+            error_message="Execution failed",
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "unplanned_attack_group",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=500),
+        )
+    )
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=all_results)
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # 1. Cold hierarchy with max_nodes=1
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+    assert cold_hier.truncated is True
+
+    # 2. Warm hierarchy
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=600)
+    warm_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert warm_hier is not None
+
+    # Parity assertions:
+    assert cold_hier.overall_counts.completed == 501
+    assert cold_hier.overall_counts.succeeded == 500
+    assert cold_hier.overall_counts.errors == 1
+    assert cold_hier.overall_counts.completed == warm_hier.overall_counts.completed
+    assert cold_hier.overall_counts.succeeded == warm_hier.overall_counts.succeeded
+    assert cold_hier.overall_counts.errors == warm_hier.overall_counts.errors
+
+    # Outcomes parity
+    assert cold_hier.overall_counts.outcomes is not None
+    assert warm_hier.overall_counts.outcomes is not None
+    assert cold_hier.overall_counts.outcomes.successes == warm_hier.overall_counts.outcomes.successes
+    assert cold_hier.overall_counts.outcomes.errors == warm_hier.overall_counts.outcomes.errors
+
+    # Group counts parity for the unplanned group
+    assert len(cold_hier.groups) == len(warm_hier.groups) == 1
+    cold_group = cold_hier.groups[0]
+    warm_group = warm_hier.groups[0]
+    assert cold_group.counts.completed == warm_group.counts.completed == 501
+    assert cold_group.counts.succeeded == warm_group.counts.succeeded == 500
+    assert cold_group.counts.errors == warm_group.counts.errors == 1
+    assert cold_group.counts.retries == warm_group.counts.retries == 5

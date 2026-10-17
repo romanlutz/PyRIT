@@ -14,7 +14,7 @@ import weakref
 from collections.abc import Callable, Collection, Iterator, Mapping, MutableSequence, Sequence
 from contextlib import closing
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, ParamSpec, TypeVar, cast
@@ -45,6 +45,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute, flag_modified
 from sqlalchemy.orm.session import Session
 
+from pyrit.analytics.outcome_statistics import compute_outcome_statistics, success_percentage
 from pyrit.common.async_compatibility import legacy_sync_override, run_legacy_sync_async
 from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.pagination import DecodedKeysetCursor
@@ -116,6 +117,9 @@ from pyrit.models import (
     ScenarioConversationMessageProjection,
     ScenarioConversationProjection,
     ScenarioIdentifier,
+    ScenarioProducerCategoryCounts,
+    ScenarioProducerCounts,
+    ScenarioProgressCounts,
     ScenarioProgressScore,
     ScenarioResult,
     ScenarioRunState,
@@ -133,6 +137,7 @@ from pyrit.models import (
     SeedRecord,
     SeedType,
     TargetIdentifier,
+    config_hash,
     group_conversation_message_pieces_by_sequence,
     sort_message_pieces,
 )
@@ -282,6 +287,17 @@ class ScenarioHistoryAggregate:
     unknown_role_error_attempts: int
     unknown_role_retries: int
 
+    outcome_successes: int = 0
+    outcome_failures: int = 0
+    outcome_errors: int = 0
+    outcome_undetermined: int = 0
+
+    raw_total_errors: int = 0
+    raw_total_retries: int = 0
+    raw_retrying_attacks_count: int = 0
+
+    group_counts: dict[str, ScenarioProgressCounts] = field(default_factory=dict)
+
     @classmethod
     def empty(cls, *, scenario_result_id: str) -> "ScenarioHistoryAggregate":
         """
@@ -308,6 +324,14 @@ class ScenarioHistoryAggregate:
             unknown_role_attempts=0,
             unknown_role_error_attempts=0,
             unknown_role_retries=0,
+            outcome_successes=0,
+            outcome_failures=0,
+            outcome_errors=0,
+            outcome_undetermined=0,
+            raw_total_errors=0,
+            raw_total_retries=0,
+            raw_retrying_attacks_count=0,
+            group_counts={},
         )
 
 
@@ -6126,6 +6150,15 @@ class MemoryInterface(abc.ABC):
                 .mappings()
                 .all()
             )
+            group_rows = (
+                session.execute(
+                    self._build_scenario_history_group_aggregate_statement(
+                        entry_ids=entry_ids, plan_entry_ids=plan_entry_ids
+                    )
+                )
+                .mappings()
+                .all()
+            )
             name_rows = session.execute(
                 select(AttackResultEntry.attribution_parent_id, self._get_scenario_attempt_unit_expressions()[0])
                 .where(AttackResultEntry.attribution_parent_id.in_(entry_ids))
@@ -6144,6 +6177,58 @@ class MemoryInterface(abc.ABC):
                     .distinct()
                 ).all()
             }
+
+        groups_by_run: dict[str, dict[str, ScenarioProgressCounts]] = {}
+        for grow in group_rows:
+            if grow["scenario_result_id"] is None or not grow["unit_group_id"]:
+                continue
+            run_id = str(grow["scenario_result_id"])
+            raw_gid = str(grow["unit_group_id"])
+            canonical_gid = raw_gid
+            if "\x1f" in raw_gid:
+                name, _, eval_hash = raw_gid.partition("\x1f")
+                canonical_gid = config_hash({"atomic_attack_name": name, "technique_eval_hash": eval_hash})
+            g_outcomes = compute_outcome_statistics(
+                {
+                    AttackOutcome.SUCCESS: grow["outcome_successes"] or 0,
+                    AttackOutcome.FAILURE: grow["outcome_failures"] or 0,
+                    AttackOutcome.ERROR: grow["outcome_errors"] or 0,
+                    AttackOutcome.UNDETERMINED: grow["outcome_undetermined"] or 0,
+                }
+            )
+            g_producer_counts = ScenarioProducerCounts(
+                target_facing=ScenarioProducerCategoryCounts(
+                    attempts=grow["target_facing_attempts"] or 0,
+                    errors=grow["target_facing_error_attempts"] or 0,
+                    retries=grow["target_facing_retries"] or 0,
+                ),
+                orchestration=ScenarioProducerCategoryCounts(
+                    attempts=grow["orchestration_attempts"] or 0,
+                    errors=grow["orchestration_error_attempts"] or 0,
+                    retries=grow["orchestration_retries"] or 0,
+                ),
+                unknown=ScenarioProducerCategoryCounts(
+                    attempts=grow["unknown_role_attempts"] or 0,
+                    errors=grow["unknown_role_error_attempts"] or 0,
+                    retries=grow["unknown_role_retries"] or 0,
+                ),
+            )
+            g_completed = grow["completed_units"] or 0
+            g_succeeded = grow["successful_units"] or 0
+            counts = ScenarioProgressCounts(
+                completed=g_completed,
+                planned=None,
+                succeeded=g_succeeded,
+                success_percentage=success_percentage(succeeded=g_succeeded, completed=g_completed),
+                errors=grow["error_attempts"] or 0,
+                retries=grow["total_retries"] or 0,
+                producer_counts=g_producer_counts,
+                outcomes=g_outcomes,
+            )
+            run_groups = groups_by_run.setdefault(run_id, {})
+            run_groups[canonical_gid] = counts
+            if canonical_gid != raw_gid:
+                run_groups[raw_gid] = counts
 
         names_by_run: dict[str, list[str]] = {}
         for scenario_result_id, atomic_attack_name in name_rows:
@@ -6173,25 +6258,32 @@ class MemoryInterface(abc.ABC):
                 unknown_role_attempts=row["unknown_role_attempts"] or 0,
                 unknown_role_error_attempts=row["unknown_role_error_attempts"] or 0,
                 unknown_role_retries=row["unknown_role_retries"] or 0,
+                outcome_successes=row["outcome_successes"] or 0,
+                outcome_failures=row["outcome_failures"] or 0,
+                outcome_errors=row["outcome_errors"] or 0,
+                outcome_undetermined=row["outcome_undetermined"] or 0,
+                raw_total_errors=row["raw_total_errors"] or 0,
+                raw_total_retries=row["raw_total_retries"] or 0,
+                raw_retrying_attacks_count=row["raw_retrying_attacks_count"] or 0,
+                group_counts=groups_by_run.get(run_id, {}),
             )
         return aggregates
 
-    def _build_scenario_history_aggregate_statement(
+    def _build_scenario_history_ranked_units(
         self,
         *,
         entry_ids: Sequence[uuid.UUID],
         plan_entry_ids: Sequence[uuid.UUID],
-    ) -> Any:
+    ) -> tuple[Any, Any, Any, Any, Any]:
         """
-        Build the statement that reduces linked attempts to one metrics row per run.
+        Build the intermediate ranked-units subquery and role match conditions for scenario history.
 
         Returns:
-            Any: A statement selecting one aggregate row per scenario run with attempts.
+            tuple: (ranked, counted, is_target_facing, is_orchestration, is_unknown)
         """
-        atomic_name, technique_hash, attributed_seed_group_id, _ = self._get_scenario_attempt_unit_expressions()
-        # Explicit seed attribution is authoritative, then the objective hash. Runs with attempts identified only by
-        # their atomic identifier's seeds are flagged instead (see _get_scenario_history_runs_needing_sdk_statistics),
-        # because SQL can't derive the logical seed group from those seeds.
+        atomic_name, technique_hash, attributed_seed_group_id, identifier_seed_key = (
+            self._get_scenario_attempt_unit_expressions()
+        )
         attempts = (
             select(
                 AttackResultEntry.id.label("attempt_id"),
@@ -6199,7 +6291,9 @@ class MemoryInterface(abc.ABC):
                 atomic_name.label("atomic_attack_name"),
                 technique_hash.label("technique_eval_hash"),
                 attributed_seed_group_id.label("attributed_seed_group_id"),
-                func.coalesce(attributed_seed_group_id, AttackResultEntry.objective_sha256, "").label("seed_group_id"),
+                func.coalesce(
+                    attributed_seed_group_id, identifier_seed_key, AttackResultEntry.objective_sha256, ""
+                ).label("seed_group_id"),
                 AttackResultEntry.objective_sha256.label("objective_sha256"),
                 AttackResultEntry.outcome.label("outcome"),
                 AttackResultEntry.timestamp.label("timestamp"),
@@ -6210,6 +6304,16 @@ class MemoryInterface(abc.ABC):
                     ),
                     else_=0,
                 ).label("total_retries"),
+                case(
+                    (
+                        or_(
+                            func.coalesce(AttackResultEntry.total_retries, 0) > 0,
+                            AttackResultEntry.retry_events_json.is_not(None),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                ).label("has_retries"),
                 JsonScalar(AttackResultEntry.attribution_data, literal("$.result_role")).label("result_role"),
             )
             .where(AttackResultEntry.attribution_parent_id.in_(entry_ids))
@@ -6228,6 +6332,7 @@ class MemoryInterface(abc.ABC):
         )
         ranked = select(
             units.c.scenario_result_id,
+            units.c.unit_group_id,
             units.c.timestamp,
             units.c.outcome.label("latest_outcome"),
             func.max(units.c.is_planned).over(partition_by=unit_partition).label("is_planned"),
@@ -6235,6 +6340,7 @@ class MemoryInterface(abc.ABC):
             func.sum(case((is_error, 1), else_=0)).over(partition_by=unit_partition).label("unit_errors"),
             units.c.result_role.label("result_role"),
             units.c.total_retries.label("attempt_retries"),
+            func.max(units.c.has_retries).over(partition_by=unit_partition).label("unit_has_retries"),
             func.row_number()
             .over(
                 partition_by=unit_partition,
@@ -6256,6 +6362,23 @@ class MemoryInterface(abc.ABC):
             ranked.c.result_role.is_(None),
             and_(not_(is_target_facing), not_(is_orchestration)),
         )
+        return ranked, counted, is_target_facing, is_orchestration, is_unknown
+
+    def _build_scenario_history_aggregate_statement(
+        self,
+        *,
+        entry_ids: Sequence[uuid.UUID],
+        plan_entry_ids: Sequence[uuid.UUID],
+    ) -> Any:
+        """
+        Build the statement that reduces linked attempts to one metrics row per run.
+
+        Returns:
+            Any: A statement selecting one aggregate row per scenario run with attempts.
+        """
+        ranked, counted, is_target_facing, is_orchestration, is_unknown = self._build_scenario_history_ranked_units(
+            entry_ids=entry_ids, plan_entry_ids=plan_entry_ids
+        )
         return (
             select(
                 ranked.c.scenario_result_id,
@@ -6269,6 +6392,38 @@ class MemoryInterface(abc.ABC):
                 func.sum(case((and_(counted, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)).label(
                     "total_retries"
                 ),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                ).label("outcome_successes"),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
+                ).label("outcome_failures"),
+                func.sum(case((and_(counted, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)).label(
+                    "outcome_errors"
+                ),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
+                ).label("outcome_undetermined"),
+                func.sum(case((ranked.c.unit_rank == 1, ranked.c.unit_errors), else_=0)).label("raw_total_errors"),
+                func.sum(
+                    case((and_(ranked.c.unit_rank == 1, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)
+                ).label("raw_total_retries"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                ranked.c.unit_rank == 1,
+                                or_(
+                                    ranked.c.unit_retries > 0,
+                                    ranked.c.attempt_retries > 0,
+                                    ranked.c.unit_has_retries == 1,
+                                ),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("raw_retrying_attacks_count"),
                 func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
                 func.sum(
                     case(
@@ -6298,6 +6453,74 @@ class MemoryInterface(abc.ABC):
             .order_by(ranked.c.scenario_result_id)
         )
 
+    def _build_scenario_history_group_aggregate_statement(
+        self,
+        *,
+        entry_ids: Sequence[uuid.UUID],
+        plan_entry_ids: Sequence[uuid.UUID],
+    ) -> Any:
+        """
+        Build the statement that reduces linked attempts to metrics rows per group.
+
+        Returns:
+            Any: A statement selecting aggregate rows grouped by scenario run and atomic group.
+        """
+        ranked, counted, is_target_facing, is_orchestration, is_unknown = self._build_scenario_history_ranked_units(
+            entry_ids=entry_ids, plan_entry_ids=plan_entry_ids
+        )
+        return (
+            select(
+                ranked.c.scenario_result_id,
+                ranked.c.unit_group_id,
+                func.sum(case((counted, 1), else_=0)).label("completed_units"),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                ).label("successful_units"),
+                func.sum(case((counted, ranked.c.unit_errors), else_=0)).label("error_attempts"),
+                func.sum(case((and_(counted, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)).label(
+                    "total_retries"
+                ),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                ).label("outcome_successes"),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
+                ).label("outcome_failures"),
+                func.sum(case((and_(counted, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)).label(
+                    "outcome_errors"
+                ),
+                func.sum(
+                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
+                ).label("outcome_undetermined"),
+                func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
+                func.sum(
+                    case(
+                        (and_(is_target_facing, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1),
+                        else_=0,
+                    )
+                ).label("target_facing_error_attempts"),
+                func.sum(case((is_target_facing, ranked.c.attempt_retries), else_=0)).label("target_facing_retries"),
+                func.sum(case((is_orchestration, 1), else_=0)).label("orchestration_attempts"),
+                func.sum(
+                    case(
+                        (and_(is_orchestration, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1),
+                        else_=0,
+                    )
+                ).label("orchestration_error_attempts"),
+                func.sum(case((is_orchestration, ranked.c.attempt_retries), else_=0)).label("orchestration_retries"),
+                func.sum(case((is_unknown, 1), else_=0)).label("unknown_role_attempts"),
+                func.sum(
+                    case(
+                        (and_(is_unknown, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1),
+                        else_=0,
+                    )
+                ).label("unknown_role_error_attempts"),
+                func.sum(case((is_unknown, ranked.c.attempt_retries), else_=0)).label("unknown_role_retries"),
+            )
+            .group_by(ranked.c.scenario_result_id, ranked.c.unit_group_id)
+            .order_by(ranked.c.scenario_result_id, ranked.c.unit_group_id)
+        )
+
     def _build_scenario_history_unit_statement(self, *, attempts: Any, plan_entry_ids: Sequence[uuid.UUID]) -> Any:
         """
         Resolve every persisted attempt to the logical work unit whose counters it feeds.
@@ -6319,6 +6542,7 @@ class MemoryInterface(abc.ABC):
                 attempts.c.outcome,
                 attempts.c.timestamp,
                 attempts.c.total_retries,
+                attempts.c.has_retries,
                 attempts.c.result_role,
                 unplanned_group_id.label("unit_group_id"),
                 attempts.c.seed_group_id.label("unit_seed_id"),
@@ -6399,6 +6623,7 @@ class MemoryInterface(abc.ABC):
                 attempts.c.outcome,
                 attempts.c.timestamp,
                 attempts.c.total_retries,
+                attempts.c.has_retries,
                 attempts.c.result_role,
                 attempts.c.atomic_attack_name,
                 unplanned_group_id.label("unplanned_group_id"),
@@ -6425,6 +6650,7 @@ class MemoryInterface(abc.ABC):
             matched.c.outcome,
             matched.c.timestamp,
             matched.c.total_retries,
+            matched.c.has_retries,
             matched.c.result_role,
             func.coalesce(matched.c.atomic_group_id, matched.c.unplanned_group_id).label("unit_group_id"),
             func.coalesce(matched.c.planned_seed_group_id, matched.c.seed_group_id).label("unit_seed_id"),
@@ -6750,7 +6976,8 @@ class MemoryInterface(abc.ABC):
             role=AttackResultRole.ORCHESTRATION,
         )
         metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
-        child_ids_match = metadata_text.like("%child_attack_result_ids%")
+        # Match only when child_attack_result_ids is not empty (contains at least one quoted ID)
+        child_ids_match = metadata_text.like('%child_attack_result_ids%["%')
 
         attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
 
@@ -6800,6 +7027,91 @@ class MemoryInterface(abc.ABC):
             rows = session.execute(statement).mappings().all()
 
         return [self._row_to_scenario_attack_result_delta(row) for row in rows]
+
+    def _execute_get_scenario_parent_deltas_for_child_ids(
+        self,
+        *,
+        scenario_result_id: str,
+        child_ids: Sequence[str],
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return run-scoped parent deltas that reference any of the specified child result IDs.
+
+        Args:
+            scenario_result_id: Persisted scenario run ID.
+            child_ids: Child attack result IDs to find parents for.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched parent deltas.
+        """
+        try:
+            scenario_uuid = uuid.UUID(scenario_result_id)
+        except (ValueError, TypeError):
+            return []
+        valid_child_ids = [cid for cid in child_ids if cid]
+        if not valid_child_ids:
+            return []
+
+        deltas: list[ScenarioAttackResultDelta] = []
+        metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
+        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
+
+        chunk_size = min(len(valid_child_ids), max(1, self._MAX_BIND_VARS - 10))
+        with closing(self._get_session()) as session:
+            for i in range(0, len(valid_child_ids), chunk_size):
+                chunk = valid_child_ids[i : i + chunk_size]
+                child_matches = [metadata_text.like(f'%"{cid}"%') for cid in chunk]
+                statement = (
+                    select(
+                        AttackResultEntry.id,
+                        AttackResultEntry.conversation_id,
+                        AttackResultEntry.objective,
+                        AttackResultEntry.objective_sha256,
+                        AttackResultEntry.atomic_attack_identifier,
+                        AttackResultEntry.outcome,
+                        AttackResultEntry.execution_time_ms,
+                        AttackResultEntry.executed_turns,
+                        AttackResultEntry.outcome_reason,
+                        AttackResultEntry.timestamp,
+                        AttackResultEntry.retry_events_json,
+                        AttackResultEntry.total_retries,
+                        AttackResultEntry.error_type,
+                        AttackResultEntry.error_message,
+                        AttackResultEntry.attribution_data,
+                        AttackResultEntry.attack_metadata,
+                        AttackResultEntry.pruned_conversation_ids,
+                        AttackResultEntry.adversarial_chat_conversation_ids,
+                        AttackResultEntry.preparation_conversation_ids,
+                        ScoreEntry.id.label("score_id"),
+                        ScoreEntry.score_value,
+                        ScoreEntry.score_type,
+                        ScoreEntry.status.label("score_status"),
+                        ScoreEntry.score_rationale,
+                        ScoreEntry.scorer_class_identifier,
+                    )
+                    .outerjoin(
+                        ScoreEntry,
+                        func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id)
+                        == ScoreEntry.id,
+                    )
+                    .where(
+                        and_(
+                            AttackResultEntry.attribution_parent_id == scenario_uuid,
+                            or_(*child_matches),
+                        )
+                    )
+                    .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+                )
+                rows = session.execute(statement).mappings().all()
+                deltas.extend(self._row_to_scenario_attack_result_delta(row) for row in rows)
+
+        seen_ids: set[str] = set()
+        unique_deltas: list[ScenarioAttackResultDelta] = []
+        for d in deltas:
+            if d.attack_result_id not in seen_ids:
+                seen_ids.add(d.attack_result_id)
+                unique_deltas.append(d)
+        return unique_deltas
 
     def _fetch_bounded_conversation_messages(
         self,
@@ -10554,6 +10866,28 @@ class MemoryInterface(abc.ABC):
         return await self._run_database_operation_async(
             self._execute_get_scenario_orchestration_parent_deltas,
             scenario_result_id=scenario_result_id,
+        )
+
+    async def get_scenario_parent_deltas_for_child_ids_async(
+        self,
+        *,
+        scenario_result_id: str,
+        child_ids: Sequence[str],
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Return run-scoped parent deltas that reference any of the specified child result IDs.
+
+        Args:
+            scenario_result_id: The ID of the scenario run.
+            child_ids: Child attack result IDs to find parents for.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: The matched parent deltas.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_scenario_parent_deltas_for_child_ids,
+            scenario_result_id=scenario_result_id,
+            child_ids=child_ids,
         )
 
     async def get_attack_result_conversation_projections_async(

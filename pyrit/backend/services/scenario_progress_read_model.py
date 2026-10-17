@@ -851,6 +851,8 @@ class ScenarioProgressReadModel:
         overall_counts: ScenarioProgressCounts | None = None,
         exact_total_errors: int | None = None,
         exact_total_retries: int | None = None,
+        exact_retrying_attacks_count: int | None = None,
+        exact_group_counts: Mapping[str, ScenarioProgressCounts] | None = None,
         parent_deltas: Sequence[ScenarioAttackResultDelta] = (),
     ) -> ScenarioHierarchyProjection:
         """
@@ -867,6 +869,8 @@ class ScenarioProgressReadModel:
             overall_counts: Optional exact run-wide progress counts overriding truncated snapshot totals.
             exact_total_errors: Optional exact run-wide error count from database aggregates.
             exact_total_retries: Optional exact run-wide retry count from database aggregates.
+            exact_retrying_attacks_count: Optional exact run-wide count of retrying attacks from aggregates.
+            exact_group_counts: Optional mapping of atomic group ID to exact counts from aggregates.
             parent_deltas: Optional orchestration parent deltas to resolve roots and child references
                 beyond delta limits.
 
@@ -1093,13 +1097,10 @@ class ScenarioProgressReadModel:
                     break
                 if next_root.attack_result_id in visited_ids:
                     continue
-                fallback_child_index = (
-                    next_root.attempt_index - 1 if next_root.attempt_index is not None else None
-                )
                 root_node = _build_node(
                     attack_result_id=next_root.attack_result_id,
                     parent_id=None,
-                    child_index=fallback_child_index,
+                    child_index=None,
                     active_path=set(),
                     depth=0,
                 )
@@ -1120,16 +1121,29 @@ class ScenarioProgressReadModel:
         for ag in snapshot.summary.atomic_groups:
             seen_group_ids.add(ag.id)
             group_roots = roots_by_group.get(ag.id, [])
-            counts = ScenarioProgressCounts(
-                completed=ag.completed,
-                planned=ag.planned,
-                succeeded=ag.succeeded,
-                success_percentage=ag.success_percentage,
-                errors=ag.errors,
-                retries=ag.retries,
-                producer_counts=ag.producer_counts,
-                outcomes=ag.outcomes,
-            )
+            if exact_group_counts and ag.id in exact_group_counts:
+                exact_g = exact_group_counts[ag.id]
+                counts = ScenarioProgressCounts(
+                    completed=exact_g.completed,
+                    planned=ag.planned,
+                    succeeded=exact_g.succeeded,
+                    success_percentage=exact_g.success_percentage,
+                    errors=exact_g.errors,
+                    retries=exact_g.retries,
+                    producer_counts=exact_g.producer_counts,
+                    outcomes=exact_g.outcomes,
+                )
+            else:
+                counts = ScenarioProgressCounts(
+                    completed=ag.completed,
+                    planned=ag.planned,
+                    succeeded=ag.succeeded,
+                    success_percentage=ag.success_percentage,
+                    errors=ag.errors,
+                    retries=ag.retries,
+                    producer_counts=ag.producer_counts,
+                    outcomes=ag.outcomes,
+                )
             groups.append(
                 ScenarioHierarchyGroup(
                     atomic_group_id=ag.id,
@@ -1150,12 +1164,15 @@ class ScenarioProgressReadModel:
                     unit = ResultUnitIdentity(atomic_group_id=r.atomic_group_id, seed_group_id=r.seed_group_id)
                     attempts_by_unit.setdefault(unit, []).append(r)
 
-                counts = count_execution_units(
-                    units=list(attempts_by_unit.keys()),
-                    attempts_by_unit=attempts_by_unit,
-                    planned=None,
-                    producer_attempts=group_results,
-                )
+                if exact_group_counts and gid in exact_group_counts:
+                    counts = exact_group_counts[gid]
+                else:
+                    counts = count_execution_units(
+                        units=list(attempts_by_unit.keys()),
+                        attempts_by_unit=attempts_by_unit,
+                        planned=None,
+                        producer_attempts=group_results,
+                    )
                 groups.append(
                     ScenarioHierarchyGroup(
                         atomic_group_id=gid,
@@ -1197,7 +1214,11 @@ class ScenarioProgressReadModel:
                     )
                 )
 
-        failed_attacks_count = exact_total_errors if exact_total_errors is not None else len(all_failed_attacks)
+        failed_attacks_count = (
+            max(len(all_failed_attacks), exact_total_errors)
+            if exact_total_errors is not None
+            else len(all_failed_attacks)
+        )
         failed_attacks_truncated = bool(
             (snapshot.has_more and failed_attacks_count > len(all_failed_attacks))
             or failed_attacks_count > _MAX_DIAGNOSTIC_ITEMS
@@ -1219,9 +1240,16 @@ class ScenarioProgressReadModel:
             diagnostic_retries = max(diagnostic_retries, exact_total_retries)
 
         total_persisted_retries = sum(r.total_retries for r in snapshot.results)
-        attack_retries_count = len(all_attack_retries)
+        attack_retries_count = (
+            max(len(all_attack_retries), exact_retrying_attacks_count)
+            if exact_retrying_attacks_count is not None
+            else len(all_attack_retries)
+        )
         attack_retries_truncated = bool(
-            (snapshot.has_more and diagnostic_retries > total_persisted_retries)
+            (
+                snapshot.has_more
+                and (diagnostic_retries > total_persisted_retries or attack_retries_count > len(all_attack_retries))
+            )
             or attack_retries_count > _MAX_DIAGNOSTIC_ITEMS
         )
         attack_retries = all_attack_retries[:_MAX_DIAGNOSTIC_ITEMS]

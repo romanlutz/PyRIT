@@ -23,8 +23,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import TypeAdapter, ValidationError
 
-from pyrit.analytics.outcome_statistics import success_percentage
-from pyrit.analytics.scenario_statistics import compute_scenario_statistics
+from pyrit.analytics.outcome_statistics import compute_outcome_statistics, success_percentage
+from pyrit.analytics.scenario_statistics import (
+    ScenarioAttempt,
+    ScenarioExecutionUnit,
+    count_execution_units,
+    resolve_execution_unit,
+)
 from pyrit.backend.models.common import PaginationInfo, filter_sensitive_fields
 from pyrit.backend.models.scenarios import ScenarioRunListResponse
 from pyrit.backend.services.pagination import (
@@ -51,8 +56,10 @@ from pyrit.memory.memory_interface import (
 from pyrit.models import (
     SCENARIO_RUN_PLAN_METADATA_KEY,
     SCENARIO_RUN_STARTED_AT_METADATA_KEY,
+    AtomicAttackIdentifier,
     AttackOutcome,
     AttackResult,
+    AttackResultMetadata,
     ComponentIdentifier,
     ScenarioAttackResultDelta,
     ScenarioHierarchyNode,
@@ -1617,10 +1624,76 @@ class ScenarioRunService:
         if not run_ids:
             return aggregates
         recounted = dict(aggregates)
-        for scenario_result in await self._memory.get_scenario_results_async(scenario_result_ids=run_ids):
-            run_id = str(scenario_result.id)
-            # A plan this service rejected counts as a legacy run, as in the SQL path.
-            overall = compute_scenario_statistics(scenario_result, use_saved_plan=plans.get(run_id) is not None).overall
+        for run_id in run_ids:
+            cursor: AttackResultKeysetCursor | None = None
+            all_deltas: list[ScenarioAttackResultDelta] = []
+            while True:
+                page, has_more = await self._memory.get_scenario_attack_result_deltas_async(
+                    scenario_result_id=run_id,
+                    cursor=cursor,
+                    limit=500,
+                )
+                all_deltas.extend(page)
+                if not has_more or not page:
+                    break
+                cursor = AttackResultKeysetCursor(
+                    timestamp=page[-1].timestamp, attack_result_id=page[-1].attack_result_id
+                )
+
+            use_plan = plans.get(run_id) is not None
+            atomic_groups = plans.get(run_id) or [] if use_plan else []
+            groups_by_identity: dict[tuple[str, str], ScenarioRunPlanAtomicGroup] = {}
+            grouped_by_name: dict[str, list[ScenarioRunPlanAtomicGroup]] = {}
+            for group in atomic_groups:
+                groups_by_identity[(group.atomic_attack_name, group.technique_eval_hash)] = group
+                grouped_by_name.setdefault(group.atomic_attack_name, []).append(group)
+            plan_lookup = ScenarioPlanLookup(
+                groups_by_identity=groups_by_identity,
+                groups_by_name={name: tuple(g) for name, g in grouped_by_name.items()},
+                seed_ids_by_group_and_objective={},
+            )
+            attempts: list[ScenarioAttempt] = []
+            for delta in all_deltas:
+                atomic_name = str(delta.attribution_data.get("parent_collection") or "")
+                eval_hash = delta.attribution_data.get("parent_eval_hash")
+                attr_seed = delta.attribution_data.get("seed_group_id")
+                typed_identifier = (
+                    AtomicAttackIdentifier.from_component_identifier(delta.atomic_attack_identifier)
+                    if isinstance(delta.atomic_attack_identifier, ComponentIdentifier)
+                    else None
+                )
+                unit = resolve_execution_unit(
+                    atomic_attack_name=atomic_name,
+                    technique_eval_hash=str(eval_hash) if eval_hash is not None else None,
+                    attributed_seed_group_id=str(attr_seed) if attr_seed else None,
+                    atomic_attack_identifier=typed_identifier,
+                    objective=delta.objective,
+                    objective_sha256=delta.objective_sha256,
+                    plan_lookup=plan_lookup,
+                )
+                res_metadata = AttackResultMetadata.from_metadata(metadata=delta.attribution_data)
+                attempts.append(
+                    ScenarioAttempt(
+                        unit=unit,
+                        atomic_attack_name=atomic_name,
+                        outcome=delta.outcome,
+                        timestamp=delta.timestamp,
+                        attempt_id=delta.attack_result_id,
+                        total_retries=delta.total_retries,
+                        result_role=res_metadata.result_role,
+                    )
+                )
+            attempts.sort(key=lambda a: (a.timestamp, a.attempt_id))
+            attempts_by_unit: dict[ScenarioExecutionUnit, list[ScenarioAttempt]] = {}
+            for a in attempts:
+                attempts_by_unit.setdefault(a.unit, []).append(a)
+
+            overall = count_execution_units(
+                units=list(attempts_by_unit.keys()),
+                attempts_by_unit=attempts_by_unit,
+                planned=None,
+                producer_attempts=attempts,
+            )
             recounted[run_id] = replace(
                 aggregates[run_id],
                 unit_count=overall.completed,
@@ -1628,6 +1701,10 @@ class ScenarioRunService:
                 successful_units=overall.succeeded,
                 error_attempts=overall.errors,
                 total_retries=overall.retries,
+                outcome_successes=overall.outcomes.successes if overall.outcomes else 0,
+                outcome_failures=overall.outcomes.failures if overall.outcomes else 0,
+                outcome_errors=overall.outcomes.errors if overall.outcomes else 0,
+                outcome_undetermined=overall.outcomes.undetermined if overall.outcomes else 0,
                 target_facing_attempts=overall.producer_counts.target_facing.attempts,
                 target_facing_error_attempts=overall.producer_counts.target_facing.errors,
                 target_facing_retries=overall.producer_counts.target_facing.retries,
@@ -2290,12 +2367,47 @@ class ScenarioRunService:
         exact_overall_counts: ScenarioProgressCounts | None = None
         exact_total_errors: int | None = None
         exact_total_retries: int | None = None
+        exact_retrying_attacks_count: int | None = None
+        exact_group_counts: Mapping[str, ScenarioProgressCounts] | None = None
         parent_deltas: list[ScenarioAttackResultDelta] = []
 
         if progress_snapshot.has_more:
-            parent_deltas = await self._memory.get_scenario_orchestration_parent_deltas_async(
-                scenario_result_id=scenario_result_id
-            )
+            plan_lookup = ScenarioPlanLookup.from_plan(plan=plan)
+            all_deltas_map: dict[str, ScenarioAttackResultDelta] = {
+                d.attack_result_id: d for d in progress_snapshot.deltas
+            }
+            all_results_map: dict[str, ScenarioProgressResult] = {
+                r.attack_result_id: r for r in progress_snapshot.results
+            }
+
+            referenced_child_ids: set[str] = set()
+            for r in all_results_map.values():
+                for cid in r.child_attack_result_ids:
+                    referenced_child_ids.add(cid)
+
+            current_candidates = [
+                r.attack_result_id for r in all_results_map.values() if r.attack_result_id not in referenced_child_ids
+            ]
+
+            depth = 0
+            while current_candidates and depth < 10:
+                depth += 1
+                new_parents = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
+                    scenario_result_id=scenario_result_id,
+                    child_ids=current_candidates,
+                )
+                if not new_parents:
+                    break
+                next_candidates: list[str] = []
+                for p in new_parents:
+                    if p.attack_result_id not in all_deltas_map:
+                        parent_deltas.append(p)
+                        all_deltas_map[p.attack_result_id] = p
+                        p_res = self._progress_read_model._map_progress_delta(delta=p, plan_lookup=plan_lookup)
+                        all_results_map[p.attack_result_id] = p_res
+                        next_candidates.append(p.attack_result_id)
+                current_candidates = next_candidates
+
             plan_ids = [scenario_result_id] if plan is not None else []
             aggregates = await self._memory.get_scenario_history_aggregates_async(
                 scenario_result_ids=[scenario_result_id],
@@ -2325,6 +2437,14 @@ class ScenarioRunService:
                         retries=agg.unknown_role_retries,
                     ),
                 )
+                outcomes = compute_outcome_statistics(
+                    {
+                        AttackOutcome.SUCCESS: agg.outcome_successes,
+                        AttackOutcome.FAILURE: agg.outcome_failures,
+                        AttackOutcome.ERROR: agg.outcome_errors,
+                        AttackOutcome.UNDETERMINED: agg.outcome_undetermined,
+                    }
+                )
                 exact_overall_counts = ScenarioProgressCounts(
                     planned=progress_snapshot.summary.overall.planned,
                     completed=agg.completed_units,
@@ -2335,9 +2455,12 @@ class ScenarioRunService:
                     errors=agg.error_attempts,
                     retries=agg.total_retries,
                     producer_counts=producer_counts,
+                    outcomes=outcomes,
                 )
-                exact_total_errors = agg.error_attempts
-                exact_total_retries = agg.total_retries
+                exact_total_errors = agg.raw_total_errors
+                exact_total_retries = agg.raw_total_retries
+                exact_retrying_attacks_count = agg.raw_retrying_attacks_count
+                exact_group_counts = agg.group_counts
 
         hierarchy = self._progress_read_model.build_scenario_hierarchy(
             scenario_result_id=scenario_result_id,
@@ -2350,6 +2473,8 @@ class ScenarioRunService:
             overall_counts=exact_overall_counts,
             exact_total_errors=exact_total_errors,
             exact_total_retries=exact_total_retries,
+            exact_retrying_attacks_count=exact_retrying_attacks_count,
+            exact_group_counts=exact_group_counts,
             parent_deltas=parent_deltas,
         )
 
