@@ -6,7 +6,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-# Correctness watchdogs allow for stalled CI workers without disabling deadlock detection.
+# Deadlock backstop for correctness tests, not a latency budget.
 TEST_WATCHDOG_SECONDS = 300.0
 
 
