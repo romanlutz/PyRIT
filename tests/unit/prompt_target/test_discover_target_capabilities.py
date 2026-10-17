@@ -13,6 +13,7 @@ import httpx
 import pytest
 from mcp.types import Tool as MCPToolDefinition
 from openai.types.chat import ChatCompletion
+from unit.async_utils import TEST_WATCHDOG_SECONDS
 from unit.mocks import MockPromptTarget
 
 from pyrit.models import Message, MessagePiece, PromptDataType, RequestTraceContext
@@ -792,6 +793,7 @@ async def test_responses_probes_suppress_provider_io_and_preserve_state(
         original_value='{"type":"function_call","call_id":"new","name":"direct_async","arguments":"{}"}',
         original_value_data_type="function_call",
     ).to_message()
+
     requested = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -804,21 +806,20 @@ async def test_responses_probes_suppress_provider_io_and_preserve_state(
             requested.set()
             try:
                 await asyncio.Event().wait()
-            except asyncio.CancelledError:
+            finally:
                 cancelled.set()
-                raise
         return response
 
     original_wait_for = asyncio.wait_for
 
     async def expire_once_requested_async(awaitable: Awaitable[list[Message]], *, timeout: float) -> list[Message]:
-        # Expire only after the request starts, not during memory access on a stalled runner.
         probe = asyncio.ensure_future(awaitable)
         try:
-            await original_wait_for(requested.wait(), timeout=timeout)
+            await original_wait_for(requested.wait(), timeout=TEST_WATCHDOG_SECONDS)
             return await original_wait_for(probe, timeout=0)
         finally:
-            probe.cancel()
+            if not probe.done():
+                probe.cancel()
             await asyncio.gather(probe, return_exceptions=True)
 
     with (
@@ -836,8 +837,7 @@ async def test_responses_probes_suppress_provider_io_and_preserve_state(
                 capabilities=[CapabilityName.JSON_OUTPUT],
                 test_modalities=set(),
                 retries=0,
-                # A finite correctness watchdog, not a memory-access latency assertion.
-                per_probe_timeout_s=300.0,
+                per_probe_timeout_s=TEST_WATCHDOG_SECONDS,
             )
 
         if outcome == "cancel":
