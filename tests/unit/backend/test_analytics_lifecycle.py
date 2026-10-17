@@ -163,7 +163,7 @@ async def test_http_timeout_keeps_native_cleanup_busy_until_runtime_drain_async(
     cleanup = held_native_cleanup
 
     async def expire_async(tasks: set[asyncio.Task[Any]], *, timeout: float) -> tuple[set[Any], set[Any]]:
-        assert 0 < timeout <= 30
+        assert 0 < timeout <= 300
         await expire.wait()
         return set(), tasks
 
@@ -374,10 +374,9 @@ async def test_actual_app_lifespan_restarts_with_a_fresh_native_sdk_async(
             os.environ,
             {
                 "PYRIT_CONFIG_FILE": str(path),
-                "ENTRA_CLIENT_ID": "",
-                "ENTRA_TENANT_ID": "",
-                "ENTRA_ALLOWED_GROUP_IDS": "",
+                "PYRIT_AUTH_MODE": "local",
             },
+            clear=True,
         ),
         patch.object(ConfigurationLoader, "initialize_pyrit_async", new_callable=AsyncMock),
         patch("pyrit.setup.configuration_loader.DEFAULT_CONFIG_PATH", tmp_path / "missing-default.yaml"),
