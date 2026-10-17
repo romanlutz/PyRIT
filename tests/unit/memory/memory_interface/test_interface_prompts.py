@@ -21,6 +21,7 @@ from pyrit.memory.memory_models import (
 )
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import (
+    ChatMessageRole,
     ComponentIdentifier,
     Conversation,
     ConverterIdentifier,
@@ -28,6 +29,7 @@ from pyrit.models import (
     IdentifierType,
     Message,
     MessagePiece,
+    PromptDataType,
     Score,
     SeedPrompt,
     TargetIdentifier,
@@ -401,75 +403,117 @@ async def test_duplicate_conversation_excluding_last_turn(sqlite_instance: Memor
         assert piece.sequence < 2
 
 
-async def test_duplicate_conversation_excluding_last_turn_with_tool_calls(sqlite_instance: MemoryInterface):
-    conversation_id = str(uuid4())
-
-    def tool_calling_turn(*, sequence: int, prompt: str, call_id: str, answer: str) -> list[MessagePiece]:
-        function_call = {"type": "function_call", "call_id": call_id, "name": "lookup", "arguments": "{}"}
-        function_call_output = {"type": "function_call_output", "call_id": call_id, "output": "result"}
-        return [
-            MessagePiece(role="user", original_value=prompt, conversation_id=conversation_id, sequence=sequence),
-            MessagePiece(
-                role="assistant",
-                original_value=json.dumps(function_call),
-                original_value_data_type="function_call",
-                conversation_id=conversation_id,
-                sequence=sequence + 1,
-            ),
-            MessagePiece(
-                role="tool",
-                original_value=json.dumps(function_call_output),
-                original_value_data_type="function_call_output",
-                conversation_id=conversation_id,
-                sequence=sequence + 2,
-            ),
-            MessagePiece(
-                role="assistant", original_value=answer, conversation_id=conversation_id, sequence=sequence + 3
-            ),
-        ]
-
-    pieces = tool_calling_turn(sequence=0, prompt="first question", call_id="call_1", answer="first answer")
-    pieces += tool_calling_turn(sequence=4, prompt="refused question", call_id="call_2", answer="I can't help")
-    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
-
-    new_conversation_id = await sqlite_instance.duplicate_conversation_excluding_last_turn_async(
-        conversation_id=conversation_id,
-    )
-
-    duplicate_conversation = await sqlite_instance.get_message_pieces_async(conversation_id=new_conversation_id)
-    assert [piece.original_value for piece in duplicate_conversation] == [piece.original_value for piece in pieces[:4]]
+def _backtrack_history_pieces(
+    *, history: Sequence[str], conversation_id: str, sequence_step: int
+) -> list[MessagePiece]:
+    roles: dict[str, ChatMessageRole] = {"s": "system", "u": "user", "a": "assistant", "t": "assistant", "r": "tool"}
+    pending_calls: list[str] = []
+    pieces: list[MessagePiece] = []
+    for sequence, message_roles in enumerate(history):
+        for role in message_roles:
+            data_type: PromptDataType = "text"
+            value = f"message {len(pieces)}"
+            if role == "t":
+                call_id = f"call_{len(pieces)}"
+                pending_calls.append(call_id)
+                data_type = "function_call"
+                value = json.dumps({"type": data_type, "call_id": call_id, "name": "lookup", "arguments": "{}"})
+            elif role == "r":
+                data_type = "function_call_output"
+                value = json.dumps({"type": data_type, "call_id": pending_calls.pop(0), "output": "sunny"})
+            pieces.append(
+                MessagePiece(
+                    role=roles[role],
+                    original_value=value,
+                    original_value_data_type=data_type,
+                    conversation_id=conversation_id,
+                    sequence=sequence * sequence_step,
+                )
+            )
+    return pieces
 
 
+# s: system, u: user, a: assistant, t: function call, r: tool result.
+# Each element is one message; repeated letters represent pieces sharing its sequence.
+@pytest.mark.parametrize("sequence_step", [1, 3], ids=["consecutive", "gapped"])
 @pytest.mark.parametrize(
-    "roles, kept",
+    "history, expected",
     [
-        (["user", "assistant"], 0),
-        (["system", "user", "assistant"], 1),
-        (["user", "assistant", "user"], 2),
-        (["user", "assistant", "user", "assistant"], 2),
-        (["assistant", "assistant"], 0),
+        ("", ""),
+        ("s", ""),
+        ("u", ""),
+        ("ua", ""),
+        ("sua", "s"),
+        ("uaua", "ua"),
+        ("suauaua", "suaua"),
+        ("suauau", "suaua"),
+        ("sut", "s"),
+        ("sutr", "s"),
+        ("sutra", "s"),
+        ("utra", ""),
+        ("suautra", "sua"),
+        ("sutraua", "sutra"),
+        ("utrautra", "utra"),
+        ("sutrautra", "sutra"),
+        ("sutratra", "s"),
+        ("suautratra", "sua"),
+        ("suttrra", "s"),
+        ("suauttrra", "sua"),
+        ("sutrautr", "sutra"),
+        ("sutrau", "sutra"),
+        ("suas", "sua"),
+        ("suaa", "s"),
+        ("aa", ""),
+        ("ssua", "ss"),
+        pytest.param(("s", "uu", "tt", "rr", "aa"), ("s",), id="first-multipiece-turn"),
+        pytest.param(
+            ("s", "uu", "tt", "rr", "aa", "uu", "tt", "rr", "aa"),
+            ("s", "uu", "tt", "rr", "aa"),
+            id="retain-multipiece-tool-turn",
+        ),
+        pytest.param(
+            ("s", "uu", "tt", "rr", "aa", "uu"),
+            ("s", "uu", "tt", "rr", "aa"),
+            id="multipiece-half-turn",
+        ),
+        pytest.param(("s", "uu", "tt"), ("s",), id="multipiece-pending-calls"),
     ],
 )
-async def test_duplicate_conversation_excluding_last_turn_without_tool_calls(
-    sqlite_instance: MemoryInterface, roles: list[str], kept: int
-):
+async def test_duplicate_conversation_excluding_last_turn_role_sequences_async(
+    *,
+    sqlite_instance: MemoryInterface,
+    history: Sequence[str],
+    expected: Sequence[str],
+    sequence_step: int,
+) -> None:
     conversation_id = str(uuid4())
-    pieces = [
-        MessagePiece(
-            role=role, original_value=f"message {sequence}", conversation_id=conversation_id, sequence=sequence
-        )
-        for sequence, role in enumerate(roles)
-    ]
-    await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
+    pieces = _backtrack_history_pieces(history=history, conversation_id=conversation_id, sequence_step=sequence_step)
+    if pieces:
+        await sqlite_instance.add_message_pieces_to_memory_async(message_pieces=pieces)
+    source = await sqlite_instance.get_message_pieces_async(conversation_id=conversation_id)
 
     new_conversation_id = await sqlite_instance.duplicate_conversation_excluding_last_turn_async(
         conversation_id=conversation_id,
     )
 
     duplicate_conversation = await sqlite_instance.get_message_pieces_async(conversation_id=new_conversation_id)
-    assert [piece.original_value for piece in duplicate_conversation] == [
-        piece.original_value for piece in pieces[:kept]
+    retained = source[: sum(len(message_roles) for message_roles in expected)]
+    assert list(history[: len(expected)]) == list(expected)
+    assert new_conversation_id != conversation_id
+    assert all(piece.conversation_id == new_conversation_id for piece in duplicate_conversation)
+    assert [piece.role for piece in duplicate_conversation] == [piece.role for piece in retained]
+    assert [piece.original_value for piece in duplicate_conversation] == [piece.original_value for piece in retained]
+    assert [piece.original_value_data_type for piece in duplicate_conversation] == [
+        piece.original_value_data_type for piece in retained
     ]
+    assert [piece.sequence for piece in duplicate_conversation] == [piece.sequence for piece in retained]
+    assert [piece.original_prompt_id for piece in duplicate_conversation] == [
+        piece.original_prompt_id for piece in retained
+    ]
+    assert {piece.id for piece in duplicate_conversation}.isdisjoint(piece.id for piece in source)
+    assert [
+        piece.model_dump() for piece in await sqlite_instance.get_message_pieces_async(conversation_id=conversation_id)
+    ] == [piece.model_dump() for piece in source]
 
 
 async def test_duplicate_conversation_excluding_last_turn_not_score(sqlite_instance: MemoryInterface):
