@@ -854,6 +854,7 @@ class ScenarioProgressReadModel:
         exact_retrying_attacks_count: int | None = None,
         exact_group_counts: Mapping[str, ScenarioProgressCounts] | None = None,
         parent_deltas: Sequence[ScenarioAttackResultDelta] = (),
+        unverified_candidate_ids: set[str] | Sequence[str] | None = None,
     ) -> ScenarioHierarchyProjection:
         """
         Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
@@ -873,6 +874,8 @@ class ScenarioProgressReadModel:
             exact_group_counts: Optional mapping of atomic group ID to exact counts from aggregates.
             parent_deltas: Optional orchestration parent deltas to resolve roots and child references
                 beyond delta limits.
+            unverified_candidate_ids: Optional candidates whose parent status could not be verified
+                due to query clipping or budget exhaustion; excluded from root_results.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -896,11 +899,20 @@ class ScenarioProgressReadModel:
 
         # A true root is not referenced as a child by any parent and does not carry an attempt_index
         # (which designates a child attempt dispatched by an orchestration parent).
+        unverified_set = set(unverified_candidate_ids) if unverified_candidate_ids else set()
         root_results = [
             r
             for r in results_by_id.values()
-            if r.attack_result_id not in referenced_child_ids and r.attempt_index is None
+            if r.attack_result_id not in referenced_child_ids
+            and r.attempt_index is None
+            and r.attack_result_id not in unverified_set
         ]
+        if not root_results:
+            root_results = [
+                r
+                for r in results_by_id.values()
+                if r.attack_result_id not in referenced_child_ids and r.attempt_index is None
+            ]
         root_results.sort(key=lambda r: (r.timestamp, r.attack_result_id))
 
         visited_ids: set[str] = set()
@@ -1090,7 +1102,13 @@ class ScenarioProgressReadModel:
         # Handle unreached/disconnected components (including detached cycles) in a single linear pass
         if total_nodes_count < max_nodes:
             unreached = [r for r in results_by_id.values() if r.attack_result_id not in visited_ids]
-            unreached.sort(key=lambda r: (r.timestamp, r.attack_result_id))
+            unreached.sort(
+                key=lambda r: (
+                    r.attack_result_id in unverified_set,
+                    r.timestamp,
+                    r.attack_result_id,
+                )
+            )
             for next_root in unreached:
                 if total_nodes_count >= max_nodes:
                     hierarchy_truncated = True

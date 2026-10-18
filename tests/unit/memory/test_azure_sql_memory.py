@@ -498,10 +498,7 @@ def test_get_conversation_stats_chunks_within_bind_budget(
     """Conversation statistics query chunks parameters within _MAX_BIND_VARS and combines results."""
     session = MagicMock()
     session.execute.side_effect = lambda sql, params: MagicMock(
-        fetchall=lambda: [
-            (cid, 3, "preview", "text", "2026-10-16T12:00:00+00:00")
-            for cid in params.values()
-        ]
+        fetchall=lambda: [(cid, 3, "preview", "text", "2026-10-16T12:00:00+00:00") for cid in params.values()]
     )
 
     max_vars = uninitialized_memory_interface._MAX_BIND_VARS
@@ -510,9 +507,7 @@ def test_get_conversation_stats_chunks_within_bind_budget(
     # 1. At the limit: exactly 2,000 IDs -> 1 query, 2,000 parameters
     at_limit_ids = [f"conv_{i}" for i in range(max_vars)]
     with patch.object(uninitialized_memory_interface, "_get_session", return_value=session):
-        stats_at_limit = uninitialized_memory_interface._execute_get_conversation_stats(
-            conversation_ids=at_limit_ids
-        )
+        stats_at_limit = uninitialized_memory_interface._execute_get_conversation_stats(conversation_ids=at_limit_ids)
     assert len(stats_at_limit) == max_vars
     assert session.execute.call_count == 1
     params_at_limit = session.execute.call_args[0][1]
