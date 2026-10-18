@@ -6409,7 +6409,9 @@ class MemoryInterface(abc.ABC):
                 func.sum(case((ranked.c.attempt_outcome == AttackOutcome.ERROR.value, 1), else_=0)).label(
                     "raw_total_errors"
                 ),
-                func.sum(ranked.c.attempt_retries).label("raw_total_retries"),
+                func.sum(
+                    case((and_(ranked.c.unit_rank == 1, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)
+                ).label("raw_total_retries"),
                 func.sum(case((ranked.c.has_retries == 1, 1), else_=0)).label("raw_retrying_attacks_count"),
                 func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
                 func.sum(
@@ -7021,6 +7023,7 @@ class MemoryInterface(abc.ABC):
         scenario_result_id: str,
         child_ids: Sequence[str],
         limit: int = 500,
+        exclude_result_ids: Sequence[str] | None = None,
     ) -> list[ScenarioAttackResultDelta]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
@@ -7029,6 +7032,7 @@ class MemoryInterface(abc.ABC):
             scenario_result_id: Persisted scenario run ID.
             child_ids: Child attack result IDs to find parents for.
             limit: Maximum number of parent deltas to return.
+            exclude_result_ids: Optional result IDs already known to caller to exclude from query.
 
         Returns:
             list[ScenarioAttackResultDelta]: The matched parent deltas.
@@ -7041,12 +7045,27 @@ class MemoryInterface(abc.ABC):
         if not valid_child_ids or limit <= 0:
             return []
 
+        valid_exclude_uuids: list[uuid.UUID] = []
+        if exclude_result_ids:
+            for eid in exclude_result_ids:
+                try:
+                    valid_exclude_uuids.append(uuid.UUID(str(eid)))
+                except (ValueError, TypeError):
+                    continue
+        exclude_id_set = {str(u) for u in valid_exclude_uuids}
+
         seen_ids: set[str] = set()
         unique_deltas: list[ScenarioAttackResultDelta] = []
         metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
         attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
 
-        chunk_size = min(len(valid_child_ids), max(1, self._MAX_BIND_VARS - 10))
+        exclude_clauses = [
+            AttackResultEntry.id.not_in(valid_exclude_uuids[j : j + 200])
+            for j in range(0, len(valid_exclude_uuids), 200)
+        ]
+        max_exclude_batch = min(200, len(valid_exclude_uuids))
+        chunk_size = min(len(valid_child_ids), max(1, self._MAX_BIND_VARS - 10 - max_exclude_batch))
+
         with closing(self._get_session()) as session:
             for i in range(0, len(valid_child_ids), chunk_size):
                 remaining_limit = max(0, limit - len(unique_deltas))
@@ -7054,6 +7073,11 @@ class MemoryInterface(abc.ABC):
                     break
                 chunk = valid_child_ids[i : i + chunk_size]
                 child_matches = [metadata_text.like(f'%"{cid}"%') for cid in chunk]
+                where_conditions = [
+                    AttackResultEntry.attribution_parent_id == scenario_uuid,
+                    or_(*child_matches),
+                    *exclude_clauses,
+                ]
                 statement = (
                     select(
                         AttackResultEntry.id,
@@ -7087,19 +7111,14 @@ class MemoryInterface(abc.ABC):
                         func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id)
                         == ScoreEntry.id,
                     )
-                    .where(
-                        and_(
-                            AttackResultEntry.attribution_parent_id == scenario_uuid,
-                            or_(*child_matches),
-                        )
-                    )
+                    .where(and_(*where_conditions))
                     .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
                     .limit(remaining_limit + 1)
                 )
                 rows = session.execute(statement).mappings().all()
                 for row in rows:
                     delta = self._row_to_scenario_attack_result_delta(row)
-                    if delta.attack_result_id not in seen_ids:
+                    if delta.attack_result_id not in seen_ids and delta.attack_result_id not in exclude_id_set:
                         seen_ids.add(delta.attack_result_id)
                         unique_deltas.append(delta)
                         if len(unique_deltas) >= limit:
@@ -10870,6 +10889,7 @@ class MemoryInterface(abc.ABC):
         scenario_result_id: str,
         child_ids: Sequence[str],
         limit: int = 500,
+        exclude_result_ids: Sequence[str] | None = None,
     ) -> list[ScenarioAttackResultDelta]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
@@ -10878,6 +10898,7 @@ class MemoryInterface(abc.ABC):
             scenario_result_id: The ID of the scenario run.
             child_ids: Child attack result IDs to find parents for.
             limit: Maximum number of parent deltas to return.
+            exclude_result_ids: Optional result IDs already known to caller to exclude from query.
 
         Returns:
             list[ScenarioAttackResultDelta]: The matched parent deltas.
@@ -10887,6 +10908,7 @@ class MemoryInterface(abc.ABC):
             scenario_result_id=scenario_result_id,
             child_ids=child_ids,
             limit=limit,
+            exclude_result_ids=exclude_result_ids,
         )
 
     async def get_attack_result_conversation_projections_async(

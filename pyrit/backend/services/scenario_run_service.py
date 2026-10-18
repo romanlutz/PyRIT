@@ -1754,47 +1754,44 @@ class ScenarioRunService:
                     recounted_group_counts[gid] = g_counts
 
             is_truncated = max_deltas is not None and len(all_deltas) >= max_deltas
-            raw_total_errors = (
-                aggregates[run_id].raw_total_errors
-                if is_truncated
-                else sum(1 for d in all_deltas if d.outcome == AttackOutcome.ERROR)
-            )
-            raw_total_retries = (
-                aggregates[run_id].raw_total_retries if is_truncated else sum(d.total_retries for d in all_deltas)
-            )
-            raw_retrying_attacks_count = (
-                aggregates[run_id].raw_retrying_attacks_count
-                if is_truncated
-                else sum(1 for d in all_deltas if d.total_retries > 0 or bool(d.retry_events))
-            )
+            if is_truncated:
+                # Bounded recount read only a prefix of deltas. Preserve exact run-wide
+                # statistics from the database aggregates rather than replacing them with prefix counts.
+                recounted[run_id] = aggregates[run_id]
+            else:
+                raw_total_errors = sum(1 for d in all_deltas if d.outcome == AttackOutcome.ERROR)
+                raw_total_retries = ScenarioProgressReadModel.total_retry_pressure(
+                    attempts_per_unit=(len(a) for a in attempts_by_unit.values()),
+                    persisted_retries=(d.total_retries for d in all_deltas),
+                )
+                raw_retrying_attacks_count = sum(1 for d in all_deltas if d.total_retries > 0 or bool(d.retry_events))
+                merged_group_counts = {**aggregates[run_id].group_counts, **recounted_group_counts}
 
-            merged_group_counts = {**aggregates[run_id].group_counts, **recounted_group_counts}
-
-            recounted[run_id] = replace(
-                aggregates[run_id],
-                unit_count=overall.completed,
-                completed_units=overall.completed,
-                successful_units=overall.succeeded,
-                error_attempts=overall.errors,
-                total_retries=overall.retries,
-                outcome_successes=overall.outcomes.successes if overall.outcomes else 0,
-                outcome_failures=overall.outcomes.failures if overall.outcomes else 0,
-                outcome_errors=overall.outcomes.errors if overall.outcomes else 0,
-                outcome_undetermined=overall.outcomes.undetermined if overall.outcomes else 0,
-                raw_total_errors=raw_total_errors,
-                raw_total_retries=raw_total_retries,
-                raw_retrying_attacks_count=raw_retrying_attacks_count,
-                group_counts=merged_group_counts,
-                target_facing_attempts=overall.producer_counts.target_facing.attempts,
-                target_facing_error_attempts=overall.producer_counts.target_facing.errors,
-                target_facing_retries=overall.producer_counts.target_facing.retries,
-                orchestration_attempts=overall.producer_counts.orchestration.attempts,
-                orchestration_error_attempts=overall.producer_counts.orchestration.errors,
-                orchestration_retries=overall.producer_counts.orchestration.retries,
-                unknown_role_attempts=overall.producer_counts.unknown.attempts,
-                unknown_role_error_attempts=overall.producer_counts.unknown.errors,
-                unknown_role_retries=overall.producer_counts.unknown.retries,
-            )
+                recounted[run_id] = replace(
+                    aggregates[run_id],
+                    unit_count=overall.completed,
+                    completed_units=overall.completed,
+                    successful_units=overall.succeeded,
+                    error_attempts=overall.errors,
+                    total_retries=overall.retries,
+                    outcome_successes=overall.outcomes.successes if overall.outcomes else 0,
+                    outcome_failures=overall.outcomes.failures if overall.outcomes else 0,
+                    outcome_errors=overall.outcomes.errors if overall.outcomes else 0,
+                    outcome_undetermined=overall.outcomes.undetermined if overall.outcomes else 0,
+                    raw_total_errors=raw_total_errors,
+                    raw_total_retries=raw_total_retries,
+                    raw_retrying_attacks_count=raw_retrying_attacks_count,
+                    group_counts=merged_group_counts,
+                    target_facing_attempts=overall.producer_counts.target_facing.attempts,
+                    target_facing_error_attempts=overall.producer_counts.target_facing.errors,
+                    target_facing_retries=overall.producer_counts.target_facing.retries,
+                    orchestration_attempts=overall.producer_counts.orchestration.attempts,
+                    orchestration_error_attempts=overall.producer_counts.orchestration.errors,
+                    orchestration_retries=overall.producer_counts.orchestration.retries,
+                    unknown_role_attempts=overall.producer_counts.unknown.attempts,
+                    unknown_role_error_attempts=overall.producer_counts.unknown.errors,
+                    unknown_role_retries=overall.producer_counts.unknown.retries,
+                )
         return recounted
 
     def _build_history_summary(
@@ -2481,7 +2478,7 @@ class ScenarioRunService:
             unreached_cyclic = [cid for cid in all_results_map if cid not in reachable]
             current_candidates = list(unreferenced_roots) if unreferenced_roots else list(unreached_cyclic)
 
-            parent_budget = self._progress_read_model._STORAGE_PAGE_SIZE
+            parent_budget = max(2500, self._progress_read_model._STORAGE_PAGE_SIZE * 5)
             checked_child_ids: set[str] = set()
             depth = 0
             while current_candidates and depth < 10 and len(parent_deltas) < parent_budget:
@@ -2492,7 +2489,8 @@ class ScenarioRunService:
                 new_parents = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
                     scenario_result_id=scenario_result_id,
                     child_ids=current_candidates,
-                    limit=remaining_budget,
+                    limit=min(self._progress_read_model._STORAGE_PAGE_SIZE, remaining_budget),
+                    exclude_result_ids=list(all_deltas_map.keys()),
                 )
                 checked_child_ids.update(current_candidates)
                 next_candidates: list[str] = []
