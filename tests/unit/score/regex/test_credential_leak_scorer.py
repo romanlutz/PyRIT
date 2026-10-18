@@ -127,6 +127,8 @@ async def test_credential_detected(text: str, patch_central_database):
         "sk-svcacct-short",
         "sk-ant-short",
         "hf_short",
+        "ask-sk-proj-" + "A" * 50,
+        "myhf_" + "A" * 34,
     ],
 )
 async def test_credential_not_detected(text: str, patch_central_database):
@@ -191,6 +193,60 @@ async def test_ai_credentials_exclusion_with_garak_patterns(patch_central_databa
     assert (await scorer.score_text_async(_HF_TOKEN))[0].get_value() is False
     assert (await scorer.score_text_async(_OPENAI_PROJ_KEY))[0].get_value() is True
     assert (await scorer.score_text_async(_HF_FINE_GRAINED_TOKEN))[0].get_value() is True
+
+
+async def test_ai_credentials_hyphen_endings_and_exact_exclusions(patch_central_database):
+    openai_fixture = "sk-proj-" + "A" * 155 + "-"
+    anthropic_fixture = "sk-ant-api03-" + "A" * 94 + "-"
+
+    # 1. Detected by default patterns (complete match including trailing hyphen)
+    default_scorer = CredentialLeakScorer()
+    score_oai = (await default_scorer.score_text_async(openai_fixture))[0]
+    assert score_oai.get_value() is True
+    assert "OpenAI API Key" in score_oai.score_rationale
+
+    score_ant = (await default_scorer.score_text_async(anthropic_fixture))[0]
+    assert score_ant.get_value() is True
+    assert "Anthropic API Key" in score_ant.score_rationale
+
+    # 2. Exact excluded fixtures score False with GARAK_PATTERNS
+    excluded_scorer = CredentialLeakScorer.from_excluded_values(
+        [openai_fixture, anthropic_fixture],
+        patterns=CredentialLeakScorer.GARAK_PATTERNS,
+    )
+    assert (await excluded_scorer.score_text_async(openai_fixture))[0].get_value() is False
+    assert (await excluded_scorer.score_text_async(anthropic_fixture))[0].get_value() is False
+
+    # 3. Non-excluded values still score True
+    assert (await excluded_scorer.score_text_async("sk-proj-" + "A" * 155))[0].get_value() is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sk-proj-" + "A" * 201,
+        "sk-ant-api03-" + "A" * 141,
+        "hf_" + "A" * 81,
+    ],
+)
+async def test_ai_credentials_overlong_rejected(text: str, patch_central_database):
+    scorer = CredentialLeakScorer()
+    assert (await scorer.score_text_async(text))[0].get_value() is False
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_pattern"),
+    [
+        (f"这是我的密钥:{_OPENAI_PROJ_KEY}测试", "OpenAI API Key"),
+        (f"这是Anthropic密钥:{_ANTHROPIC_KEY}结束", "Anthropic API Key"),
+        (f"这是HF令牌:{_HF_TOKEN}结束", "Hugging Face Token"),
+    ],
+)
+async def test_ai_credentials_detected_in_non_ascii_context(text: str, expected_pattern: str, patch_central_database):
+    scorer = CredentialLeakScorer()
+    score = (await scorer.score_text_async(text))[0]
+    assert score.get_value() is True
+    assert expected_pattern in score.score_rationale
 
 
 async def test_credential_scorer_custom_patterns(patch_central_database):
