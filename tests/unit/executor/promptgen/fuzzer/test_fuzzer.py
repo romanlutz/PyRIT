@@ -19,6 +19,8 @@ from pyrit.executor.promptgen.fuzzer import (
 )
 from pyrit.executor.promptgen.fuzzer.fuzzer import _PromptNode
 from pyrit.models import (
+    Message,
+    MessagePiece,
     Score,
     SeedDataset,
     SeedPrompt,
@@ -285,6 +287,66 @@ class TestFuzzerGenerator:
             scorer_class_identifier=get_mock_scorer_identifier(),
         )
         assert generator._is_jailbreak(false_score) is False
+
+    def test_process_scoring_results_attributes_jailbreaks_to_scored_response(
+        self,
+        scoring_target: MockPromptTarget,
+        template_converters: list[FuzzerConverter],
+        mock_scorer: MagicMock,
+        fuzzer_context: FuzzerContext,
+    ) -> None:
+        """A jailbreak verdict must map to the response its score was stored on, not its list position."""
+        generator = FuzzerGenerator(
+            objective_target=scoring_target,
+            template_converters=template_converters,
+            scorer=mock_scorer,
+        )
+
+        first_piece = MessagePiece(role="assistant", original_value="first", conversation_id="conv-first")
+        second_piece = MessagePiece(role="assistant", original_value="second", conversation_id="conv-second")
+        responses = [first_piece.to_message(), second_piece.to_message()]
+
+        def _score(piece: MessagePiece, value: str) -> Score:
+            return Score(
+                score_value=value,
+                score_value_description="",
+                score_type="true_false",
+                score_category=[],
+                score_rationale="",
+                score_metadata={},
+                message_piece_id=piece.id,
+                scorer_class_identifier=get_mock_scorer_identifier(),
+            )
+
+        node = _PromptNode(template="template", parent=None)
+
+        # A scorer can return several scores for one response, so the flattened
+        # batch list does not line up with the responses by position.
+        scores = [_score(first_piece, "false"), _score(first_piece, "false"), _score(second_piece, "true")]
+        jailbreak_count = generator._process_scoring_results(
+            context=fuzzer_context,
+            scores=scores,
+            responses=responses,
+            template_node=node,
+            current_seed=node,
+        )
+        assert jailbreak_count == 1
+        assert fuzzer_context.jailbreak_conversation_ids == ["conv-second"]
+        assert fuzzer_context.total_target_query_count == 2
+
+        # A batch where only the second response produced a score must not credit the first conversation.
+        fuzzer_context.jailbreak_conversation_ids = []
+        fuzzer_context.total_target_query_count = 0
+        jailbreak_count = generator._process_scoring_results(
+            context=fuzzer_context,
+            scores=[_score(second_piece, "true")],
+            responses=responses,
+            template_node=node,
+            current_seed=node,
+        )
+        assert jailbreak_count == 1
+        assert fuzzer_context.jailbreak_conversation_ids == ["conv-second"]
+        assert fuzzer_context.total_target_query_count == 2
 
     def test_is_jailbreak_float_scale_scorer(
         self, scoring_target: MockPromptTarget, template_converters: list[FuzzerConverter]
