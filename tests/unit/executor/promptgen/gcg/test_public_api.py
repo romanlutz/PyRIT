@@ -22,6 +22,7 @@ from pyrit.executor.promptgen.gcg import (
     GCGOutputConfig,
     GCGResult,
     GCGStrategyConfig,
+    create_gcg_data_config_async,
     fetch_advbench_for_gcg_async,
     load_goals_and_targets,
 )
@@ -43,6 +44,7 @@ def test_public_api_symbols_are_exported() -> None:
         "GCGOutputConfig",
         "GCGResult",
         "GCGStrategyConfig",
+        "create_gcg_data_config_async",
         "fetch_advbench_for_gcg_async",
         "load_goals_and_targets",
     }
@@ -64,6 +66,7 @@ def test_public_api_symbols_are_importable_from_package() -> None:
         GCGOutputConfig,
         GCGResult,
         GCGStrategyConfig,
+        create_gcg_data_config_async,
         fetch_advbench_for_gcg_async,
         load_goals_and_targets,
     )

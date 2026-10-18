@@ -109,6 +109,13 @@ ml_client.environments.create_or_update(env_docker_context)
 # in ``pyrit.executor.promptgen.gcg.config``; goals and targets flow into
 # ``GCGGenerator.execute_async`` at runtime, not through the config.
 #
+# AdvBench already provides a target completion for each objective. For an
+# ordinary ``SeedDataset`` without those values, call
+# ``await create_gcg_data_config_async(dataset=..., adversarial_target=...)``.
+# It preserves provided ``gcg_target`` metadata and asks the adversarial target
+# to generate only missing completion prefixes. The resolved strings are still
+# serialized locally, so the adversarial target is never needed by the AML job.
+#
 # We also have to specify a GPU compute target. In our experience, a GPU instance with
 # at least 24GB of vRAM is required (e.g., Standard_NC24ads_A100_v4).
 #

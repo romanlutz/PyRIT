@@ -82,10 +82,10 @@ class GCGDataConfig:
     internet, which is what makes GCG runnable in air-gapped subscriptions and
     pins reproducibility to the submitted job.
 
-    Build one from a ``SeedDataset`` via ``from_seed_dataset`` (either a public
-    dataset materialized with ``fetch_advbench_for_gcg_async`` or a private
-    ``SeedDataset`` assembled in memory). Each seed contributes its ``value`` as
-    a goal and ``metadata[target_metadata_key]`` as the paired target string.
+    Build one from a dataset whose seeds already contain target metadata via
+    ``from_seed_dataset``. For an arbitrary objective dataset, use
+    ``create_gcg_data_config_async`` to preserve provided completions and
+    generate missing ones with an adversarial target before serialization.
 
     Attributes:
         train_goals (list[str]): Training goals (harmful behaviors) to optimize
@@ -127,12 +127,13 @@ class GCGDataConfig:
         test_dataset: SeedDataset | None = None,
         target_metadata_key: str = TARGET_METADATA_KEY,
     ) -> GCGDataConfig:
-        """Materialize goals and targets from ``SeedDataset``(s) into an inline config.
+        """Materialize fully specified ``SeedDataset``(s) into an inline config.
 
         Each seed's ``value`` becomes a goal and its
         ``metadata[target_metadata_key]`` becomes the paired target string.
-        This is the adapter between PyRIT's standard ``SeedDataset`` surface and
-        the goal/target pairs the GCG optimizer consumes.
+        This strict synchronous path requires every seed to carry a target.
+        Use ``create_gcg_data_config_async`` when missing targets should be
+        generated through an adversarial target.
 
         Args:
             dataset (SeedDataset): Training dataset. Every seed must carry a
