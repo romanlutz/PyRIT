@@ -19,7 +19,6 @@ from pyrit.executor.promptgen.fuzzer import (
 )
 from pyrit.executor.promptgen.fuzzer.fuzzer import _PromptNode
 from pyrit.models import (
-    Message,
     MessagePiece,
     Score,
     SeedDataset,
