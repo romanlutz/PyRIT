@@ -5213,7 +5213,7 @@ dev = [
     { name = "types-aiofiles", specifier = ">=24.1.0" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20250516" },
     { name = "types-requests", specifier = ">=2.31.0.20250515" },
-    { name = "uv", specifier = "==0.9.17" },
+    { name = "uv", specifier = ">=0.9.17" },
 ]
 
 [[package]]

@@ -9,11 +9,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _dev_uv_pin() -> str:
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    pins: list[str] = [dep for dep in pyproject["dependency-groups"]["dev"] if dep.startswith("uv==")]
-    assert len(pins) == 1
-    return pins[0].removeprefix("uv==")
+def _locked_uv_version() -> str:
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    versions = {package["version"] for package in lock["package"] if package["name"] == "uv"}
+    assert len(versions) == 1, versions
+    return versions.pop()
 
 
 def _setup_uv_versions() -> dict[str, str]:
@@ -27,10 +27,11 @@ def _setup_uv_versions() -> dict[str, str]:
     return versions
 
 
-def test_dev_uv_pin_matches_every_setup_uv_version() -> None:
-    # pre-commit-uv builds the hook environments with the uv from the dev dependencies, and under
-    # `uv run` it is also the uv that hooks call, so it has to stay on the version CI installs.
-    pin = _dev_uv_pin()
+def test_locked_uv_matches_every_setup_uv_version() -> None:
+    # pre-commit-uv builds the hook environments with the uv that uv.lock selects for the dev
+    # dependencies, and under `uv run` it is also the uv that hooks call. When an update moves
+    # uv in uv.lock, the setup-uv versions have to move with it.
+    locked = _locked_uv_version()
     versions = _setup_uv_versions()
     assert versions
-    assert versions == dict.fromkeys(versions, pin)
+    assert versions == dict.fromkeys(versions, locked)

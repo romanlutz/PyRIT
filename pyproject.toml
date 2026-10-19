@@ -94,8 +94,9 @@ dev = [
     "pre-commit>=4.2.0",
     "pre-commit-uv>=4.3.0",
     # pre-commit-uv creates the hook environments with this uv, and it is also the uv
-    # on PATH under `uv run`. Keep it on the setup-uv version in .github/workflows.
-    "uv==0.9.17",
+    # on PATH under `uv run` or in an activated venv. uv.lock selects the version; keep
+    # the setup-uv version in .github/workflows on the locked one when it changes.
+    "uv>=0.9.17",
     "pytest>=9.0.3",
     "pytest-rerunfailures>=15.1",
     "pytest-asyncio>=1.0.0",

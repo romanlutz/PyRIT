@@ -16,7 +16,7 @@ Note: if you did not install PyRIT using uv, then omit uv run from the above com
 
 ## Hook Environments
 
-The dev dependencies include [pre-commit-uv](https://github.com/tox-dev/pre-commit-uv), so after `uv sync`, `uv run pre-commit` creates the Python hook environments with `uv venv` and installs the hooks with `uv pip install` instead of virtualenv and pip. It uses the uv from the dev dependencies, which is pinned to the version CI uses. Under `uv run`, that is also the `uv` the `ty-check` hook calls. Hook versions and hook selection still come from `.pre-commit-config.yaml`.
+The dev dependencies include [pre-commit-uv](https://github.com/tox-dev/pre-commit-uv), so after `uv sync`, `uv run pre-commit` creates the Python hook environments with `uv venv` and installs the hooks with `uv pip install` instead of virtualenv and pip. It uses the uv from the dev dependencies, at the version selected in `uv.lock`, which is also the version CI installs. Under `uv run` or in an activated virtual environment, that uv comes before your machine-wide uv on PATH, so it is the `uv` you run there and the one the `ty-check` hook calls. Hook versions and hook selection still come from `.pre-commit-config.yaml`.
 
 To check that pre-commit-uv is active, run `uv run pre-commit --version`. The output should end with the pre-commit-uv and uv versions, such as `(pre-commit-uv=4.3.0, uv=0.9.17)`.
 
