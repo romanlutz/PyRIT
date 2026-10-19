@@ -2390,6 +2390,47 @@ class ModelWorker:
         return task.operation(*task.args, **task.kwargs)
 
 
+def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> None:
+    """
+    Check that GCG can optimize against a model and tokenizer before any worker starts.
+
+    Args:
+        model (Any): The loaded causal language model.
+        tokenizer (Any): The tokenizer paired with the model.
+        model_path (str): The model path, used in error messages.
+
+    Raises:
+        ValueError: If the tokenizer is not fast, the model exposes no floating point
+            input embedding matrix, or the tokenizer has ids outside that matrix.
+    """
+    if not tokenizer.is_fast:
+        raise ValueError(
+            f"The tokenizer for {model_path!r} ({type(tokenizer).__name__}) is not backed by the Hugging Face "
+            "tokenizers library, so it cannot return the character-to-token offsets GCG uses to locate the goal, "
+            "control and target. Load it with the default tokenizers backend."
+        )
+    try:
+        weight = getattr(model.get_input_embeddings(), "weight", None)
+    except NotImplementedError:
+        weight = None
+    if not isinstance(weight, torch.Tensor):
+        raise ValueError(
+            f"Model {model_path!r} does not expose an input embedding matrix through get_input_embeddings(). "
+            "GCG computes token gradients through that matrix."
+        )
+    if not weight.is_floating_point():
+        raise ValueError(
+            f"The input embeddings of {model_path!r} are {weight.dtype}, so GCG cannot compute token gradients "
+            "through them. Load the model without quantizing the embedding layer."
+        )
+    if len(tokenizer) > weight.shape[0]:
+        raise ValueError(
+            f"The tokenizer for {model_path!r} has {len(tokenizer)} tokens but the model's input embeddings "
+            f"have only {weight.shape[0]} rows. Check that the tokenizer matches the model, or call "
+            "model.resize_token_embeddings(len(tokenizer)) after adding tokens."
+        )
+
+
 def get_workers(params: Any, evaluation: bool = False) -> tuple[list[ModelWorker], list[ModelWorker]]:
     """
     Load and optionally start training and held-out model workers.
@@ -2398,7 +2439,8 @@ def get_workers(params: Any, evaluation: bool = False) -> tuple[list[ModelWorker
         tuple[list[ModelWorker], list[ModelWorker]]: Training and held-out workers.
 
     Raises:
-        ValueError: If a tokenizer does not define a chat template.
+        ValueError: If a tokenizer does not define a chat template, or a model and
+            tokenizer pair fails the GCG capability check.
     """
     tokenizers = []
     for i in range(len(params.tokenizer_paths)):
@@ -2447,6 +2489,8 @@ def get_workers(params: Any, evaluation: bool = False) -> tuple[list[ModelWorker
         )
         for i in range(len(params.model_paths))
     ]
+    for model_path, worker in zip(params.model_paths, workers, strict=True):
+        _check_gcg_capabilities(model=worker.model, tokenizer=worker.tokenizer, model_path=model_path)
     if not evaluation:
         for worker in workers:
             worker.start()

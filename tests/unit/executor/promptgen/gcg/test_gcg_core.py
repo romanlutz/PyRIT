@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch, sentinel
 
@@ -1086,7 +1087,9 @@ class TestGetWorkersChatTemplateValidation:
         tokenizer = MagicMock()
         tokenizer.pad_token = "<pad>"
         tokenizer.chat_template = "{{ messages[0]['content'] }}"
-        worker = MagicMock()
+        tokenizer.__len__.return_value = 8
+        worker = MagicMock(tokenizer=tokenizer)
+        worker.model.get_input_embeddings.return_value = torch.nn.Embedding(8, 4)
 
         with (
             patch.object(attack_manager_mod.AutoTokenizer, "from_pretrained", return_value=tokenizer),
@@ -1097,6 +1100,62 @@ class TestGetWorkersChatTemplateValidation:
         worker.start.assert_called_once_with()
         assert train_workers == [worker]
         assert test_workers == []
+
+    def test_capability_check_runs_before_workers_start(self) -> None:
+        params = MagicMock()
+        params.tokenizer_paths = ["fake/chat-model"]
+        params.tokenizer_kwargs = [{}]
+        params.model_paths = ["fake/chat-model"]
+        params.model_kwargs = [{}]
+        params.devices = ["cpu"]
+        params.token = ""
+
+        tokenizer = MagicMock()
+        tokenizer.pad_token = "<pad>"
+        tokenizer.chat_template = "{{ messages[0]['content'] }}"
+        tokenizer.is_fast = False
+        worker = MagicMock(tokenizer=tokenizer)
+
+        with (
+            patch.object(attack_manager_mod.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+            patch.object(attack_manager_mod, "ModelWorker", return_value=worker),
+            pytest.raises(ValueError, match="'fake/chat-model' .* is not backed by the Hugging Face tokenizers"),
+        ):
+            attack_manager_mod.get_workers(params, evaluation=False)
+
+        worker.start.assert_not_called()
+
+
+class TestCheckGcgCapabilities:
+    def test_accepts_tiny_model_with_fast_tokenizer(self) -> None:
+        attack_manager_mod._check_gcg_capabilities(
+            model=_tiny_model("llama"), tokenizer=_fast_tokenizer(), model_path="fake/model"
+        )
+
+    def test_accepts_tokenizer_that_exactly_fills_embeddings(self) -> None:
+        model = MagicMock()
+        model.get_input_embeddings.return_value = torch.nn.Embedding(len(_fast_tokenizer()), 4)
+        attack_manager_mod._check_gcg_capabilities(model=model, tokenizer=_fast_tokenizer(), model_path="fake/model")
+
+    @pytest.mark.parametrize(
+        ("embeddings", "match"),
+        [
+            (NotImplementedError(), "does not expose an input embedding matrix"),
+            (None, "does not expose an input embedding matrix"),
+            (SimpleNamespace(weight=torch.zeros(256, 4, dtype=torch.int8)), "are torch.int8"),
+            (torch.nn.Embedding(4, 4), "has 27 tokens but the model's input embeddings have only 4 rows"),
+        ],
+    )
+    def test_rejects_unusable_embeddings(self, embeddings: Any, match: str) -> None:
+        model = MagicMock()
+        if isinstance(embeddings, Exception):
+            model.get_input_embeddings.side_effect = embeddings
+        else:
+            model.get_input_embeddings.return_value = embeddings
+        with pytest.raises(ValueError, match=match):
+            attack_manager_mod._check_gcg_capabilities(
+                model=model, tokenizer=_fast_tokenizer(), model_path="fake/model"
+            )
 
 
 def test_model_worker_uses_model_device_dispatch() -> None:
