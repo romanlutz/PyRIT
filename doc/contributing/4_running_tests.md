@@ -84,6 +84,11 @@ timeout coverage expires the real cancellation path only after the request start
 Event-controlled analytics expiry tests freeze both deadline clocks so floating-point
 rounding cannot turn a valid query budget into a failed assertion.
 
+File-surface cancellation tests hold an in-flight read at an explicit checkpoint.
+Cancellation returns before that read is released; the worker may finish that chunk,
+but must stop before starting another. Wait for worker cleanup before checking final read
+counts or removing patches, rather than assuming fixed sleeps let the worker settle.
+
 For scenario correctness tests, wait for the owned task to finish, including
 persistence and scheduler handoff. Use events to control concurrent steps and a
 finite test watchdog to detect deadlocks, not short per-step latency limits.
