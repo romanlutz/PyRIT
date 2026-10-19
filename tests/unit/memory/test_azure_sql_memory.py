@@ -1087,3 +1087,50 @@ def test_scenario_attack_result_deltas_by_ids_statement_type_hints() -> None:
 
     hints = typing.get_type_hints(MemoryInterface._build_scenario_attack_result_deltas_by_ids_statement)
     assert hints.get("return") is Select
+
+
+def test_scenario_parent_deltas_for_child_ids_bounds_parameters_with_large_exclusions_mssql(
+    memory_interface: AzureSQLMemory,
+) -> None:
+    """Verify that _execute_get_scenario_parent_deltas_for_child_ids never exceeds SQL Server bind limits."""
+    scenario_id = str(uuid.uuid4())
+    # Case 1: 1,100 children and 1,100 exclusions - previously combined to ~2,900 params exceeding 2,100 MSSQL limit
+    child_ids = [str(uuid.uuid4()) for _ in range(1100)]
+    exclude_ids = [str(uuid.uuid4()) for _ in range(1100)]
+
+    session = MagicMock()
+    session.execute.return_value.mappings.return_value.all.return_value = []
+    with patch.object(memory_interface, "_get_session", return_value=session):
+        deltas = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
+            scenario_result_id=scenario_id,
+            child_ids=child_ids,
+            exclude_result_ids=exclude_ids,
+        )
+
+    assert deltas == []
+    assert session.execute.call_count >= 1
+    for call in session.execute.call_args_list:
+        stmt = call.args[0]
+        compiled = stmt.compile(dialect=mssql.dialect())
+        assert len(compiled.params) <= memory_interface._MAX_BIND_VARS
+        assert len(compiled.params) <= 2000
+
+    # Case 2: 1,000 children and 2,500 exclusions (budget boundary)
+    child_ids_2 = [str(uuid.uuid4()) for _ in range(1000)]
+    exclude_ids_2 = [str(uuid.uuid4()) for _ in range(2500)]
+
+    session.reset_mock()
+    with patch.object(memory_interface, "_get_session", return_value=session):
+        deltas = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
+            scenario_result_id=scenario_id,
+            child_ids=child_ids_2,
+            exclude_result_ids=exclude_ids_2,
+        )
+
+    assert deltas == []
+    assert session.execute.call_count >= 1
+    for call in session.execute.call_args_list:
+        stmt = call.args[0]
+        compiled = stmt.compile(dialect=mssql.dialect())
+        assert len(compiled.params) <= memory_interface._MAX_BIND_VARS
+        assert len(compiled.params) <= 2000

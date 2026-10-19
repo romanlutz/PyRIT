@@ -907,12 +907,6 @@ class ScenarioProgressReadModel:
             and r.attempt_index is None
             and r.attack_result_id not in unverified_set
         ]
-        if not root_results:
-            root_results = [
-                r
-                for r in results_by_id.values()
-                if r.attack_result_id not in referenced_child_ids and r.attempt_index is None
-            ]
         root_results.sort(key=lambda r: (r.timestamp, r.attack_result_id))
 
         visited_ids: set[str] = set()
@@ -1101,10 +1095,25 @@ class ScenarioProgressReadModel:
 
         # Handle unreached/disconnected components (including detached cycles) in a single linear pass
         if total_nodes_count < max_nodes:
-            unreached = [r for r in results_by_id.values() if r.attack_result_id not in visited_ids]
+            # Nodes that are unverified or descended from unverified candidates can never be emitted as roots
+            unverified_descendants: set[str] = set(unverified_set)
+            unverified_queue = list(unverified_set)
+            while unverified_queue:
+                curr = unverified_queue.pop()
+                res = results_by_id.get(curr)
+                if res:
+                    for cid in res.child_attack_result_ids:
+                        if cid not in unverified_descendants:
+                            unverified_descendants.add(cid)
+                            unverified_queue.append(cid)
+
+            unreached = [
+                r
+                for r in results_by_id.values()
+                if r.attack_result_id not in visited_ids and r.attack_result_id not in unverified_descendants
+            ]
             unreached.sort(
                 key=lambda r: (
-                    r.attack_result_id in unverified_set,
                     r.timestamp,
                     r.attack_result_id,
                 )
@@ -1127,7 +1136,9 @@ class ScenarioProgressReadModel:
                 else:
                     visited_ids.add(next_root.attack_result_id)
 
-        if not hierarchy_truncated and any(r.attack_result_id not in visited_ids for r in results_by_id.values()):
+        if not hierarchy_truncated and (
+            any(r.attack_result_id not in visited_ids for r in results_by_id.values()) or bool(unverified_set)
+        ):
             hierarchy_truncated = True
 
         for g_roots in roots_by_group.values():

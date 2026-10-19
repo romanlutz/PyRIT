@@ -344,6 +344,26 @@ class ScenarioRunStateRecord:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ScenarioAttemptSeedSummary:
+    """
+    Lightweight projection of attempt seed and outcome fields for scenario recount.
+
+    Contains only the scalar fields required to resolve logical execution units and
+    aggregate attempt counts during legacy recount. Never loads prompt entries, score
+    records, retry events, or large conversation payloads.
+    """
+
+    attack_result_id: str
+    objective: str
+    objective_sha256: str | None
+    atomic_attack_identifier: AtomicAttackIdentifier | None
+    outcome: AttackOutcome
+    timestamp: datetime
+    total_retries: int
+    attribution_data: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _AttackResultQuery:
     """
     Immutable filters and pagination settings for an attack-result query.
@@ -6821,6 +6841,89 @@ class MemoryInterface(abc.ABC):
         ]
         return deltas, has_more
 
+    @staticmethod
+    def _row_to_scenario_attempt_seed_summary(row: Mapping[str, Any]) -> ScenarioAttemptSeedSummary:
+        atomic_identifier = (
+            AtomicAttackIdentifier.model_validate(row["atomic_attack_identifier"])
+            if row["atomic_attack_identifier"]
+            else None
+        )
+        return ScenarioAttemptSeedSummary(
+            attack_result_id=str(row["id"]),
+            objective=row["objective"],
+            objective_sha256=row["objective_sha256"],
+            atomic_attack_identifier=atomic_identifier,
+            outcome=AttackOutcome(row["outcome"]),
+            timestamp=row["timestamp"],
+            total_retries=row["total_retries"] or 0,
+            attribution_data=row["attribution_data"] or {},
+        )
+
+    def _execute_get_scenario_recount_summaries(
+        self,
+        *,
+        scenario_result_id: str,
+        cursor: AttackResultKeysetCursor | None = None,
+        limit: int = 500,
+    ) -> tuple[list[ScenarioAttemptSeedSummary], bool]:
+        """
+        Return bounded scenario attempt seed summaries in ascending keyset order for recount.
+
+        This projection selects only minimal scalar fields required for execution unit
+        resolution and recount metrics without loading score entries, prompt rows, or
+        retry events.
+
+        Returns:
+            tuple[list[ScenarioAttemptSeedSummary], bool]: The page and whether more rows exist.
+
+        Raises:
+            ValueError: If the limit or cursor identifiers are invalid.
+        """
+        if limit < 1 or limit > 500:
+            raise ValueError("Scenario recount limit must be between 1 and 500.")
+
+        scenario_uuid = uuid.UUID(scenario_result_id)
+        conditions: list[Any] = [AttackResultEntry.attribution_parent_id == scenario_uuid]
+        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
+        if cursor is not None:
+            cursor_uuid = uuid.UUID(cursor.attack_result_id)
+            cursor_id_order = self._get_scenario_attempt_id_order_expression(
+                attempt_id=literal(cursor_uuid, type_=AttackResultEntry.id.type)
+            )
+            conditions.append(
+                or_(
+                    AttackResultEntry.timestamp > cursor.timestamp,
+                    and_(
+                        AttackResultEntry.timestamp == cursor.timestamp,
+                        attempt_id_order > cursor_id_order,
+                    ),
+                )
+            )
+
+        statement = (
+            select(
+                AttackResultEntry.id,
+                AttackResultEntry.objective,
+                AttackResultEntry.objective_sha256,
+                AttackResultEntry.atomic_attack_identifier,
+                AttackResultEntry.outcome,
+                AttackResultEntry.timestamp,
+                AttackResultEntry.total_retries,
+                AttackResultEntry.attribution_data,
+            )
+            .where(and_(*conditions))
+            .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+            .limit(limit + 1)
+        )
+        with closing(self._get_session()) as session:
+            rows = session.execute(statement).mappings().all()
+
+        has_more = len(rows) > limit
+        summaries: list[ScenarioAttemptSeedSummary] = [
+            self._row_to_scenario_attempt_seed_summary(row) for row in rows[:limit]
+        ]
+        return summaries, has_more
+
     def _build_scenario_attack_result_deltas_by_ids_statement(
         self,
         *,
@@ -7059,12 +7162,25 @@ class MemoryInterface(abc.ABC):
         metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
         attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
 
-        exclude_clauses = [
-            AttackResultEntry.id.not_in(valid_exclude_uuids[j : j + 200])
-            for j in range(0, len(valid_exclude_uuids), 200)
-        ]
-        max_exclude_batch = min(200, len(valid_exclude_uuids))
-        chunk_size = min(len(valid_child_ids), max(1, self._MAX_BIND_VARS - 10 - max_exclude_batch))
+        _fixed_overhead = 10
+        # To avoid exceeding SQL Server's 2,100 parameter limit (or SQLite's 500),
+        # budget the total parameters across fixed clauses, exclusions, and child ID matches.
+        max_sql_excludes = self._MAX_BIND_VARS // 2
+        if len(valid_exclude_uuids) <= max_sql_excludes:
+            exclude_clauses = [
+                AttackResultEntry.id.not_in(valid_exclude_uuids[j : j + 200])
+                for j in range(0, len(valid_exclude_uuids), 200)
+            ]
+            exclude_param_count = len(valid_exclude_uuids)
+        else:
+            # When exclusions are too large, don't bind them in SQL; Python filters them via exclude_id_set.
+            exclude_clauses = []
+            exclude_param_count = 0
+
+        chunk_size = min(
+            len(valid_child_ids),
+            max(1, self._MAX_BIND_VARS - _fixed_overhead - exclude_param_count),
+        )
 
         with closing(self._get_session()) as session:
             for i in range(0, len(valid_child_ids), chunk_size):
@@ -10833,6 +10949,33 @@ class MemoryInterface(abc.ABC):
         """
         return await self._run_database_operation_async(
             self._execute_get_scenario_attack_result_deltas,
+            scenario_result_id=scenario_result_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def get_scenario_recount_summaries_async(
+        self,
+        *,
+        scenario_result_id: str,
+        cursor: AttackResultKeysetCursor | None = None,
+        limit: int = 500,
+    ) -> tuple[list[ScenarioAttemptSeedSummary], bool]:
+        """
+        Return bounded scenario attempt seed summaries in ascending keyset order for recount.
+
+        This projection selects only the minimal scalar fields needed for execution-unit
+        matching and recount metrics. Never loads scores, prompt entries, retry events, or
+        large conversation payloads.
+
+        Returns:
+            tuple[list[ScenarioAttemptSeedSummary], bool]: The page and whether more rows exist.
+
+        Raises:
+            ValueError: If the limit is invalid.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_scenario_recount_summaries,
             scenario_result_id=scenario_result_id,
             cursor=cursor,
             limit=limit,

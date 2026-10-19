@@ -3006,9 +3006,11 @@ async def test_legacy_recount_paged_deltas_without_hydrating_scenario_results(
     # Spy on memory methods
     original_get_scenario_results = sqlite_instance.get_scenario_results_async
     original_get_deltas = sqlite_instance.get_scenario_attack_result_deltas_async
+    original_get_summaries = sqlite_instance.get_scenario_recount_summaries_async
 
     scenario_results_called = False
-    delta_page_sizes: list[int] = []
+    deltas_called = False
+    summary_page_sizes: list[int] = []
 
     async def tracking_get_scenario_results(*args: Any, **kwargs: Any) -> Any:
         nonlocal scenario_results_called
@@ -3016,11 +3018,17 @@ async def test_legacy_recount_paged_deltas_without_hydrating_scenario_results(
         return await original_get_scenario_results(*args, **kwargs)
 
     async def tracking_get_deltas(*args: Any, **kwargs: Any) -> Any:
-        delta_page_sizes.append(kwargs.get("limit", 0))
+        nonlocal deltas_called
+        deltas_called = True
         return await original_get_deltas(*args, **kwargs)
+
+    async def tracking_get_summaries(*args: Any, **kwargs: Any) -> Any:
+        summary_page_sizes.append(kwargs.get("limit", 0))
+        return await original_get_summaries(*args, **kwargs)
 
     sqlite_instance.get_scenario_results_async = tracking_get_scenario_results  # type: ignore[assignment]
     sqlite_instance.get_scenario_attack_result_deltas_async = tracking_get_deltas  # type: ignore[assignment]
+    sqlite_instance.get_scenario_recount_summaries_async = tracking_get_summaries  # type: ignore[assignment]
 
     service = ScenarioRunService(memory=sqlite_instance)
 
@@ -3031,9 +3039,10 @@ async def test_legacy_recount_paged_deltas_without_hydrating_scenario_results(
     assert matched_run is not None
     assert matched_run.completed_attacks == 501
 
-    # Verified: full ScenarioResult was NOT loaded, deltas were paged!
+    # Verified: full ScenarioResult was NOT loaded, deltas were NOT hydrated, summaries were paged!
     assert scenario_results_called is False
-    assert len(delta_page_sizes) >= 2  # Paged in batches of 500
+    assert deltas_called is False
+    assert len(summary_page_sizes) >= 2  # Paged in batches of 500
 
 
 @pytest.mark.asyncio
@@ -4175,3 +4184,253 @@ async def test_saved_plan_two_seeds_shared_objective_different_context_500_attem
     assert warm_hier.diagnostics.total_retries == 498
     assert cold_hier.overall_counts.completed == 2
     assert warm_hier.overall_counts.completed == 2
+
+
+@pytest.mark.asyncio
+async def test_11_parent_chain_boundary_guards_depth_cutoff_mssql_and_sqlite(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that an 11-parent deep chain (exceeding depth boundary 10) above 500 leaves with max_nodes=1
+    never promotes unverified candidates (at depth 10) to roots in cold response, and marks hierarchy truncated.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ElevenParentChainScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 leaves
+    leaf_ids = [str(uuid.uuid4()) for _ in range(500)]
+    leaf_results = [
+        AttackResult(
+            attack_result_id=lid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Leaf {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "leaves_group",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i, lid in enumerate(leaf_ids)
+    ]
+
+    # Chain of 11 parents:
+    # Parent 10 references all 500 leaves
+    # Parent 9 references Parent 10
+    # ...
+    # Parent 0 (True Root) references Parent 1
+    parent_ids = [str(uuid.uuid4()) for _ in range(11)]
+    parents: list[AttackResult] = []
+    for depth in range(11):
+        pid = parent_ids[depth]
+        children = leaf_ids if depth == 10 else [parent_ids[depth + 1]]
+        parents.append(
+            AttackResult(
+                attack_result_id=pid,
+                conversation_id=str(uuid.uuid4()),
+                objective=f"Parent depth {depth}",
+                outcome=AttackOutcome.SUCCESS,
+                total_retries=0,
+                attribution_parent_id=scenario_id,
+                attribution_data={
+                    "parent_collection": "orch_group",
+                    "result_role": AttackResultRole.ORCHESTRATION.value,
+                },
+                metadata={"child_attack_result_ids": children},
+                timestamp=base_time + timedelta(seconds=500 + depth),
+            )
+        )
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=leaf_results + parents)
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    # Cold hierarchy with max_nodes=1 loads 1 leaf initially, then seeks parents up to depth 10.
+    # Depth 10 reaches parent_ids[1]. parent_ids[0] (True Root) is not loaded due to depth <= 10.
+    # Parent 1 is unverified. None of Parent 1, Parent 2, ..., Parent 10 should be promoted to root!
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+    assert cold_hier.truncated is True
+
+    cold_roots = [r for g in cold_hier.groups for r in g.roots]
+    cold_root_ids = {r.attack_result_id for r in cold_roots}
+    # Intermediate parents must NOT be emitted as fake roots
+    for pid in parent_ids[1:]:
+        assert pid not in cold_root_ids
+
+
+@pytest.mark.asyncio
+async def test_parent_budget_boundary_guards_unverified_parents(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that at the 2,500-parent budget boundary, parents whose own parents were not checked
+    are marked unverified and never emitted as apparent roots.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="ParentBudgetBoundaryScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 1 leaf
+    leaf_id = str(uuid.uuid4())
+    leaf_result = AttackResult(
+        attack_result_id=leaf_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Leaf",
+        outcome=AttackOutcome.SUCCESS,
+        total_retries=0,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "leaf_group",
+            "result_role": AttackResultRole.TARGET_FACING.value,
+        },
+        timestamp=base_time,
+    )
+
+    # 2,500 parents all referencing leaf_id
+    parent_budget = 2500
+    parent_ids = [str(uuid.uuid4()) for _ in range(parent_budget)]
+    parents = [
+        AttackResult(
+            attack_result_id=pid,
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Parent {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "orch_group",
+                "result_role": AttackResultRole.ORCHESTRATION.value,
+            },
+            metadata={"child_attack_result_ids": [leaf_id]},
+            timestamp=base_time + timedelta(seconds=1 + i),
+        )
+        for i, pid in enumerate(parent_ids)
+    ]
+
+    # 1 top-level outer root referencing the first 10 parents
+    outer_root_id = str(uuid.uuid4())
+    outer_root = AttackResult(
+        attack_result_id=outer_root_id,
+        conversation_id=str(uuid.uuid4()),
+        objective="Outer Root",
+        outcome=AttackOutcome.SUCCESS,
+        total_retries=0,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "root_group",
+            "result_role": AttackResultRole.ORCHESTRATION.value,
+        },
+        metadata={"child_attack_result_ids": parent_ids[:10]},
+        timestamp=base_time + timedelta(seconds=3000),
+    )
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[leaf_result] + parents + [outer_root])
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+    assert cold_hier.truncated is True
+
+    cold_roots = [r for g in cold_hier.groups for r in g.roots]
+    cold_root_ids = {r.attack_result_id for r in cold_roots}
+    # None of the 2,500 parents whose parents were never verified may be an apparent root
+    for pid in parent_ids[:10]:
+        assert pid not in cold_root_ids
+
+
+@pytest.mark.asyncio
+async def test_2001_legacy_attempts_recount_uses_lightweight_summaries_without_full_delta_hydration(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """
+    Test that a large legacy run with 2,001 attempts recounts using get_scenario_recount_summaries_async
+    without hydrating full ScenarioAttackResultDelta objects or calling get_scenario_attack_result_deltas_async.
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="LegacyRecount2001Scenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 2,001 legacy attempts without seed group IDs in attribution (needing SDK statistics)
+    count = 2001
+    results = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Objective {i}",
+            outcome=AttackOutcome.SUCCESS if i % 2 == 0 else AttackOutcome.FAILURE,
+            total_retries=1 if i % 10 == 0 else 0,
+            atomic_attack_identifier=AtomicAttackIdentifier(
+                class_name="MockAttack",
+                seed_identifiers=[SeedIdentifier(class_name="SeedPrompt", value=f"seed_val_{i}")],
+            ),
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": f"technique_{(i % 5)}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(count)
+    ]
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+
+    deltas_call_count = 0
+    summaries_page_limits: list[int] = []
+
+    original_get_deltas = sqlite_instance.get_scenario_attack_result_deltas_async
+    original_get_summaries = sqlite_instance.get_scenario_recount_summaries_async
+
+    async def tracking_get_deltas(*args: Any, **kwargs: Any) -> Any:
+        nonlocal deltas_call_count
+        deltas_call_count += 1
+        return await original_get_deltas(*args, **kwargs)
+
+    async def tracking_get_summaries(*args: Any, **kwargs: Any) -> Any:
+        summaries_page_limits.append(kwargs.get("limit", 0))
+        return await original_get_summaries(*args, **kwargs)
+
+    sqlite_instance.get_scenario_attack_result_deltas_async = tracking_get_deltas  # type: ignore[assignment]
+    sqlite_instance.get_scenario_recount_summaries_async = tracking_get_summaries  # type: ignore[assignment]
+
+    service = ScenarioRunService(memory=sqlite_instance)
+    run_list = await service.list_runs_async(limit=10)
+    assert run_list is not None
+    matched_run = next((r for r in run_list.items if r.scenario_result_id == scenario_id), None)
+    assert matched_run is not None
+    assert matched_run.completed_attacks == count
+
+    # Recount MUST use lightweight summaries and NEVER call full delta hydration
+    assert deltas_call_count == 0
+    # 2,001 items paged with limit 500 => pages: 500, 500, 500, 500, 500
+    assert len(summaries_page_limits) == 5
+    assert summaries_page_limits == [500, 500, 500, 500, 500]

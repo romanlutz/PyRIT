@@ -49,6 +49,7 @@ from pyrit.common.async_compatibility import run_legacy_sync_async
 from pyrit.memory import AttackResultKeysetCursor, CentralMemory, SQLiteMemory
 from pyrit.memory.memory_interface import (
     MemoryInterface,
+    ScenarioAttemptSeedSummary,
     ScenarioHistoryAggregate,
     ScenarioHistoryKeysetCursor,
     ScenarioHistoryRunRecord,
@@ -1627,18 +1628,18 @@ class ScenarioRunService:
         recounted = dict(aggregates)
         for run_id in run_ids:
             cursor: AttackResultKeysetCursor | None = None
-            all_deltas: list[ScenarioAttackResultDelta] = []
+            all_summaries: list[ScenarioAttemptSeedSummary] = []
             while True:
-                remaining_limit = min(500, max_deltas - len(all_deltas)) if max_deltas is not None else 500
+                remaining_limit = min(500, max_deltas - len(all_summaries)) if max_deltas is not None else 500
                 if remaining_limit <= 0:
                     break
-                page, has_more = await self._memory.get_scenario_attack_result_deltas_async(
+                page, has_more = await self._memory.get_scenario_recount_summaries_async(
                     scenario_result_id=run_id,
                     cursor=cursor,
                     limit=remaining_limit,
                 )
-                all_deltas.extend(page)
-                if not has_more or not page or (max_deltas is not None and len(all_deltas) >= max_deltas):
+                all_summaries.extend(page)
+                if not has_more or not page or (max_deltas is not None and len(all_summaries) >= max_deltas):
                     break
                 cursor = AttackResultKeysetCursor(
                     timestamp=page[-1].timestamp, attack_result_id=page[-1].attack_result_id
@@ -1656,13 +1657,13 @@ class ScenarioRunService:
                     )
             plan_lookup = ScenarioPlanLookup.from_plan(plan=saved_plan)
             attempts: list[ScenarioAttempt] = []
-            for delta in all_deltas:
-                atomic_name = str(delta.attribution_data.get("parent_collection") or "")
-                eval_hash = delta.attribution_data.get("parent_eval_hash")
-                attr_seed = delta.attribution_data.get("seed_group_id")
+            for summary in all_summaries:
+                atomic_name = str(summary.attribution_data.get("parent_collection") or "")
+                eval_hash = summary.attribution_data.get("parent_eval_hash")
+                attr_seed = summary.attribution_data.get("seed_group_id")
                 typed_identifier = (
-                    AtomicAttackIdentifier.from_component_identifier(delta.atomic_attack_identifier)
-                    if isinstance(delta.atomic_attack_identifier, ComponentIdentifier)
+                    AtomicAttackIdentifier.from_component_identifier(summary.atomic_attack_identifier)
+                    if isinstance(summary.atomic_attack_identifier, ComponentIdentifier)
                     else None
                 )
                 unit = resolve_execution_unit(
@@ -1670,19 +1671,19 @@ class ScenarioRunService:
                     technique_eval_hash=str(eval_hash) if eval_hash is not None else None,
                     attributed_seed_group_id=str(attr_seed) if attr_seed else None,
                     atomic_attack_identifier=typed_identifier,
-                    objective=delta.objective,
-                    objective_sha256=delta.objective_sha256,
+                    objective=summary.objective,
+                    objective_sha256=summary.objective_sha256,
                     plan_lookup=plan_lookup,
                 )
-                res_metadata = AttackResultMetadata.from_metadata(metadata=delta.attribution_data)
+                res_metadata = AttackResultMetadata.from_metadata(metadata=summary.attribution_data)
                 attempts.append(
                     ScenarioAttempt(
                         unit=unit,
                         atomic_attack_name=atomic_name,
-                        outcome=delta.outcome,
-                        timestamp=delta.timestamp,
-                        attempt_id=delta.attack_result_id,
-                        total_retries=delta.total_retries,
+                        outcome=summary.outcome,
+                        timestamp=summary.timestamp,
+                        attempt_id=summary.attack_result_id,
+                        total_retries=summary.total_retries,
                         result_role=res_metadata.result_role,
                     )
                 )
@@ -1753,24 +1754,24 @@ class ScenarioRunService:
                     )
                     recounted_group_counts[gid] = g_counts
 
-            is_truncated = max_deltas is not None and len(all_deltas) >= max_deltas
+            is_truncated = max_deltas is not None and len(all_summaries) >= max_deltas
             raw_total_errors = (
                 aggregates[run_id].raw_total_errors
                 if is_truncated
-                else sum(1 for d in all_deltas if d.outcome == AttackOutcome.ERROR)
+                else sum(1 for d in all_summaries if d.outcome == AttackOutcome.ERROR)
             )
             raw_total_retries = (
                 aggregates[run_id].raw_total_retries
                 if is_truncated
                 else ScenarioProgressReadModel.total_retry_pressure(
                     attempts_per_unit=(len(a) for a in attempts_by_unit.values()),
-                    persisted_retries=(d.total_retries for d in all_deltas),
+                    persisted_retries=(d.total_retries for d in all_summaries),
                 )
             )
             raw_retrying_attacks_count = (
                 aggregates[run_id].raw_retrying_attacks_count
                 if is_truncated
-                else sum(1 for d in all_deltas if d.total_retries > 0 or bool(d.retry_events))
+                else sum(1 for d in all_summaries if d.total_retries > 0)
             )
             merged_group_counts = {**aggregates[run_id].group_counts, **recounted_group_counts}
 
@@ -2515,15 +2516,16 @@ class ScenarioRunService:
                             if len(parent_deltas) >= parent_budget:
                                 break
 
-                    if len(new_parents) < page_limit:
-                        break
-
                     if len(parent_deltas) >= parent_budget:
                         layer_clipped = True
                         break
 
+                    if len(new_parents) < page_limit:
+                        break
+
                 if layer_clipped:
                     unverified_candidate_ids.update(layer_candidates)
+                    unverified_candidate_ids.update(next_layer_candidates)
                     break
 
                 checked_child_ids.update(layer_candidates)
@@ -2536,6 +2538,13 @@ class ScenarioRunService:
 
             if layer_candidates:
                 unverified_candidate_ids.update(layer_candidates)
+
+            # Any node in all_results_map that is not referenced as a child by another loaded node
+            # and whose parents were not queried to completion in the DB is unverified.
+            all_referenced_cids: set[str] = {cid for r in all_results_map.values() for cid in r.child_attack_result_ids}
+            for rid in all_results_map:
+                if rid not in all_referenced_cids and rid not in checked_child_ids:
+                    unverified_candidate_ids.add(rid)
 
             plan_ids = [scenario_result_id] if plan is not None else []
             aggregates = await self._memory.get_scenario_history_aggregates_async(
