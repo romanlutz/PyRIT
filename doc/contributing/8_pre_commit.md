@@ -14,31 +14,33 @@ uv run pre-commit run --files <file_name>
 ```
 Note: if you did not install PyRIT using uv, then omit uv run from the above commands
 
-## Preparing Hook Environments with uv
+## Hook Environments
 
-pre-commit builds each Python hook environment with virtualenv and installs the hook with `python -m pip install .`, even when pre-commit itself is started with `uv run`. Running it with [pre-commit-uv](https://github.com/tox-dev/pre-commit-uv) makes it create the environments with `uv venv` and install the hooks with `uv pip install` instead. Hook versions and hook selection still come from `.pre-commit-config.yaml`.
+The dev dependencies include [pre-commit-uv](https://github.com/tox-dev/pre-commit-uv), so after `uv sync`, `uv run pre-commit` creates the Python hook environments with `uv venv` and installs the hooks with `uv pip install` instead of virtualenv and pip. It uses the uv from the dev dependencies, which is pinned to the version CI uses. Under `uv run`, that is also the `uv` the `ty-check` hook calls. Hook versions and hook selection still come from `.pre-commit-config.yaml`.
 
-pre-commit-uv is not one of the dev dependencies, so add it to a single command with `--with`. Pin it and uv so the preparation can be repeated, and check that it is active:
+To check that pre-commit-uv is active, run `uv run pre-commit --version`. The output should end with the pre-commit-uv and uv versions, such as `(pre-commit-uv=4.3.0, uv=0.9.17)`.
+
+pre-commit-uv does not reuse hook environments that were created with virtualenv and pip. It rebuilds them on the next run, which needs network access. To rebuild them ahead of time, run this once while online:
 
 ```bash
-uv run --frozen --no-sync --with pre-commit-uv==4.4.0 --with uv==0.13.1 pre-commit --version
+uv run pre-commit install-hooks
 ```
 
-The output should end with `(pre-commit-uv=4.4.0, uv=0.13.1)`. If it does not, pre-commit-uv is not active and pre-commit falls back to virtualenv and pip.
+Setting `DISABLE_PRE_COMMIT_UV_PATCH=1` turns pre-commit-uv off. pre-commit then rebuilds the hook environments with pip, and the next run without it rebuilds them with uv.
 
-### Preparing for an Offline Run
+### Running the Hooks Offline
 
 Preparation needs network access and is a separate step from the run. It installs the project environment, which the `ty-check` hook runs in, then clones the hook repositories and creates every hook environment:
 
 ```bash
-uv sync --frozen --extra all
-uv run --frozen --no-sync --with pre-commit-uv==4.4.0 --with uv==0.13.1 pre-commit install-hooks
+uv sync --extra all
+uv run pre-commit install-hooks
 ```
 
-Run the hooks with the same `--with` options. Without pre-commit-uv, pre-commit does not accept the environments that uv created and tries to install them again with pip:
+Then run the hooks without network access:
 
 ```bash
-UV_OFFLINE=1 GIT_ALLOW_PROTOCOL=file uv run --frozen --no-sync --with pre-commit-uv==4.4.0 --with uv==0.13.1 pre-commit run --all-files
+UV_OFFLINE=1 GIT_ALLOW_PROTOCOL=file uv run pre-commit run --all-files
 ```
 
 `UV_OFFLINE=1` makes uv use only its cache, so a package that was not prepared fails the run instead of being downloaded. It does not cover git: if a hook repository was not prepared, pre-commit tries to clone it, and `GIT_ALLOW_PROTOCOL=file` makes that clone fail instead of reaching the network. In PowerShell, set `$env:UV_OFFLINE = "1"` and `$env:GIT_ALLOW_PROTOCOL = "file"` before the command instead, and clear them afterwards with `Remove-Item Env:UV_OFFLINE, Env:GIT_ALLOW_PROTOCOL`, since they stay set for the rest of the session.

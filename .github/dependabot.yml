@@ -18,6 +18,10 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # The uv dev dependency is pinned to the setup-uv version in .github/workflows,
+      # which Dependabot does not update. Bump them together by hand.
+      - dependency-name: "uv"
 
   - package-ecosystem: npm
     directory: /frontend
