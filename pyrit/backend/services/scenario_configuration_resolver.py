@@ -7,17 +7,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pyrit.models.dataset_limit import DatasetLimit, normalize_dataset_limit
-from pyrit.registry import ConverterRegistry, ScenarioRegistry, TargetRegistry
-from pyrit.scenario import DatasetSource
+from pyrit.registry import ScenarioRegistry, TargetRegistry
 from pyrit.scenario.core.scenario_target_defaults import validate_default_adversarial_target
+from pyrit.scenario.core.technique_tokens import resolve_technique_tokens
 
 if TYPE_CHECKING:
     from pyrit.converter import Converter
+    from pyrit.models.scenario_dataset import ScenarioDatasetRequest
     from pyrit.prompt_target import PromptTarget
     from pyrit.scenario import Scenario
-
-_CONVERTER_MODIFIER_PREFIX = "converter."
 
 
 class ScenarioConfigurationResolver:
@@ -91,9 +89,7 @@ class ScenarioConfigurationResolver:
         scenario_class: type[Scenario],
         objective_target: Any | None = None,
         techniques: list[str] | None = None,
-        dataset_names: list[str] | None = None,
-        max_dataset_size: DatasetLimit = "default",
-        dataset_filters: dict[str, list[str]] | None = None,
+        datasets: ScenarioDatasetRequest | None = None,
         include_baseline: bool | None = None,
         max_concurrency: int | None = None,
         max_retries: int | None = None,
@@ -102,7 +98,7 @@ class ScenarioConfigurationResolver:
         """
         Resolve shared launch and estimate fields into scenario parameters.
 
-        Omitted, null, empty, and "default" limits retain the default. "all" removes only the total limit.
+        Dataset edits pass through unchanged; the scenario applies and validates them.
 
         Returns:
             dict[str, Any]: Values accepted by ``Scenario.set_params_from_args``.
@@ -122,11 +118,9 @@ class ScenarioConfigurationResolver:
         if memory_labels:
             resolved["memory_labels"] = memory_labels
 
-        filters = dataset_filters or {}
-        total_limit = normalize_dataset_limit(max_dataset_size)
-        has_total_override = total_limit != "default"
-        needs_introspection = bool(techniques) or bool(dataset_names) or has_total_override or bool(filters)
-        if not needs_introspection:
+        if datasets is not None:
+            resolved["dataset_overrides"] = datasets
+        if not techniques:
             return resolved
 
         try:
@@ -147,20 +141,6 @@ class ScenarioConfigurationResolver:
             if technique_converters:
                 resolved["technique_converters"] = technique_converters
 
-        if dataset_names or has_total_override or filters:
-            default_config = introspection_instance._default_dataset_config
-            config = default_config.with_overrides(filters=filters)
-            if dataset_names:
-                existing_sources = {source.name: source for source in config.sources}
-                config = config.with_overrides(
-                    sources=[
-                        existing_sources[name] if name in existing_sources else DatasetSource(name=name)
-                        for name in dataset_names
-                    ]
-                )
-            config = config.with_overrides(max_total=total_limit)
-            resolved["dataset_config"] = config
-
         return resolved
 
     @classmethod
@@ -174,6 +154,11 @@ class ScenarioConfigurationResolver:
         """
         Resolve technique tokens and their additive converter modifiers.
 
+        Resolution itself lives with the technique catalog in ``pyrit.scenario.core``, so
+        the launch path and the preset check cannot disagree about what a token means.
+        This adapter supplies the launch path's contract: stop at the first bad token
+        rather than reporting every problem.
+
         Returns:
             tuple[list[Any], dict[str, list[Converter]]]: Selected enum members and
                 converters keyed by concrete technique name.
@@ -181,58 +166,11 @@ class ScenarioConfigurationResolver:
         Raises:
             ValueError: If a technique or converter modifier is invalid.
         """
-        technique_enums: list[Any] = []
-        technique_converters: dict[str, list[Converter]] = {}
-        for token in tokens:
-            base_name, _, remainder = token.partition(":")
-            modifiers = [modifier for modifier in remainder.split(":") if modifier] if remainder else []
-            try:
-                technique_enum = technique_class(base_name)
-            except ValueError:
-                available_techniques = [technique.value for technique in technique_class]
-                raise ValueError(
-                    f"Technique '{base_name}' not found for scenario '{scenario_name}'. "
-                    f"Available: {', '.join(available_techniques)}"
-                ) from None
-            technique_enums.append(technique_enum)
-
-            converters = cls._resolve_converter_modifiers(modifiers=modifiers, token=token)
-            for concrete in technique_class.expand({technique_enum}) if converters else ():
-                technique_converters.setdefault(concrete.value, []).extend(converters)
-
-        return technique_enums, technique_converters
-
-    @staticmethod
-    def _resolve_converter_modifiers(*, modifiers: list[str], token: str) -> list[Converter]:
-        """
-        Resolve converter modifiers from one technique token.
-
-        Returns:
-            list[Converter]: Registered converter instances in token order.
-
-        Raises:
-            ValueError: If a modifier is malformed or references an unknown converter.
-        """
-        if not modifiers:
-            return []
-
-        instances = ConverterRegistry.get_registry_singleton().instances
-        converters: list[Converter] = []
-        for modifier in modifiers:
-            if not modifier.startswith(_CONVERTER_MODIFIER_PREFIX):
-                raise ValueError(
-                    f"Unknown technique modifier '{modifier}' in '{token}'. "
-                    f"Supported modifiers must use the '{_CONVERTER_MODIFIER_PREFIX}' prefix "
-                    f"(e.g. '{_CONVERTER_MODIFIER_PREFIX}translation_spanish')."
-                )
-            converter_name = modifier[len(_CONVERTER_MODIFIER_PREFIX) :]
-            converter = instances.get(converter_name)
-            if converter is None:
-                available = instances.get_names()
-                available_text = ", ".join(available) if available else "(none registered)"
-                raise ValueError(
-                    f"Converter '{converter_name}' in '{token}' is not a registered converter "
-                    f"instance. Available converters: {available_text}"
-                )
-            converters.append(converter)
-        return converters
+        resolution = resolve_technique_tokens(
+            tokens=tokens,
+            technique_class=technique_class,
+            scenario_name=scenario_name,
+        )
+        if resolution.issues:
+            raise ValueError(resolution.issues[0].message)
+        return resolution.techniques, resolution.technique_converters

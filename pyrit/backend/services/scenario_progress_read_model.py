@@ -6,7 +6,8 @@
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -120,6 +121,14 @@ class _ProgressSummaryState:
 
 
 @dataclass
+class _ProgressRefreshState:
+    """Refresh ownership shared by a run's current caller and waiters."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    callers: int = 0
+
+
+@dataclass
 class _ProgressCacheEntry:
     """Hydrated and mapped progress state for one scenario run."""
 
@@ -133,7 +142,7 @@ class _ProgressCacheEntry:
 
 
 class ScenarioProgressReadModel:
-    """Hydrate, map, cache, and summarize persisted progress with one event-loop-owned async refresh lock."""
+    """Hydrate, map, cache, and summarize persisted progress with an event-loop-owned refresh lock per run."""
 
     _CACHE_MAX_RUNS = 32
     _STORAGE_PAGE_SIZE = 500
@@ -142,7 +151,7 @@ class ScenarioProgressReadModel:
         """Initialize a read model over the scenario-result store."""
         self._memory = memory
         self._cache: OrderedDict[str, _ProgressCacheEntry] = OrderedDict()
-        self._cache_lock = asyncio.Lock()
+        self._refresh_states: dict[str, _ProgressRefreshState] = {}
 
     async def get_snapshot_async(
         self,
@@ -170,10 +179,10 @@ class ScenarioProgressReadModel:
         Returns:
             ScenarioProgressSnapshot: Deltas, mapped results, summary, and effective plan.
         """
-        async with self._cache_lock:
+        async with self._refresh_run_async(scenario_result_id=scenario_result_id):
             entry = self._get_cache_entry(scenario_result_id=scenario_result_id, plan=plan, terminal=terminal)
             first_new_index = len(entry.results)
-            await self._hydrate_new_deltas_async(
+            deltas_updated = await self._hydrate_new_deltas_async(
                 scenario_result_id=scenario_result_id,
                 entry=entry,
                 terminal=terminal,
@@ -187,7 +196,25 @@ class ScenarioProgressReadModel:
                 active_group_ids=active_group_ids,
                 terminal=terminal,
                 objective_scorer_identifier=objective_scorer_identifier,
+                deltas_updated=deltas_updated,
             )
+
+    @asynccontextmanager
+    async def _refresh_run_async(self, *, scenario_result_id: str) -> AsyncGenerator[None, None]:
+        """Keep one run's lock and cache entry protected until its last caller exits."""
+        state = self._refresh_states.get(scenario_result_id)
+        if state is None:
+            state = _ProgressRefreshState()
+            self._refresh_states[scenario_result_id] = state
+        state.callers += 1
+        try:
+            async with state.lock:
+                yield
+        finally:
+            state.callers -= 1
+            if state.callers == 0:
+                del self._refresh_states[scenario_result_id]
+            self._trim_cache()
 
     def _get_cache_entry(
         self, *, scenario_result_id: str, plan: ScenarioRunPlan | None, terminal: bool
@@ -206,10 +233,19 @@ class ScenarioProgressReadModel:
             entry = _ProgressCacheEntry(plan_signature=plan_signature)
             self._cache[scenario_result_id] = entry
         self._cache.move_to_end(scenario_result_id)
-        while len(self._cache) > self._CACHE_MAX_RUNS:
-            self._cache.popitem(last=False)
+        self._trim_cache()
 
         return entry
+
+    def _trim_cache(self) -> None:
+        """Evict idle LRU entries; protected runs may temporarily exceed the limit."""
+        if len(self._cache) <= self._CACHE_MAX_RUNS:
+            return
+        for scenario_result_id in list(self._cache):
+            if len(self._cache) <= self._CACHE_MAX_RUNS:
+                break
+            if scenario_result_id not in self._refresh_states:
+                del self._cache[scenario_result_id]
 
     def _build_snapshot(
         self,
@@ -221,6 +257,7 @@ class ScenarioProgressReadModel:
         active_group_ids: Sequence[str],
         terminal: bool,
         objective_scorer_identifier: ComponentIdentifier | None,
+        deltas_updated: bool = False,
     ) -> ScenarioProgressSnapshot:
         summary_plan = plan or self._synthesize_legacy_plan(deltas=entry.deltas)
         if len(entry.results) < len(entry.deltas):
@@ -235,7 +272,12 @@ class ScenarioProgressReadModel:
             terminal=terminal,
             plan_complete=plan_complete,
         )
-        if entry.summary is None or first_new_index < len(entry.deltas) or entry.summary_state != summary_state:
+        if (
+            entry.summary is None
+            or deltas_updated
+            or first_new_index < len(entry.deltas)
+            or entry.summary_state != summary_state
+        ):
             technique_details_by_group = self._build_technique_details_by_group(
                 deltas=entry.deltas,
                 results=entry.results,
@@ -266,15 +308,21 @@ class ScenarioProgressReadModel:
         entry: _ProgressCacheEntry,
         terminal: bool = False,
         max_deltas: int | None = None,
-    ) -> None:
-        """Hydrate persisted deltas after the cached keyset cursor up to max_deltas if specified."""
+    ) -> bool:
+        """
+        Hydrate persisted deltas while preserving their timestamp/ID keyset order.
+
+        Returns:
+            bool: Whether any delta was appended or replaced, so the summary rebuilds.
+        """
         if not entry.has_more and max_deltas is not None and len(entry.deltas) >= max_deltas:
-            return
+            return False
         if not entry.has_more and max_deltas is None and terminal:
-            return
+            return False
+        changed = False
         while True:
             if max_deltas is not None and len(entry.deltas) >= max_deltas:
-                return
+                return changed
             fetch_limit = (
                 min(self._STORAGE_PAGE_SIZE, max_deltas - len(entry.deltas))
                 if max_deltas is not None
@@ -283,7 +331,28 @@ class ScenarioProgressReadModel:
             page, has_more = await self._memory.get_scenario_attack_result_deltas_async(
                 scenario_result_id=scenario_result_id, cursor=entry.cursor, limit=fetch_limit
             )
-            entry.deltas.extend(page)
+            # The keyset is ordered by (timestamp, id), so an edited row whose timestamp
+            # moved forward is emitted again after the cursor. Such a re-emission is an
+            # update of an attempt already cached, never a second attempt (#3183).
+            positions = {delta.attack_result_id: index for index, delta in enumerate(entry.deltas)}
+            replaced_from: int | None = None
+            for delta in page:
+                position = positions.get(delta.attack_result_id)
+                if position is None:
+                    positions[delta.attack_result_id] = len(entry.deltas)
+                    entry.deltas.append(delta)
+                    changed = True
+                else:
+                    entry.deltas[position] = delta
+                    changed = True
+                    replaced_from = position if replaced_from is None else min(replaced_from, position)
+            if replaced_from is not None:
+                # Timestamp bumps move attempts forward; paging and latest-attempt
+                # selection need the affected suffix in keyset order.
+                entry.deltas[replaced_from:] = sorted(
+                    entry.deltas[replaced_from:], key=lambda delta: (delta.timestamp, delta.attack_result_id)
+                )
+                del entry.results[replaced_from:]
             if page:
                 last = page[-1]
                 entry.cursor = AttackResultKeysetCursor(
@@ -293,7 +362,7 @@ class ScenarioProgressReadModel:
             if not has_more:
                 if terminal:
                     entry.has_more = False
-                return
+                return changed
             if not page:
                 raise RuntimeError("Scenario progress storage returned an empty page with has_more=True.")
 
@@ -442,7 +511,11 @@ class ScenarioProgressReadModel:
                 "logical-unit progress rollups, but retained in overall producer counts.",
                 unattributed_attempts,
             )
-        latest_results = [attempts_by_unit[unit][-1] for unit in overall_units if attempts_by_unit.get(unit)]
+        latest_results = [
+            completions[-1]
+            for unit in overall_units
+            if (completions := [result for result in attempts_by_unit.get(unit, ()) if result.attempt_index is None])
+        ]
         objective_scorer = ScenarioProgressReadModel._build_objective_scorer(
             scorer_identifier=objective_scorer_identifier,
             results=latest_results,

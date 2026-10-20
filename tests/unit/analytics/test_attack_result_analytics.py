@@ -5,20 +5,20 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta, timezone
-from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import update
 
 from pyrit.analytics import AttackResultAnalytics, compute_scenario_statistics
-from pyrit.analytics._execution import AnalyticsExecution
 from pyrit.common.task_utils import gather_with_cleanup_async
 from pyrit.exceptions.analytics_exception import AnalyticsBusyException, AnalyticsDataException
 from pyrit.memory import CentralMemory, MemoryInterface, SQLiteMemory
 from pyrit.memory.analytics_identity_v1 import ObjectiveTargetAnalyticsIdentityV1
 from pyrit.memory.attack_analytics import RawAnalyticsOption
+from pyrit.memory.memory_models import TargetIdentifierEntry
 from pyrit.models import (
     AtomicAttackIdentifier,
     AttackAnalyticsDimension,
@@ -34,30 +34,14 @@ from pyrit.models import (
     AttackResultRole,
     TargetIdentifier,
 )
+from pyrit.prompt_target import HTTPTarget
 from unit.memory.test_attack_analytics import make_result, predicate
 from unit.mocks import make_scenario_result
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pyrit.memory.query_control import QueryControl
-
-
-@pytest.fixture
-async def analytics(sqlite_instance: SQLiteMemory) -> AsyncGenerator[AttackResultAnalytics, None]:
-    """
-    Run real SQLite correctness checks with bounded test time, not a production latency requirement.
-
-    Full-suite contention must not turn filter/count assertions into one-second
-    benchmarks. Default budgets and expiration/cleanup are tested independently
-    in test_execution.py. Admission capacities and native database work are unchanged.
-    """
-    execution = partial(AnalyticsExecution, queue_timeout=30.0, report_timeout=30.0, quick_timeout=30.0)
-    with patch("pyrit.analytics.attack_result_analytics.AnalyticsExecution", side_effect=execution):
-        async with AttackResultAnalytics(memory=sqlite_instance) as analytics:
-            yield analytics
 
 
 @pytest.fixture
@@ -67,6 +51,24 @@ async def mixed_results(sqlite_instance: SQLiteMemory) -> None:
     await sqlite_instance.add_attack_results_to_memory_async(
         attack_results=[make_result(index=index, outcome=outcome) for index, outcome in enumerate(outcomes, 1)]
     )
+
+
+async def test_lifecycle_status_is_lazy_and_shared_after_binding_async(sqlite_instance: SQLiteMemory) -> None:
+    first = AttackResultAnalytics(memory=sqlite_instance)
+    unused = AttackResultAnalytics(memory=sqlite_instance)
+    assert not first.has_active_work
+    assert not first.is_closed
+    assert first._controller is None
+    await unused.close_async()
+    assert unused.is_closed
+    assert not first.is_closed
+    async with first:
+        async with AttackResultAnalytics(memory=sqlite_instance) as second:
+            assert not first.has_active_work
+            assert not second.is_closed
+        assert first.is_closed
+        assert not first.has_active_work
+    assert second.is_closed
 
 
 @pytest.mark.usefixtures("mixed_results")
@@ -517,6 +519,47 @@ async def test_mutated_models_are_revalidated_before_execution(
                     )
                 )
         run.assert_not_awaited()
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize("model_name", ["", "   ", "\t", "\r\n", "\xa0", "\u2003", " \t\xa0"])
+@pytest.mark.parametrize("embedded", [False, True], ids=["normalized", "embedded"])
+async def test_blank_target_labels_keep_distinct_sdk_identities_async(
+    analytics: AttackResultAnalytics, sqlite_instance: SQLiteMemory, model_name: str, embedded: bool
+) -> None:
+    targets = [
+        HTTPTarget(
+            http_request=f"POST /chat HTTP/1.1\nHost: {host}.example\n\n{{PROMPT}}",
+            model_name=model_name,
+        ).get_identifier()
+        for host in ("bank", "hr")
+    ]
+    results = [make_result(index=index) for index in (1, 2)]
+    for result, target in zip(results, targets, strict=True):
+        result.atomic_attack_identifier = AtomicAttackIdentifier.build(
+            attack_identifier=AttackIdentifier(class_name="ProbeAttack", class_module="tests", objective_target=target)
+        )
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
+    if embedded:
+        async with await sqlite_instance.get_session_async() as session:
+            await session.execute(update(TargetIdentifierEntry).values(model_name=None, identifier_json=None))
+            await session.commit()
+    axis = AttackAnalyticsDimension(name="objective_target")
+    expected = {target.hash: f"HTTPTarget ({target.hash[-8:]})" for target in targets}
+    report = await analytics.query_async(query=AttackAnalyticsQuery(group_by=axis))
+    facets = await analytics.facets_async(query=AttackAnalyticsFacetQuery(dimension=axis, search="HTTPTarget"))
+    matrix = await analytics.query_async(
+        query=AttackAnalyticsQuery(group_by=axis, compare_by=AttackAnalyticsDimension(name="operation"))
+    )
+    assert {group.key.value: group.label for group in report.groups} == expected
+    assert {item.key.value: item.label for item in facets.items} == expected
+    assert {row.key.value: row.label for row in matrix.rows} == expected
+    for group in report.groups:
+        page = await analytics.results_async(
+            query=AttackAnalyticsResultsQuery(filters=AttackAnalyticsFilters(dimensions=group.drilldown_filters))
+        )
+        assert len(page.items) == group.statistics.total_results == 1
+        assert page.items[0].target_identifier_hash == group.key.value
 
 
 async def test_frozen_target_groups_preserve_content_hashes_and_every_result_id(

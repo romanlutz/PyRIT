@@ -19,6 +19,7 @@ const TARGETS = [
     model_name: "mobile-router",
     capabilities: {
       supports_multi_turn: true,
+      supports_editable_history: true,
       supports_system_prompt: true,
       supported_input_modalities: ["text", "image_path"],
       supported_output_modalities: ["text"],
@@ -46,6 +47,7 @@ const TARGETS = [
     model_name: "gpt-4o-mobile",
     capabilities: {
       supports_multi_turn: true,
+      supports_editable_history: true,
       supports_system_prompt: true,
       supported_input_modalities: ["text", "image_path"],
       supported_output_modalities: ["text"],
@@ -189,6 +191,10 @@ async function installTouchTargetMocks(page: Page): Promise<void> {
           },
         })
       );
+      return;
+    }
+    if (apiPath === "/operations" && method === "GET") {
+      await route.fulfill(jsonResponse({ items: [] }));
       return;
     }
     if (apiPath === "/config" && method === "GET") {
@@ -476,7 +482,7 @@ async function startChatWithMessages(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Registry", exact: true }).click();
   await expect(page.getByText("gpt-4o-mobile", { exact: true })).toBeVisible();
   await page.getByRole("combobox", { name: "Default objective target", exact: true }).selectOption({ index: 1 });
-  await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("button", { name: "Technique.execute", exact: true }).click();
   await page.getByTestId("chat-input").fill(
     "Assess this deterministic mobile prompt"
   );
@@ -501,7 +507,7 @@ test.describe("Mobile touch targets", () => {
     await page.getByRole("button", { name: "Registry", exact: true }).click();
     await expect(page.getByText("gpt-4o-mobile", { exact: true })).toBeVisible();
     await page.getByRole("combobox", { name: "Default objective target", exact: true }).selectOption({ index: 1 });
-    await page.getByRole("button", { name: "Chat", exact: true }).click();
+    await page.getByRole("button", { name: "Technique.execute", exact: true }).click();
 
     await page.getByRole("button", { name: "Add objective" }).click();
     const objectiveInput = page.getByRole("textbox", {
@@ -714,6 +720,7 @@ test.describe("Mobile touch targets", () => {
           '[data-testid="new-attack-btn"]',
           '[aria-label="Attach files"]',
           '[data-testid="toggle-converter-panel-btn"]',
+          '[data-testid="undo-last-send-btn"]',
           '[data-testid="toggle-objective-header-btn"]',
           '[data-testid="chat-input"]',
           '[data-testid="send-message-btn"]',
@@ -726,9 +733,14 @@ test.describe("Mobile touch targets", () => {
     await expectNoDocumentOverflow(page);
 
     await page.getByTestId("copy-to-input-btn-1").click();
-    for (const name of ["This conversation", "New conversation", "New attack"]) {
+    for (const name of ["Copy to next message", "Branch conversation", "Branch attack", "Use in scan"]) {
       await expectMinimumTouchTarget(page.getByRole("menuitem", { name, exact: true }));
     }
+    await expect(page.getByText("Copy only this message to the prompt box.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Copy history including this turn into the same attack.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Copy history including this turn into a new attack (i.e., separate group of conversations).", { exact: true })).toBeVisible();
+    await expect(page.getByText("Apply a PyRIT attack technique after prepending history including this turn.", { exact: true })).toBeVisible();
+    await expectNoDocumentOverflow(page);
     await page.keyboard.press("Escape");
 
     const outcomeButton = page.getByRole("button", {

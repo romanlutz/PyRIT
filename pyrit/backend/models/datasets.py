@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.models import PromptDataType, SeedRecord, SeedType
+from pyrit.models.scenario_dataset import ScenarioDatasetSettings
 
 
 class DatasetInfo(BaseModel):
@@ -30,6 +31,7 @@ class DatasetInfo(BaseModel):
     )
     loaded: bool = Field(..., description="Whether this dataset currently has seeds in memory")
     provider_available: bool = Field(..., description="Whether a registered provider can load this dataset")
+    origins: list[str] = Field(default_factory=list, description="Distinct origins of stored seeds, not providers")
     logical_examples: int | None = Field(
         None, description="Number of logical examples represented by stored seed groups"
     )
@@ -46,6 +48,13 @@ class DatasetListResponse(BaseModel):
     """Response for listing available datasets."""
 
     items: list[DatasetInfo] = Field(..., description="List of available datasets")
+
+
+class ScenarioDatasetLoadResponse(BaseModel):
+    """Selected dataset settings and metadata after an explicit load."""
+
+    settings: ScenarioDatasetSettings
+    items: list[DatasetInfo]
 
 
 class SeedExampleSummary(BaseModel):
@@ -71,9 +80,25 @@ class SeedExampleListResponse(BaseModel):
     total: int = Field(..., description="Number of logical examples that match the filters")
 
 
+class SeedMemberView(SeedRecord):
+    """A stored seed plus the URL a browser can use to fetch its media."""
+
+    value_url: str | None = Field(
+        None,
+        description=(
+            "Client-fetchable media URL (/api/media or a signed blob URL). "
+            "Null for non-media. The stored value remains the stable source reference."
+        ),
+    )
+
+
 class SeedExampleDetailResponse(SeedExampleSummary):
     """One logical seed example with all of its stored seeds."""
 
-    members: list[SeedRecord] = Field(
-        ..., description="Stored seed records without reconstruction, objectives first, then by sequence"
+    members: list[SeedMemberView] = Field(
+        ...,
+        description=(
+            "Stored seed records without reconstruction, objectives first, then by sequence. "
+            "Media members include value_url for display; value is the stored reference."
+        ),
     )

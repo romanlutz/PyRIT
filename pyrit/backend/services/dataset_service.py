@@ -16,6 +16,7 @@ from functools import lru_cache
 from uuid import UUID
 
 from pyrit.backend.mappers import format_last_message_preview
+from pyrit.backend.mappers.attack_mappers import resolve_client_media_url_async
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.models.datasets import (
     DatasetInfo,
@@ -23,6 +24,7 @@ from pyrit.backend.models.datasets import (
     SeedExampleDetailResponse,
     SeedExampleListResponse,
     SeedExampleSummary,
+    SeedMemberView,
 )
 from pyrit.common.pagination import decode_keyset_cursor, encode_keyset_cursor, fingerprint_filters
 from pyrit.datasets import SeedDatasetProvider
@@ -83,6 +85,7 @@ class DatasetService:
                     selection_key=f"dataset:named:{dataset_name}",
                     loaded=summary is not None,
                     provider_available=dataset_name in provider_names,
+                    origins=list(summary.origins) if summary else [],
                     logical_examples=summary.logical_examples if summary else None,
                     seed_pieces=summary.seed_pieces if summary else None,
                     objectives=summary.objectives if summary else None,
@@ -100,6 +103,7 @@ class DatasetService:
                     selection_key="dataset:unnamed",
                     loaded=True,
                     provider_available=False,
+                    origins=list(unnamed_summary.origins),
                     logical_examples=unnamed_summary.logical_examples,
                     seed_pieces=unnamed_summary.seed_pieces,
                     objectives=unnamed_summary.objectives,
@@ -202,7 +206,21 @@ class DatasetService:
         if not seeds:
             return None
         summary = self._summarize(example_id=example_id, seeds=seeds)
-        return SeedExampleDetailResponse(**summary.model_dump(), members=seeds)
+        members = [await self._seed_member_view_async(seed) for seed in seeds]
+        return SeedExampleDetailResponse(**summary.model_dump(), members=members)
+
+    @staticmethod
+    async def _seed_member_view_async(seed: SeedRecord) -> SeedMemberView:
+        """
+        Attach a display URL without changing the stored seed value.
+
+        List rows do not call this. Media bytes are resolved only when one example is opened.
+
+        Returns:
+            The stored seed plus ``value_url`` for media, or null for everything else.
+        """
+        value_url = await resolve_client_media_url_async(value=seed.value, data_type=seed.data_type)
+        return SeedMemberView.model_validate({**seed.model_dump(), "value_url": value_url})
 
     @staticmethod
     def _parse_selection_key(selection_key: str) -> str | None:
@@ -290,6 +308,7 @@ class DatasetService:
             modalities=tuple(sorted({modality for summary in unnamed for modality in summary.modalities})),
             harm_categories=tuple(sorted({category for summary in unnamed for category in summary.harm_categories})),
             has_unlabeled_harm_categories=any(summary.has_unlabeled_harm_categories for summary in unnamed),
+            origins=tuple(sorted({origin for summary in unnamed for origin in summary.origins})),
         )
 
 

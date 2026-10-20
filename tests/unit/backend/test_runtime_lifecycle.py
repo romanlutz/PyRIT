@@ -7,6 +7,7 @@ import asyncio
 import os
 from collections.abc import Generator
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -17,6 +18,7 @@ from fastapi import FastAPI
 from starlette.requests import Request
 
 import pyrit.backend.services.runtime_lifecycle as lifecycle_module
+from pyrit.backend.authentication_policy import AuthenticationPolicy
 from pyrit.backend.middleware.auth import require_admin
 from pyrit.backend.middleware.runtime import RuntimeAdmissionMiddleware
 from pyrit.backend.routes import configuration, health
@@ -41,6 +43,7 @@ def runtime(tmp_path: Path) -> Generator[RuntimeLifecycle, None, None]:
     )
     source = ConfigurationFileService(config_file_value=str(config_path))
     app = FastAPI()
+    app.state.authentication_policy = AuthenticationPolicy(mode="local")
     with patch.dict(os.environ, {}, clear=True):
         service = RuntimeLifecycle(app=app, source=source)
     assert service.topology_supported
@@ -98,6 +101,54 @@ async def test_runtime_readiness_reports_state_async(*, runtime: RuntimeLifecycl
     }
 
 
+@pytest.mark.parametrize("state", ["initializing", "ready", "failed", "restart-required", "stopping", None])
+async def test_health_reports_readiness_and_revision_without_changing_liveness_async(
+    *, runtime: RuntimeLifecycle, state: str | None
+) -> None:
+    if state is None:
+        del runtime.app.state.runtime_lifecycle
+    else:
+        runtime.state = state
+    revision = "copyrit-test--new"
+    with patch.dict(os.environ, {"CONTAINER_APP_REVISION": revision}):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url="http://test") as client:
+            response = await client.get("/api/health")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    data = response.json()
+    assert datetime.fromisoformat(data["timestamp"]).tzinfo == UTC
+    assert data == {
+        "status": "healthy",
+        "timestamp": data["timestamp"],
+        "service": "pyrit-backend",
+        "ready": state == "ready",
+        "state": state if state is not None else "failed",
+        "revision": revision,
+    }
+
+
+async def test_health_does_not_invent_a_revision_async(runtime: RuntimeLifecycle) -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url="http://test") as client:
+            response = await client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["revision"] is None
+
+
+async def test_failed_startup_keeps_liveness_and_configuration_recovery_async(runtime: RuntimeLifecycle) -> None:
+    with patch.object(runtime, "_load_async", AsyncMock(side_effect=ValueError("private startup error"))):
+        await runtime.startup_async()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=runtime.app), base_url="http://test") as client:
+        response = await client.get("/api/health")
+        saved_configuration = await client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+    assert response.json()["ready"] is False
+    assert response.json()["state"] == "restart-required"
+    assert "private startup error" not in response.text
+    assert saved_configuration.status_code == 200
+
+
 @pytest.mark.parametrize(
     "failures", [(), ("scenarios",), ("services",), ("memory",), ("scenarios", "services", "memory")]
 )
@@ -118,6 +169,8 @@ async def test_shutdown_disposes_memory_after_services_even_on_failure(
         order.attach_mock(memory.dispose_engine_async, "memory")
         errors = tuple(asyncio.CancelledError(name) if cancelled else RuntimeError(name) for name in failures)
         for name, error in zip(failures, errors, strict=True):
+            if name in {"scenarios", "memory"}:
+                error.add_note(f"Existing {name} note.")
             getattr(order, name).side_effect = error
         if len(errors) == 1:
             with pytest.raises(type(errors[0])) as single_error:
@@ -131,6 +184,13 @@ async def test_shutdown_disposes_memory_after_services_even_on_failure(
             await runtime.shutdown_async()
 
     assert order.mock_calls == [call.scenarios(), call.services(), call.memory()]
+    expected_notes = {
+        "scenarios": "Runtime shutdown phase: scenario service shutdown.",
+        "memory": "Runtime shutdown phase: memory disposal.",
+    }
+    for name, error in zip(failures, errors, strict=True):
+        expected = [f"Existing {name} note.", expected_notes[name]] if name in expected_notes else None
+        assert getattr(error, "__notes__", None) == expected
 
 
 async def test_shutdown_repeated_failure_preserves_original_error_async(runtime: RuntimeLifecycle) -> None:
@@ -154,6 +214,45 @@ async def test_success_preflights_then_replaces_idle_runtime(runtime: RuntimeLif
     lifecycle_module.close_services_async.assert_awaited_once()
     config.apply_prepared_reinitialization_async.assert_awaited_once()
     assert runtime.version == (await runtime.source.read_with_version_async())[1]
+
+
+async def test_startup_publishes_default_operation_without_creating_it_async(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("memory_db_type: in_memory\noperation: ' op_trash_panda '\n", encoding="utf-8")
+    source = ConfigurationFileService(config_file_value=str(config_path))
+    app = FastAPI()
+    lifecycle = RuntimeLifecycle(app=app, source=source)
+    config = ConfigurationLoader(
+        memory_db_type="in_memory", env_files=[], operator="roakey", operation=" op_trash_panda "
+    )
+    memory = MagicMock(spec=MemoryInterface)
+
+    with (
+        patch.object(lifecycle, "_load_async", AsyncMock(return_value=config)),
+        patch.object(lifecycle, "_management_async", AsyncMock()),
+        patch.object(config, "initialize_pyrit_async", AsyncMock()),
+        patch.object(lifecycle_module, "get_scenario_run_service", return_value=MagicMock(spec=ScenarioRunService)),
+        patch.object(CentralMemory, "_memory_instance", memory),
+    ):
+        await lifecycle.startup_async()
+
+    assert lifecycle.state == "ready"
+    assert app.state.default_operation == "op_trash_panda"
+    assert app.state.default_labels == {"operator": "roakey"}
+    memory.add_operation_async.assert_not_called()
+
+
+async def test_live_apply_publishes_default_operation_without_creating_it_async(runtime: RuntimeLifecycle) -> None:
+    config = await runtime._load_async()
+    config.operation = "configured_operation"
+    memory = MagicMock(spec=MemoryInterface)
+
+    with patch.object(CentralMemory, "_memory_instance", memory):
+        await apply_async(runtime)
+
+    assert runtime.app.state.default_operation == "configured_operation"
+    assert "operation" not in runtime.app.state.default_labels
+    memory.add_operation_async.assert_not_called()
 
 
 async def test_saved_opt_in_is_required(runtime: RuntimeLifecycle) -> None:
@@ -480,6 +579,17 @@ def test_multiple_workers_disable_apply(worker_setting: str) -> None:
     assert not service.topology_supported
 
 
+async def test_management_publishes_target_upload_directory(tmp_path: Path) -> None:
+    app = FastAPI()
+    with patch.dict(os.environ, {}, clear=True):
+        service = RuntimeLifecycle(app=app, source=ConfigurationFileService(config_file_value=None))
+    config = ConfigurationLoader(memory_db_type="in_memory", env_files=[], target_upload_directory=str(tmp_path))
+
+    await service._management_async(config)
+
+    assert app.state.target_upload_directory == str(tmp_path)
+
+
 async def test_invalid_cold_configuration_requires_restart_but_retains_raw_repair(tmp_path: Path) -> None:
     path = tmp_path / "broken.yaml"
     path.write_text("broken: [", encoding="utf-8")
@@ -489,6 +599,7 @@ async def test_invalid_cold_configuration_requires_restart_but_retains_raw_repai
     await service.startup_async()
     assert service.state == "restart-required"
     assert not app.state.allow_custom_initializers
+    assert app.state.target_upload_directory is None
     assert app.state.environment_file_service is None
     content, version = await source.read_with_version_async()
     assert content == "broken: ["
@@ -497,7 +608,7 @@ async def test_invalid_cold_configuration_requires_restart_but_retains_raw_repai
 
 
 def test_authorization_policy_does_not_change_with_environment(runtime: RuntimeLifecycle) -> None:
-    runtime.app.state.auth_environment["PYRIT_ALLOW_UNAUTHENTICATED_ADMIN"] = ""
+    runtime.app.state.authentication_policy = AuthenticationPolicy(mode="local")
     request = Request({"type": "http", "app": runtime.app})
     with patch.dict(os.environ, {"PYRIT_ALLOW_UNAUTHENTICATED_ADMIN": "true"}):
         with pytest.raises(Exception) as error:

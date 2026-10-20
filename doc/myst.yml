@@ -96,6 +96,7 @@ project:
         - file: scanner/benchmark.ipynb
         - file: scanner/foundry.ipynb
         - file: scanner/garak.ipynb
+        - file: scanner/technique.ipynb
     - file: code/framework.md
       children:
         - file: code/datasets/0_dataset.md
@@ -196,6 +197,7 @@ project:
         - file: api/pyrit_analytics.md
         - file: api/pyrit_auth.md
         - file: api/pyrit_cli_api_client.md
+        - file: api/pyrit_cli_pyrit_migrate.md
         - file: api/pyrit_cli_pyrit_scan.md
         - file: api/pyrit_cli_pyrit_shell.md
         - file: api/pyrit_common.md

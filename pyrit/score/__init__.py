@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pyrit.score.conversation_scorer import ConversationScorer, create_conversation_scorer
     from pyrit.score.float_scale.audio_float_scale_scorer import AudioFloatScaleScorer
     from pyrit.score.float_scale.azure_content_filter_scorer import AzureContentFilterScorer
+    from pyrit.score.float_scale.decision_scorer import DecisionScorer
     from pyrit.score.float_scale.float_scale_fallback_scorer import FloatScaleFallbackScorer
     from pyrit.score.float_scale.float_scale_score_aggregator import (
         FloatScaleScoreAggregator,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from pyrit.score.message_scorable_resolver import MessageScorableResolver
     from pyrit.score.message_scorer import MessageScorer
     from pyrit.score.observation.execution import NonReplayableObservationError
+    from pyrit.score.observation.lifecycle import AttemptObserver, SurfaceLifecycleSource
     from pyrit.score.observation.local_file_surface_source import LocalFileSurfaceSource
     from pyrit.score.observation.observation_source import ObservationSource
     from pyrit.score.observation.otel_span_exporter import InMemoryTraceExporter
@@ -176,6 +178,7 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "ConversationScorer": "pyrit.score.conversation_scorer",
     "AgentThreatRulesScorer": "pyrit.score.true_false.regex.agent_threat_rules_scorer",
     "CredentialLeakScorer": "pyrit.score.true_false.regex.credential_leak_scorer",
+    "DecisionScorer": "pyrit.score.float_scale.decision_scorer",
     "DecodingScorer": "pyrit.score.true_false.decoding_scorer",
     "DivergenceScorer": "pyrit.score.true_false.regex.divergence_scorer",
     "EscapedAnsiOutputScorer": "pyrit.score.true_false.regex.escaped_ansi_output_scorer",
@@ -202,6 +205,8 @@ _LAZY_EXPORTS: dict[str, str | tuple[str, str | None]] = {
     "InMemoryTraceExporter": "pyrit.score.observation.otel_span_exporter",
     "FileWriteScorer": "pyrit.score.true_false.file_write_scorer",
     "LocalFileSurfaceSource": "pyrit.score.observation.local_file_surface_source",
+    "AttemptObserver": "pyrit.score.observation.lifecycle",
+    "SurfaceLifecycleSource": "pyrit.score.observation.lifecycle",
     "ObservationSource": "pyrit.score.observation.observation_source",
     "OtelTraceSource": "pyrit.score.observation.otel_trace_source",
     "OtelToolCallScorer": "pyrit.score.true_false.otel_tool_call_scorer",

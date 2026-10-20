@@ -75,6 +75,7 @@ class ScenarioRunPlanAtomicGroup(BaseModel):
     tags: list[str] = Field(default_factory=list)
     #: None for plans persisted before kinds were recorded, so those plans round-trip unchanged.
     kind: ScenarioRunPlanGroupKind | None = None
+    selected_technique_eval_hashes: list[str] | None = Field(default=None, min_length=1)
 
 
 class ScenarioRunPlan(BaseModel):
@@ -228,7 +229,7 @@ class ScenarioProgressCounts(BaseModel):
         if self.succeeded > self.completed:
             raise ValueError("succeeded must not exceed completed.")
         if self.success_percentage is not None:
-            expected = int((self.succeeded / self.completed) * 100) if self.completed else 0
+            expected = self.succeeded * 100 // self.completed if self.completed else 0
             if self.success_percentage != expected:
                 raise ValueError("success_percentage must agree with succeeded and completed.")
         if self.outcomes is not None:
@@ -270,8 +271,10 @@ class ScenarioExecutionStatistics(BaseModel):
     atomic_attacks: dict[str, ScenarioProgressCounts] = Field(default_factory=dict)
     #: Counts keyed by display group label.
     display_groups: dict[str, ScenarioProgressCounts] = Field(default_factory=dict)
-    #: Total persisted attempts, including superseded ones.
+    #: Actual execution attempts, including superseded ones but not duplicate orchestration envelopes.
     attempts: int = Field(default=0, ge=0)
+    #: Actual attempts per recorded atomic attack name, without duplicate orchestration envelopes.
+    atomic_attack_attempts: dict[str, int] = Field(default_factory=dict)
     #: Attempts excluded from logical-unit counts, but retained in producer counts.
     unattributed_attempts: int = Field(default=0, ge=0)
 
