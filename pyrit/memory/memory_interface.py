@@ -7155,12 +7155,12 @@ class MemoryInterface(abc.ABC):
         *,
         entry_ids: Sequence[uuid.UUID],
         plan_entry_ids: Sequence[uuid.UUID],
-    ) -> tuple[Any, Any, Any, Any, Any]:
+    ) -> tuple[Any, Any, Any, Any, Any, Any]:
         """
         Build the intermediate ranked-units subquery and role match conditions for scenario history.
 
         Returns:
-            tuple: (ranked, counted, is_target_facing, is_orchestration, is_unknown)
+            tuple: (ranked, counted, completed, is_target_facing, is_orchestration, is_unknown)
         """
         atomic_name, technique_hash, attributed_seed_group_id, identifier_seed_key = (
             self._get_scenario_attempt_unit_expressions()
@@ -7299,7 +7299,7 @@ class MemoryInterface(abc.ABC):
             ranked.c.result_role.is_(None),
             and_(not_(is_target_facing), not_(is_orchestration)),
         )
-        return ranked, counted, is_target_facing, is_orchestration, is_unknown
+        return ranked, counted, completed, is_target_facing, is_orchestration, is_unknown
 
     def _build_scenario_history_aggregate_statement(
         self,
@@ -7313,8 +7313,8 @@ class MemoryInterface(abc.ABC):
         Returns:
             Any: A statement selecting one aggregate row per scenario run with attempts.
         """
-        ranked, counted, is_target_facing, is_orchestration, is_unknown = self._build_scenario_history_ranked_units(
-            entry_ids=entry_ids, plan_entry_ids=plan_entry_ids
+        ranked, counted, completed, is_target_facing, is_orchestration, is_unknown = (
+            self._build_scenario_history_ranked_units(entry_ids=entry_ids, plan_entry_ids=plan_entry_ids)
         )
         return (
             select(
@@ -7330,16 +7330,16 @@ class MemoryInterface(abc.ABC):
                     "total_retries"
                 ),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
                 ).label("outcome_successes"),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
                 ).label("outcome_failures"),
-                func.sum(case((and_(counted, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)).label(
-                    "outcome_errors"
-                ),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)
+                ).label("outcome_errors"),
+                func.sum(
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
                 ).label("outcome_undetermined"),
                 func.sum(case((ranked.c.attempt_outcome == AttackOutcome.ERROR.value, 1), else_=0)).label(
                     "raw_total_errors"
@@ -7389,32 +7389,32 @@ class MemoryInterface(abc.ABC):
         Returns:
             Any: A statement selecting aggregate rows grouped by scenario run and atomic group.
         """
-        ranked, counted, is_target_facing, is_orchestration, is_unknown = self._build_scenario_history_ranked_units(
-            entry_ids=entry_ids, plan_entry_ids=plan_entry_ids
+        ranked, counted, completed, is_target_facing, is_orchestration, is_unknown = (
+            self._build_scenario_history_ranked_units(entry_ids=entry_ids, plan_entry_ids=plan_entry_ids)
         )
         return (
             select(
                 ranked.c.scenario_result_id,
                 ranked.c.unit_group_id,
-                func.sum(case((counted, 1), else_=0)).label("completed_units"),
+                func.sum(case((completed, 1), else_=0)).label("completed_units"),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
                 ).label("successful_units"),
                 func.sum(case((counted, ranked.c.unit_errors), else_=0)).label("error_attempts"),
                 func.sum(case((and_(counted, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)).label(
                     "total_retries"
                 ),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.SUCCESS.value), 1), else_=0)
                 ).label("outcome_successes"),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.FAILURE.value), 1), else_=0)
                 ).label("outcome_failures"),
-                func.sum(case((and_(counted, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)).label(
-                    "outcome_errors"
-                ),
                 func.sum(
-                    case((and_(counted, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.ERROR.value), 1), else_=0)
+                ).label("outcome_errors"),
+                func.sum(
+                    case((and_(completed, ranked.c.latest_outcome == AttackOutcome.UNDETERMINED.value), 1), else_=0)
                 ).label("outcome_undetermined"),
                 func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
                 func.sum(

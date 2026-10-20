@@ -315,14 +315,10 @@ class ScenarioProgressReadModel:
         Returns:
             bool: Whether any delta was appended or replaced, so the summary rebuilds.
         """
-        if not entry.has_more and max_deltas is not None and len(entry.deltas) >= max_deltas:
-            return False
-        if not entry.has_more and max_deltas is None and terminal:
+        if max_deltas is not None and len(entry.deltas) >= max_deltas:
             return False
         changed = False
         while True:
-            if max_deltas is not None and len(entry.deltas) >= max_deltas:
-                return changed
             fetch_limit = (
                 min(self._STORAGE_PAGE_SIZE, max_deltas - len(entry.deltas))
                 if max_deltas is not None
@@ -359,9 +355,11 @@ class ScenarioProgressReadModel:
                     timestamp=last.timestamp,
                     attack_result_id=last.attack_result_id,
                 )
+            if max_deltas is not None and len(entry.deltas) >= max_deltas:
+                entry.has_more = has_more
+                return changed
             if not has_more:
-                if terminal:
-                    entry.has_more = False
+                entry.has_more = False
                 return changed
             if not page:
                 raise RuntimeError("Scenario progress storage returned an empty page with has_more=True.")
@@ -1300,8 +1298,8 @@ class ScenarioProgressReadModel:
                         total_retries=result.total_retries,
                     )
                 )
-            if result.retries:
-                retries_list = result.retries
+            if result.retries or (result.total_retries and result.total_retries > 0):
+                retries_list = list(result.retries) if result.retries else []
                 retries_truncated = False
                 if len(retries_list) > _MAX_RETRIES_PER_NODE:
                     retries_list = retries_list[:_MAX_RETRIES_PER_NODE]

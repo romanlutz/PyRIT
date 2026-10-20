@@ -972,7 +972,6 @@ def test_hierarchy_unplanned_groups_shared_counting() -> None:
         role=AttackResultRole.TARGET_FACING,
         parent_collection="unplanned_group",
         seed_group_id="seed_u",
-        attempt_index=1,
         seconds_offset=1,
     )
     delta2 = _make_test_delta(
@@ -981,7 +980,6 @@ def test_hierarchy_unplanned_groups_shared_counting() -> None:
         role=AttackResultRole.TARGET_FACING,
         parent_collection="unplanned_group",
         seed_group_id="seed_u",
-        attempt_index=2,
         seconds_offset=2,
     )
 
@@ -1154,7 +1152,6 @@ def test_hierarchy_repeated_attempt_diagnostic_retries_consistency() -> None:
         role=AttackResultRole.TARGET_FACING,
         parent_collection="group_1",
         seed_group_id="seed_1",
-        attempt_index=1,
         seconds_offset=1,
     )
     delta2 = _make_test_delta(
@@ -1163,7 +1160,6 @@ def test_hierarchy_repeated_attempt_diagnostic_retries_consistency() -> None:
         role=AttackResultRole.TARGET_FACING,
         parent_collection="group_1",
         seed_group_id="seed_1",
-        attempt_index=2,
         seconds_offset=2,
     )
 
