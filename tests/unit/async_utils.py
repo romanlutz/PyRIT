@@ -26,3 +26,24 @@ async def wait_for_completion_async(*, future: asyncio.Future[T], timeout: float
     if not done:
         raise TimeoutError("The operation under test did not complete before the test watchdog expired.")
     return future.result()
+
+
+async def wait_for_worker_ready_async(
+    *, started: asyncio.Event, operation: asyncio.Future[T], timeout: float = TEST_WATCHDOG_SECONDS
+) -> None:
+    """Observe loop-signaled readiness or early completion without borrowing an executor worker.
+
+    Workers signal with ``loop.call_soon_threadsafe(started.set)``. The caller still owns releasing
+    and joining the operation, including when this wait fails or is cancelled.
+    """
+    waiter = asyncio.create_task(started.wait())
+    try:
+        done, _ = await asyncio.wait({waiter, operation}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        if operation in done:
+            operation.result()
+            raise AssertionError("The operation completed before the test observed worker readiness.")
+        if waiter not in done:
+            raise TimeoutError("The worker did not become ready before the test watchdog expired.")
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
