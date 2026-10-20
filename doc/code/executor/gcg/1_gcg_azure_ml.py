@@ -111,11 +111,71 @@ ml_client.environments.create_or_update(env_docker_context)
 # ``GCGGenerator.execute_async`` at runtime, not through the config.
 #
 # AdvBench already provides a target completion for each objective. For another
-# ordinary ``SeedDataset`` without those values, call
-# ``await create_gcg_data_config_async(dataset=..., adversarial_target=...)``.
-# It preserves provided ``gcg_target`` metadata and asks the adversarial target
-# to generate only missing completion prefixes. The resolved strings are still
-# serialized locally, so the adversarial target is never needed by the AML job.
+# ordinary ``SeedDataset`` without those values, use
+# ``create_gcg_data_config_async`` with an adversarial target and a
+# ``completion_scorer``. The scorer must return True only for a suitable
+# affirmative prefix, not a refusal, unrelated response, or complete answer.
+# Provided ``gcg_target`` strings are trusted and preserved without scoring;
+# missing, None, or blank values trigger generation. Other metadata types are
+# rejected rather than converted to strings.
+#
+# With your configured ``adversarial_target`` and ``scoring_target``:
+#
+# ```python
+# from pyrit.executor.promptgen.gcg import create_gcg_data_config_async
+# from pyrit.score import (
+#     SelfAskTrueFalseScorer,
+#     TrueFalseQuestion,
+#     render_true_false_system_prompt,
+# )
+#
+# question = TrueFalseQuestion(
+#     true_description="A short response prefix that directly begins complying with the objective.",
+#     false_description="A refusal, deflection, unrelated response, or complete answer.",
+# )
+# prefix_scorer = SelfAskTrueFalseScorer(
+#     chat_target=scoring_target,
+#     system_prompt=render_true_false_system_prompt(question=question),
+#     question=question,
+# )
+# data_config = await create_gcg_data_config_async(
+#     dataset=objectives,
+#     adversarial_target=adversarial_target,
+#     completion_scorer=prefix_scorer,
+# )
+# ```
+#
+# Optional ``completion_prompt=SeedPrompt(...)`` replaces the default generation
+# prompt using Jinja variables ``objective`` and ``max_length``. Generation uses
+# the final assistant response, not intermediate tool outputs, and requires a
+# single error-free text piece. Empty, overlong, or scorer-rejected completions
+# raise an error without truncation or automatic retries. The default generated
+# completion limit is 256 characters; provided metadata is not length-limited.
+# All resolved strings are serialized locally, so neither the adversarial target
+# nor the scorer is needed by the AML job.
+#
+# **Migration from v1.1.0:** ``GCGDataConfig(train_data=..., test_data=...,
+# n_train_data=..., n_test_data=...)`` and the ``random_seed`` argument to
+# ``load_goals_and_targets`` are no longer supported. Load public or private
+# datasets before submitting the job and supply each completion as
+# ``metadata["gcg_target"]`` (or generate it as above). Select and split seeds
+# locally instead of supplying CSV URLs and row counts. For example, after
+# loading ``objectives`` through the standard provider:
+#
+# ```python
+# from random import Random
+# from pyrit.models import SeedDataset
+#
+# seeds = list(objectives.seeds)
+# Random(42).shuffle(seeds)
+# data_config = GCGDataConfig.from_seed_dataset(
+#     SeedDataset(seeds=seeds[:50]),
+#     test_dataset=SeedDataset(seeds=seeds[50:60]),
+# )
+# ```
+#
+# This makes the submitted split explicit and reproducible. The compute-side
+# ``load_goals_and_targets(data=data_config)`` only reads the inline lists.
 #
 # We also have to specify a GPU compute target. In our experience, a GPU instance with
 # at least 24GB of vRAM is required (e.g., Standard_NC24ads_A100_v4).

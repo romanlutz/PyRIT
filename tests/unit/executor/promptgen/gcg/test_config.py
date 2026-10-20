@@ -327,3 +327,56 @@ def test_from_seed_dataset_round_trips_through_json() -> None:
     dataset = _seed_dataset_with_targets([("goal a", "Sure, a"), ("goal b", "Sure, b")])
     config = GCGDataConfig.from_seed_dataset(dataset)
     assert GCGDataConfig.from_json(config.to_json()) == config
+
+
+@pytest.mark.parametrize("field_name", ["train_goals", "train_targets", "test_goals", "test_targets"])
+@pytest.mark.parametrize("value", ["abc", None, {"0": "goal"}, [""], [" "], [False], [1], [None], [{}]])
+def test_data_config_rejects_invalid_lists_and_values(field_name: str, value: Any) -> None:
+    fields: dict[str, Any] = {
+        "train_goals": ["train goal"],
+        "train_targets": ["train target"],
+        "test_goals": ["test goal"],
+        "test_targets": ["test target"],
+    }
+    fields[field_name] = value
+
+    with pytest.raises(ValueError, match=field_name):
+        GCGDataConfig(**fields)
+    with pytest.raises(ValueError, match=field_name):
+        GCGDataConfig.from_json(json.dumps(fields))
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '"abc"', "42"])
+def test_data_config_json_requires_object(payload: str) -> None:
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        GCGDataConfig.from_json(payload)
+
+
+def test_data_config_json_rejects_invalid_syntax() -> None:
+    with pytest.raises(ValueError, match="not valid JSON"):
+        GCGDataConfig.from_json("{not-json")
+
+
+def test_data_config_json_rejects_unknown_fields() -> None:
+    with pytest.raises(ValueError, match="unknown fields"):
+        GCGDataConfig.from_json('{"goals": ["goal"]}')
+
+
+def test_data_config_json_explains_legacy_migration() -> None:
+    with pytest.raises(ValueError, match="Load a SeedDataset"):
+        GCGDataConfig.from_json('{"train_data": "goals.csv", "n_train_data": 50}')
+
+
+@pytest.mark.parametrize("target", ["", " ", False, 1, [], {"wrong": "schema"}])
+def test_from_seed_dataset_rejects_invalid_target_metadata(target: object) -> None:
+    dataset = SeedDataset(seeds=[SeedObjective(value="goal", metadata={"gcg_target": target})])
+
+    with pytest.raises(ValueError, match="metadata"):
+        GCGDataConfig.from_seed_dataset(dataset)
+
+
+def test_from_seed_dataset_rejects_blank_goal() -> None:
+    dataset = SeedDataset(seeds=[SeedObjective(value=" ", metadata={"gcg_target": "target"})])
+
+    with pytest.raises(ValueError, match="Seed goal must be a nonblank string"):
+        GCGDataConfig.from_seed_dataset(dataset)

@@ -31,9 +31,24 @@ if TYPE_CHECKING:
         SamplingStrategy,
         SuffixInitializer,
     )
-    from pyrit.models import SeedDataset
+    from pyrit.models import SeedDataset, SeedUnion
 
 _DEFAULT_CONTROL_INIT: str = "! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !"
+
+
+def _validate_nonblank_string(*, value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a nonblank string.")
+    return value
+
+
+def _get_seed_target(*, seed: SeedUnion, target_metadata_key: str) -> str | None:
+    target = (seed.metadata or {}).get(target_metadata_key)
+    if target is None:
+        return None
+    if not isinstance(target, str):
+        raise ValueError(f"Seed {seed.value!r} metadata[{target_metadata_key!r}] must be a string.")
+    return target if target.strip() else None
 
 
 def _default_model_kwargs() -> dict[str, Any]:
@@ -108,6 +123,12 @@ class GCGDataConfig:
     test_targets: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        for field_name in ("train_goals", "train_targets", "test_goals", "test_targets"):
+            values = getattr(self, field_name)
+            if not isinstance(values, list):
+                raise ValueError(f"GCGDataConfig.{field_name} must be a list of nonblank strings.")
+            for index, value in enumerate(values):
+                _validate_nonblank_string(value=value, field_name=f"GCGDataConfig.{field_name}[{index}]")
         if len(self.train_goals) != len(self.train_targets):
             raise ValueError(
                 "GCGDataConfig train_goals and train_targets must have equal length, "
@@ -148,7 +169,8 @@ class GCGDataConfig:
             GCGDataConfig: A config with goals and targets stored inline.
 
         Raises:
-            ValueError: If any seed is missing ``metadata[target_metadata_key]``.
+            ValueError: If a goal is blank or target metadata is missing, blank,
+                or not a string.
         """
         train_goals, train_targets = cls._resolve_goals_and_targets(
             dataset=dataset, target_metadata_key=target_metadata_key
@@ -179,19 +201,21 @@ class GCGDataConfig:
             tuple[list[str], list[str]]: ``(goals, targets)`` in seed order.
 
         Raises:
-            ValueError: If any seed is missing ``metadata[target_metadata_key]``.
+            ValueError: If a goal is blank or target metadata is missing, blank,
+                or not a string.
         """
         goals: list[str] = []
         targets: list[str] = []
         for seed in dataset.seeds:
-            target = (seed.metadata or {}).get(target_metadata_key)
+            goal = _validate_nonblank_string(value=seed.value, field_name="Seed goal")
+            target = _get_seed_target(seed=seed, target_metadata_key=target_metadata_key)
             if target is None:
                 raise ValueError(
-                    f"Seed {seed.value!r} is missing metadata[{target_metadata_key!r}]; "
-                    "GCG requires a target completion string for every goal."
+                    f"Seed {seed.value!r} is missing metadata[{target_metadata_key!r}] or it is blank; "
+                    "GCG requires a nonblank target completion string for every goal."
                 )
-            goals.append(seed.value)
-            targets.append(str(target))
+            goals.append(goal)
+            targets.append(target)
         return goals, targets
 
     def to_json(self) -> str:
@@ -205,6 +229,16 @@ class GCGDataConfig:
             data = json.loads(payload)
         except json.JSONDecodeError as e:
             raise ValueError(f"GCGDataConfig.from_json: payload is not valid JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError("GCGDataConfig.from_json: payload must be a JSON object.")
+        if {"train_data", "test_data", "n_train_data", "n_test_data"} & data.keys():
+            raise ValueError(
+                "GCGDataConfig no longer accepts CSV paths or row counts. Load a SeedDataset, "
+                "select its seeds locally, and use from_seed_dataset or create_gcg_data_config_async."
+            )
+        unknown_fields = data.keys() - {"train_goals", "train_targets", "test_goals", "test_targets"}
+        if unknown_fields:
+            raise ValueError(f"GCGDataConfig.from_json: unknown fields: {sorted(unknown_fields)}.")
         return cls(**data)
 
     @classmethod
