@@ -34,6 +34,7 @@ from pyrit.executor.promptgen.gcg.attack.base.attack_manager import (  # noqa: E
     get_embedding_matrix,
     get_embeddings,
 )
+from pyrit.executor.promptgen.gcg.config import GCGModelConfig  # noqa: E402
 
 gcg_attack_mod = pytest.importorskip(
     "pyrit.executor.promptgen.gcg.attack.gcg.gcg_attack",
@@ -1074,29 +1075,28 @@ class TestGetWorkersChatTemplateValidation:
             with pytest.raises(ValueError, match="no chat_template configured"):
                 get_workers(params)
 
-    def test_starts_workers_for_training(self) -> None:
+    def test_starts_workers_for_training_with_default_model_config(self, tmp_path: Path) -> None:
+        _fast_tokenizer().save_pretrained(tmp_path)
+        model_config = GCGModelConfig(name=str(tmp_path), device="cpu")
         params = MagicMock()
-        params.tokenizer_paths = ["fake/chat-model"]
-        params.tokenizer_kwargs = [{}]
-        params.model_paths = ["fake/chat-model"]
-        params.model_kwargs = [{}]
-        params.devices = ["cpu"]
-        params.token = ""
+        params.tokenizer_paths = [model_config.name]
+        params.tokenizer_kwargs = [model_config.tokenizer_kwargs]
+        params.model_paths = [model_config.name]
+        params.model_kwargs = [model_config.model_kwargs]
+        params.devices = [model_config.device]
+        params.token = None
         params.num_train_models = 1
 
-        tokenizer = MagicMock()
-        tokenizer.pad_token = "<pad>"
-        tokenizer.chat_template = "{{ messages[0]['content'] }}"
-        tokenizer.__len__.return_value = 8
-        worker = MagicMock(tokenizer=tokenizer)
-        worker.model.get_input_embeddings.return_value = torch.nn.Embedding(8, 4)
+        worker = MagicMock(model=_tiny_model("llama"))
 
-        with (
-            patch.object(attack_manager_mod.AutoTokenizer, "from_pretrained", return_value=tokenizer),
-            patch.object(attack_manager_mod, "ModelWorker", return_value=worker),
-        ):
+        def build_worker(model_path: str, token: Any, model_kwargs: Any, tokenizer: Any, device: str) -> MagicMock:
+            worker.tokenizer = tokenizer
+            return worker
+
+        with patch.object(attack_manager_mod, "ModelWorker", side_effect=build_worker):
             train_workers, test_workers = attack_manager_mod.get_workers(params, evaluation=False)
 
+        assert worker.tokenizer.is_fast
         worker.start.assert_called_once_with()
         assert train_workers == [worker]
         assert test_workers == []
@@ -1132,9 +1132,11 @@ class TestCheckGcgCapabilities:
             model=_tiny_model("llama"), tokenizer=_fast_tokenizer(), model_path="fake/model"
         )
 
-    def test_accepts_tokenizer_that_exactly_fills_embeddings(self) -> None:
+    def test_accepts_unused_added_tokens_beyond_embeddings(self) -> None:
+        # <start_of_turn> and <end_of_turn> (ids 25 and 26) are added tokens the ChatML
+        # template never emits, like Gemma 3's image token; the rendered prompt tops out at 24.
         model = MagicMock()
-        model.get_input_embeddings.return_value = torch.nn.Embedding(len(_fast_tokenizer()), 4)
+        model.get_input_embeddings.return_value = torch.nn.Embedding(25, 4)
         attack_manager_mod._check_gcg_capabilities(model=model, tokenizer=_fast_tokenizer(), model_path="fake/model")
 
     @pytest.mark.parametrize(
@@ -1143,7 +1145,7 @@ class TestCheckGcgCapabilities:
             (NotImplementedError(), "does not expose an input embedding matrix"),
             (None, "does not expose an input embedding matrix"),
             (SimpleNamespace(weight=torch.zeros(256, 4, dtype=torch.int8)), "are torch.int8"),
-            (torch.nn.Embedding(4, 4), "has 27 tokens but the model's input embeddings have only 4 rows"),
+            (torch.nn.Embedding(24, 4), "produces token id 24 but the model's input embeddings have only 24 rows"),
         ],
     )
     def test_rejects_unusable_embeddings(self, embeddings: Any, match: str) -> None:

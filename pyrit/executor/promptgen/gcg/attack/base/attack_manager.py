@@ -2401,7 +2401,7 @@ def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> N
 
     Raises:
         ValueError: If the tokenizer is not fast, the model exposes no floating point
-            input embedding matrix, or the tokenizer has ids outside that matrix.
+            input embedding matrix, or GCG would use token ids outside that matrix.
     """
     if not tokenizer.is_fast:
         raise ValueError(
@@ -2423,11 +2423,21 @@ def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> N
             f"The input embeddings of {model_path!r} are {weight.dtype}, so GCG cannot compute token gradients "
             "through them. Load the model without quantizing the embedding layer."
         )
-    if len(tokenizer) > weight.shape[0]:
+    # Added tokens the chat template never emits (e.g. Gemma 3's image token) may sit past the
+    # embedding rows, so check only the ids GCG uses: the base vocabulary sampled by
+    # get_nonascii_toks, the special token ids, and a conversation rendered as in _update_ids.
+    messages = [{"role": "user", "content": "Say it ! !"}, {"role": "assistant", "content": "Sure"}]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False)
+    special_ids = (tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id, tokenizer.unk_token_id)
+    max_id = max(
+        tokenizer.vocab_size - 1,
+        *tokenizer(prompt, add_special_tokens=False).input_ids,
+        *(i for i in special_ids if i is not None),
+    )
+    if max_id >= weight.shape[0]:
         raise ValueError(
-            f"The tokenizer for {model_path!r} has {len(tokenizer)} tokens but the model's input embeddings "
-            f"have only {weight.shape[0]} rows. Check that the tokenizer matches the model, or call "
-            "model.resize_token_embeddings(len(tokenizer)) after adding tokens."
+            f"The tokenizer for {model_path!r} produces token id {max_id} but the model's input embeddings "
+            f"have only {weight.shape[0]} rows. Check that the tokenizer matches the model."
         )
 
 
