@@ -361,6 +361,7 @@ class ScenarioAttemptSeedSummary:
     timestamp: datetime
     total_retries: int
     attribution_data: dict[str, Any]
+    has_retries: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -6857,6 +6858,7 @@ class MemoryInterface(abc.ABC):
             timestamp=row["timestamp"],
             total_retries=row["total_retries"] or 0,
             attribution_data=row["attribution_data"] or {},
+            has_retries=bool(row.get("has_retries", False)),
         )
 
     def _execute_get_scenario_recount_summaries(
@@ -6910,6 +6912,16 @@ class MemoryInterface(abc.ABC):
                 AttackResultEntry.timestamp,
                 AttackResultEntry.total_retries,
                 AttackResultEntry.attribution_data,
+                case(
+                    (
+                        or_(
+                            func.coalesce(AttackResultEntry.total_retries, 0) > 0,
+                            AttackResultEntry.retry_events_json.is_not(None),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                ).label("has_retries"),
             )
             .where(and_(*conditions))
             .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
@@ -7127,9 +7139,13 @@ class MemoryInterface(abc.ABC):
         child_ids: Sequence[str],
         limit: int = 500,
         exclude_result_ids: Sequence[str] | None = None,
-    ) -> list[ScenarioAttackResultDelta]:
+    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
+
+        Paginates scanned database rows using keyset cursors across child chunks to guarantee
+        that a short returned list is a genuine proof of exhausted database rows, preventing
+        false-root generation when database exclusions are omitted or partial.
 
         Args:
             scenario_result_id: Persisted scenario run ID.
@@ -7138,15 +7154,16 @@ class MemoryInterface(abc.ABC):
             exclude_result_ids: Optional result IDs already known to caller to exclude from query.
 
         Returns:
-            list[ScenarioAttackResultDelta]: The matched parent deltas.
+            tuple[list[ScenarioAttackResultDelta], bool]: The matched parent deltas and whether
+                more unscanned matching rows exist in the database.
         """
         try:
             scenario_uuid = uuid.UUID(scenario_result_id)
         except (ValueError, TypeError):
-            return []
+            return [], False
         valid_child_ids = [cid for cid in child_ids if cid]
         if not valid_child_ids or limit <= 0:
-            return []
+            return [], False
 
         valid_exclude_uuids: list[uuid.UUID] = []
         if exclude_result_ids:
@@ -7182,67 +7199,117 @@ class MemoryInterface(abc.ABC):
             max(1, self._MAX_BIND_VARS - _fixed_overhead - exclude_param_count),
         )
 
+        has_more = False
+        max_scanned_rows = 10000
+        total_scanned_rows = 0
+        scan_page_size = min(500, self._MAX_BIND_VARS)
+        num_chunks = (len(valid_child_ids) + chunk_size - 1) // chunk_size
+
         with closing(self._get_session()) as session:
-            for i in range(0, len(valid_child_ids), chunk_size):
-                remaining_limit = max(0, limit - len(unique_deltas))
-                if remaining_limit <= 0:
+            for chunk_idx, i in enumerate(range(0, len(valid_child_ids), chunk_size)):
+                if len(unique_deltas) >= limit or total_scanned_rows >= max_scanned_rows:
+                    has_more = True
                     break
+
                 chunk = valid_child_ids[i : i + chunk_size]
                 child_matches = [metadata_text.like(f'%"{cid}"%') for cid in chunk]
-                where_conditions = [
+                base_where_conditions = [
                     AttackResultEntry.attribution_parent_id == scenario_uuid,
                     or_(*child_matches),
                     *exclude_clauses,
                 ]
-                statement = (
-                    select(
-                        AttackResultEntry.id,
-                        AttackResultEntry.conversation_id,
-                        AttackResultEntry.objective,
-                        AttackResultEntry.objective_sha256,
-                        AttackResultEntry.atomic_attack_identifier,
-                        AttackResultEntry.outcome,
-                        AttackResultEntry.execution_time_ms,
-                        AttackResultEntry.executed_turns,
-                        AttackResultEntry.outcome_reason,
-                        AttackResultEntry.timestamp,
-                        AttackResultEntry.retry_events_json,
-                        AttackResultEntry.total_retries,
-                        AttackResultEntry.error_type,
-                        AttackResultEntry.error_message,
-                        AttackResultEntry.attribution_data,
-                        AttackResultEntry.attack_metadata,
-                        AttackResultEntry.pruned_conversation_ids,
-                        AttackResultEntry.adversarial_chat_conversation_ids,
-                        AttackResultEntry.preparation_conversation_ids,
-                        ScoreEntry.id.label("score_id"),
-                        ScoreEntry.score_value,
-                        ScoreEntry.score_type,
-                        ScoreEntry.status.label("score_status"),
-                        ScoreEntry.score_rationale,
-                        ScoreEntry.scorer_class_identifier,
+
+                chunk_cursor: AttackResultKeysetCursor | None = None
+
+                while len(unique_deltas) < limit and total_scanned_rows < max_scanned_rows:
+                    where_conditions = list(base_where_conditions)
+                    if chunk_cursor is not None:
+                        cursor_uuid = uuid.UUID(chunk_cursor.attack_result_id)
+                        cursor_id_order = self._get_scenario_attempt_id_order_expression(
+                            attempt_id=literal(cursor_uuid, type_=AttackResultEntry.id.type)
+                        )
+                        where_conditions.append(
+                            or_(
+                                AttackResultEntry.timestamp > chunk_cursor.timestamp,
+                                and_(
+                                    AttackResultEntry.timestamp == chunk_cursor.timestamp,
+                                    attempt_id_order > cursor_id_order,
+                                ),
+                            )
+                        )
+
+                    statement = (
+                        select(
+                            AttackResultEntry.id,
+                            AttackResultEntry.conversation_id,
+                            AttackResultEntry.objective,
+                            AttackResultEntry.objective_sha256,
+                            AttackResultEntry.atomic_attack_identifier,
+                            AttackResultEntry.outcome,
+                            AttackResultEntry.execution_time_ms,
+                            AttackResultEntry.executed_turns,
+                            AttackResultEntry.outcome_reason,
+                            AttackResultEntry.timestamp,
+                            AttackResultEntry.retry_events_json,
+                            AttackResultEntry.total_retries,
+                            AttackResultEntry.error_type,
+                            AttackResultEntry.error_message,
+                            AttackResultEntry.attribution_data,
+                            AttackResultEntry.attack_metadata,
+                            AttackResultEntry.pruned_conversation_ids,
+                            AttackResultEntry.adversarial_chat_conversation_ids,
+                            AttackResultEntry.preparation_conversation_ids,
+                            ScoreEntry.id.label("score_id"),
+                            ScoreEntry.score_value,
+                            ScoreEntry.score_type,
+                            ScoreEntry.status.label("score_status"),
+                            ScoreEntry.score_rationale,
+                            ScoreEntry.scorer_class_identifier,
+                        )
+                        .outerjoin(
+                            ScoreEntry,
+                            func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id)
+                            == ScoreEntry.id,
+                        )
+                        .where(and_(*where_conditions))
+                        .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+                        .limit(scan_page_size + 1)
                     )
-                    .outerjoin(
-                        ScoreEntry,
-                        func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id)
-                        == ScoreEntry.id,
+                    rows = session.execute(statement).mappings().all()
+                    if not rows:
+                        break
+
+                    scanned_in_query = min(len(rows), scan_page_size)
+                    total_scanned_rows += scanned_in_query
+                    has_more_in_chunk = len(rows) > scan_page_size
+
+                    last_scanned_row = rows[scanned_in_query - 1]
+                    chunk_cursor = AttackResultKeysetCursor(
+                        timestamp=last_scanned_row["timestamp"],
+                        attack_result_id=str(last_scanned_row["id"]),
                     )
-                    .where(and_(*where_conditions))
-                    .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
-                    .limit(remaining_limit + 1)
-                )
-                rows = session.execute(statement).mappings().all()
-                for row in rows:
-                    delta = self._row_to_scenario_attack_result_delta(row)
-                    if delta.attack_result_id not in seen_ids and delta.attack_result_id not in exclude_id_set:
-                        seen_ids.add(delta.attack_result_id)
-                        unique_deltas.append(delta)
-                        if len(unique_deltas) >= limit:
-                            break
-                if len(unique_deltas) >= limit:
+
+                    for row in rows[:scanned_in_query]:
+                        delta = self._row_to_scenario_attack_result_delta(row)
+                        if delta.attack_result_id not in seen_ids and delta.attack_result_id not in exclude_id_set:
+                            seen_ids.add(delta.attack_result_id)
+                            unique_deltas.append(delta)
+                            if len(unique_deltas) >= limit:
+                                break
+
+                    if len(unique_deltas) >= limit:
+                        if has_more_in_chunk or chunk_idx + 1 < num_chunks:
+                            has_more = True
+                        break
+
+                    if not has_more_in_chunk:
+                        break
+
+                if total_scanned_rows >= max_scanned_rows:
+                    has_more = True
                     break
 
-        return unique_deltas[:limit]
+        return unique_deltas[:limit], has_more
 
     def _fetch_bounded_conversation_messages(
         self,
@@ -11033,7 +11100,7 @@ class MemoryInterface(abc.ABC):
         child_ids: Sequence[str],
         limit: int = 500,
         exclude_result_ids: Sequence[str] | None = None,
-    ) -> list[ScenarioAttackResultDelta]:
+    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
         """
         Return run-scoped parent deltas that reference any of the specified child result IDs.
 
@@ -11044,7 +11111,8 @@ class MemoryInterface(abc.ABC):
             exclude_result_ids: Optional result IDs already known to caller to exclude from query.
 
         Returns:
-            list[ScenarioAttackResultDelta]: The matched parent deltas.
+            tuple[list[ScenarioAttackResultDelta], bool]: The matched parent deltas and whether
+                more unscanned matching rows exist in the database.
         """
         return await self._run_database_operation_async(
             self._execute_get_scenario_parent_deltas_for_child_ids,

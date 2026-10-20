@@ -1771,7 +1771,7 @@ class ScenarioRunService:
             raw_retrying_attacks_count = (
                 aggregates[run_id].raw_retrying_attacks_count
                 if is_truncated
-                else sum(1 for d in all_summaries if d.total_retries > 0)
+                else sum(1 for d in all_summaries if d.has_retries or d.total_retries > 0)
             )
             merged_group_counts = {**aggregates[run_id].group_counts, **recounted_group_counts}
 
@@ -2500,7 +2500,7 @@ class ScenarioRunService:
                     if remaining_budget <= 0:
                         break
                     page_limit = min(self._progress_read_model._STORAGE_PAGE_SIZE, remaining_budget)
-                    new_parents = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
+                    new_parents, has_more = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
                         scenario_result_id=scenario_result_id,
                         child_ids=layer_candidates,
                         limit=page_limit,
@@ -2520,7 +2520,11 @@ class ScenarioRunService:
                         layer_clipped = True
                         break
 
-                    if len(new_parents) < page_limit:
+                    if not has_more:
+                        break
+
+                    if not new_parents:
+                        layer_clipped = True
                         break
 
                 if layer_clipped:

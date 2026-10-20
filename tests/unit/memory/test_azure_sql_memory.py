@@ -1101,13 +1101,14 @@ def test_scenario_parent_deltas_for_child_ids_bounds_parameters_with_large_exclu
     session = MagicMock()
     session.execute.return_value.mappings.return_value.all.return_value = []
     with patch.object(memory_interface, "_get_session", return_value=session):
-        deltas = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
+        deltas, has_more = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
             scenario_result_id=scenario_id,
             child_ids=child_ids,
             exclude_result_ids=exclude_ids,
         )
 
     assert deltas == []
+    assert has_more is False
     assert session.execute.call_count >= 1
     for call in session.execute.call_args_list:
         stmt = call.args[0]
@@ -1121,13 +1122,14 @@ def test_scenario_parent_deltas_for_child_ids_bounds_parameters_with_large_exclu
 
     session.reset_mock()
     with patch.object(memory_interface, "_get_session", return_value=session):
-        deltas = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
+        deltas, has_more = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
             scenario_result_id=scenario_id,
             child_ids=child_ids_2,
             exclude_result_ids=exclude_ids_2,
         )
 
     assert deltas == []
+    assert has_more is False
     assert session.execute.call_count >= 1
     for call in session.execute.call_args_list:
         stmt = call.args[0]

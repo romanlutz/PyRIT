@@ -3278,19 +3278,21 @@ async def test_shared_child_with_1001_parents_bounded_parent_query(sqlite_instan
 
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[child_result, *parents])
 
-    deltas = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
+    deltas, has_more = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
         scenario_result_id=scenario_id,
         child_ids=[child_id],
         limit=500,
     )
     assert len(deltas) == 500
+    assert has_more is True
 
-    deltas_10 = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
+    deltas_10, has_more_10 = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
         scenario_result_id=scenario_id,
         child_ids=[child_id],
         limit=10,
     )
     assert len(deltas_10) == 10
+    assert has_more_10 is True
 
 
 @pytest.mark.asyncio
@@ -4434,3 +4436,201 @@ async def test_2001_legacy_attempts_recount_uses_lightweight_summaries_without_f
     # 2,001 items paged with limit 500 => pages: 500, 500, 500, 500, 500
     assert len(summaries_page_limits) == 5
     assert summaries_page_limits == [500, 500, 500, 500, 500]
+
+
+@pytest.mark.asyncio
+async def test_1002_results_500_leaves_501_parents_leaf_0_not_emitted_as_root_parity(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Test exact 1,002-result SQLite case where 500 leaves, 501 parents referencing leaf 1 covering
+    leaves 1..499, and 1 final parent referencing leaf 0 does not emit leaf 0 as a root in cold hierarchy,
+    and agrees with warm hierarchy.
+    """
+    scenario_id = str(uuid.uuid4())
+    base_time = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=uuid.UUID(scenario_id),
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 leaf results (leaf 0 to leaf 499)
+    leaf_ids = [str(uuid.uuid4()) for _ in range(500)]
+    leaf_results = [
+        AttackResult(
+            attack_result_id=leaf_ids[i],
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Leaf objective {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "attack_group",
+                "seed_group_id": f"seed_{i}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+
+    # 501 parents (parents 0 to 500): all reference leaf 1, and between them cover leaves 1..499
+    parent_results: list[AttackResult] = []
+    for i in range(501):
+        children = [leaf_ids[1], leaf_ids[(i % 499) + 1]]
+        parent_results.append(
+            AttackResult(
+                attack_result_id=str(uuid.uuid4()),
+                conversation_id=str(uuid.uuid4()),
+                objective=f"Parent objective {i}",
+                outcome=AttackOutcome.SUCCESS,
+                total_retries=0,
+                attribution_parent_id=scenario_id,
+                attribution_data={
+                    "parent_collection": "orch_group",
+                    "result_role": AttackResultRole.ORCHESTRATION.value,
+                },
+                metadata={"child_attack_result_ids": children},
+                timestamp=base_time + timedelta(seconds=500 + i),
+            )
+        )
+
+    # 1 final parent (parent 501) saved at index 1001: references leaf 0
+    final_parent_id = str(uuid.uuid4())
+    parent_results.append(
+        AttackResult(
+            attack_result_id=final_parent_id,
+            conversation_id=str(uuid.uuid4()),
+            objective="Parent of leaf 0",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "orch_group",
+                "result_role": AttackResultRole.ORCHESTRATION.value,
+            },
+            metadata={"child_attack_result_ids": [leaf_ids[0]]},
+            timestamp=base_time + timedelta(seconds=1001),
+        )
+    )
+
+    assert len(leaf_results) + len(parent_results) == 1002
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=leaf_results + parent_results)
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=1200)
+    warm_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert warm_hier is not None
+
+    # Leaf 0 must NEVER be emitted as a root in cold or warm hierarchy
+    all_cold_roots = [r for g in cold_hier.groups for r in g.roots]
+    all_warm_roots = [r for g in warm_hier.groups for r in g.roots]
+    assert len(all_cold_roots) >= 1
+    assert len(all_warm_roots) >= 1
+    assert all(r.attack_result_id != leaf_ids[0] for r in all_cold_roots)
+    assert all(r.attack_result_id != leaf_ids[0] for r in all_warm_roots)
+    # The roots must be actual orchestration parents
+    assert all(r.result_role == AttackResultRole.ORCHESTRATION for r in all_cold_roots)
+    assert all(r.result_role == AttackResultRole.ORCHESTRATION for r in all_warm_roots)
+    # Cold and warm root IDs must agree
+    cold_root_ids = {r.attack_result_id for r in all_cold_roots}
+    warm_root_ids = {r.attack_result_id for r in all_warm_roots}
+    assert cold_root_ids == warm_root_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control_retries", [0, 1, 3])
+async def test_500_results_followed_by_retrying_attempt_diagnostic_count_parity(
+    sqlite_instance: SQLiteMemory,
+    control_retries: int,
+) -> None:
+    """Test that 500 ordinary results followed by 1 result with retry events (or total_retries)
+    correctly preserves raw_retrying_attacks_count=1 and attack_retries_count=1 in cold hierarchy,
+    agreeing with warm hierarchy and SQL aggregate across controls (total_retries=0, 1, 3).
+    """
+    scenario_uuid = uuid.uuid4()
+    scenario_id = str(scenario_uuid)
+    base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=scenario_uuid,
+        scenario_name="RetryEventOnlyScenario",
+        scenario_version=1,
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 ordinary results with total_retries=0 and no retry events
+    ordinary_results = [
+        AttackResult(
+            attack_result_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Objective {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "attack_group",
+                "seed_group_id": f"seed_{i}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+
+    # 1 legacy result at index 500 (attempt 501) with saved RetryEvent
+    retry_events = [
+        RetryEvent(
+            attempt_number=1,
+            exception_type="RateLimitError",
+            timestamp=base_time + timedelta(seconds=500),
+        )
+    ]
+    if control_retries > 1:
+        retry_events.append(
+            RetryEvent(
+                attempt_number=2,
+                exception_type="RateLimitError",
+                timestamp=base_time + timedelta(seconds=501),
+            )
+        )
+
+    retrying_result = AttackResult(
+        attack_result_id=str(uuid.uuid4()),
+        conversation_id=str(uuid.uuid4()),
+        objective="Objective 500",
+        outcome=AttackOutcome.SUCCESS,
+        total_retries=control_retries,
+        retry_events=retry_events,
+        attribution_parent_id=scenario_id,
+        attribution_data={
+            "parent_collection": "attack_group",
+            "seed_group_id": "seed_500",
+            "result_role": AttackResultRole.TARGET_FACING.value,
+        },
+        timestamp=base_time + timedelta(seconds=500),
+    )
+
+    all_results = ordinary_results + [retrying_result]
+    assert len(all_results) == 501
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=all_results)
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=600)
+    warm_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert warm_hier is not None
+
+    # Parity assertions: SQL aggregate and recount must preserve raw_retrying_attacks_count=1
+    assert cold_hier.diagnostics.attack_retries_count == 1
+    assert warm_hier.diagnostics.attack_retries_count == 1
+    assert cold_hier.diagnostics.attack_retries_count == warm_hier.diagnostics.attack_retries_count
