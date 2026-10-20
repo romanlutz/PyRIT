@@ -78,14 +78,12 @@ _LAZY_IMPORTS = {
     "StandardGCGSampling": ("pyrit.executor.promptgen.gcg.default_implementations", "StandardGCGSampling"),
     "SuffixInitializer": ("pyrit.executor.promptgen.gcg.extension_protocols", "SuffixInitializer"),
     "create_gcg_data_config_async": ("pyrit.executor.promptgen.gcg.data", "create_gcg_data_config_async"),
-    "fetch_advbench_for_gcg_async": ("pyrit.executor.promptgen.gcg.data", "fetch_advbench_for_gcg_async"),
     "load_goals_and_targets": ("pyrit.executor.promptgen.gcg.data", "load_goals_and_targets"),
 }
 
 if TYPE_CHECKING:
     from pyrit.executor.promptgen.gcg.data import (
         create_gcg_data_config_async,
-        fetch_advbench_for_gcg_async,
         load_goals_and_targets,
     )
     from pyrit.executor.promptgen.gcg.default_implementations import (
@@ -144,6 +142,5 @@ __all__ = [
     "StandardGCGSampling",
     "SuffixInitializer",
     "create_gcg_data_config_async",
-    "fetch_advbench_for_gcg_async",
     "load_goals_and_targets",
 ]

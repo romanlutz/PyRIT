@@ -99,17 +99,18 @@ ml_client.environments.create_or_update(env_docker_context)
 # Docker-installed package (Python's `-m` flag puts the cwd at the front of `sys.path`).
 #
 # The new public API takes a typed ``GCGConfig`` (strategy) and a separate
-# ``GCGDataConfig`` (resolved goals and targets). We fetch the AdvBench data
-# locally with ``fetch_advbench_for_gcg_async`` and materialize the goals and
-# targets inline into the ``GCGDataConfig`` via ``from_seed_dataset``, so the
-# serialized JSON the AML job reads already embeds the data and the compute
-# container never fetches it from the public internet. We build both configs
-# locally, serialize each into a JSON file the AML job mounts as an input, and
-# ship those paths through the job command. Defaults come from the dataclasses
-# in ``pyrit.executor.promptgen.gcg.config``; goals and targets flow into
+# ``GCGDataConfig`` (resolved goals and targets). We load the bundled
+# ``adv_bench`` dataset through the standard ``SeedDatasetProvider``; each seed
+# already preserves its canonical target completion in ``metadata["gcg_target"]``.
+# We materialize those values inline via ``from_seed_dataset``, so the serialized
+# JSON the AML job reads already embeds the data and the compute container never
+# fetches it from the public internet. We build both configs locally, serialize
+# each into a JSON file the AML job mounts as an input, and ship those paths
+# through the job command. Defaults come from the dataclasses in
+# ``pyrit.executor.promptgen.gcg.config``; goals and targets flow into
 # ``GCGGenerator.execute_async`` at runtime, not through the config.
 #
-# AdvBench already provides a target completion for each objective. For an
+# AdvBench already provides a target completion for each objective. For another
 # ordinary ``SeedDataset`` without those values, call
 # ``await create_gcg_data_config_async(dataset=..., adversarial_target=...)``.
 # It preserves provided ``gcg_target`` metadata and asks the adversarial target
@@ -121,18 +122,18 @@ ml_client.environments.create_or_update(env_docker_context)
 #
 # Depending on the compute instance you use, you may encounter "out of memory" errors.
 # In this case, we recommend training on a smaller model or lowering the number
-# of goals fetched (``fetch_advbench_for_gcg_async(n=...)``) or ``algorithm.batch_size``.
+# of goals selected below or ``algorithm.batch_size``.
 
 # %%
 import tempfile
 
+from pyrit.datasets import SeedDatasetProvider
 from pyrit.executor.promptgen.gcg import (
     GCGAlgorithmConfig,
     GCGConfig,
     GCGDataConfig,
     GCGModelConfig,
     GCGOutputConfig,
-    fetch_advbench_for_gcg_async,
 )
 
 config = GCGConfig(
@@ -140,7 +141,8 @@ config = GCGConfig(
     algorithm=GCGAlgorithmConfig(n_steps=5, batch_size=64, test_steps=1),
     output=GCGOutputConfig(result_prefix="gcg_suffix"),
 )
-objectives = await fetch_advbench_for_gcg_async(n=5)
+objectives = (await SeedDatasetProvider.fetch_datasets_async(dataset_names=["adv_bench"]))[0]
+objectives.seeds = list(objectives.seeds[:5])
 data_config = GCGDataConfig.from_seed_dataset(objectives)
 
 # Write the configs into a tempdir so AML can mount them as separate job inputs.
