@@ -4544,6 +4544,136 @@ async def test_1002_results_500_leaves_501_parents_leaf_0_not_emitted_as_root_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("leaf_490_parents_count", [1, 2, 3, 11])
+async def test_chunk_boundary_unprocessed_rows_500_leaves_parents_leaf_499_parity(
+    sqlite_instance: SQLiteMemory,
+    leaf_490_parents_count: int,
+) -> None:
+    """Test 1,000, 1,001, 1,002, and 1,010-result SQLite chunk-boundary cases.
+    500 leaves split into chunks of 490 and 10 in SQLite.
+    490 parents reference leaves 0..489 (1 each).
+    leaf_490_parents_count parents reference leaf 490.
+    9 parents reference leaves 491..499 (1 each).
+    Total parents: 490 + leaf_490_parents_count + 9.
+    When leaf_490_parents_count == 2 (total 501 parents): chunk 2 returns 11 parents.
+    Parent loop consumes 10 parents before reaching limit 500, leaving the 11th parent (leaf 499) unprocessed.
+    The database has_more flag must be True so leaf 499 is not emitted as a false root.
+    """
+    scenario_id = str(uuid.uuid4())
+    base_time = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+
+    scen = make_scenario_result(
+        id=uuid.UUID(scenario_id),
+        objective_target_identifier=get_mock_target_identifier(),
+        attack_results={},
+    )
+    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
+
+    # 500 leaf results (leaves 0 to 499)
+    leaf_ids = [str(uuid.uuid4()) for _ in range(500)]
+    leaf_results = [
+        AttackResult(
+            attack_result_id=leaf_ids[i],
+            conversation_id=str(uuid.uuid4()),
+            objective=f"Leaf objective {i}",
+            outcome=AttackOutcome.SUCCESS,
+            total_retries=0,
+            attribution_parent_id=scenario_id,
+            attribution_data={
+                "parent_collection": "attack_group",
+                "seed_group_id": f"seed_{i}",
+                "result_role": AttackResultRole.TARGET_FACING.value,
+            },
+            timestamp=base_time + timedelta(seconds=i),
+        )
+        for i in range(500)
+    ]
+
+    parent_results: list[AttackResult] = []
+    # 490 parents referencing leaves 0..489 (1 each)
+    for i in range(490):
+        parent_results.append(
+            AttackResult(
+                attack_result_id=str(uuid.uuid4()),
+                conversation_id=str(uuid.uuid4()),
+                objective=f"Parent {i}",
+                outcome=AttackOutcome.SUCCESS,
+                total_retries=0,
+                attribution_parent_id=scenario_id,
+                attribution_data={
+                    "parent_collection": "orch_group",
+                    "result_role": AttackResultRole.ORCHESTRATION.value,
+                },
+                metadata={"child_attack_result_ids": [leaf_ids[i]]},
+                timestamp=base_time + timedelta(seconds=500 + len(parent_results)),
+            )
+        )
+
+    # leaf_490_parents_count parents referencing leaf 490
+    for i in range(leaf_490_parents_count):
+        parent_results.append(
+            AttackResult(
+                attack_result_id=str(uuid.uuid4()),
+                conversation_id=str(uuid.uuid4()),
+                objective=f"Parent 490_{i}",
+                outcome=AttackOutcome.SUCCESS,
+                total_retries=0,
+                attribution_parent_id=scenario_id,
+                attribution_data={
+                    "parent_collection": "orch_group",
+                    "result_role": AttackResultRole.ORCHESTRATION.value,
+                },
+                metadata={"child_attack_result_ids": [leaf_ids[490]]},
+                timestamp=base_time + timedelta(seconds=500 + len(parent_results)),
+            )
+        )
+
+    # 9 parents referencing leaves 491..499 (1 each)
+    for i in range(491, 500):
+        parent_results.append(
+            AttackResult(
+                attack_result_id=str(uuid.uuid4()),
+                conversation_id=str(uuid.uuid4()),
+                objective=f"Parent {i}",
+                outcome=AttackOutcome.SUCCESS,
+                total_retries=0,
+                attribution_parent_id=scenario_id,
+                attribution_data={
+                    "parent_collection": "orch_group",
+                    "result_role": AttackResultRole.ORCHESTRATION.value,
+                },
+                metadata={"child_attack_result_ids": [leaf_ids[i]]},
+                timestamp=base_time + timedelta(seconds=500 + len(parent_results)),
+            )
+        )
+
+    await sqlite_instance.add_attack_results_to_memory_async(attack_results=leaf_results + parent_results)
+    service = ScenarioRunService(memory=sqlite_instance)
+
+    cold_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert cold_hier is not None
+
+    await service.get_run_progress_async(scenario_result_id=scenario_id, since=None, limit=1200)
+    warm_hier = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    assert warm_hier is not None
+
+    # Leaf 499 must NEVER be emitted as a root in cold or warm hierarchy
+    all_cold_roots = [r for g in cold_hier.groups for r in g.roots]
+    all_warm_roots = [r for g in warm_hier.groups for r in g.roots]
+    assert len(all_cold_roots) >= 1
+    assert len(all_warm_roots) >= 1
+    assert all(r.attack_result_id != leaf_ids[499] for r in all_cold_roots)
+    assert all(r.attack_result_id != leaf_ids[499] for r in all_warm_roots)
+    # The roots must be actual orchestration parents
+    assert all(r.result_role == AttackResultRole.ORCHESTRATION for r in all_cold_roots)
+    assert all(r.result_role == AttackResultRole.ORCHESTRATION for r in all_warm_roots)
+    # Cold and warm root IDs must agree
+    cold_root_ids = {r.attack_result_id for r in all_cold_roots}
+    warm_root_ids = {r.attack_result_id for r in all_warm_roots}
+    assert cold_root_ids == warm_root_ids
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("control_retries", [0, 1, 3])
 async def test_500_results_followed_by_retrying_attempt_diagnostic_count_parity(
     sqlite_instance: SQLiteMemory,

@@ -7289,16 +7289,19 @@ class MemoryInterface(abc.ABC):
                         attack_result_id=str(last_scanned_row["id"]),
                     )
 
-                    for row in rows[:scanned_in_query]:
+                    has_unprocessed_in_page = False
+                    for row_idx, row in enumerate(rows[:scanned_in_query]):
                         delta = self._row_to_scenario_attack_result_delta(row)
                         if delta.attack_result_id not in seen_ids and delta.attack_result_id not in exclude_id_set:
                             seen_ids.add(delta.attack_result_id)
                             unique_deltas.append(delta)
                             if len(unique_deltas) >= limit:
+                                if row_idx + 1 < len(rows):
+                                    has_unprocessed_in_page = True
                                 break
 
                     if len(unique_deltas) >= limit:
-                        if has_more_in_chunk or chunk_idx + 1 < num_chunks:
+                        if has_more_in_chunk or has_unprocessed_in_page or chunk_idx + 1 < num_chunks:
                             has_more = True
                         break
 
