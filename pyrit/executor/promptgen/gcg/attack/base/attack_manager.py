@@ -38,7 +38,7 @@ from pyrit.executor.promptgen.gcg.experiments.log import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
@@ -2390,7 +2390,9 @@ class ModelWorker:
         return task.operation(*task.args, **task.kwargs)
 
 
-def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> None:
+def _check_gcg_capabilities(
+    *, model: Any, tokenizer: Any, model_path: str, prompts: Iterable[AttackPrompt] = ()
+) -> None:
     """
     Check that GCG can optimize against a model and tokenizer before any worker starts.
 
@@ -2398,6 +2400,8 @@ def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> N
         model (Any): The loaded causal language model.
         tokenizer (Any): The tokenizer paired with the model.
         model_path (str): The model path, used in error messages.
+        prompts (Iterable[AttackPrompt]): Actual initial prompts to check in addition
+            to the tokenizer's base vocabulary, special tokens, and template probe.
 
     Raises:
         ValueError: If the tokenizer is not fast, the model exposes no floating point
@@ -2434,6 +2438,8 @@ def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> N
         *tokenizer(prompt, add_special_tokens=False).input_ids,
         *(i for i in special_ids if i is not None),
     )
+    for attack_prompt in prompts:
+        max_id = max(max_id, int(attack_prompt.input_ids.max()))
     if max_id >= weight.shape[0]:
         raise ValueError(
             f"The tokenizer for {model_path!r} produces token id {max_id} but the model's input embeddings "
@@ -2441,9 +2447,39 @@ def _check_gcg_capabilities(*, model: Any, tokenizer: Any, model_path: str) -> N
         )
 
 
+def start_workers(*, params: Any, workers: list[ModelWorker]) -> None:
+    """
+    Validate every model's actual training and held-out prompts before starting any worker.
+
+    Args:
+        params (Any): Attack parameters containing model paths, training and held-out
+            goal/target lists, and the resolved ``control_init``.
+        workers (list[ModelWorker]): Loaded workers in model-path order.
+
+    Raises:
+        ValueError: If any model, tokenizer, or rendered initial prompt is incompatible with GCG.
+    """
+    goal_target_pairs = [
+        *zip(params.goals, params.targets, strict=True),
+        *zip(params.test_goals, params.test_targets, strict=True),
+    ]
+    for model_path, worker in zip(params.model_paths, workers, strict=True):
+        prompts = (
+            AttackPrompt(goal=goal, target=target, tokenizer=worker.tokenizer, control_init=params.control_init)
+            for goal, target in goal_target_pairs
+        )
+        _check_gcg_capabilities(model=worker.model, tokenizer=worker.tokenizer, model_path=model_path, prompts=prompts)
+    for worker in workers:
+        worker.start()
+
+
 def get_workers(params: Any, evaluation: bool = False) -> tuple[list[ModelWorker], list[ModelWorker]]:
     """
     Load and optionally start training and held-out model workers.
+
+    When ``evaluation`` is True, only model/tokenizer capabilities are checked.
+    Call ``start_workers`` with the final goals, targets, and resolved initial suffix
+    after preparing the run's inputs.
 
     Returns:
         tuple[list[ModelWorker], list[ModelWorker]]: Training and held-out workers.
@@ -2499,11 +2535,11 @@ def get_workers(params: Any, evaluation: bool = False) -> tuple[list[ModelWorker
         )
         for i in range(len(params.model_paths))
     ]
-    for model_path, worker in zip(params.model_paths, workers, strict=True):
-        _check_gcg_capabilities(model=worker.model, tokenizer=worker.tokenizer, model_path=model_path)
-    if not evaluation:
-        for worker in workers:
-            worker.start()
+    if evaluation:
+        for model_path, worker in zip(params.model_paths, workers, strict=True):
+            _check_gcg_capabilities(model=worker.model, tokenizer=worker.tokenizer, model_path=model_path)
+    else:
+        start_workers(params=params, workers=workers)
 
     num_train_models = getattr(params, "num_train_models", len(workers))
     logger.info(f"Loaded {num_train_models} train models")
