@@ -444,6 +444,7 @@ class ScenarioAttemptSeedSummary:
     total_retries: int
     attribution_data: dict[str, Any]
     has_retries: bool = False
+    child_attack_result_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -7260,6 +7261,11 @@ class MemoryInterface(abc.ABC):
             + func.sum(pressure_attempt).over(partition_by=unit_partition)
             - 1
         )
+        raw_unit_retries = (
+            func.sum(units.c.total_retries).over(partition_by=unit_partition)
+            + func.count().over(partition_by=unit_partition)
+            - 1
+        )
         ranked = select(
             units.c.scenario_result_id,
             units.c.unit_group_id,
@@ -7269,6 +7275,7 @@ class MemoryInterface(abc.ABC):
             units.c.has_retries.label("has_retries"),
             func.max(units.c.is_planned).over(partition_by=unit_partition).label("is_planned"),
             unit_retries.label("unit_retries"),
+            raw_unit_retries.label("raw_unit_retries"),
             func.sum(case((is_error, pressure_attempt), else_=0))
             .over(partition_by=unit_partition)
             .label("unit_errors"),
@@ -7345,7 +7352,10 @@ class MemoryInterface(abc.ABC):
                     "raw_total_errors"
                 ),
                 func.sum(
-                    case((and_(ranked.c.unit_rank == 1, ranked.c.unit_retries > 0), ranked.c.unit_retries), else_=0)
+                    case(
+                        (and_(ranked.c.unit_rank == 1, ranked.c.raw_unit_retries > 0), ranked.c.raw_unit_retries),
+                        else_=0,
+                    )
                 ).label("raw_total_retries"),
                 func.sum(case((ranked.c.has_retries == 1, 1), else_=0)).label("raw_retrying_attacks_count"),
                 func.sum(case((is_target_facing, 1), else_=0)).label("target_facing_attempts"),
@@ -7769,6 +7779,23 @@ class MemoryInterface(abc.ABC):
             if row["atomic_attack_identifier"]
             else None
         )
+        metadata = row.get("attack_metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        metadata = metadata or {}
+        attr_data = dict(row.get("attribution_data") or {})
+        for k in ("result_role", "attempt_index"):
+            if k not in attr_data and k in metadata:
+                attr_data[k] = metadata[k]
+        raw_child_ids = metadata.get("child_attack_result_ids") or attr_data.get("child_attack_result_ids")
+        if isinstance(raw_child_ids, (list, tuple)):
+            child_ids = tuple(str(cid) for cid in raw_child_ids if isinstance(cid, str) and cid)
+        else:
+            child_ids = ()
+
         return ScenarioAttemptSeedSummary(
             attack_result_id=str(row["id"]),
             objective=row["objective"],
@@ -7777,8 +7804,9 @@ class MemoryInterface(abc.ABC):
             outcome=AttackOutcome(row["outcome"]),
             timestamp=row["timestamp"],
             total_retries=row["total_retries"] or 0,
-            attribution_data=row["attribution_data"] or {},
+            attribution_data=attr_data,
             has_retries=bool(row.get("has_retries", False)),
+            child_attack_result_ids=child_ids,
         )
 
     def _execute_get_scenario_recount_summaries(
@@ -7832,6 +7860,7 @@ class MemoryInterface(abc.ABC):
                 AttackResultEntry.timestamp,
                 AttackResultEntry.total_retries,
                 AttackResultEntry.attribution_data,
+                AttackResultEntry.attack_metadata,
                 case(
                     (
                         or_(

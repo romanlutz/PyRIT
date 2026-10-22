@@ -1773,7 +1773,7 @@ class ScenarioRunService:
                         total_retries=summary.total_retries,
                         result_role=res_metadata.result_role,
                         attempt_index=res_metadata.attempt_index,
-                        child_attack_result_ids=(),
+                        child_attack_result_ids=summary.child_attack_result_ids,
                     )
                 )
             attempts.sort(key=lambda a: (a.timestamp, a.attempt_id))
