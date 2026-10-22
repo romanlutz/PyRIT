@@ -126,6 +126,7 @@ from pyrit.models import (
     Operation,
     OperationUsage,
     PromptDataType,
+    RequestTraceContext,
     RetryEvent,
     ScenarioAttackResultDelta,
     ScenarioIdentifier,
@@ -3651,6 +3652,10 @@ class MemoryInterface(abc.ABC):
         """
         Retrieve the request that produced the given response.
 
+        Outbound request markers identify caller-supplied messages of any role, skipping
+        target-generated tool calls and outputs. Unmarked history falls back to the last
+        user message, or the preceding message when no user message exists.
+
         Args:
             response (Message): The response message object to match.
 
@@ -3675,6 +3680,12 @@ class MemoryInterface(abc.ABC):
             raise ValueError(
                 f"The provided request does not have a preceding request in conversation '{response.conversation_id}'."
             )
+        for message in reversed(preceding_messages):
+            if message.api_role == "user" or any(
+                piece.prompt_metadata.get(RequestTraceContext.REQUEST_METADATA_KEY) == 1
+                for piece in message.message_pieces
+            ):
+                return message
         return preceding_messages[-1]
 
     def _build_message_piece_identifier_conditions(
@@ -9124,6 +9135,10 @@ class MemoryInterface(abc.ABC):
     async def get_request_from_response_async(self, *, response: Message) -> Message:
         """
         Retrieve the request that produced the given response.
+
+        Returns the latest preceding outbound request of any role, skipping target-generated
+        tool messages. For unmarked history, returns the last user message or, if absent,
+        the immediately preceding message.
 
         Args:
             response (Message): The response message object to match.
