@@ -1353,6 +1353,49 @@ export interface UpdateScenarioPresetRequest {
   expected_version: string
 }
 
+export interface ScenarioSuiteEntry {
+  entry_id: string
+  preset_name: string
+}
+
+/** A user-authored, ordered collection of scenario preset references. */
+export interface ScenarioSuite {
+  name: string
+  schema_version: number
+  description?: string | null
+  /** Who created the suite. Descriptive only; never used to authorize a read or a write. */
+  author?: string | null
+  entries: ScenarioSuiteEntry[]
+}
+
+/** Current deployment-specific status for one suite entry. */
+export interface ScenarioSuiteEntryStatus {
+  entry_id: string
+  preset_name: string
+  origin: 'stored' | 'registered' | null
+  preset_version: string | null
+  /** Advisory only. Missing or invalid preset references do not prevent saving the suite. */
+  issues: PresetIssue[]
+}
+
+export interface ScenarioSuiteResponse {
+  suite: ScenarioSuite
+  /** Opaque document version required to update the suite. */
+  version: string
+  /** Ordered exactly like `suite.entries`. */
+  entry_statuses: ScenarioSuiteEntryStatus[]
+}
+
+export interface ScenarioSuiteListResponse {
+  source: string
+  items: ScenarioSuiteResponse[]
+}
+
+export interface UpdateScenarioSuiteRequest {
+  suite: ScenarioSuite
+  expected_version: string
+}
+
 /** The launch-owned fields a preset deliberately omits. */
 export interface ResolveScenarioPresetRequest {
   expected_version?: string | null
