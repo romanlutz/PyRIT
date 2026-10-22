@@ -2,6 +2,7 @@
 # Licensed under the MIT license.
 
 import random
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ from pyrit.converter.text_selection_strategy import (
     ProportionSelectionStrategy,
     RangeSelectionStrategy,
     RegexSelectionStrategy,
+    TextSelectionStrategy,
     WordIndexSelectionStrategy,
     WordKeywordSelectionStrategy,
     WordPositionSelectionStrategy,
@@ -49,9 +51,13 @@ class TestIndexSelectionStrategy:
         result = strategy.select_range(text="Hello World")
         assert result == (0, 5)
 
-    def test_identifier_params_default_to_empty(self):
+    def test_identifier_params_include_indices(self):
         strategy = IndexSelectionStrategy(start=0, end=5)
-        assert strategy.get_identifier_params() == {}
+        assert strategy.get_identifier_params() == {"start": 0, "end": 5}
+
+    def test_identifier_params_omit_open_end(self):
+        strategy = IndexSelectionStrategy(start=2)
+        assert strategy.get_identifier_params() == {"start": 2}
 
     def test_select_range_start_after_end(self):
         strategy = IndexSelectionStrategy(start=10, end=5)
@@ -663,3 +669,37 @@ class TestAllWordsSelectionStrategy:
         strategy = AllWordsSelectionStrategy()
         result = strategy.select_words(words=[])
         assert result == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (IndexSelectionStrategy(start=0, end=5), IndexSelectionStrategy(start=6, end=11)),
+        (RegexSelectionStrategy(pattern="Hello"), RegexSelectionStrategy(pattern="World")),
+        (KeywordSelectionStrategy(keyword="Hello"), KeywordSelectionStrategy(keyword="Hello", context_after=6)),
+        (
+            PositionSelectionStrategy(start_proportion=0.0, end_proportion=0.5),
+            PositionSelectionStrategy(start_proportion=0.5, end_proportion=1.0),
+        ),
+        (ProportionSelectionStrategy(proportion=0.5), ProportionSelectionStrategy(proportion=0.5, anchor="end")),
+        (
+            ProportionSelectionStrategy(proportion=0.5, anchor="random", seed=1),
+            ProportionSelectionStrategy(proportion=0.5, anchor="random", seed=4),
+        ),
+        (
+            RangeSelectionStrategy(start_proportion=0.0, end_proportion=0.5),
+            RangeSelectionStrategy(start_proportion=0.5, end_proportion=1.0),
+        ),
+        (RegexSelectionStrategy(pattern="world"), RegexSelectionStrategy(pattern=re.compile("world", re.IGNORECASE))),
+        (
+            KeywordSelectionStrategy(keyword="world"),
+            KeywordSelectionStrategy(keyword="world", case_sensitive=False),
+        ),
+    ],
+    ids=["index", "regex", "keyword", "position", "proportion", "seed", "range", "regex-flags", "case-sensitivity"],
+)
+def test_char_level_identifier_params_follow_selected_range(
+    first: TextSelectionStrategy, second: TextSelectionStrategy
+) -> None:
+    assert first.select_range(text="Hello World") != second.select_range(text="Hello World")
+    assert first.get_identifier_params() != second.get_identifier_params()
