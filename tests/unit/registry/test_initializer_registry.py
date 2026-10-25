@@ -12,6 +12,7 @@ from pyrit.common import REQUIRED_VALUE
 from pyrit.models.parameter import Parameter
 from pyrit.registry.components.initializer_registry import PYRIT_PATH, InitializerRegistry
 from pyrit.registry.custom_initializer_storage import CustomInitializerStorage
+from pyrit.registry.discovery import discover_in_directory
 from pyrit.setup.configuration_loader import ConfigurationLoader
 from pyrit.setup.initialization import _execute_initializers_async
 from pyrit.setup.pyrit_initializer import PyRITInitializer
@@ -523,6 +524,29 @@ def test_discover_directory_registers_and_lists_metadata():
         assert "solo" in registry
         metadata = registry.get_all_registered_class_metadata()
         assert any(m.registry_name == "solo" for m in metadata)
+
+
+def test_discover_directory_does_not_evaluate_dynamic_module_attributes(caplog):
+    """Test that discovery inspects module members without invoking module-level dynamic attributes."""
+    script = (
+        "from pyrit.setup.pyrit_initializer import PyRITInitializer\n\n"
+        "class SafeInitializer(PyRITInitializer):\n"
+        "    async def initialize_async(self) -> None:\n"
+        "        pass\n\n"
+        "def __dir__():\n"
+        "    return ['SafeInitializer', 'dynamic_attribute']\n\n"
+        "def __getattr__(name):\n"
+        "    raise RuntimeError(f'dynamic attribute evaluated: {name}')\n"
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        script_path = Path(temp_dir) / "dynamic.py"
+        script_path.write_text(script)
+
+        discovered = list(discover_in_directory(directory=Path(temp_dir), base_class=PyRITInitializer))
+
+    assert [item[2] for item in discovered][0].__name__ == "SafeInitializer"
+    assert "Failed to load module" not in caplog.text
 
 
 def test_discover_single_file_registers_builtin():

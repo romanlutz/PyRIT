@@ -70,8 +70,7 @@ def _process_file(*, file_path: Path, base_class: type[T]) -> Iterator[tuple[str
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        for attr_name in dir(module):
-            attr = getattr(module, attr_name)
+        for _attr_name, attr in inspect.getmembers_static(module):
             if (
                 inspect.isclass(attr)
                 and issubclass(attr, base_class)
