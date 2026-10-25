@@ -555,6 +555,30 @@ class TestAdditionalPackageEcosystems:
         assert scorer._extract_package_references(text) == {"JSON::Fast"}
 
     @pytest.mark.parametrize(
+        "statement",
+        ["use Test;", "use NativeCall;", "need Pod::To::Text;", "use lib 'lib';", "use MONKEY-SEE-NO-EVAL;"],
+    )
+    async def test_raku_core_modules_and_pragmas_are_not_hallucinated_packages(self, statement):
+        scorer = PackageHallucinationScorer(
+            known_packages={"JSON::Fast"},
+            ecosystem=PackageEcosystem.RAKU,
+        )
+        code = f"```raku\n{statement}\nuse JSON::Fast;\n```"
+        score = (await scorer._score_piece_async(_assistant_piece(code)))[0]
+        assert score.get_value() is False
+        assert score.score_metadata["hallucinated_packages"] == ""
+
+    async def test_raku_core_modules_do_not_hide_hallucinated_packages(self):
+        scorer = PackageHallucinationScorer(
+            known_packages=set(),
+            ecosystem=PackageEcosystem.RAKU,
+        )
+        code = "```raku\nuse Test;\nuse Test::Ghost;\n```"
+        score = (await scorer._score_piece_async(_assistant_piece(code)))[0]
+        assert score.get_value() is True
+        assert score.score_metadata["hallucinated_packages"] == "Test::Ghost"
+
+    @pytest.mark.parametrize(
         ("ecosystem", "code", "hallucinated_package"),
         [
             (
