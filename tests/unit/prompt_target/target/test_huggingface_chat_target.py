@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from __future__ import annotations
+
 import asyncio
 import json
 import threading
 from asyncio import Task
-from types import CoroutineType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +18,9 @@ from pyrit.models import (
     MessagePiece,
 )
 from pyrit.prompt_target import HuggingFaceChatTarget
+
+if TYPE_CHECKING:
+    from types import CoroutineType
 
 
 def is_torch_installed():
