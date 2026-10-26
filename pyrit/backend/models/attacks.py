@@ -342,6 +342,8 @@ class ConversationMessagesResponse(BaseModel):
             "None when the conversation does not end with a target response."
         ),
     )
+    pagination: PaginationInfo | None = None
+    partial_message_sequences: list[int] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -568,6 +570,7 @@ class ConversationSummary(BaseModel):
     message_count: int = Field(0, description="Number of messages in this conversation")
     last_message_preview: str | None = Field(None, description="Preview of the last message")
     created_at: datetime | None = Field(None, description="Timestamp of the first message")
+    conversation_type: str | None = None
 
 
 class AttackConversationsResponse(BaseModel):
@@ -578,6 +581,8 @@ class AttackConversationsResponse(BaseModel):
     conversations: list[ConversationSummary] = Field(
         default_factory=list, description="All conversations including main"
     )
+    pagination: PaginationInfo | None = None
+    total_count: int | None = None
 
 
 class CreateConversationRequest(BaseModel):

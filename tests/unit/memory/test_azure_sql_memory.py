@@ -16,7 +16,7 @@ from sqlalchemy.orm import Query, Session
 from pyrit.common.singleton import Singleton
 from pyrit.converter.base64_converter import Base64Converter
 from pyrit.memory import AzureSQLMemory, EmbeddingDataEntry, MemoryInterface, PromptMemoryEntry
-from pyrit.memory.memory_interface import AttackResultKeysetCursor, _AttackResultQuery
+from pyrit.memory.memory_interface import AttackResultKeysetCursor, MessagePieceKeysetCursor, _AttackResultQuery
 from pyrit.memory.memory_models import ScenarioResultEntry
 from pyrit.memory.storage.serializers import set_message_piece_sha256_async
 from pyrit.models import Conversation, MessagePiece
@@ -1274,53 +1274,47 @@ def test_scenario_attack_result_deltas_by_ids_statement_type_hints() -> None:
     assert hints.get("return") is Select
 
 
-def test_scenario_parent_deltas_for_child_ids_bounds_parameters_with_large_exclusions_mssql(
-    memory_interface: AzureSQLMemory,
+def test_hierarchy_roots_compile_native_array_matching_and_bounded_keysets_mssql(
+    uninitialized_memory_interface: AzureSQLMemory,
 ) -> None:
-    """Verify that _execute_get_scenario_parent_deltas_for_child_ids never exceeds SQL Server bind limits."""
-    scenario_id = str(uuid.uuid4())
-    # Case 1: 1,100 children and 1,100 exclusions - previously combined to ~2,900 params exceeding 2,100 MSSQL limit
-    child_ids = [str(uuid.uuid4()) for _ in range(1100)]
-    exclude_ids = [str(uuid.uuid4()) for _ in range(1100)]
+    statement = uninitialized_memory_interface._build_scenario_root_deltas_statement(
+        scenario_result_id=str(uuid.uuid4()),
+        cursor=AttackResultKeysetCursor(timestamp=datetime(2026, 1, 1, tzinfo=UTC), attack_result_id=str(uuid.uuid4())),
+        limit=5,
+    )
+    compiled = statement.compile(dialect=mssql.dialect())
+    sql = str(compiled)
+    assert "OPENJSON" in sql
+    assert "OUTER APPLY" in sql
+    assert "JSON_QUERY" in sql
+    assert "NOT IN" in sql
+    assert "IS NOT NULL" in sql
+    assert "DATALENGTH" in sql
+    assert "Latin1_General_100_BIN2" in sql
+    assert "TOP" in sql
+    assert "LOWER(CAST" in sql.upper()
+    assert len(compiled.params) < 30
 
-    session = MagicMock()
-    session.execute.return_value.mappings.return_value.all.return_value = []
-    with patch.object(memory_interface, "_get_session", return_value=session):
-        deltas, has_more = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
-            scenario_result_id=scenario_id,
-            child_ids=child_ids,
-            exclude_result_ids=exclude_ids,
-        )
 
-    assert deltas == []
-    assert has_more is False
-    assert session.execute.call_count >= 1
-    for call in session.execute.call_args_list:
-        stmt = call.args[0]
-        compiled = stmt.compile(dialect=mssql.dialect())
-        assert len(compiled.params) <= memory_interface._MAX_BIND_VARS
-        assert len(compiled.params) <= 2000
-
-    # Case 2: 1,000 children and 2,500 exclusions (budget boundary)
-    child_ids_2 = [str(uuid.uuid4()) for _ in range(1000)]
-    exclude_ids_2 = [str(uuid.uuid4()) for _ in range(2500)]
-
-    session.reset_mock()
-    with patch.object(memory_interface, "_get_session", return_value=session):
-        deltas, has_more = memory_interface._execute_get_scenario_parent_deltas_for_child_ids(
-            scenario_result_id=scenario_id,
-            child_ids=child_ids_2,
-            exclude_result_ids=exclude_ids_2,
-        )
-
-    assert deltas == []
-    assert has_more is False
-    assert session.execute.call_count >= 1
-    for call in session.execute.call_args_list:
-        stmt = call.args[0]
-        compiled = stmt.compile(dialect=mssql.dialect())
-        assert len(compiled.params) <= memory_interface._MAX_BIND_VARS
-        assert len(compiled.params) <= 2000
+def test_message_piece_page_compiles_sequence_timestamp_uuid_order_mssql(
+    uninitialized_memory_interface: AzureSQLMemory,
+) -> None:
+    statement = uninitialized_memory_interface._build_conversation_message_page_statement(
+        conversation_id=str(uuid.uuid4()),
+        cursor=MessagePieceKeysetCursor(
+            sequence=-1, timestamp=datetime(2026, 1, 1, tzinfo=UTC), message_piece_id=str(uuid.uuid4())
+        ),
+        limit=3,
+    )
+    compiled = statement.compile(dialect=mssql.dialect())
+    sql = str(compiled)
+    assert "TOP" in sql
+    assert "ORDER BY" in sql
+    assert "sequence ASC" in sql
+    assert "timestamp ASC" in sql
+    assert "LOWER(CAST" in sql.upper()
+    assert -1 in compiled.params.values()
+    assert len(compiled.params) < 15
 
 
 def test_get_metadata_conditions_binds_special_character_keys(

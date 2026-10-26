@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from pyrit.analytics import compute_outcome_statistics
 from pyrit.backend.main import app
+from pyrit.backend.services.saved_conversation_read_service import SavedConversationReadService
 from pyrit.backend.services.scenario_progress_read_model import (
     ScenarioProgressReadModel,
     ScenarioProgressSnapshot,
@@ -214,6 +215,22 @@ def _make_test_snapshot(
         summary=effective_summary,
         plan=effective_plan,
     )
+
+
+def test_exact_retry_diagnostics_override_partial_preview_arithmetic() -> None:
+    snapshot = _make_test_snapshot(
+        deltas=[_make_test_delta(attack_result_id="first"), _make_test_delta(attack_result_id="second")]
+    )
+    assert snapshot.summary.overall.retries == 1
+    projection = ScenarioProgressReadModel.build_scenario_hierarchy(
+        scenario_result_id="scenario-run-1",
+        scenario_name="TestScenario",
+        scenario_version=1,
+        status=ScenarioRunState.COMPLETED,
+        snapshot=snapshot,
+        exact_total_retries=0,
+    )
+    assert projection.diagnostics.total_retries == 0
 
 
 def test_hierarchy_ordinary_flat_results() -> None:
@@ -477,7 +494,8 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
 
     memory.get_scenario_attack_result_deltas_by_ids_async = AsyncMock(side_effect=mock_get_deltas)
     memory.get_scenario_result_header_async = AsyncMock(return_value=None)
-    memory.get_attack_result_conversation_projections_async = AsyncMock(
+    conversation_reader = MagicMock(spec=SavedConversationReadService)
+    conversation_reader.get_legacy_projections_async = AsyncMock(
         return_value=ScenarioAttackResultConversations(
             conversations=[
                 ScenarioConversationProjection(
@@ -500,6 +518,7 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
 
     read_model = ScenarioProgressReadModel(memory=memory)
     service = ScenarioRunService(memory=memory, progress_read_model=read_model)
+    service._saved_conversation_reader = conversation_reader
 
     node = await service.get_run_hierarchy_node_async(
         scenario_result_id="scenario-run-1",
@@ -511,8 +530,9 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
     assert len(node.children) == 1
     assert node.children[0].attack_result_id == "child-1"
     assert len(node.conversations) == 1
-    assert len(node.conversations[0].messages) == 1
-    assert node.conversations[0].messages[0].content == "Test prompt"
+    conversation_reader.get_legacy_projections_async.assert_awaited_once_with(
+        attack_result_id="parent-1", include_messages=False
+    )
 
     # Querying non-existent node returns None
     missing = await service.get_run_hierarchy_node_async(
@@ -687,7 +707,7 @@ async def test_sqlite_memory_batched_reads_and_projections_parity(sqlite_instanc
     assert cross_run_id not in delta_ids
 
     # 2. Test conversation projections
-    conv_projections = await sqlite_instance.get_attack_result_conversation_projections_async(
+    conv_projections = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=child_id,
         include_messages=True,
     )
@@ -1112,7 +1132,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         await sqlite_instance._run_database_operation_async(sqlite_instance._insert_entry, PromptMemoryEntry(entry=p))
 
     # Read with limit=2
-    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=ar_id,
         include_messages=True,
         limit_messages_per_conversation=2,
@@ -1251,7 +1271,7 @@ async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLit
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
     # 1. Direct memory read returns ScenarioAttackResultConversations with total_count=55 and truncated=True
-    conv_result = await sqlite_instance.get_attack_result_conversation_projections_async(
+    conv_result = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=ar_id,
         max_conversations=50,
     )
@@ -1410,7 +1430,7 @@ async def test_sqlite_message_pieces_bounding(sqlite_instance: SQLiteMemory) -> 
         )
 
     # 1. Fetch with default max_pieces_per_message=100
-    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=ar_id,
         include_messages=True,
         max_pieces_per_message=100,
@@ -1422,7 +1442,7 @@ async def test_sqlite_message_pieces_bounding(sqlite_instance: SQLiteMemory) -> 
     assert msg.pieces_truncated is True
 
     # 2. Fetch with higher limit max_pieces_per_message=200
-    projs_untruncated = await sqlite_instance.get_attack_result_conversation_projections_async(
+    projs_untruncated = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=ar_id,
         include_messages=True,
         max_pieces_per_message=200,
@@ -1791,7 +1811,6 @@ async def test_persisted_conversation_statistics_parity_between_hierarchy_and_no
 
     service = ScenarioRunService(memory=sqlite_instance)
 
-    # 1. Node detail endpoint: full messages loaded, exact count=3, messages_truncated=False
     node = await service.get_run_hierarchy_node_async(
         scenario_result_id=scenario_id,
         attack_result_id=ar_id,
@@ -1799,8 +1818,14 @@ async def test_persisted_conversation_statistics_parity_between_hierarchy_and_no
     assert node is not None
     assert len(node.conversations) == 1
     assert node.conversations[0].message_count == 3
-    assert len(node.conversations[0].messages) == 3
-    assert node.conversations[0].messages_truncated is False
+    assert node.conversations[0].messages == []
+    assert node.conversations[0].messages_truncated is True
+    explicit_preview = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id, attack_result_id=ar_id, include_messages=True
+    )
+    assert explicit_preview is not None
+    assert len(explicit_preview.conversations[0].messages) == 3
+    assert explicit_preview.conversations[0].messages_truncated is False
 
     # 2. Full hierarchy endpoint: real count=3 via bounded stats read, empty messages list, messages_truncated=True
     hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
@@ -1914,8 +1939,7 @@ async def test_bounded_conversation_messages_piece_budget_applied_at_sql_layer(
     )
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
-    # 1. Fetch via get_attack_result_conversation_projections_async with max_pieces_per_message=100
-    projs = await sqlite_instance.get_attack_result_conversation_projections_async(
+    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
         attack_result_id=ar_id,
         include_messages=True,
         max_pieces_per_message=100,
@@ -1936,18 +1960,14 @@ async def test_bounded_conversation_messages_piece_budget_applied_at_sql_layer(
     assert len(msg1.pieces) == 5
     assert msg1.pieces_truncated is False
 
-    # 2. Verify SQL-level row bounding: _fetch_bounded_conversation_messages only fetches
-    # at most (max_pieces_per_message + 1) rows per sequence directly from the DB.
-    # Testing directly with max_pieces_per_message=10:
-    messages_capped_10, _ = sqlite_instance._fetch_bounded_conversation_messages(
+    messages_capped_10, _, partial_sequences = await sqlite_instance.get_bounded_conversation_messages_async(
         conversation_id=conv_id,
         limit=10,
         max_pieces_per_message=10,
     )
-    assert len(messages_capped_10[0].pieces) == 10
-    assert messages_capped_10[0].pieces_truncated is True
-    assert len(messages_capped_10[1].pieces) == 5
-    assert messages_capped_10[1].pieces_truncated is False
+    assert len(messages_capped_10[0].message_pieces) == 10
+    assert len(messages_capped_10[1].message_pieces) == 5
+    assert partial_sequences == {0}
 
 
 async def test_diagnostics_total_retries_count_event_mismatch_parity(
@@ -2162,7 +2182,6 @@ async def test_parent_with_2500_children_bounds_unresolved_references(sqlite_ins
 
     service = ScenarioRunService(memory=sqlite_instance)
 
-    # 1. Single node detail: with 200 immediate children loaded, unresolved references are capped at 500 (not 2,300)
     node = await service.get_run_hierarchy_node_async(
         scenario_result_id=scenario_id,
         attack_result_id=parent_id,
@@ -2170,8 +2189,20 @@ async def test_parent_with_2500_children_bounds_unresolved_references(sqlite_ins
     )
     assert node is not None
     assert len(node.children) == 200
-    assert len(node.unresolved_child_attack_result_ids) == 500
-    assert node.unresolved_child_references_truncated is True
+    assert node.unresolved_child_attack_result_ids == []
+    assert node.children_count == 2500
+    assert node.child_attack_result_ids == child_ids[:200]
+    assert node.next_children_cursor is not None
+    missing_page = await service.get_run_hierarchy_node_async(
+        scenario_result_id=scenario_id,
+        attack_result_id=parent_id,
+        max_immediate_children=200,
+        children_cursor=node.next_children_cursor,
+    )
+    assert missing_page is not None
+    assert missing_page.children == []
+    assert missing_page.unresolved_child_attack_result_ids == child_ids[200:400]
+    assert missing_page.next_children_cursor is not None
 
     # 2. Full hierarchy with max_nodes=1: parent has 2,500 unresolved children capped at 500 (not 2,500)
     hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
@@ -2209,25 +2240,29 @@ async def test_cold_hierarchy_hydration_bounded_by_max_nodes(sqlite_instance: SQ
     ]
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=results)
 
-    # Track delta queries
-    original_get_deltas = sqlite_instance.get_scenario_attack_result_deltas_async
-    query_limits: list[int] = []
-
-    async def tracking_get_deltas(*args: Any, **kwargs: Any) -> Any:
-        query_limits.append(kwargs.get("limit", 0))
-        return await original_get_deltas(*args, **kwargs)
-
-    sqlite_instance.get_scenario_attack_result_deltas_async = tracking_get_deltas  # type: ignore[assignment]
-
     service = ScenarioRunService(memory=sqlite_instance)
-
-    # Cold max_nodes=1 hierarchy call
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    with (
+        patch.object(
+            sqlite_instance, "get_scenario_root_deltas_async", wraps=sqlite_instance.get_scenario_root_deltas_async
+        ) as roots,
+        patch.object(
+            sqlite_instance,
+            "_row_to_scenario_attack_result_delta",
+            wraps=sqlite_instance._row_to_scenario_attack_result_delta,
+        ) as hydrate,
+        patch.object(sqlite_instance, "get_scenario_attack_result_deltas_async", new_callable=AsyncMock) as full_deltas,
+        patch.object(service._progress_read_model, "get_snapshot_async", new_callable=AsyncMock) as progress,
+    ):
+        hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    roots.assert_awaited_once()
+    assert roots.call_args.kwargs["limit"] == 1
+    assert hydrate.call_count == 1
+    full_deltas.assert_not_awaited()
+    progress.assert_not_awaited()
     assert hierarchy is not None
     assert hierarchy.truncated is True
-    # Must only have executed 1 page query (capped at storage page size), NOT 3 page queries (500, 500, 1)!
-    assert len(query_limits) == 1
-    assert query_limits[0] == 500
+    assert hierarchy.has_more is True
+    assert hierarchy.next_cursor is not None
 
 
 def test_build_scenario_hierarchy_unqueried_conversation_not_false_zero() -> None:
@@ -3222,12 +3257,10 @@ async def test_500_cyclic_results_with_outer_parent_at_501_parity(sqlite_instanc
     assert cold_root_ids == warm_root_ids
 
 
-@pytest.mark.asyncio
-async def test_shared_child_with_1001_parents_bounded_parent_query(sqlite_instance: SQLiteMemory) -> None:
-    """
-    Test that a child with 1,001 parents queries parents in bounded chunks with SQL LIMIT,
-    never hydrating all 1,001 rows in memory.
-    """
+async def test_shared_child_with_1001_parents_has_bounded_native_root_pages_async(
+    sqlite_instance: SQLiteMemory,
+) -> None:
+    """Page the actual parent roots without reverse-discovering or hydrating their complete fan-in."""
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
     base_time = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -3274,21 +3307,21 @@ async def test_shared_child_with_1001_parents_bounded_parent_query(sqlite_instan
 
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[child_result, *parents])
 
-    deltas, has_more = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
-        scenario_result_id=scenario_id,
-        child_ids=[child_id],
-        limit=500,
-    )
-    assert len(deltas) == 500
-    assert has_more is True
-
-    deltas_10, has_more_10 = await sqlite_instance.get_scenario_parent_deltas_for_child_ids_async(
-        scenario_result_id=scenario_id,
-        child_ids=[child_id],
-        limit=10,
-    )
-    assert len(deltas_10) == 10
-    assert has_more_10 is True
+    service = ScenarioRunService(memory=sqlite_instance)
+    with patch.object(
+        sqlite_instance,
+        "_row_to_scenario_attack_result_delta",
+        wraps=sqlite_instance._row_to_scenario_attack_result_delta,
+    ) as mapped:
+        page = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=10)
+    assert page is not None
+    roots = [node for group in page.groups for node in group.roots]
+    assert len(roots) == 10
+    assert {root.attack_result_id for root in roots} == {parent.attack_result_id for parent in parents[:10]}
+    assert all(not root.children for root in roots)
+    assert page.has_more
+    assert page.next_cursor is not None
+    assert mapped.call_count == 10
 
 
 @pytest.mark.asyncio

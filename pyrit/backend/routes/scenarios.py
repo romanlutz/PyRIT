@@ -386,6 +386,7 @@ async def get_scenario_run_progress(  # pyrit-async-suffix-exempt
     "/runs/{scenario_result_id}/hierarchy",
     response_model=ScenarioHierarchyProjection,
     responses={
+        400: {"model": ProblemDetail, "description": "Invalid hierarchy cursor"},
         404: {"model": ProblemDetail, "description": "Run not found"},
     },
 )
@@ -393,6 +394,7 @@ async def get_scenario_run_hierarchy(  # pyrit-async-suffix-exempt
     *,
     scenario_result_id: IdentifierStr,
     max_nodes: int = Query(1000, ge=1, le=5000, description="Maximum nodes to assemble in the hierarchy tree"),
+    cursor: CursorStr | None = Query(None, description="Opaque root-page continuation cursor"),
 ) -> ScenarioHierarchyProjection:
     """
     Get the bounded result hierarchy projection for a scenario run.
@@ -402,10 +404,12 @@ async def get_scenario_run_hierarchy(  # pyrit-async-suffix-exempt
         target-facing children, and generic read-only conversations.
     """
     service = get_scenario_run_service()
-    hierarchy = await service.get_run_hierarchy_async(
-        scenario_result_id=scenario_result_id,
-        max_nodes=max_nodes,
-    )
+    try:
+        hierarchy = await service.get_run_hierarchy_async(
+            scenario_result_id=scenario_result_id, max_nodes=max_nodes, cursor=cursor
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if hierarchy is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -418,6 +422,7 @@ async def get_scenario_run_hierarchy(  # pyrit-async-suffix-exempt
     "/runs/{scenario_result_id}/hierarchy/nodes/{attack_result_id}",
     response_model=ScenarioHierarchyNode,
     responses={
+        400: {"model": ProblemDetail, "description": "Invalid child cursor"},
         404: {"model": ProblemDetail, "description": "Node or run not found"},
     },
 )
@@ -425,6 +430,9 @@ async def get_scenario_run_hierarchy_node(  # pyrit-async-suffix-exempt
     *,
     scenario_result_id: IdentifierStr,
     attack_result_id: IdentifierStr,
+    limit: int = Query(200, ge=1, le=500, description="Maximum ordered child references in this page"),
+    children_cursor: CursorStr | None = Query(None, description="Opaque ordered-child continuation cursor"),
+    include_messages: bool = Query(False, description="Explicitly include legacy clipped conversation previews"),
 ) -> ScenarioHierarchyNode:
     """
     Get single-node hierarchy details and generic conversation projections without full-run hydration.
@@ -433,10 +441,16 @@ async def get_scenario_run_hierarchy_node(  # pyrit-async-suffix-exempt
         ScenarioHierarchyNode: The target node with resolved immediate children and conversations.
     """
     service = get_scenario_run_service()
-    node = await service.get_run_hierarchy_node_async(
-        scenario_result_id=scenario_result_id,
-        attack_result_id=attack_result_id,
-    )
+    try:
+        node = await service.get_run_hierarchy_node_async(
+            scenario_result_id=scenario_result_id,
+            attack_result_id=attack_result_id,
+            max_immediate_children=limit,
+            children_cursor=children_cursor,
+            include_messages=include_messages,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if node is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

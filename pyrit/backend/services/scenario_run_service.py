@@ -40,6 +40,7 @@ from pyrit.backend.services.pagination import (
     fingerprint_filters,
     normalize_label_filters,
 )
+from pyrit.backend.services.saved_conversation_read_service import SavedConversationReadService
 from pyrit.backend.services.scenario_configuration_resolver import ScenarioConfigurationResolver
 from pyrit.backend.services.scenario_progress_read_model import (
     ResultUnitIdentity,
@@ -230,6 +231,7 @@ class ScenarioRunService:
         self._progress_read_model = (
             progress_read_model if progress_read_model is not None else ScenarioProgressReadModel(memory=self._memory)
         )
+        self._saved_conversation_reader = SavedConversationReadService(memory=self._memory)
         self._technique_metadata_cache: dict[str, dict[str, ScenarioTechniqueSummary]] = {}
 
         self._preparations: set[asyncio.Task[_PreparedRun]] = set()
@@ -2492,11 +2494,116 @@ class ScenarioRunService:
             raise ValueError("Cursor timestamp must include a timezone.")
         return AttackResultKeysetCursor(timestamp=timestamp, attack_result_id=attack_result_id)
 
+    async def _get_hierarchy_aggregate_async(
+        self, *, scenario_result_id: str, plan: ScenarioRunPlan | None
+    ) -> ScenarioHistoryAggregate:
+        """
+        Read exact shared run statistics independently of the selected hierarchy page.
+
+        Returns:
+            ScenarioHistoryAggregate: The same SQL/SDK aggregate used by saved-run history.
+        """
+        aggregates = await self._memory.get_scenario_history_aggregates_async(
+            scenario_result_ids=[scenario_result_id],
+            plan_scenario_ids=[scenario_result_id] if plan is not None else [],
+        )
+        aggregates = await self._recount_with_sdk_statistics_async(
+            aggregates=aggregates,
+            plans={scenario_result_id: plan.atomic_groups if plan is not None else None},
+        )
+        return aggregates[scenario_result_id]
+
+    @staticmethod
+    def _hierarchy_counts(*, aggregate: ScenarioHistoryAggregate, planned: int | None) -> ScenarioProgressCounts:
+        """
+        Present the shared aggregate without choosing a second counting population.
+
+        Returns:
+            ScenarioProgressCounts: Exact logical counts, outcomes, and producer diagnostics.
+        """
+        return ScenarioProgressCounts(
+            planned=planned,
+            completed=aggregate.completed_units,
+            succeeded=aggregate.successful_units,
+            success_percentage=success_percentage(
+                succeeded=aggregate.successful_units, completed=aggregate.completed_units
+            ),
+            errors=aggregate.error_attempts,
+            retries=aggregate.total_retries,
+            producer_counts=ScenarioProducerCounts(
+                target_facing=ScenarioProducerCategoryCounts(
+                    attempts=aggregate.target_facing_attempts,
+                    errors=aggregate.target_facing_error_attempts,
+                    retries=aggregate.target_facing_retries,
+                ),
+                orchestration=ScenarioProducerCategoryCounts(
+                    attempts=aggregate.orchestration_attempts,
+                    errors=aggregate.orchestration_error_attempts,
+                    retries=aggregate.orchestration_retries,
+                ),
+                unknown=ScenarioProducerCategoryCounts(
+                    attempts=aggregate.unknown_role_attempts,
+                    errors=aggregate.unknown_role_error_attempts,
+                    retries=aggregate.unknown_role_retries,
+                ),
+            ),
+            outcomes=compute_outcome_statistics(
+                {
+                    AttackOutcome.SUCCESS: aggregate.outcome_successes,
+                    AttackOutcome.FAILURE: aggregate.outcome_failures,
+                    AttackOutcome.ERROR: aggregate.outcome_errors,
+                    AttackOutcome.UNDETERMINED: aggregate.outcome_undetermined,
+                }
+            ),
+        )
+
+    async def _load_hierarchy_preview_async(
+        self, *, scenario_result_id: str, roots: Sequence[ScenarioAttackResultDelta], max_nodes: int
+    ) -> list[ScenarioAttackResultDelta]:
+        """
+        Resolve only the bounded preview's descendants in breadth-first batches.
+
+        Returns:
+            list[ScenarioAttackResultDelta]: Roots and saved descendants, never more than the node budget.
+        """
+        deltas = {delta.attack_result_id: delta for delta in roots}
+        queried_ids = set(deltas)
+        frontier = list(roots)
+        for _ in range(10):
+            if not frontier or len(deltas) >= max_nodes:
+                break
+            pending = (
+                child_id
+                for delta in frontier
+                for child_id in self._progress_read_model._read_child_attack_result_ids(
+                    attack_metadata=delta.attack_metadata
+                )[:500]
+            )
+            batch: list[str] = []
+            batch_limit = min(500, max_nodes - len(deltas))
+            for child_id in pending:
+                if child_id in queried_ids:
+                    continue
+                queried_ids.add(child_id)
+                batch.append(child_id)
+                if len(batch) >= batch_limit:
+                    break
+            if not batch:
+                break
+            frontier = list(
+                await self._memory.get_scenario_attack_result_deltas_by_ids_async(
+                    scenario_result_id=scenario_result_id, attack_result_ids=batch
+                )
+            )
+            deltas.update((child.attack_result_id, child) for child in frontier)
+        return list(deltas.values())
+
     async def get_run_hierarchy_async(
         self,
         *,
         scenario_result_id: str,
         max_nodes: int = 1000,
+        cursor: str | None = None,
     ) -> ScenarioHierarchyProjection | None:
         """
         Get the bounded result hierarchy projection for a scenario run.
@@ -2504,6 +2611,7 @@ class ScenarioRunService:
         Args:
             scenario_result_id: The persisted scenario run ID.
             max_nodes: Maximum nodes to assemble in the hierarchy tree.
+            cursor: Optional continuation for the ascending page of true roots.
 
         Returns:
             ScenarioHierarchyProjection | None: The hierarchy projection, or None if the run does not exist.
@@ -2520,181 +2628,51 @@ class ScenarioRunService:
                 scenario_result_id,
             )
             plan = None
-        plan_complete = plan is not None
-        terminal = header_result.scenario_run_state in (
-            ScenarioRunState.COMPLETED,
-            ScenarioRunState.FAILED,
-            ScenarioRunState.CANCELLED,
+        if not 1 <= max_nodes <= 5000:
+            raise ValueError("Hierarchy node budget must be between 1 and 5000.")
+        fingerprint = fingerprint_filters(filters={"kind": "hierarchy-roots", "run": scenario_result_id})
+        anchor = decode_keyset_cursor(cursor=cursor, fingerprint=fingerprint)
+        if cursor is not None and (anchor is None or anchor.position is not None):
+            raise ValueError("Invalid hierarchy root cursor.")
+        root_cursor = (
+            AttackResultKeysetCursor(timestamp=anchor.timestamp, attack_result_id=anchor.identifier)
+            if anchor is not None
+            else None
         )
-        snapshot = self.snapshot_active_run(scenario_result_id=scenario_result_id)
-        objective_scorer_identifier = header_result.objective_scorer_identifier
-        if not isinstance(objective_scorer_identifier, ComponentIdentifier):
-            objective_scorer_identifier = None
-
-        progress_snapshot = await self._progress_read_model.get_snapshot_async(
-            scenario_result_id=scenario_result_id,
-            plan=plan,
-            plan_complete=plan_complete,
-            active_group_ids=snapshot.active_group_ids,
-            terminal=terminal,
-            objective_scorer_identifier=objective_scorer_identifier,
-            max_deltas=max(max_nodes, self._progress_read_model._STORAGE_PAGE_SIZE),
+        roots, has_more = await self._memory.get_scenario_root_deltas_async(
+            scenario_result_id=scenario_result_id, cursor=root_cursor, limit=min(500, max_nodes)
         )
-
-        exact_overall_counts: ScenarioProgressCounts | None = None
-        exact_total_errors: int | None = None
-        exact_total_retries: int | None = None
-        exact_retrying_attacks_count: int | None = None
-        exact_group_counts: Mapping[str, ScenarioProgressCounts] | None = None
-        parent_deltas: list[ScenarioAttackResultDelta] = []
-        unverified_candidate_ids: set[str] = set()
-
-        if progress_snapshot.has_more:
-            plan_lookup = ScenarioPlanLookup.from_plan(plan=plan)
-            all_deltas_map: dict[str, ScenarioAttackResultDelta] = {
-                d.attack_result_id: d for d in progress_snapshot.deltas
-            }
-            all_results_map: dict[str, ScenarioProgressResult] = {
-                r.attack_result_id: r for r in progress_snapshot.results
-            }
-
-            referenced_child_ids: set[str] = set()
-            for r in all_results_map.values():
-                for cid in r.child_attack_result_ids:
-                    referenced_child_ids.add(cid)
-
-            unreferenced_roots = [
-                r.attack_result_id for r in all_results_map.values() if r.attack_result_id not in referenced_child_ids
-            ]
-            reachable: set[str] = set()
-            queue = list(unreferenced_roots)
-            while queue:
-                curr = queue.pop()
-                if curr not in reachable:
-                    reachable.add(curr)
-                    res = all_results_map.get(curr)
-                    if res:
-                        queue.extend(res.child_attack_result_ids)
-
-            unreached_cyclic = [cid for cid in all_results_map if cid not in reachable]
-            current_candidates = list(unreferenced_roots) if unreferenced_roots else list(unreached_cyclic)
-
-            parent_budget = max(2500, self._progress_read_model._STORAGE_PAGE_SIZE * 5)
-            checked_child_ids: set[str] = set()
-            depth = 0
-            layer_candidates = list(current_candidates)
-            while layer_candidates and depth < 10 and len(parent_deltas) < parent_budget:
-                depth += 1
-                next_layer_candidates: list[str] = []
-                layer_clipped = False
-                while len(parent_deltas) < parent_budget:
-                    remaining_budget = max(0, parent_budget - len(parent_deltas))
-                    if remaining_budget <= 0:
-                        break
-                    page_limit = min(self._progress_read_model._STORAGE_PAGE_SIZE, remaining_budget)
-                    new_parents, has_more = await self._memory.get_scenario_parent_deltas_for_child_ids_async(
-                        scenario_result_id=scenario_result_id,
-                        child_ids=layer_candidates,
-                        limit=page_limit,
-                        exclude_result_ids=list(all_deltas_map.keys()),
-                    )
-                    for p in new_parents:
-                        if p.attack_result_id not in all_deltas_map:
-                            parent_deltas.append(p)
-                            all_deltas_map[p.attack_result_id] = p
-                            p_res = self._progress_read_model._map_progress_delta(delta=p, plan_lookup=plan_lookup)
-                            all_results_map[p.attack_result_id] = p_res
-                            next_layer_candidates.append(p.attack_result_id)
-                            if len(parent_deltas) >= parent_budget:
-                                break
-
-                    if len(parent_deltas) >= parent_budget:
-                        layer_clipped = True
-                        break
-
-                    if not has_more:
-                        break
-
-                    if not new_parents:
-                        layer_clipped = True
-                        break
-
-                if layer_clipped:
-                    unverified_candidate_ids.update(layer_candidates)
-                    unverified_candidate_ids.update(next_layer_candidates)
-                    break
-
-                checked_child_ids.update(layer_candidates)
-                layer_candidates = [cid for cid in next_layer_candidates if cid not in checked_child_ids]
-
-                if not layer_candidates and len(parent_deltas) < parent_budget and depth < 10:
-                    remaining_cyclic = [cid for cid in unreached_cyclic if cid not in checked_child_ids]
-                    if remaining_cyclic:
-                        layer_candidates = remaining_cyclic
-
-            if layer_candidates:
-                unverified_candidate_ids.update(layer_candidates)
-
-            # Any node in all_results_map that is not referenced as a child by another loaded node
-            # and whose parents were not queried to completion in the DB is unverified.
-            all_referenced_cids: set[str] = {cid for r in all_results_map.values() for cid in r.child_attack_result_ids}
-            for rid in all_results_map:
-                if rid not in all_referenced_cids and rid not in checked_child_ids:
-                    unverified_candidate_ids.add(rid)
-
-            plan_ids = [scenario_result_id] if plan is not None else []
-            aggregates = await self._memory.get_scenario_history_aggregates_async(
-                scenario_result_ids=[scenario_result_id],
-                plan_scenario_ids=plan_ids,
-            )
-            plans_map = {scenario_result_id: plan.atomic_groups if plan is not None else None}
-            aggregates = await self._recount_with_sdk_statistics_async(
-                aggregates=aggregates,
-                plans=plans_map,
-            )
-            agg = aggregates.get(scenario_result_id)
-            if agg is not None:
-                producer_counts = ScenarioProducerCounts(
-                    target_facing=ScenarioProducerCategoryCounts(
-                        attempts=agg.target_facing_attempts,
-                        errors=agg.target_facing_error_attempts,
-                        retries=agg.target_facing_retries,
-                    ),
-                    orchestration=ScenarioProducerCategoryCounts(
-                        attempts=agg.orchestration_attempts,
-                        errors=agg.orchestration_error_attempts,
-                        retries=agg.orchestration_retries,
-                    ),
-                    unknown=ScenarioProducerCategoryCounts(
-                        attempts=agg.unknown_role_attempts,
-                        errors=agg.unknown_role_error_attempts,
-                        retries=agg.unknown_role_retries,
-                    ),
-                )
-                outcomes = compute_outcome_statistics(
-                    {
-                        AttackOutcome.SUCCESS: agg.outcome_successes,
-                        AttackOutcome.FAILURE: agg.outcome_failures,
-                        AttackOutcome.ERROR: agg.outcome_errors,
-                        AttackOutcome.UNDETERMINED: agg.outcome_undetermined,
-                    }
-                )
-                exact_overall_counts = ScenarioProgressCounts(
-                    planned=progress_snapshot.summary.overall.planned,
-                    completed=agg.completed_units,
-                    succeeded=agg.successful_units,
-                    success_percentage=success_percentage(
-                        succeeded=agg.successful_units, completed=agg.completed_units
-                    ),
-                    errors=agg.error_attempts,
-                    retries=agg.total_retries,
-                    producer_counts=producer_counts,
-                    outcomes=outcomes,
-                )
-                exact_total_errors = agg.raw_total_errors
-                exact_total_retries = agg.raw_total_retries
-                exact_retrying_attacks_count = agg.raw_retrying_attacks_count
-                exact_group_counts = agg.group_counts
+        deltas = await self._load_hierarchy_preview_async(
+            scenario_result_id=scenario_result_id, roots=roots, max_nodes=max_nodes
+        )
+        aggregate = await self._get_hierarchy_aggregate_async(scenario_result_id=scenario_result_id, plan=plan)
+        summary_plan = plan or self._progress_read_model._synthesize_legacy_plan(deltas=deltas)
+        plan_lookup = ScenarioPlanLookup.from_plan(plan=summary_plan)
+        results = tuple(
+            self._progress_read_model._map_progress_delta(delta=delta, plan_lookup=plan_lookup) for delta in deltas
+        )
+        summary = self._progress_read_model._build_progress_summary(
+            plan=summary_plan,
+            plan_complete=plan is not None,
+            results=results,
+            active_group_ids=(),
+            terminal=header_result.scenario_run_state
+            in (ScenarioRunState.COMPLETED, ScenarioRunState.FAILED, ScenarioRunState.CANCELLED),
+            objective_scorer_identifier=None,
+            technique_details_by_group=self._progress_read_model._build_technique_details_by_group(
+                deltas=deltas, results=results
+            ),
+        )
+        raw_attempts = (
+            aggregate.target_facing_attempts + aggregate.orchestration_attempts + aggregate.unknown_role_attempts
+        )
+        progress_snapshot = ScenarioProgressSnapshot(
+            deltas=tuple(deltas),
+            results=results,
+            summary=summary,
+            plan=summary_plan,
+            has_more=has_more or raw_attempts > len(deltas),
+        )
 
         hierarchy = self._progress_read_model.build_scenario_hierarchy(
             scenario_result_id=scenario_result_id,
@@ -2704,14 +2682,27 @@ class ScenarioRunService:
             snapshot=progress_snapshot,
             max_nodes=max_nodes,
             conversation_stats=None,
-            overall_counts=exact_overall_counts,
-            exact_total_errors=exact_total_errors,
-            exact_total_retries=exact_total_retries,
-            exact_retrying_attacks_count=exact_retrying_attacks_count,
-            exact_group_counts=exact_group_counts,
-            parent_deltas=parent_deltas,
-            unverified_candidate_ids=unverified_candidate_ids,
+            overall_counts=self._hierarchy_counts(aggregate=aggregate, planned=summary.overall.planned),
+            exact_total_errors=aggregate.raw_total_errors,
+            exact_total_retries=aggregate.raw_total_retries,
+            exact_retrying_attacks_count=aggregate.raw_retrying_attacks_count,
+            exact_group_counts=aggregate.group_counts,
+            root_result_ids=[root.attack_result_id for root in roots],
         )
+        hierarchy.has_more = has_more
+        if has_more and roots:
+            hierarchy.next_cursor = encode_keyset_cursor(
+                timestamp=roots[-1].timestamp,
+                identifier=roots[-1].attack_result_id,
+                fingerprint=fingerprint,
+            )
+        if cursor is None and not roots and raw_attempts:
+            rootless, clipped = await self._memory.get_scenario_recount_summaries_async(
+                scenario_result_id=scenario_result_id, limit=min(100, max_nodes)
+            )
+            hierarchy.diagnostics.rootless_result_ids = [result.attack_result_id for result in rootless]
+            hierarchy.diagnostics.rootless_results_count = raw_attempts
+            hierarchy.diagnostics.rootless_results_truncated = clipped
 
         # Obtain real conversation counts for the actual bounded preview nodes
         seen_conv_ids: set[str] = set()
@@ -2773,6 +2764,8 @@ class ScenarioRunService:
         scenario_result_id: str,
         attack_result_id: str,
         max_immediate_children: int = 200,
+        children_cursor: str | None = None,
+        include_messages: bool = False,
     ) -> ScenarioHierarchyNode | None:
         """
         Get bounded single-node hierarchy details and generic conversation projections without full-run hydration.
@@ -2781,10 +2774,14 @@ class ScenarioRunService:
             scenario_result_id: The persisted scenario run ID.
             attack_result_id: The target attack result ID.
             max_immediate_children: Maximum number of immediate child nodes to resolve.
+            children_cursor: Continuation bound to this run, node, and stored child ordering.
+            include_messages: Explicitly include compatible clipped conversation previews.
 
         Returns:
             ScenarioHierarchyNode | None: The node details, or None if the node is not found in this run.
         """
+        if not 1 <= max_immediate_children <= 500:
+            raise ValueError("Hierarchy child page size must be between 1 and 500.")
         deltas = await self._memory.get_scenario_attack_result_deltas_by_ids_async(
             scenario_result_id=scenario_result_id,
             attack_result_ids=[attack_result_id],
@@ -2800,6 +2797,10 @@ class ScenarioRunService:
             try:
                 plan = self._load_run_plan(scenario_result=header_result)
             except (ValidationError, ValueError):
+                logger.warning(
+                    "Scenario run %s has invalid persisted plan metadata; treating the plan as unavailable.",
+                    scenario_result_id,
+                )
                 plan = None
 
         plan_lookup = ScenarioPlanLookup.from_plan(plan=plan)
@@ -2809,29 +2810,52 @@ class ScenarioRunService:
         )
 
         child_ids = target_result.child_attack_result_ids
+        fingerprint = fingerprint_filters(
+            filters={
+                "kind": "hierarchy-children",
+                "run": scenario_result_id,
+                "node": attack_result_id,
+                "ordered_references": json.dumps(child_ids, separators=(",", ":")),
+            }
+        )
+        anchor = decode_keyset_cursor(cursor=children_cursor, fingerprint=fingerprint)
+        if children_cursor is not None and (
+            anchor is None
+            or anchor.position is None
+            or not 0 <= anchor.position < len(child_ids)
+            or anchor.identifier != target_delta.attack_result_id
+            or anchor.timestamp != target_delta.timestamp
+        ):
+            raise ValueError("Invalid or stale hierarchy child cursor.")
+        child_offset = anchor.position if anchor is not None and anchor.position is not None else 0
+        page_child_ids = child_ids[child_offset : child_offset + max_immediate_children]
+        next_offset = child_offset + len(page_child_ids)
+        next_children_cursor = (
+            encode_keyset_cursor(
+                timestamp=target_delta.timestamp,
+                identifier=target_delta.attack_result_id,
+                position=next_offset,
+                fingerprint=fingerprint,
+            )
+            if next_offset < len(child_ids)
+            else None
+        )
         children_deltas: list[ScenarioAttackResultDelta] = []
         children_results: list[ScenarioProgressResult] = []
-        children_truncated = False
-        if child_ids:
-            if len(child_ids) > max_immediate_children:
-                children_truncated = True
-                fetch_child_ids = child_ids[:max_immediate_children]
-            else:
-                fetch_child_ids = child_ids
-
+        if page_child_ids:
             children_deltas = list(
                 await self._memory.get_scenario_attack_result_deltas_by_ids_async(
                     scenario_result_id=scenario_result_id,
-                    attack_result_ids=fetch_child_ids,
+                    attack_result_ids=page_child_ids,
                 )
             )
             children_results = [
                 self._progress_read_model._map_progress_delta(delta=d, plan_lookup=plan_lookup) for d in children_deltas
             ]
 
-        conversations = await self._memory.get_attack_result_conversation_projections_async(
+        conversations = await self._saved_conversation_reader.get_legacy_projections_async(
             attack_result_id=attack_result_id,
-            include_messages=True,
+            include_messages=include_messages,
         )
 
         return self._progress_read_model.build_hierarchy_node(
@@ -2840,7 +2864,10 @@ class ScenarioRunService:
             children_deltas=children_deltas,
             children_results=children_results,
             conversations=conversations,
-            children_truncated=children_truncated,
+            children_truncated=child_offset > 0 or next_offset < len(child_ids),
+            child_offset=child_offset,
+            child_limit=max_immediate_children,
+            next_children_cursor=next_children_cursor,
         )
 
     async def get_run_results_async(self, *, scenario_result_id: str) -> ScenarioResult | None:

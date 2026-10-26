@@ -646,6 +646,13 @@ In active runs and saved scenario results, **Atomic attack groups** defaults to 
 
 Until you expand or collapse the section, its default follows the current group count as progress loads. Once you choose, the section keeps your choice during progress updates for the same run, even if the count crosses 20. Opening a different run resets to that run's count-based default.
 
+Compound-attack hierarchy browsing is a separate GUI follow-up. The backend provides
+paged roots and ordered child expansion, with exact run statistics independent of
+the displayed page. Node reads return conversation metadata by default; clients
+can page the selected saved transcript without loading every conversation.
+See the [backend hierarchy API](../../pyrit/backend/README.md#scenario-result-hierarchy)
+for continuation and clipping semantics.
+
 ### Operations and Findings
 
 An operation groups related red-teaming work. Inside it you record findings:

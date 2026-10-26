@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import uuid
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -864,9 +865,18 @@ class ScenarioProgressReadModel:
             list[str]: The child IDs in stored order, or an empty list when none are recorded.
         """
         child_ids = attack_metadata.get("child_attack_result_ids")
-        if isinstance(child_ids, list) and all(isinstance(child_id, str) for child_id in child_ids):
-            return list(child_ids)
-        return []
+        if not isinstance(child_ids, list):
+            return []
+        identifiers: list[str] = []
+        for index, child_id in enumerate(child_ids):
+            if not isinstance(child_id, str):
+                identifiers.append(f"<invalid child reference at position {index}>")
+                continue
+            try:
+                identifiers.append(str(uuid.UUID(child_id.lower())))
+            except ValueError:
+                identifiers.append(child_id)
+        return identifiers
 
     @staticmethod
     def _synthesize_legacy_plan(*, deltas: list[ScenarioAttackResultDelta]) -> ScenarioRunPlan:
@@ -924,8 +934,7 @@ class ScenarioProgressReadModel:
         exact_total_retries: int | None = None,
         exact_retrying_attacks_count: int | None = None,
         exact_group_counts: Mapping[str, ScenarioProgressCounts] | None = None,
-        parent_deltas: Sequence[ScenarioAttackResultDelta] = (),
-        unverified_candidate_ids: set[str] | Sequence[str] | None = None,
+        root_result_ids: Sequence[str] | None = None,
     ) -> ScenarioHierarchyProjection:
         """
         Assemble the scenario result hierarchy projection with cycle, depth, and node budget guards.
@@ -943,10 +952,7 @@ class ScenarioProgressReadModel:
             exact_total_retries: Optional exact run-wide retry count from database aggregates.
             exact_retrying_attacks_count: Optional exact run-wide count of retrying attacks from aggregates.
             exact_group_counts: Optional mapping of atomic group ID to exact counts from aggregates.
-            parent_deltas: Optional orchestration parent deltas to resolve roots and child references
-                beyond delta limits.
-            unverified_candidate_ids: Optional candidates whose parent status could not be verified
-                due to query clipping or budget exhaustion; excluded from root_results.
+            root_result_ids: Optional authoritative, run-scoped root page returned by storage.
 
         Returns:
             ScenarioHierarchyProjection: Bounded hierarchy projection with diagnostics.
@@ -954,31 +960,16 @@ class ScenarioProgressReadModel:
         deltas_by_id: dict[str, ScenarioAttackResultDelta] = {d.attack_result_id: d for d in snapshot.deltas}
         results_by_id: dict[str, ScenarioProgressResult] = {r.attack_result_id: r for r in snapshot.results}
 
-        plan_lookup = ScenarioPlanLookup.from_plan(plan=snapshot.plan)
-        for p_delta in parent_deltas:
-            if p_delta.attack_result_id not in deltas_by_id:
-                deltas_by_id[p_delta.attack_result_id] = p_delta
-            if p_delta.attack_result_id not in results_by_id:
-                results_by_id[p_delta.attack_result_id] = ScenarioProgressReadModel._map_progress_delta(
-                    delta=p_delta, plan_lookup=plan_lookup
-                )
-
         referenced_child_ids: set[str] = set()
         for result in results_by_id.values():
             for child_id in result.child_attack_result_ids:
                 referenced_child_ids.add(child_id)
 
-        # A true root is not referenced as a child by any parent and does not carry an attempt_index
-        # (which designates a child attempt dispatched by an orchestration parent).
-        unverified_set = set(unverified_candidate_ids) if unverified_candidate_ids else set()
-        root_results = [
-            r
-            for r in results_by_id.values()
-            if r.attack_result_id not in referenced_child_ids
-            and r.attempt_index is None
-            and r.attack_result_id not in unverified_set
-        ]
+        root_results = [r for r in results_by_id.values() if r.attack_result_id not in referenced_child_ids]
         root_results.sort(key=lambda r: (r.timestamp, r.attack_result_id))
+        if root_result_ids is not None:
+            root_results = [results_by_id[identifier] for identifier in root_result_ids if identifier in results_by_id]
+        reserved_root_ids = {result.attack_result_id for result in root_results}
 
         visited_ids: set[str] = set()
         total_nodes_count = 0
@@ -1005,56 +996,28 @@ class ScenarioProgressReadModel:
             total_nodes_count += 1
             visited_ids.add(attack_result_id)
 
-            retries = result.retries
-            retries_truncated = False
-            if len(retries) > _MAX_RETRIES_PER_NODE:
-                retries = retries[:_MAX_RETRIES_PER_NODE]
-                retries_truncated = True
-
-            executed_turns = _resolve_executed_turns(delta)
-            outcome_reason = (
-                delta.outcome_reason
-                or delta.attribution_data.get("outcome_reason")
-                or delta.attack_metadata.get("outcome_reason")
+            node = ScenarioProgressReadModel._map_hierarchy_node(
+                delta=delta, result=result, parent_id=parent_id, child_index=child_index
             )
-
-            raw_child_ids = list(result.child_attack_result_ids)
-            child_refs_truncated = len(raw_child_ids) > _MAX_CHILD_REFERENCES
-            bounded_child_ids = raw_child_ids[:_MAX_CHILD_REFERENCES] if child_refs_truncated else raw_child_ids
-
-            orchestration: ScenarioOrchestrationParentSummary | None = None
-            if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
-                completion_policy = delta.attack_metadata.get("completion_policy")
-                orchestration = ScenarioOrchestrationParentSummary(
-                    attack_result_id=result.attack_result_id,
-                    result_role=result.result_role,
-                    outcome=result.outcome,
-                    outcome_reason=outcome_reason,
-                    attempt_index=result.attempt_index,
-                    execution_time_ms=result.execution_time_ms,
-                    executed_turns=executed_turns,
-                    completion_policy=str(completion_policy) if completion_policy is not None else None,
-                    child_attack_result_ids=bounded_child_ids,
-                    child_references_truncated=child_refs_truncated,
-                    error_type=result.error_type,
-                    error_message=result.error_message,
-                    timestamp=result.timestamp,
-                    total_retries=result.total_retries,
-                    retries=retries,
-                    retries_truncated=retries_truncated,
-                )
-
             current_active_path = active_path | {attack_result_id}
             children: list[ScenarioHierarchyNode] = []
             unresolved_children: list[str] = []
+            seen_child_ids: set[str] = set()
+            node.children_truncated = node.child_references_truncated
+            if node.child_references_truncated:
+                hierarchy_truncated = True
 
-            for idx, c_id in enumerate(result.child_attack_result_ids):
-                if c_id in current_active_path or depth >= _MAX_HIERARCHY_DEPTH or c_id not in deltas_by_id:
+            for idx, c_id in enumerate(node.child_attack_result_ids):
+                if c_id in current_active_path or c_id in seen_child_ids or c_id not in deltas_by_id:
                     unresolved_children.append(c_id)
-                elif total_nodes_count >= max_nodes:
+                    if c_id not in deltas_by_id and snapshot.has_more:
+                        node.children_truncated = True
+                elif depth >= _MAX_HIERARCHY_DEPTH or total_nodes_count >= max_nodes - len(reserved_root_ids):
+                    node.children_truncated = True
                     hierarchy_truncated = True
                     unresolved_children.append(c_id)
                 else:
+                    seen_child_ids.add(c_id)
                     child_node = _build_node(
                         attack_result_id=c_id,
                         parent_id=attack_result_id,
@@ -1110,47 +1073,19 @@ class ScenarioProgressReadModel:
                 node_conversations_count = len(conversations)
                 node_conversations_truncated = False
 
-            unresolved_refs_truncated = len(unresolved_children) > _MAX_CHILD_REFERENCES
-            bounded_unresolved_children = (
-                unresolved_children[:_MAX_CHILD_REFERENCES] if unresolved_refs_truncated else unresolved_children
+            node.children = children
+            node.unresolved_child_attack_result_ids = unresolved_children[:_MAX_CHILD_REFERENCES]
+            node.unresolved_child_references_truncated = (
+                len(unresolved_children) > _MAX_CHILD_REFERENCES or node.child_references_truncated
             )
-
-            return ScenarioHierarchyNode(
-                attack_result_id=result.attack_result_id,
-                conversation_id=result.conversation_id or "",
-                parent_attack_result_id=parent_id,
-                child_index=child_index,
-                result_role=result.result_role,
-                attempt_index=result.attempt_index,
-                atomic_attack_name=result.atomic_attack_name,
-                atomic_group_id=result.atomic_group_id,
-                seed_group_id=result.seed_group_id,
-                objective=delta.objective,
-                outcome=result.outcome,
-                outcome_reason=outcome_reason,
-                execution_time_ms=result.execution_time_ms,
-                executed_turns=executed_turns,
-                timestamp=result.timestamp,
-                score=result.score,
-                error_type=result.error_type,
-                error_message=result.error_message,
-                total_retries=result.total_retries,
-                retries=retries,
-                retries_truncated=retries_truncated,
-                child_attack_result_ids=bounded_child_ids,
-                child_references_truncated=child_refs_truncated,
-                children=children,
-                children_truncated=False,
-                unresolved_child_attack_result_ids=bounded_unresolved_children,
-                unresolved_child_references_truncated=unresolved_refs_truncated,
-                conversations=conversations,
-                conversations_count=node_conversations_count,
-                conversations_truncated=node_conversations_truncated,
-                orchestration=orchestration,
-            )
+            node.conversations = conversations
+            node.conversations_count = node_conversations_count
+            node.conversations_truncated = node_conversations_truncated
+            return node
 
         roots_by_group: dict[str, list[ScenarioHierarchyNode]] = {}
         for root_result in root_results:
+            reserved_root_ids.discard(root_result.attack_result_id)
             if total_nodes_count >= max_nodes:
                 hierarchy_truncated = True
                 break
@@ -1165,24 +1100,8 @@ class ScenarioProgressReadModel:
                 roots_by_group.setdefault(root_node.atomic_group_id, []).append(root_node)
 
         # Handle unreached/disconnected components (including detached cycles) in a single linear pass
-        if total_nodes_count < max_nodes:
-            # Nodes that are unverified or descended from unverified candidates can never be emitted as roots
-            unverified_descendants: set[str] = set(unverified_set)
-            unverified_queue = list(unverified_set)
-            while unverified_queue:
-                curr = unverified_queue.pop()
-                res = results_by_id.get(curr)
-                if res:
-                    for cid in res.child_attack_result_ids:
-                        if cid not in unverified_descendants:
-                            unverified_descendants.add(cid)
-                            unverified_queue.append(cid)
-
-            unreached = [
-                r
-                for r in results_by_id.values()
-                if r.attack_result_id not in visited_ids and r.attack_result_id not in unverified_descendants
-            ]
+        if root_result_ids is None and total_nodes_count < max_nodes:
+            unreached = [r for r in results_by_id.values() if r.attack_result_id not in visited_ids]
             unreached.sort(
                 key=lambda r: (
                     r.timestamp,
@@ -1207,9 +1126,7 @@ class ScenarioProgressReadModel:
                 else:
                     visited_ids.add(next_root.attack_result_id)
 
-        if not hierarchy_truncated and (
-            any(r.attack_result_id not in visited_ids for r in results_by_id.values()) or bool(unverified_set)
-        ):
+        if not hierarchy_truncated and any(r.attack_result_id not in visited_ids for r in results_by_id.values()):
             hierarchy_truncated = True
 
         for g_roots in roots_by_group.values():
@@ -1325,19 +1242,19 @@ class ScenarioProgressReadModel:
         )
         failed_attacks = all_failed_attacks[:_MAX_DIAGNOSTIC_ITEMS]
 
-        attempts_by_unit: dict[tuple[str, str], list[ScenarioProgressResult]] = {}
-        for r in snapshot.results:
-            attempts_by_unit.setdefault((r.atomic_group_id, r.seed_group_id), []).append(r)
-
-        diagnostic_retries = max(
-            snapshot.summary.overall.retries,
-            ScenarioProgressReadModel.total_retry_pressure(
-                attempts_per_unit=(len(attempts) for attempts in attempts_by_unit.values()),
-                persisted_retries=(r.total_retries for r in snapshot.results),
-            ),
-        )
         if exact_total_retries is not None:
-            diagnostic_retries = max(diagnostic_retries, exact_total_retries)
+            diagnostic_retries = exact_total_retries
+        else:
+            raw_attempts_by_unit: dict[tuple[str, str], list[ScenarioProgressResult]] = {}
+            for r in snapshot.results:
+                raw_attempts_by_unit.setdefault((r.atomic_group_id, r.seed_group_id), []).append(r)
+            diagnostic_retries = max(
+                snapshot.summary.overall.retries,
+                ScenarioProgressReadModel.total_retry_pressure(
+                    attempts_per_unit=(len(attempts) for attempts in raw_attempts_by_unit.values()),
+                    persisted_retries=(r.total_retries for r in snapshot.results),
+                ),
+            )
 
         total_persisted_retries = sum(r.total_retries for r in snapshot.results)
         attack_retries_count = (
@@ -1389,6 +1306,9 @@ class ScenarioProgressReadModel:
         conversations_truncated: bool = False,
         children_truncated: bool = False,
         max_child_references: int = _MAX_CHILD_REFERENCES,
+        child_offset: int = 0,
+        child_limit: int | None = None,
+        next_children_cursor: str | None = None,
     ) -> ScenarioHierarchyNode:
         """
         Assemble a single hierarchy node with its immediate children and generic conversations.
@@ -1403,44 +1323,93 @@ class ScenarioProgressReadModel:
             conversations_truncated: Flag indicating if conversations list was truncated.
             children_truncated: Flag indicating if immediate children list was truncated.
             max_child_references: Maximum number of child references to retain before truncating.
+            child_offset: Position of the first reference in this page.
+            child_limit: Optional ordered-reference page size.
+            next_children_cursor: Continuation for the next reference page.
 
         Returns:
             ScenarioHierarchyNode: The assembled node.
         """
-        conv_list: list[ScenarioConversationProjection] = []
+        node = ScenarioProgressReadModel._map_hierarchy_node(
+            delta=delta, result=result, max_child_references=max_child_references
+        )
         if isinstance(conversations, ScenarioAttackResultConversations):
-            conv_list = list(conversations.conversations)
+            node.conversations = list(conversations.conversations)
             if conversations_count is None:
                 conversations_count = conversations.total_count
             conversations_truncated = conversations_truncated or conversations.truncated
         else:
-            conv_list = list(conversations)
-
-        resolved_conversations_count: int | None = (
-            conversations_count if conversations_count is not None else len(conv_list)
-        )
-
+            node.conversations = list(conversations)
+        node.conversations_count = conversations_count if conversations_count is not None else len(node.conversations)
+        node.conversations_truncated = conversations_truncated
         children_deltas_by_id = {d.attack_result_id: d for d in children_deltas}
         children_results_by_id = {r.attack_result_id: r for r in children_results}
+        page_child_ids = (
+            result.child_attack_result_ids[child_offset : child_offset + child_limit]
+            if child_limit is not None
+            else result.child_attack_result_ids[child_offset:]
+        )
+        node.child_attack_result_ids = page_child_ids[:max_child_references]
+        node.child_references_truncated = len(result.child_attack_result_ids) > len(node.child_attack_result_ids)
+        node.child_offset = child_offset
+        node.next_children_cursor = next_children_cursor
+        node.children_truncated = children_truncated or len(page_child_ids) > max_child_references
+        if node.orchestration is not None:
+            node.orchestration.child_attack_result_ids = list(node.child_attack_result_ids)
+            node.orchestration.child_references_truncated = node.child_references_truncated
+        unresolved_children: list[str] = []
+        seen_child_ids = set(result.child_attack_result_ids[:child_offset])
+        for idx, c_id in enumerate(node.child_attack_result_ids, start=child_offset):
+            if (
+                c_id == result.attack_result_id
+                or c_id in seen_child_ids
+                or c_id not in children_deltas_by_id
+                or c_id not in children_results_by_id
+            ):
+                unresolved_children.append(c_id)
+                continue
+            seen_child_ids.add(c_id)
+            node.children.append(
+                ScenarioProgressReadModel._map_hierarchy_node(
+                    delta=children_deltas_by_id[c_id],
+                    result=children_results_by_id[c_id],
+                    parent_id=result.attack_result_id,
+                    child_index=idx,
+                    max_child_references=max_child_references,
+                )
+            )
+        node.unresolved_child_attack_result_ids = unresolved_children[:max_child_references]
+        node.unresolved_child_references_truncated = (
+            len(unresolved_children) > max_child_references or len(page_child_ids) > max_child_references
+        )
+        return node
 
-        retries = result.retries
-        retries_truncated = False
-        if len(retries) > _MAX_RETRIES_PER_NODE:
-            retries = retries[:_MAX_RETRIES_PER_NODE]
-            retries_truncated = True
+    @staticmethod
+    def _map_hierarchy_node(
+        *,
+        delta: ScenarioAttackResultDelta,
+        result: ScenarioProgressResult,
+        parent_id: str | None = None,
+        child_index: int | None = None,
+        max_child_references: int = _MAX_CHILD_REFERENCES,
+    ) -> ScenarioHierarchyNode:
+        """
+        Map shared result fields once for tree previews and direct node expansion.
 
+        Returns:
+            ScenarioHierarchyNode: A bounded node before attaching resolved children or conversations.
+        """
+        retries = result.retries[:_MAX_RETRIES_PER_NODE]
+        retries_truncated = len(result.retries) > _MAX_RETRIES_PER_NODE
         executed_turns = _resolve_executed_turns(delta)
         outcome_reason = (
             delta.outcome_reason
             or delta.attribution_data.get("outcome_reason")
             or delta.attack_metadata.get("outcome_reason")
         )
-
-        raw_child_ids = list(result.child_attack_result_ids)
-        child_refs_truncated = len(raw_child_ids) > max_child_references
-        bounded_child_ids = raw_child_ids[:max_child_references] if child_refs_truncated else raw_child_ids
-
-        orchestration: ScenarioOrchestrationParentSummary | None = None
+        child_ids = result.child_attack_result_ids[:max_child_references]
+        child_refs_truncated = len(result.child_attack_result_ids) > max_child_references
+        orchestration = None
         if result.result_role == AttackResultRole.ORCHESTRATION or result.child_attack_result_ids:
             completion_policy = delta.attack_metadata.get("completion_policy")
             orchestration = ScenarioOrchestrationParentSummary(
@@ -1452,7 +1421,7 @@ class ScenarioProgressReadModel:
                 execution_time_ms=result.execution_time_ms,
                 executed_turns=executed_turns,
                 completion_policy=str(completion_policy) if completion_policy is not None else None,
-                child_attack_result_ids=bounded_child_ids,
+                child_attack_result_ids=child_ids,
                 child_references_truncated=child_refs_truncated,
                 error_type=result.error_type,
                 error_message=result.error_message,
@@ -1461,113 +1430,16 @@ class ScenarioProgressReadModel:
                 retries=retries,
                 retries_truncated=retries_truncated,
             )
-
-        children: list[ScenarioHierarchyNode] = []
-        unresolved_children: list[str] = []
-
-        seen_child_ids: set[str] = set()
-        for idx, c_id in enumerate(result.child_attack_result_ids):
-            if c_id == result.attack_result_id or c_id in seen_child_ids or c_id not in children_deltas_by_id:
-                unresolved_children.append(c_id)
-            else:
-                seen_child_ids.add(c_id)
-                c_delta = children_deltas_by_id[c_id]
-                c_res = children_results_by_id[c_id]
-                c_retries = c_res.retries
-                c_retries_truncated = False
-                if len(c_retries) > _MAX_RETRIES_PER_NODE:
-                    c_retries = c_retries[:_MAX_RETRIES_PER_NODE]
-                    c_retries_truncated = True
-
-                c_executed_turns = _resolve_executed_turns(c_delta)
-                c_outcome_reason = (
-                    c_delta.outcome_reason
-                    or c_delta.attribution_data.get("outcome_reason")
-                    or c_delta.attack_metadata.get("outcome_reason")
-                )
-
-                c_child_ids = list(c_res.child_attack_result_ids)
-                c_child_refs_truncated = len(c_child_ids) > max_child_references
-                c_bounded_child_ids = c_child_ids[:max_child_references] if c_child_refs_truncated else c_child_ids
-
-                c_orchestration: ScenarioOrchestrationParentSummary | None = None
-                if c_res.result_role == AttackResultRole.ORCHESTRATION or c_res.child_attack_result_ids:
-                    c_policy = c_delta.attack_metadata.get("completion_policy")
-                    c_orchestration = ScenarioOrchestrationParentSummary(
-                        attack_result_id=c_res.attack_result_id,
-                        result_role=c_res.result_role,
-                        outcome=c_res.outcome,
-                        outcome_reason=c_outcome_reason,
-                        attempt_index=c_res.attempt_index,
-                        execution_time_ms=c_res.execution_time_ms,
-                        executed_turns=c_executed_turns,
-                        completion_policy=str(c_policy) if c_policy is not None else None,
-                        child_attack_result_ids=c_bounded_child_ids,
-                        child_references_truncated=c_child_refs_truncated,
-                        error_type=c_res.error_type,
-                        error_message=c_res.error_message,
-                        timestamp=c_res.timestamp,
-                        total_retries=c_res.total_retries,
-                        retries=c_retries,
-                        retries_truncated=c_retries_truncated,
-                    )
-
-                c_has_related = bool(
-                    c_res.related_conversation_ids
-                    or ScenarioProgressReadModel._read_related_conversation_ids(delta=c_delta)
-                )
-                if c_res.conversation_id or c_has_related:
-                    c_conv_count = None
-                    c_conv_truncated = True
-                else:
-                    c_conv_count = 0
-                    c_conv_truncated = False
-
-                children.append(
-                    ScenarioHierarchyNode(
-                        attack_result_id=c_res.attack_result_id,
-                        conversation_id=c_res.conversation_id or "",
-                        parent_attack_result_id=result.attack_result_id,
-                        child_index=idx,
-                        result_role=c_res.result_role,
-                        attempt_index=c_res.attempt_index,
-                        atomic_attack_name=c_res.atomic_attack_name,
-                        atomic_group_id=c_res.atomic_group_id,
-                        seed_group_id=c_res.seed_group_id,
-                        objective=c_delta.objective,
-                        outcome=c_res.outcome,
-                        outcome_reason=c_outcome_reason,
-                        execution_time_ms=c_res.execution_time_ms,
-                        executed_turns=c_executed_turns,
-                        timestamp=c_res.timestamp,
-                        score=c_res.score,
-                        error_type=c_res.error_type,
-                        error_message=c_res.error_message,
-                        total_retries=c_res.total_retries,
-                        retries=c_retries,
-                        retries_truncated=c_retries_truncated,
-                        child_attack_result_ids=c_bounded_child_ids,
-                        child_references_truncated=c_child_refs_truncated,
-                        children=[],
-                        children_truncated=False,
-                        unresolved_child_attack_result_ids=[],
-                        conversations=[],
-                        conversations_count=c_conv_count,
-                        conversations_truncated=c_conv_truncated,
-                        orchestration=c_orchestration,
-                    )
-                )
-
-        unresolved_refs_truncated = len(unresolved_children) > max_child_references
-        bounded_unresolved_children = (
-            unresolved_children[:max_child_references] if unresolved_refs_truncated else unresolved_children
+        has_conversations = bool(
+            result.conversation_id
+            or result.related_conversation_ids
+            or ScenarioProgressReadModel._read_related_conversation_ids(delta=delta)
         )
-
         return ScenarioHierarchyNode(
             attack_result_id=result.attack_result_id,
             conversation_id=result.conversation_id or "",
-            parent_attack_result_id=None,
-            child_index=None,
+            parent_attack_result_id=parent_id,
+            child_index=child_index,
             result_role=result.result_role,
             attempt_index=result.attempt_index,
             atomic_attack_name=result.atomic_attack_name,
@@ -1585,14 +1457,11 @@ class ScenarioProgressReadModel:
             total_retries=result.total_retries,
             retries=retries,
             retries_truncated=retries_truncated,
-            child_attack_result_ids=bounded_child_ids,
+            child_attack_result_ids=child_ids,
             child_references_truncated=child_refs_truncated,
-            children=children,
-            children_truncated=children_truncated,
-            unresolved_child_attack_result_ids=bounded_unresolved_children,
-            unresolved_child_references_truncated=unresolved_refs_truncated,
-            conversations=conv_list,
-            conversations_count=resolved_conversations_count,
-            conversations_truncated=conversations_truncated,
+            children_count=len(result.child_attack_result_ids),
+            children_truncated=bool(result.child_attack_result_ids),
+            conversations_count=None if has_conversations else 0,
+            conversations_truncated=has_conversations,
             orchestration=orchestration,
         )

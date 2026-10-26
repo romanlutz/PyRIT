@@ -141,6 +141,9 @@ class ScenarioHierarchyNode(BaseModel):
     # Resolved children in stored order (bounded traversal)
     children: list["ScenarioHierarchyNode"] = Field(default_factory=list)
     children_truncated: bool = False
+    children_count: int | None = Field(default=None, ge=0)
+    child_offset: int = Field(default=0, ge=0)
+    next_children_cursor: str | None = None
 
     # Missing, malformed, cyclic, or cross-run references that could not be safely resolved
     unresolved_child_attack_result_ids: list[str] = Field(default_factory=list)
@@ -209,6 +212,9 @@ class ScenarioHierarchyDiagnostics(BaseModel):
     attack_retries_truncated: bool = False
 
     total_retries: int = 0
+    rootless_result_ids: list[str] = Field(default_factory=list)
+    rootless_results_count: int = 0
+    rootless_results_truncated: bool = False
 
 
 class ScenarioHierarchyProjection(BaseModel):
@@ -224,6 +230,8 @@ class ScenarioHierarchyProjection(BaseModel):
     overall_counts: ScenarioProgressCounts
     diagnostics: ScenarioHierarchyDiagnostics = Field(default_factory=ScenarioHierarchyDiagnostics)
     truncated: bool = False
+    has_more: bool = False
+    next_cursor: str | None = None
 
 
 ScenarioHierarchyNode.model_rebuild()

@@ -57,7 +57,7 @@ from pyrit.analytics.outcome_statistics import compute_outcome_statistics, succe
 from pyrit.common.async_compatibility import legacy_sync_override, run_legacy_sync_async
 from pyrit.common.deprecation import print_deprecation_message
 from pyrit.common.pagination import DecodedKeysetCursor
-from pyrit.memory.analytics_sql import JsonArrayItems, JsonArrayJoin, JsonContainer, JsonScalar
+from pyrit.memory.analytics_sql import JsonArrayItems, JsonArrayJoin, JsonArrayValue, JsonContainer, JsonScalar, UuidHex
 
 if TYPE_CHECKING:
     from pyrit.memory.memory_embedding import MemoryEmbedding
@@ -113,6 +113,7 @@ from pyrit.models import (
     ConversationRetry,
     ConversationRetryReason,
     ConversationStats,
+    ConversationType,
     ConverterIdentifier,
     Finding,
     FindingCreate,
@@ -127,11 +128,7 @@ from pyrit.models import (
     Operation,
     PromptDataType,
     RetryEvent,
-    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
-    ScenarioConversationMessagePieceProjection,
-    ScenarioConversationMessageProjection,
-    ScenarioConversationProjection,
     ScenarioIdentifier,
     ScenarioProducerCategoryCounts,
     ScenarioProducerCounts,
@@ -445,6 +442,43 @@ class ScenarioAttemptSeedSummary:
     attribution_data: dict[str, Any]
     has_retries: bool = False
     child_attack_result_ids: tuple[str, ...] = ()
+
+
+class MessagePieceKeysetCursor(NamedTuple):
+    """Ascending saved-message order, including pieces within the same turn."""
+
+    sequence: int
+    timestamp: datetime
+    message_piece_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ConversationMessagePage:
+    """A bounded page of canonical saved messages, possibly splitting a multimodal turn."""
+
+    messages: tuple[Message, ...]
+    next_cursor: MessagePieceKeysetCursor | None
+    partial_message_sequences: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttackConversationRecord:
+    """A saved main or related conversation reference, without presentation labels."""
+
+    conversation_id: str
+    conversation_type: ConversationType | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttackConversationPage:
+    """Bounded conversation references and the revision of their stored ordering."""
+
+    main_conversation_id: str
+    conversations: tuple[AttackConversationRecord, ...]
+    total_count: int
+    timestamp: datetime
+    reference_revision: str
+    objective_score_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -7686,6 +7720,118 @@ class MemoryInterface(abc.ABC):
             score=score,
         )
 
+    @staticmethod
+    def _scenario_attack_result_delta_statement() -> Select:
+        """Return the shared lightweight result/score projection, without filters or pagination."""
+        return select(
+            AttackResultEntry.id,
+            AttackResultEntry.conversation_id,
+            AttackResultEntry.objective,
+            AttackResultEntry.objective_sha256,
+            AttackResultEntry.atomic_attack_identifier,
+            AttackResultEntry.outcome,
+            AttackResultEntry.execution_time_ms,
+            AttackResultEntry.executed_turns,
+            AttackResultEntry.outcome_reason,
+            AttackResultEntry.timestamp,
+            AttackResultEntry.retry_events_json,
+            AttackResultEntry.total_retries,
+            AttackResultEntry.error_type,
+            AttackResultEntry.error_message,
+            AttackResultEntry.attribution_data,
+            AttackResultEntry.attack_metadata,
+            AttackResultEntry.pruned_conversation_ids,
+            AttackResultEntry.adversarial_chat_conversation_ids,
+            AttackResultEntry.preparation_conversation_ids,
+            ScoreEntry.id.label("score_id"),
+            ScoreEntry.score_value,
+            ScoreEntry.score_type,
+            ScoreEntry.status.label("score_status"),
+            ScoreEntry.score_rationale,
+            ScoreEntry.scorer_class_identifier,
+        ).outerjoin(
+            ScoreEntry,
+            func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
+        )
+
+    def _build_scenario_root_deltas_statement(
+        self,
+        *,
+        scenario_result_id: str,
+        cursor: AttackResultKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> Select:
+        """
+        Page saved roots directly instead of hydrating a chronological prefix and searching for its ancestors.
+
+        Keep reference expansion uncorrelated so SQLite reads the saved edges once, not once per candidate.
+
+        Returns:
+            Select: A run-scoped, ascending keyset query with one sentinel row.
+
+        Raises:
+            ValueError: If the run, cursor, or page limit is invalid.
+        """
+        if not 1 <= limit <= 500:
+            raise ValueError("Hierarchy root limit must be between 1 and 500.")
+        scenario_uuid = uuid.UUID(scenario_result_id)
+        parents = AttackResultEntry.__table__.alias("hierarchy_parents")
+        references = JsonArrayItems(
+            JsonArrayValue(parents.c.attack_metadata, literal("$.child_attack_result_ids"))
+        ).table_valued("value", "type")
+        candidate_id = UuidHex(sql_cast(AttackResultEntry.id, String(36)))
+        referenced_id = UuidHex(references.c.value)
+        incoming_ids = (
+            select(referenced_id)
+            .select_from(JsonArrayJoin(parents, references, literal(True)))
+            .where(
+                parents.c.attribution_parent_id == scenario_uuid,
+                sql_cast(references.c.type, String(8)).in_(("text", "1")),
+                referenced_id.is_not(None),
+            )
+        )
+        conditions = [
+            AttackResultEntry.attribution_parent_id == scenario_uuid,
+            candidate_id.not_in(incoming_ids),
+        ]
+        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
+        if cursor is not None:
+            cursor_id_order = self._get_scenario_attempt_id_order_expression(
+                attempt_id=literal(uuid.UUID(cursor.attack_result_id), type_=AttackResultEntry.id.type)
+            )
+            conditions.append(
+                or_(
+                    AttackResultEntry.timestamp > cursor.timestamp,
+                    and_(AttackResultEntry.timestamp == cursor.timestamp, attempt_id_order > cursor_id_order),
+                )
+            )
+        return (
+            self._scenario_attack_result_delta_statement()
+            .where(*conditions)
+            .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
+            .limit(limit + 1)
+        )
+
+    def _execute_get_scenario_root_deltas(
+        self,
+        *,
+        scenario_result_id: str,
+        cursor: AttackResultKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
+        """
+        Read one bounded page of true saved roots without loading their children or messages.
+
+        Returns:
+            tuple[list[ScenarioAttackResultDelta], bool]: Root deltas and whether another root page exists.
+        """
+        statement = self._build_scenario_root_deltas_statement(
+            scenario_result_id=scenario_result_id, cursor=cursor, limit=limit
+        )
+        with closing(self._get_session()) as session:
+            rows = session.execute(statement).mappings().all()
+        return [self._row_to_scenario_attack_result_delta(row) for row in rows[:limit]], len(rows) > limit
+
     def _execute_get_scenario_attack_result_deltas(
         self,
         *,
@@ -7728,37 +7874,7 @@ class MemoryInterface(abc.ABC):
             )
 
         statement = (
-            select(
-                AttackResultEntry.id,
-                AttackResultEntry.conversation_id,
-                AttackResultEntry.objective,
-                AttackResultEntry.objective_sha256,
-                AttackResultEntry.atomic_attack_identifier,
-                AttackResultEntry.outcome,
-                AttackResultEntry.execution_time_ms,
-                AttackResultEntry.executed_turns,
-                AttackResultEntry.outcome_reason,
-                AttackResultEntry.timestamp,
-                AttackResultEntry.retry_events_json,
-                AttackResultEntry.total_retries,
-                AttackResultEntry.error_type,
-                AttackResultEntry.error_message,
-                AttackResultEntry.attribution_data,
-                AttackResultEntry.attack_metadata,
-                AttackResultEntry.pruned_conversation_ids,
-                AttackResultEntry.adversarial_chat_conversation_ids,
-                AttackResultEntry.preparation_conversation_ids,
-                ScoreEntry.id.label("score_id"),
-                ScoreEntry.score_value,
-                ScoreEntry.score_type,
-                ScoreEntry.status.label("score_status"),
-                ScoreEntry.score_rationale,
-                ScoreEntry.scorer_class_identifier,
-            )
-            .outerjoin(
-                ScoreEntry,
-                func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
-            )
+            self._scenario_attack_result_delta_statement()
             .where(and_(*conditions))
             .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
             .limit(limit + 1)
@@ -7920,44 +8036,9 @@ class MemoryInterface(abc.ABC):
         max_batch_size = max(1, self._MAX_BIND_VARS - 10)
         chunk_uuids = valid_uuids[:max_batch_size]
 
-        return (
-            select(
-                AttackResultEntry.id,
-                AttackResultEntry.conversation_id,
-                AttackResultEntry.objective,
-                AttackResultEntry.objective_sha256,
-                AttackResultEntry.atomic_attack_identifier,
-                AttackResultEntry.outcome,
-                AttackResultEntry.execution_time_ms,
-                AttackResultEntry.executed_turns,
-                AttackResultEntry.outcome_reason,
-                AttackResultEntry.timestamp,
-                AttackResultEntry.retry_events_json,
-                AttackResultEntry.total_retries,
-                AttackResultEntry.error_type,
-                AttackResultEntry.error_message,
-                AttackResultEntry.attribution_data,
-                AttackResultEntry.attack_metadata,
-                AttackResultEntry.pruned_conversation_ids,
-                AttackResultEntry.adversarial_chat_conversation_ids,
-                AttackResultEntry.preparation_conversation_ids,
-                ScoreEntry.id.label("score_id"),
-                ScoreEntry.score_value,
-                ScoreEntry.score_type,
-                ScoreEntry.status.label("score_status"),
-                ScoreEntry.score_rationale,
-                ScoreEntry.scorer_class_identifier,
-            )
-            .outerjoin(
-                ScoreEntry,
-                func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
-            )
-            .where(
-                and_(
-                    AttackResultEntry.attribution_parent_id == scenario_uuid,
-                    AttackResultEntry.id.in_(chunk_uuids),
-                )
-            )
+        return self._scenario_attack_result_delta_statement().where(
+            AttackResultEntry.attribution_parent_id == scenario_uuid,
+            AttackResultEntry.id.in_(chunk_uuids),
         )
 
     def _execute_get_scenario_attack_result_deltas_by_ids(
@@ -8006,262 +8087,155 @@ class MemoryInterface(abc.ABC):
                 deltas.extend(self._row_to_scenario_attack_result_delta(row) for row in rows)
         return deltas
 
-    def _execute_get_scenario_orchestration_parent_deltas(
+    def _build_conversation_message_page_statement(
         self,
         *,
-        scenario_result_id: str,
-    ) -> list[ScenarioAttackResultDelta]:
+        conversation_id: str,
+        cursor: MessagePieceKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> Select:
         """
-        Return bounded scenario-linked orchestration parent result deltas for a run.
-
-        Finds results that have result_role == ORCHESTRATION or have child_attack_result_ids in metadata.
+        Build a canonical message-piece page, including continuation within a multimodal turn.
 
         Returns:
-            list[ScenarioAttackResultDelta]: The matched orchestration parent deltas.
+            Select: An ascending sequence/timestamp/UUID query with one sentinel.
+
+        Raises:
+            ValueError: If the page limit or cursor UUID is invalid.
         """
-        try:
-            scenario_uuid = uuid.UUID(scenario_result_id)
-        except (ValueError, TypeError):
-            return []
-
-        role_match = self._get_scenario_role_match_condition(
-            role_expression=JsonScalar(AttackResultEntry.attribution_data, literal("$.result_role")),
-            role=AttackResultRole.ORCHESTRATION,
-        )
-        metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
-        # Match only when child_attack_result_ids is not empty (contains at least one quoted ID)
-        child_ids_match = metadata_text.like('%child_attack_result_ids%["%')
-
-        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
-
-        statement = (
-            select(
-                AttackResultEntry.id,
-                AttackResultEntry.conversation_id,
-                AttackResultEntry.objective,
-                AttackResultEntry.objective_sha256,
-                AttackResultEntry.atomic_attack_identifier,
-                AttackResultEntry.outcome,
-                AttackResultEntry.execution_time_ms,
-                AttackResultEntry.executed_turns,
-                AttackResultEntry.outcome_reason,
-                AttackResultEntry.timestamp,
-                AttackResultEntry.retry_events_json,
-                AttackResultEntry.total_retries,
-                AttackResultEntry.error_type,
-                AttackResultEntry.error_message,
-                AttackResultEntry.attribution_data,
-                AttackResultEntry.attack_metadata,
-                AttackResultEntry.pruned_conversation_ids,
-                AttackResultEntry.adversarial_chat_conversation_ids,
-                AttackResultEntry.preparation_conversation_ids,
-                ScoreEntry.id.label("score_id"),
-                ScoreEntry.score_value,
-                ScoreEntry.score_type,
-                ScoreEntry.status.label("score_status"),
-                ScoreEntry.score_rationale,
-                ScoreEntry.scorer_class_identifier,
+        if not 1 <= limit <= 500:
+            raise ValueError("Conversation message-piece limit must be between 1 and 500.")
+        id_order = self._get_scenario_attempt_id_order_expression(attempt_id=PromptMemoryEntry.id)
+        conditions = [PromptMemoryEntry.conversation_id == conversation_id]
+        if cursor is not None:
+            cursor_id = self._get_scenario_attempt_id_order_expression(
+                attempt_id=literal(uuid.UUID(cursor.message_piece_id), type_=PromptMemoryEntry.id.type)
             )
-            .outerjoin(
-                ScoreEntry,
-                func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id) == ScoreEntry.id,
-            )
-            .where(
-                and_(
-                    AttackResultEntry.attribution_parent_id == scenario_uuid,
-                    or_(role_match, child_ids_match),
+            conditions.append(
+                or_(
+                    PromptMemoryEntry.sequence > cursor.sequence,
+                    and_(PromptMemoryEntry.sequence == cursor.sequence, PromptMemoryEntry.timestamp > cursor.timestamp),
+                    and_(
+                        PromptMemoryEntry.sequence == cursor.sequence,
+                        PromptMemoryEntry.timestamp == cursor.timestamp,
+                        id_order > cursor_id,
+                    ),
                 )
             )
-            .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
-            .limit(self._MAX_BIND_VARS)
+        return (
+            select(PromptMemoryEntry)
+            .where(*conditions)
+            .order_by(PromptMemoryEntry.sequence.asc(), PromptMemoryEntry.timestamp.asc(), id_order.asc())
+            .limit(limit + 1)
         )
 
-        with closing(self._get_session()) as session:
-            rows = session.execute(statement).mappings().all()
-
-        return [self._row_to_scenario_attack_result_delta(row) for row in rows]
-
-    def _execute_get_scenario_parent_deltas_for_child_ids(
+    def _execute_get_conversation_message_page(
         self,
         *,
-        scenario_result_id: str,
-        child_ids: Sequence[str],
-        limit: int = 500,
-        exclude_result_ids: Sequence[str] | None = None,
-    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
+        conversation_id: str,
+        cursor: MessagePieceKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> ConversationMessagePage:
         """
-        Return run-scoped parent deltas that reference any of the specified child result IDs.
-
-        Paginates scanned database rows using keyset cursors across child chunks to guarantee
-        that a short returned list is a genuine proof of exhausted database rows, preventing
-        false-root generation when database exclusions are omitted or partial.
-
-        Args:
-            scenario_result_id: Persisted scenario run ID.
-            child_ids: Child attack result IDs to find parents for.
-            limit: Maximum number of parent deltas to return.
-            exclude_result_ids: Optional result IDs already known to caller to exclude from query.
+        Read only the selected page of canonical message pieces.
 
         Returns:
-            tuple[list[ScenarioAttackResultDelta], bool]: The matched parent deltas and whether
-                more unscanned matching rows exist in the database.
+            ConversationMessagePage: Messages, continuation, and turns split by the page boundary.
         """
-        try:
-            scenario_uuid = uuid.UUID(scenario_result_id)
-        except (ValueError, TypeError):
-            return [], False
-        valid_child_ids = [cid for cid in child_ids if cid]
-        if not valid_child_ids or limit <= 0:
-            return [], False
-
-        valid_exclude_uuids: list[uuid.UUID] = []
-        if exclude_result_ids:
-            for eid in exclude_result_ids:
-                try:
-                    valid_exclude_uuids.append(uuid.UUID(str(eid)))
-                except (ValueError, TypeError):
-                    continue
-        exclude_id_set = {str(u) for u in valid_exclude_uuids}
-
-        seen_ids: set[str] = set()
-        unique_deltas: list[ScenarioAttackResultDelta] = []
-        metadata_text = sql_cast(AttackResultEntry.attack_metadata, String)
-        attempt_id_order = self._get_scenario_attempt_id_order_expression(attempt_id=AttackResultEntry.id)
-
-        _fixed_overhead = 10
-        # To avoid exceeding SQL Server's 2,100 parameter limit (or SQLite's 500),
-        # budget the total parameters across fixed clauses, exclusions, and child ID matches.
-        max_sql_excludes = self._MAX_BIND_VARS // 2
-        if len(valid_exclude_uuids) <= max_sql_excludes:
-            exclude_clauses = [
-                AttackResultEntry.id.not_in(valid_exclude_uuids[j : j + 200])
-                for j in range(0, len(valid_exclude_uuids), 200)
-            ]
-            exclude_param_count = len(valid_exclude_uuids)
-        else:
-            # When exclusions are too large, don't bind them in SQL; Python filters them via exclude_id_set.
-            exclude_clauses = []
-            exclude_param_count = 0
-
-        chunk_size = min(
-            len(valid_child_ids),
-            max(1, self._MAX_BIND_VARS - _fixed_overhead - exclude_param_count),
+        statement = self._build_conversation_message_page_statement(
+            conversation_id=conversation_id, cursor=cursor, limit=limit
+        )
+        with closing(self._get_session()) as session:
+            rows = list(session.scalars(statement))
+            pieces = [row.get_message_piece() for row in rows[:limit]]
+        if not pieces:
+            return ConversationMessagePage(messages=(), next_cursor=None)
+        partial_sequences: set[int] = set()
+        if cursor is not None and pieces[0].sequence == cursor.sequence:
+            partial_sequences.add(cursor.sequence)
+        next_cursor = None
+        if len(rows) > limit:
+            last_piece = pieces[-1]
+            next_cursor = MessagePieceKeysetCursor(
+                sequence=last_piece.sequence,
+                timestamp=last_piece.timestamp,
+                message_piece_id=str(last_piece.id),
+            )
+            if rows[limit].sequence == last_piece.sequence:
+                partial_sequences.add(last_piece.sequence)
+        return ConversationMessagePage(
+            messages=tuple(group_conversation_message_pieces_by_sequence(message_pieces=pieces)),
+            next_cursor=next_cursor,
+            partial_message_sequences=tuple(sorted(partial_sequences)),
         )
 
-        has_more = False
-        max_scanned_rows = 10000
-        total_scanned_rows = 0
-        scan_page_size = min(500, self._MAX_BIND_VARS)
-        num_chunks = (len(valid_child_ids) + chunk_size - 1) // chunk_size
+    def _execute_get_attack_conversation_page(
+        self, *, attack_result_id: str, offset: int = 0, limit: int = 50, conversation_id: str | None = None
+    ) -> AttackConversationPage | None:
+        """
+        Read stored conversation references without loading attack relationships or message bodies.
 
+        Returns:
+            AttackConversationPage | None: One bounded reference page, or None for an absent attack.
+
+        Raises:
+            ValueError: If the ID, offset, or page limit is invalid.
+        """
+        if offset < 0 or not 1 <= limit <= 200:
+            raise ValueError("Conversation offset must be nonnegative and limit must be between 1 and 200.")
+        statement = select(
+            AttackResultEntry.conversation_id,
+            AttackResultEntry.pruned_conversation_ids,
+            AttackResultEntry.adversarial_chat_conversation_ids,
+            AttackResultEntry.preparation_conversation_ids,
+            AttackResultEntry.timestamp,
+            func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id).label(
+                "objective_score_id"
+            ),
+        ).where(AttackResultEntry.id == uuid.UUID(attack_result_id))
         with closing(self._get_session()) as session:
-            for chunk_idx, i in enumerate(range(0, len(valid_child_ids), chunk_size)):
-                if len(unique_deltas) >= limit or total_scanned_rows >= max_scanned_rows:
-                    has_more = True
-                    break
-
-                chunk = valid_child_ids[i : i + chunk_size]
-                child_matches = [metadata_text.like(f'%"{cid}"%') for cid in chunk]
-                base_where_conditions = [
-                    AttackResultEntry.attribution_parent_id == scenario_uuid,
-                    or_(*child_matches),
-                    *exclude_clauses,
+            row = session.execute(statement).mappings().one_or_none()
+        if row is None:
+            return None
+        references: dict[str, AttackConversationRecord] = {}
+        main_id = row["conversation_id"] or ""
+        if main_id:
+            references[main_id] = AttackConversationRecord(conversation_id=main_id)
+        for column_name, kind in (
+            ("pruned_conversation_ids", ConversationType.PRUNED),
+            ("adversarial_chat_conversation_ids", ConversationType.ADVERSARIAL),
+            ("preparation_conversation_ids", ConversationType.PREPARATION),
+        ):
+            values = row[column_name]
+            if not isinstance(values, list):
+                continue
+            for identifier in values:
+                if isinstance(identifier, str) and identifier:
+                    references.setdefault(
+                        identifier, AttackConversationRecord(conversation_id=identifier, conversation_type=kind)
+                    )
+        ordered = tuple(references.values())
+        revision = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        reference.conversation_id,
+                        reference.conversation_type.value if reference.conversation_type is not None else None,
+                    )
+                    for reference in ordered
                 ]
-
-                chunk_cursor: AttackResultKeysetCursor | None = None
-
-                while len(unique_deltas) < limit and total_scanned_rows < max_scanned_rows:
-                    where_conditions = list(base_where_conditions)
-                    if chunk_cursor is not None:
-                        cursor_uuid = uuid.UUID(chunk_cursor.attack_result_id)
-                        cursor_id_order = self._get_scenario_attempt_id_order_expression(
-                            attempt_id=literal(cursor_uuid, type_=AttackResultEntry.id.type)
-                        )
-                        where_conditions.append(
-                            or_(
-                                AttackResultEntry.timestamp > chunk_cursor.timestamp,
-                                and_(
-                                    AttackResultEntry.timestamp == chunk_cursor.timestamp,
-                                    attempt_id_order > cursor_id_order,
-                                ),
-                            )
-                        )
-
-                    statement = (
-                        select(
-                            AttackResultEntry.id,
-                            AttackResultEntry.conversation_id,
-                            AttackResultEntry.objective,
-                            AttackResultEntry.objective_sha256,
-                            AttackResultEntry.atomic_attack_identifier,
-                            AttackResultEntry.outcome,
-                            AttackResultEntry.execution_time_ms,
-                            AttackResultEntry.executed_turns,
-                            AttackResultEntry.outcome_reason,
-                            AttackResultEntry.timestamp,
-                            AttackResultEntry.retry_events_json,
-                            AttackResultEntry.total_retries,
-                            AttackResultEntry.error_type,
-                            AttackResultEntry.error_message,
-                            AttackResultEntry.attribution_data,
-                            AttackResultEntry.attack_metadata,
-                            AttackResultEntry.pruned_conversation_ids,
-                            AttackResultEntry.adversarial_chat_conversation_ids,
-                            AttackResultEntry.preparation_conversation_ids,
-                            ScoreEntry.id.label("score_id"),
-                            ScoreEntry.score_value,
-                            ScoreEntry.score_type,
-                            ScoreEntry.status.label("score_status"),
-                            ScoreEntry.score_rationale,
-                            ScoreEntry.scorer_class_identifier,
-                        )
-                        .outerjoin(
-                            ScoreEntry,
-                            func.coalesce(AttackResultEntry.human_score_id, AttackResultEntry.automated_score_id)
-                            == ScoreEntry.id,
-                        )
-                        .where(and_(*where_conditions))
-                        .order_by(AttackResultEntry.timestamp.asc(), attempt_id_order.asc())
-                        .limit(scan_page_size + 1)
-                    )
-                    rows = session.execute(statement).mappings().all()
-                    if not rows:
-                        break
-
-                    scanned_in_query = min(len(rows), scan_page_size)
-                    total_scanned_rows += scanned_in_query
-                    has_more_in_chunk = len(rows) > scan_page_size
-
-                    last_scanned_row = rows[scanned_in_query - 1]
-                    chunk_cursor = AttackResultKeysetCursor(
-                        timestamp=last_scanned_row["timestamp"],
-                        attack_result_id=str(last_scanned_row["id"]),
-                    )
-
-                    has_unprocessed_in_page = False
-                    for row_idx, row in enumerate(rows[:scanned_in_query]):
-                        delta = self._row_to_scenario_attack_result_delta(row)
-                        if delta.attack_result_id not in seen_ids and delta.attack_result_id not in exclude_id_set:
-                            seen_ids.add(delta.attack_result_id)
-                            unique_deltas.append(delta)
-                            if len(unique_deltas) >= limit:
-                                if row_idx + 1 < len(rows):
-                                    has_unprocessed_in_page = True
-                                break
-
-                    if len(unique_deltas) >= limit:
-                        if has_more_in_chunk or has_unprocessed_in_page or chunk_idx + 1 < num_chunks:
-                            has_more = True
-                        break
-
-                    if not has_more_in_chunk:
-                        break
-
-                if total_scanned_rows >= max_scanned_rows:
-                    has_more = True
-                    break
-
-        return unique_deltas[:limit], has_more
+            ).encode("utf-8")
+        ).hexdigest()
+        if conversation_id is not None:
+            ordered = tuple(reference for reference in ordered if reference.conversation_id == conversation_id)
+        return AttackConversationPage(
+            main_conversation_id=main_id,
+            conversations=ordered[offset : offset + limit],
+            total_count=len(ordered),
+            timestamp=row["timestamp"],
+            reference_revision=revision,
+            objective_score_id=str(row["objective_score_id"]) if row["objective_score_id"] is not None else None,
+        )
 
     def _fetch_bounded_conversation_messages(
         self,
@@ -8269,17 +8243,17 @@ class MemoryInterface(abc.ABC):
         conversation_id: str,
         limit: int,
         max_pieces_per_message: int = 100,
-    ) -> tuple[list[ScenarioConversationMessageProjection], bool]:
+    ) -> tuple[list[Message], bool, set[int]]:
         """
         Fetch conversation messages applying SQL LIMIT directly at the database layer.
 
         Preserves all multimodal message pieces and raw stored roles.
 
         Returns:
-            tuple[list[ScenarioConversationMessageProjection], bool]: Messages and whether more messages exist.
+            tuple[list[Message], bool, set[int]]: Canonical messages, more turns, and clipped turn sequences.
         """
         if not conversation_id or limit < 1:
-            return [], False
+            return [], False, set()
 
         with closing(self._get_session()) as session:
             seq_stmt = (
@@ -8291,7 +8265,7 @@ class MemoryInterface(abc.ABC):
             )
             seqs = [row[0] for row in session.execute(seq_stmt).all()]
             if not seqs:
-                return [], False
+                return [], False, set()
 
             truncated = len(seqs) > limit
             target_seqs = seqs[:limit]
@@ -8330,176 +8304,12 @@ class MemoryInterface(abc.ABC):
             )
             rows = session.execute(pieces_stmt).all()
             if not rows:
-                return [], False
+                return [], False, set()
 
-            truncated_seqs = {entry.sequence for entry, rn in rows if rn > piece_budget}
+            truncated_seqs: set[int] = {entry.sequence for entry, rn in rows if rn > piece_budget}
             bounded_pieces = [entry.get_message_piece() for entry, rn in rows if rn <= piece_budget]
-            grouped_messages = group_conversation_message_pieces_by_sequence(message_pieces=bounded_pieces)
-
-            messages: list[ScenarioConversationMessageProjection] = []
-            for msg in grouped_messages:
-                seq = msg.message_pieces[0].sequence if msg.message_pieces else 0
-                pieces_truncated = seq in truncated_seqs
-                pieces_proj = [
-                    ScenarioConversationMessagePieceProjection(
-                        data_type=piece.converted_value_data_type,
-                        content=piece.original_value,
-                        converted_value=piece.converted_value,
-                    )
-                    for piece in msg.message_pieces
-                ]
-                first_piece = msg.message_pieces[0] if msg.message_pieces else None
-                raw_role = str(first_piece.role) if first_piece else "unknown"
-                ts = first_piece.timestamp if first_piece else None
-                content = msg.get_value()
-
-                messages.append(
-                    ScenarioConversationMessageProjection(
-                        role=raw_role,
-                        content=content,
-                        sequence=seq,
-                        timestamp=ts,
-                        pieces=pieces_proj,
-                        pieces_truncated=pieces_truncated,
-                    )
-                )
-
-            return messages, truncated
-
-    def _execute_get_attack_result_conversation_projections(
-        self,
-        *,
-        attack_result_id: str,
-        include_messages: bool = False,
-        limit_messages_per_conversation: int = 100,
-        max_conversations: int = 50,
-        max_pieces_per_message: int = 100,
-    ) -> ScenarioAttackResultConversations:
-        """
-        Read generic conversation projections for an attack result without full-run hydration.
-
-        Applies bounded conversation budget and SQL LIMIT queries.
-
-        Returns:
-            ScenarioAttackResultConversations: Container with projections, total count, and truncation flag.
-        """
-        try:
-            ar_uuid = uuid.UUID(attack_result_id)
-        except (ValueError, TypeError):
-            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
-
-        entries = self._query_entries(
-            AttackResultEntry,
-            conditions=AttackResultEntry.id == ar_uuid,
-        )
-        if not entries:
-            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
-
-        entry = entries[0]
-        conversations: list[ScenarioConversationProjection] = []
-        all_conv_ids: list[str] = []
-
-        if entry.conversation_id:
-            all_conv_ids.append(entry.conversation_id)
-
-        raw_pruned: Any = entry.pruned_conversation_ids
-        raw_adversarial: Any = entry.adversarial_chat_conversation_ids
-        raw_preparation: Any = entry.preparation_conversation_ids
-
-        pruned_ids = [c for c in raw_pruned if isinstance(c, str)] if isinstance(raw_pruned, list) else []
-        adversarial_ids = (
-            [c for c in raw_adversarial if isinstance(c, str)] if isinstance(raw_adversarial, list) else []
-        )
-        preparation_ids = (
-            [c for c in raw_preparation if isinstance(c, str)] if isinstance(raw_preparation, list) else []
-        )
-
-        for c_id in pruned_ids + adversarial_ids + preparation_ids:
-            if c_id and c_id not in all_conv_ids:
-                all_conv_ids.append(c_id)
-
-        total_conversations = len(all_conv_ids)
-        conversations_truncated = total_conversations > max_conversations
-        conv_ids_to_fetch = all_conv_ids[:max_conversations]
-        if not conv_ids_to_fetch:
-            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
-
-        stats_map = self._execute_get_conversation_stats(conversation_ids=conv_ids_to_fetch)
-
-        if entry.conversation_id:
-            stats = stats_map.get(entry.conversation_id)
-            msg_count = stats.message_count if stats else 0
-            messages: list[ScenarioConversationMessageProjection] = []
-            truncated = False
-            if include_messages and entry.conversation_id:
-                messages, truncated = self._fetch_bounded_conversation_messages(
-                    conversation_id=entry.conversation_id,
-                    limit=limit_messages_per_conversation,
-                    max_pieces_per_message=max_pieces_per_message,
-                )
-            conversations.append(
-                ScenarioConversationProjection(
-                    conversation_id=entry.conversation_id,
-                    conversation_type="main",
-                    description="Main objective target conversation",
-                    message_count=msg_count,
-                    messages=messages,
-                    messages_truncated=truncated,
-                )
-            )
-
-        remaining_budget = max(0, max_conversations - (1 if entry.conversation_id else 0))
-        related_convs = (
-            [(c_id, "pruned", "Pruned conversation") for c_id in pruned_ids if c_id != entry.conversation_id]
-            + [
-                (c_id, "adversarial_chat", "Adversarial chat conversation")
-                for c_id in adversarial_ids
-                if c_id != entry.conversation_id
-            ]
-            + [
-                (c_id, "preparation", "Preparation conversation")
-                for c_id in preparation_ids
-                if c_id != entry.conversation_id
-            ]
-        )
-        seen_related: set[str] = set()
-        deduped_related: list[tuple[str, str, str]] = []
-        for item in related_convs:
-            if item[0] not in seen_related:
-                seen_related.add(item[0])
-                deduped_related.append(item)
-
-        bounded_related = deduped_related[:remaining_budget]
-
-        for c_id, conv_type, desc in bounded_related:
-            if not c_id:
-                continue
-            stats = stats_map.get(c_id)
-            msg_count = stats.message_count if stats else 0
-            messages = []
-            truncated = False
-            if include_messages:
-                messages, truncated = self._fetch_bounded_conversation_messages(
-                    conversation_id=c_id,
-                    limit=limit_messages_per_conversation,
-                    max_pieces_per_message=max_pieces_per_message,
-                )
-            conversations.append(
-                ScenarioConversationProjection(
-                    conversation_id=c_id,
-                    conversation_type=conv_type,
-                    description=desc,
-                    message_count=msg_count,
-                    messages=messages,
-                    messages_truncated=truncated,
-                )
-            )
-
-        return ScenarioAttackResultConversations(
-            conversations=conversations,
-            total_count=total_conversations,
-            truncated=conversations_truncated,
-        )
+            messages = list(group_conversation_message_pieces_by_sequence(message_pieces=bounded_pieces))
+            return messages, truncated, truncated_seqs
 
     def _execute_get_scenario_results(
         self,
@@ -12002,6 +11812,26 @@ class MemoryInterface(abc.ABC):
             limit=limit,
         )
 
+    async def get_scenario_root_deltas_async(
+        self,
+        *,
+        scenario_result_id: str,
+        cursor: AttackResultKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
+        """
+        Page true run-scoped roots without hydrating progress or discovering ancestors in Python.
+
+        Returns:
+            tuple[list[ScenarioAttackResultDelta], bool]: Root deltas and whether another page exists.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_scenario_root_deltas,
+            scenario_result_id=scenario_result_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     async def get_scenario_recount_summaries_async(
         self,
         *,
@@ -12053,84 +11883,66 @@ class MemoryInterface(abc.ABC):
             attack_result_ids=attack_result_ids,
         )
 
-    async def get_scenario_orchestration_parent_deltas_async(
-        self,
-        *,
-        scenario_result_id: str,
-    ) -> list[ScenarioAttackResultDelta]:
-        """
-        Return lightweight scenario-linked orchestration parent result deltas for a run.
-
-        Finds results that have result_role == ORCHESTRATION or have child_attack_result_ids in metadata.
-
-        Args:
-            scenario_result_id: The ID of the scenario run.
-
-        Returns:
-            list[ScenarioAttackResultDelta]: The matched orchestration parent deltas.
-        """
-        return await self._run_database_operation_async(
-            self._execute_get_scenario_orchestration_parent_deltas,
-            scenario_result_id=scenario_result_id,
-        )
-
-    async def get_scenario_parent_deltas_for_child_ids_async(
-        self,
-        *,
-        scenario_result_id: str,
-        child_ids: Sequence[str],
-        limit: int = 500,
-        exclude_result_ids: Sequence[str] | None = None,
-    ) -> tuple[list[ScenarioAttackResultDelta], bool]:
-        """
-        Return run-scoped parent deltas that reference any of the specified child result IDs.
-
-        Args:
-            scenario_result_id: The ID of the scenario run.
-            child_ids: Child attack result IDs to find parents for.
-            limit: Maximum number of parent deltas to return.
-            exclude_result_ids: Optional result IDs already known to caller to exclude from query.
-
-        Returns:
-            tuple[list[ScenarioAttackResultDelta], bool]: The matched parent deltas and whether
-                more unscanned matching rows exist in the database.
-        """
-        return await self._run_database_operation_async(
-            self._execute_get_scenario_parent_deltas_for_child_ids,
-            scenario_result_id=scenario_result_id,
-            child_ids=child_ids,
-            limit=limit,
-            exclude_result_ids=exclude_result_ids,
-        )
-
-    async def get_attack_result_conversation_projections_async(
+    async def get_attack_conversation_page_async(
         self,
         *,
         attack_result_id: str,
-        include_messages: bool = False,
-        limit_messages_per_conversation: int = 100,
-        max_conversations: int = 50,
-        max_pieces_per_message: int = 100,
-    ) -> ScenarioAttackResultConversations:
+        offset: int = 0,
+        limit: int = 50,
+        conversation_id: str | None = None,
+    ) -> AttackConversationPage | None:
         """
-        Read generic conversation projections for an attack result without full-run hydration.
-
-        Args:
-            attack_result_id: The attack result ID.
-            include_messages: Whether to populate message pieces or only metadata/counts.
-            limit_messages_per_conversation: Bound on message pieces per conversation.
-            max_conversations: Maximum number of conversations to retrieve for this attack result.
-            max_pieces_per_message: Bound on message pieces within a single message.
+        Read one bounded page of stored main/related conversation references.
 
         Returns:
-            ScenarioAttackResultConversations: Container with projections, total count, and truncation flag.
+            AttackConversationPage | None: Saved references and ordering revision, or an absent attack.
         """
         return await self._run_database_operation_async(
-            self._execute_get_attack_result_conversation_projections,
+            self._execute_get_attack_conversation_page,
             attack_result_id=attack_result_id,
-            include_messages=include_messages,
-            limit_messages_per_conversation=limit_messages_per_conversation,
-            max_conversations=max_conversations,
+            offset=offset,
+            limit=limit,
+            conversation_id=conversation_id,
+        )
+
+    async def get_conversation_message_page_async(
+        self,
+        *,
+        conversation_id: str,
+        cursor: MessagePieceKeysetCursor | None = None,
+        limit: int = 100,
+    ) -> ConversationMessagePage:
+        """
+        Read canonical saved messages with continuation through every message piece.
+
+        Returns:
+            ConversationMessagePage: One bounded piece page grouped into canonical messages.
+        """
+        return await self._run_database_operation_async(
+            self._execute_get_conversation_message_page,
+            conversation_id=conversation_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def get_bounded_conversation_messages_async(
+        self, *, conversation_id: str, limit: int = 100, max_pieces_per_message: int = 100
+    ) -> tuple[list[Message], bool, set[int]]:
+        """
+        Read a bounded turn preview for compatibility with existing clipped detail views.
+
+        Returns:
+            tuple[list[Message], bool, set[int]]: Canonical messages, more turns, and clipped turn sequences.
+
+        Raises:
+            ValueError: If the turn or piece preview budget is invalid.
+        """
+        if not 1 <= limit <= 100 or not 1 <= max_pieces_per_message <= 500:
+            raise ValueError("Conversation previews allow 1 through 100 turns and 1 through 500 pieces per turn.")
+        return await self._run_database_operation_async(
+            self._fetch_bounded_conversation_messages,
+            conversation_id=conversation_id,
+            limit=limit,
             max_pieces_per_message=max_pieces_per_message,
         )
 
