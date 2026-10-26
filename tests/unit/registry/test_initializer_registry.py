@@ -549,6 +549,55 @@ def test_discover_directory_does_not_evaluate_dynamic_module_attributes(caplog):
     assert "Failed to load module" not in caplog.text
 
 
+@pytest.mark.parametrize("include_lazy_export_in_dir", [False, True])
+def test_discover_directory_registers_declared_lazy_exports(
+    tmp_path: Path, include_lazy_export_in_dir: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    script = _SOLO_SCRIPT + (
+        "\n__all__ = ['SoloInitializer', 'TargetInitializer', 'non_class']\n"
+        "def __dir__():\n"
+        f"    return ['SoloInitializer', 'unrelated'] + "
+        f"{['TargetInitializer'] if include_lazy_export_in_dir else []!r}\n"
+        "def __getattr__(name):\n"
+        "    if name == 'TargetInitializer':\n"
+        "        from pyrit.setup.initializers.targets import TargetInitializer\n"
+        "        return TargetInitializer\n"
+        "    if name == 'non_class':\n"
+        "        return 42\n"
+        "    raise RuntimeError(f'unexpected dynamic lookup: {name}')\n"
+    )
+    (tmp_path / "lazy.py").write_text(script, encoding="utf-8")
+
+    registry = InitializerRegistry(discovery_path=tmp_path)
+
+    assert set(registry.get_class_names()) == {"solo", "target"}
+    assert registry.get_class("target").__name__ == "TargetInitializer"
+    assert registry.is_builtin("target")
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("error_type", ["AttributeError", "RuntimeError"])
+def test_discover_directory_logs_failed_lazy_export_and_keeps_other_classes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, error_type: str
+) -> None:
+    script = _SOLO_SCRIPT + (
+        "\n__all__ = ['BrokenInitializer', 'SoloInitializer', 'TargetInitializer']\n"
+        "def __getattr__(name):\n"
+        "    if name == 'TargetInitializer':\n"
+        "        from pyrit.setup.initializers.targets import TargetInitializer\n"
+        "        return TargetInitializer\n"
+        f"    raise {error_type}('export unavailable')\n"
+    )
+    (tmp_path / "lazy.py").write_text(script, encoding="utf-8")
+
+    registry = InitializerRegistry(discovery_path=tmp_path)
+
+    assert set(registry.get_class_names()) == {"solo", "target"}
+    assert "BrokenInitializer" in caplog.text
+    assert "export unavailable" in caplog.text
+    assert str(tmp_path / "lazy.py") in caplog.text
+
+
 def test_discover_single_file_registers_builtin():
     """Test that a discovery path pointing at a single file registers it as built-in."""
     with tempfile.TemporaryDirectory() as temp_dir:

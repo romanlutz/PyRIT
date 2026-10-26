@@ -30,7 +30,9 @@ def discover_in_directory(
     Discover all subclasses of base_class in a directory by loading Python files.
 
     This function walks a directory, loads Python files dynamically, and yields
-    any classes that are subclasses of the specified base_class.
+    any classes that are subclasses of the specified base_class. Members are
+    inspected statically, with dynamic lookup limited to exports declared in
+    the module's ``__all__``.
 
     Args:
         directory: The directory to search for Python files.
@@ -70,7 +72,17 @@ def _process_file(*, file_path: Path, base_class: type[T]) -> Iterator[tuple[str
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        for _attr_name, attr in inspect.getmembers_static(module):
+        members = dict(inspect.getmembers_static(module))
+        exported_names = vars(module).get("__all__", ())
+        for attr_name in sorted(members.keys() | set(exported_names)):
+            if attr_name in members:
+                attr = members[attr_name]
+            else:
+                try:
+                    attr = getattr(module, attr_name)
+                except Exception as error:
+                    logger.warning(f"Failed to load declared export '{attr_name}' from {file_path}: {error}")
+                    continue
             if (
                 inspect.isclass(attr)
                 and issubclass(attr, base_class)
