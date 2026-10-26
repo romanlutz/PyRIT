@@ -1,11 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-from typing import ClassVar, NamedTuple, Self
+from typing import ClassVar, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from pyrit.models.catalog.scenario import AttackErrorSummary, AttackRetrySummary
+from pyrit.models.conversation_summary import ConversationSummary
 from pyrit.models.results.attack_result import AttackOutcome, AttackResultRole
 from pyrit.models.results.scenario_result import ScenarioRunState
 from pyrit.models.retry_event import RetryEvent
@@ -51,53 +52,6 @@ class ScenarioOrchestrationParentSummary(BaseModel):
             self.child_attack_result_ids = self.child_attack_result_ids[: self.max_child_references]
             self.child_references_truncated = True
         return self
-
-
-class ScenarioConversationMessagePieceProjection(BaseModel):
-    """
-    Projection of an individual message piece preserving data type and multimodal content.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    data_type: str = "text"
-    content: str = ""
-    converted_value: str = ""
-
-
-class ScenarioConversationMessageProjection(BaseModel):
-    """
-    Generic, read-only message projection for conversation views.
-
-    Contains display text, conversation role, sequence order, multimodal pieces, and linked score indicators.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    role: str
-    content: str
-    sequence: int
-    timestamp: AwareDatetime | None = None
-    scores: list[ScenarioProgressScore] = Field(default_factory=list)
-    pieces: list[ScenarioConversationMessagePieceProjection] = Field(default_factory=list)
-    pieces_truncated: bool = False
-
-
-class ScenarioConversationProjection(BaseModel):
-    """
-    Generic read-only conversation projection belonging to an attack attempt.
-
-    Carries conversation metadata and optional message lists for detailed views.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    conversation_id: str
-    conversation_type: str = "main"
-    description: str | None = None
-    message_count: int | None = None
-    messages: list[ScenarioConversationMessageProjection] = Field(default_factory=list)
-    messages_truncated: bool = False
 
 
 class ScenarioHierarchyNode(BaseModel):
@@ -149,8 +103,8 @@ class ScenarioHierarchyNode(BaseModel):
     unresolved_child_attack_result_ids: list[str] = Field(default_factory=list)
     unresolved_child_references_truncated: bool = False
 
-    # Generic read-only conversations for this attack
-    conversations: list[ScenarioConversationProjection] = Field(default_factory=list)
+    # Canonical conversation metadata, loaded on node expansion
+    conversations: list[ConversationSummary] = Field(default_factory=list)
     conversations_count: int | None = None
     conversations_truncated: bool = False
 
@@ -168,14 +122,6 @@ class ScenarioHierarchyNode(BaseModel):
             ]
             self.unresolved_child_references_truncated = True
         return self
-
-
-class ScenarioAttackResultConversations(NamedTuple):
-    """Container for bounded conversation projections, total count, and list truncation flag."""
-
-    conversations: list[ScenarioConversationProjection]
-    total_count: int
-    truncated: bool
 
 
 class ScenarioHierarchyGroup(BaseModel):

@@ -3,6 +3,7 @@
 
 """Unit and parity tests for bounded Scenario result hierarchy projections."""
 
+import asyncio
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,8 @@ from fastapi.testclient import TestClient
 
 from pyrit.analytics import compute_outcome_statistics
 from pyrit.backend.main import app
+from pyrit.backend.models.attacks import AttackConversationsResponse
+from pyrit.backend.models.common import PaginationInfo
 from pyrit.backend.services.saved_conversation_read_service import SavedConversationReadService
 from pyrit.backend.services.scenario_progress_read_model import (
     ScenarioProgressReadModel,
@@ -33,15 +36,13 @@ from pyrit.models import (
     AttackSeedGroup,
     ComponentIdentifier,
     ConversationReference,
+    ConversationSummary,
     ConversationType,
     MessagePiece,
     RetryEvent,
     ScenarioAtomicGroupProgress,
-    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
     ScenarioAttackTechniqueDetails,
-    ScenarioConversationMessageProjection,
-    ScenarioConversationProjection,
     ScenarioHierarchyGroup,
     ScenarioHierarchyNode,
     ScenarioHierarchyProjection,
@@ -495,24 +496,19 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
     memory.get_scenario_attack_result_deltas_by_ids_async = AsyncMock(side_effect=mock_get_deltas)
     memory.get_scenario_result_header_async = AsyncMock(return_value=None)
     conversation_reader = MagicMock(spec=SavedConversationReadService)
-    conversation_reader.get_legacy_projections_async = AsyncMock(
-        return_value=ScenarioAttackResultConversations(
+    conversation_reader.list_conversations_async = AsyncMock(
+        return_value=AttackConversationsResponse(
+            attack_result_id="parent-1",
+            main_conversation_id="conv_1",
             conversations=[
-                ScenarioConversationProjection(
+                ConversationSummary(
                     conversation_id="conv_1",
                     conversation_type="main",
                     message_count=1,
-                    messages=[
-                        ScenarioConversationMessageProjection(
-                            role="user",
-                            content="Test prompt",
-                            sequence=1,
-                        )
-                    ],
                 )
             ],
             total_count=1,
-            truncated=False,
+            pagination=PaginationInfo(limit=50, has_more=False),
         )
     )
 
@@ -530,9 +526,7 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
     assert len(node.children) == 1
     assert node.children[0].attack_result_id == "child-1"
     assert len(node.conversations) == 1
-    conversation_reader.get_legacy_projections_async.assert_awaited_once_with(
-        attack_result_id="parent-1", include_messages=False
-    )
+    conversation_reader.list_conversations_async.assert_awaited_once_with(attack_result_id="parent-1")
 
     # Querying non-existent node returns None
     missing = await service.get_run_hierarchy_node_async(
@@ -540,6 +534,11 @@ async def test_service_get_run_hierarchy_node_async_bounded_read() -> None:
         attack_result_id="non-existent",
     )
     assert missing is None
+    conversation_reader.list_conversations_async.return_value = None
+    assert (
+        await service.get_run_hierarchy_node_async(scenario_result_id="scenario-run-1", attack_result_id="parent-1")
+        is None
+    )
 
 
 def test_rest_routes_hierarchy_and_node(client: TestClient) -> None:
@@ -706,22 +705,20 @@ async def test_sqlite_memory_batched_reads_and_projections_parity(sqlite_instanc
     # Cross-run ID belongs to scenario_id_2, so it MUST NOT be returned!
     assert cross_run_id not in delta_ids
 
-    # 2. Test conversation projections
-    conv_projections = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=child_id,
-        include_messages=True,
-    )
-    assert conv_projections.total_count == 1
-    assert conv_projections.truncated is False
-    assert len(conv_projections.conversations) == 1
-    proj = conv_projections.conversations[0]
-    assert proj.conversation_id == child_conv_id
-    assert proj.message_count == 2
-    assert len(proj.messages) == 2
-    assert proj.messages[0].role == "user"
-    assert proj.messages[0].content == "Prompt to target"
-    assert proj.messages[1].role == "assistant"
-    assert proj.messages[1].content == "Response from target"
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    references = await reader.list_conversations_async(attack_result_id=child_id)
+    assert references is not None
+    assert references.total_count == 1
+    assert len(references.conversations) == 1
+    assert references.conversations[0].conversation_id == child_conv_id
+    assert references.conversations[0].message_count == 2
+    transcript = await reader.get_messages_async(attack_result_id=child_id, conversation_id=child_conv_id)
+    assert transcript is not None
+    assert len(transcript.messages) == 2
+    assert transcript.messages[0].role == "user"
+    assert transcript.messages[0].message_pieces[0].original_value == "Prompt to target"
+    assert transcript.messages[1].role == "assistant"
+    assert transcript.messages[1].message_pieces[0].original_value == "Response from target"
 
     # 3. Test service single-node read
     service = ScenarioRunService(memory=sqlite_instance)
@@ -1084,7 +1081,7 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
 
     # Create real image on disk
     img_file = tmp_path / "diagram.png"
-    img_file.write_bytes(b"dummy_png_bytes")
+    await asyncio.to_thread(img_file.write_bytes, b"dummy_png_bytes")
     img_path = str(img_file)
 
     # Sequence 0: 2 pieces (text + image)
@@ -1131,36 +1128,33 @@ async def test_sqlite_bounded_multimodal_conversation_projection(sqlite_instance
         await set_message_piece_sha256_async(p)
         await sqlite_instance._run_database_operation_async(sqlite_instance._insert_entry, PromptMemoryEntry(entry=p))
 
-    # Read with limit=2
-    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=ar_id,
-        include_messages=True,
-        limit_messages_per_conversation=2,
-    )
-
-    assert projs.total_count == 1
-    assert projs.truncated is False
-    assert len(projs.conversations) == 1
-    proj = projs.conversations[0]
-    assert proj.conversation_id == conv_id
-    assert proj.message_count == 3  # Exact count from COUNT query
-    assert proj.messages_truncated is True
-    assert len(proj.messages) == 2  # Bounded by SQL LIMIT
-
-    # Verify multimodal pieces in message 0
-    msg0 = proj.messages[0]
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    references = await reader.list_conversations_async(attack_result_id=ar_id)
+    assert references is not None
+    assert references.total_count == 1
+    assert references.conversations[0].message_count == 3
+    transcript = await reader.get_messages_async(attack_result_id=ar_id, conversation_id=conv_id, limit=3)
+    assert transcript is not None
+    assert transcript.pagination is not None
+    assert transcript.pagination.has_more
+    assert transcript.partial_message_sequences == []
+    assert len(transcript.messages) == 2
+    msg0 = transcript.messages[0]
     assert msg0.role == "user"
-    assert len(msg0.pieces) == 2
-    assert msg0.pieces[0].data_type == "text"
-    assert msg0.pieces[0].content == "Analyze blueprint image"
-    assert msg0.pieces[1].data_type == "image_path"
-    assert msg0.pieces[1].content == img_path
-    assert msg0.pieces[1].converted_value == img_path
-
-    # Verify raw custom role in message 1
-    msg1 = proj.messages[1]
+    assert len(msg0.message_pieces) == 2
+    assert msg0.message_pieces[0].original_value_data_type == "text"
+    assert msg0.message_pieces[0].original_value == "Analyze blueprint image"
+    assert msg0.message_pieces[1].original_value_data_type == "image_path"
+    assert msg0.message_pieces[1].original_value == img_path
+    assert msg0.message_pieces[1].converted_value == img_path
+    msg1 = transcript.messages[1]
     assert msg1.role == "simulated_assistant"
-    assert msg1.content == "I detect architectural blueprints."
+    assert msg1.message_pieces[0].original_value == "I detect architectural blueprints."
+    remaining = await reader.get_messages_async(
+        attack_result_id=ar_id, conversation_id=conv_id, limit=3, cursor=transcript.pagination.next_cursor
+    )
+    assert remaining is not None
+    assert [message.sequence for message in remaining.messages] == [2]
 
 
 def test_hierarchy_repeated_attempt_diagnostic_retries_consistency() -> None:
@@ -1270,14 +1264,24 @@ async def test_sqlite_conversation_list_clipping_explicit(sqlite_instance: SQLit
     )
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
-    # 1. Direct memory read returns ScenarioAttackResultConversations with total_count=55 and truncated=True
-    conv_result = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=ar_id,
-        max_conversations=50,
-    )
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    conv_result = await reader.list_conversations_async(attack_result_id=ar_id, limit=50)
+    assert conv_result is not None
     assert conv_result.total_count == 55
-    assert conv_result.truncated is True
+    assert conv_result.pagination is not None
+    assert conv_result.pagination.has_more
     assert len(conv_result.conversations) == 50
+    remaining = await reader.list_conversations_async(
+        attack_result_id=ar_id, limit=50, cursor=conv_result.pagination.next_cursor
+    )
+    assert remaining is not None
+    assert remaining.pagination is not None
+    assert not remaining.pagination.has_more
+    assert len(remaining.conversations) == 5
+    assert {conversation.conversation_id for conversation in conv_result.conversations + remaining.conversations} == {
+        main_conv_id,
+        *prep_conv_ids,
+    }
 
     # 2. Service single-node read projects exact count and truncation flag on node
     service = ScenarioRunService(memory=sqlite_instance)
@@ -1332,8 +1336,8 @@ async def test_executed_turns_zero_vs_invalid_metadata(sqlite_instance: SQLiteMe
     assert hierarchy.groups[0].roots[0].executed_turns == 0
 
 
-def test_eliminate_tuple_duck_typing_raw_tuples() -> None:
-    """Test passing 2, 3, and 4 conversation projections as a raw Python tuple preserves all items."""
+@pytest.mark.parametrize("count", [2, 3, 4])
+def test_node_preserves_canonical_conversation_summary_sequences(count: int) -> None:
     delta = _make_test_delta(
         attack_result_id="test-node",
         outcome=AttackOutcome.SUCCESS,
@@ -1345,47 +1349,19 @@ def test_eliminate_tuple_duck_typing_raw_tuples() -> None:
         seed_group_id="seed-1",
         outcome=AttackOutcome.SUCCESS,
     )
-    conv1 = ScenarioConversationProjection(conversation_id="conv-1")
-    conv2 = ScenarioConversationProjection(conversation_id="conv-2")
-    conv3 = ScenarioConversationProjection(conversation_id="conv-3")
-    conv4 = ScenarioConversationProjection(conversation_id="conv-4")
-
-    # 2-tuple
-    node2 = ScenarioProgressReadModel.build_hierarchy_node(
+    conversations = tuple(ConversationSummary(conversation_id=f"conv-{index}") for index in range(count))
+    node = ScenarioProgressReadModel.build_hierarchy_node(
         delta=delta,
         result=result,
-        conversations=(conv1, conv2),
+        conversations=conversations,
     )
-    assert len(node2.conversations) == 2
-    assert node2.conversations == [conv1, conv2]
-    assert node2.conversations_count == 2
-    assert node2.conversations_truncated is False
-
-    # 3-tuple (specifically targeted in Roman's review comment 14)
-    node3 = ScenarioProgressReadModel.build_hierarchy_node(
-        delta=delta,
-        result=result,
-        conversations=(conv1, conv2, conv3),
-    )
-    assert len(node3.conversations) == 3
-    assert node3.conversations == [conv1, conv2, conv3]
-    assert node3.conversations_count == 3
-    assert node3.conversations_truncated is False
-
-    # 4-tuple
-    node4 = ScenarioProgressReadModel.build_hierarchy_node(
-        delta=delta,
-        result=result,
-        conversations=(conv1, conv2, conv3, conv4),
-    )
-    assert len(node4.conversations) == 4
-    assert node4.conversations == [conv1, conv2, conv3, conv4]
-    assert node4.conversations_count == 4
-    assert node4.conversations_truncated is False
+    assert node.conversations == list(conversations)
+    assert node.conversations_count == count
+    assert node.conversations_truncated is False
 
 
 async def test_sqlite_message_pieces_bounding(sqlite_instance: SQLiteMemory) -> None:
-    """Test persisting 1 message sequence with 150 pieces and verifying piece truncation at max_pieces_per_message."""
+    """Continue through a large turn without permanently clipping any saved pieces."""
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
     scen = make_scenario_result(
@@ -1429,28 +1405,26 @@ async def test_sqlite_message_pieces_bounding(sqlite_instance: SQLiteMemory) -> 
             sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
         )
 
-    # 1. Fetch with default max_pieces_per_message=100
-    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=ar_id,
-        include_messages=True,
-        max_pieces_per_message=100,
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    first = await reader.get_messages_async(attack_result_id=ar_id, conversation_id=conv_id, limit=100)
+    assert first is not None
+    assert len(first.messages) == 1
+    assert len(first.messages[0].message_pieces) == 100
+    assert first.partial_message_sequences == [0]
+    assert first.pagination is not None
+    second = await reader.get_messages_async(
+        attack_result_id=ar_id, conversation_id=conv_id, limit=100, cursor=first.pagination.next_cursor
     )
-    assert len(projs.conversations) == 1
-    assert len(projs.conversations[0].messages) == 1
-    msg = projs.conversations[0].messages[0]
-    assert len(msg.pieces) == 100
-    assert msg.pieces_truncated is True
-
-    # 2. Fetch with higher limit max_pieces_per_message=200
-    projs_untruncated = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=ar_id,
-        include_messages=True,
-        max_pieces_per_message=200,
-    )
-    assert len(projs_untruncated.conversations[0].messages) == 1
-    msg_untruncated = projs_untruncated.conversations[0].messages[0]
-    assert len(msg_untruncated.pieces) == 150
-    assert msg_untruncated.pieces_truncated is False
+    assert second is not None
+    assert len(second.messages[0].message_pieces) == 50
+    assert second.pagination is not None
+    assert not second.pagination.has_more
+    complete = await reader.get_messages_async(attack_result_id=ar_id, conversation_id=conv_id, limit=200)
+    assert complete is not None
+    assert complete.partial_message_sequences == []
+    assert [piece.id for page in (first, second) for piece in page.messages[0].message_pieces] == [
+        piece.id for piece in complete.messages[0].message_pieces
+    ]
 
 
 async def test_unloaded_conversations_in_full_hierarchy(sqlite_instance: SQLiteMemory) -> None:
@@ -1493,7 +1467,8 @@ async def test_unloaded_conversations_in_full_hierarchy(sqlite_instance: SQLiteM
     assert root_node.attack_result_id == ar_id
     assert root_node.conversations_count is None
     assert root_node.conversations_truncated is True
-    assert len(root_node.conversations) == 1
+    assert root_node.conversations == []
+    assert root_node.conversation_id == main_conv_id
 
 
 def test_diagnostic_total_retries_scope_unmatched_attempt() -> None:
@@ -1692,8 +1667,9 @@ async def test_persisted_result_with_malformed_related_conversations_metadata(
     assert hierarchy is not None
     assert len(hierarchy.groups) == 1
     root_node = hierarchy.groups[0].roots[0]
-    assert root_node.conversations_count == 1
-    assert root_node.conversations_truncated is False
+    assert root_node.conversations == []
+    assert root_node.conversations_count is None
+    assert root_node.conversations_truncated is True
 
 
 def test_read_related_conversation_ids_shapes() -> None:
@@ -1764,10 +1740,13 @@ def test_build_hierarchy_node_deduplicates_duplicate_child_ids() -> None:
     assert node.unresolved_child_attack_result_ids == ["child-1"]
 
 
-async def test_persisted_conversation_statistics_parity_between_hierarchy_and_node(
+@pytest.mark.parametrize("saved_message_count", [0, 3])
+@pytest.mark.parametrize("metadata_count", [None, 0, 99, "unknown"])
+async def test_selected_node_uses_canonical_saved_stats_and_tree_defers_conversations_async(
     sqlite_instance: SQLiteMemory,
+    saved_message_count: int,
+    metadata_count: int | str | None,
 ) -> None:
-    """Test that real conversation message counts are reported in both full hierarchy and node detail."""
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
     scen = make_scenario_result(
@@ -1789,12 +1768,11 @@ async def test_persisted_conversation_statistics_parity_between_hierarchy_and_no
         outcome=AttackOutcome.SUCCESS,
         attribution_parent_id=scenario_id,
         attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
-        metadata={},  # No count metadata!
+        metadata={} if metadata_count is None else {"conversation_message_count": metadata_count},
     )
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
-    # Insert 3 saved messages into SQLite
-    for seq in range(3):
+    for seq in range(saved_message_count):
         piece = MessagePiece(
             id=uuid.uuid4(),
             conversation_id=conv_id,
@@ -1811,88 +1789,30 @@ async def test_persisted_conversation_statistics_parity_between_hierarchy_and_no
 
     service = ScenarioRunService(memory=sqlite_instance)
 
-    node = await service.get_run_hierarchy_node_async(
-        scenario_result_id=scenario_id,
-        attack_result_id=ar_id,
-    )
+    with patch.object(
+        sqlite_instance, "get_conversation_stats_async", wraps=sqlite_instance.get_conversation_stats_async
+    ) as stats:
+        hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+        stats.assert_not_awaited()
+        node = await service.get_run_hierarchy_node_async(scenario_result_id=scenario_id, attack_result_id=ar_id)
+        stats.assert_awaited_once_with(conversation_ids=[conv_id])
     assert node is not None
     assert len(node.conversations) == 1
-    assert node.conversations[0].message_count == 3
-    assert node.conversations[0].messages == []
-    assert node.conversations[0].messages_truncated is True
-    explicit_preview = await service.get_run_hierarchy_node_async(
-        scenario_result_id=scenario_id, attack_result_id=ar_id, include_messages=True
-    )
-    assert explicit_preview is not None
-    assert len(explicit_preview.conversations[0].messages) == 3
-    assert explicit_preview.conversations[0].messages_truncated is False
-
-    # 2. Full hierarchy endpoint: real count=3 via bounded stats read, empty messages list, messages_truncated=True
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
+    assert node.conversations[0].message_count == saved_message_count
+    assert "messages" not in node.conversations[0].model_dump()
     assert hierarchy is not None
     root_node = hierarchy.groups[0].roots[0]
-    assert len(root_node.conversations) == 1
-    assert root_node.conversations[0].message_count == 3
-    assert len(root_node.conversations[0].messages) == 0
-    assert root_node.conversations[0].messages_truncated is True
-
-    # 3. Setting metadata={"conversation_message_count": 99} does not override real database stats
-    ar2_uuid = uuid.uuid4()
-    ar2_id = str(ar2_uuid)
-    ar2 = AttackResult(
-        attack_result_id=ar2_id,
-        conversation_id=conv_id,
-        objective="Metadata precedence test",
-        outcome=AttackOutcome.SUCCESS,
-        attribution_parent_id=scenario_id,
-        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
-        metadata={"conversation_message_count": 99},
-    )
-    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar2])
-    hierarchy2 = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
-    assert hierarchy2 is not None
-    root_node2 = [r for r in hierarchy2.groups[0].roots if r.attack_result_id == ar2_id][0]
-    assert root_node2.conversations[0].message_count == 3  # Still real count 3, not 99!
-
-
-async def test_persisted_result_with_non_numeric_conversation_message_count_metadata(
-    sqlite_instance: SQLiteMemory,
-) -> None:
-    """Test that metadata={'conversation_message_count': 'unknown'} does not raise ValueError in hierarchy."""
-    scenario_uuid = uuid.uuid4()
-    scenario_id = str(scenario_uuid)
-    scen = make_scenario_result(
-        id=scenario_uuid,
-        scenario_name="NonNumericMetadataScenario",
-        scenario_version=1,
-        objective_target_identifier=get_mock_target_identifier(),
-        attack_results={},
-    )
-    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
-
-    ar_uuid = uuid.uuid4()
-    ar_id = str(ar_uuid)
-    ar = AttackResult(
-        attack_result_id=ar_id,
-        conversation_id=str(uuid.uuid4()),
-        objective="Non-numeric metadata test",
-        outcome=AttackOutcome.SUCCESS,
-        attribution_parent_id=scenario_id,
-        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
-        metadata={"conversation_message_count": "unknown"},
-    )
-    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
-
-    service = ScenarioRunService(memory=sqlite_instance)
-
-    # Must succeed without raising ValueError
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
-    assert hierarchy is not None
-    root_node = hierarchy.groups[0].roots[0]
-    assert len(root_node.conversations) == 1
-    # Real SQLite has 0 messages for this new conversation, so count is 0 and not truncated
-    assert root_node.conversations[0].message_count == 0
-    assert root_node.conversations[0].messages_truncated is False
+    assert root_node.conversations == []
+    assert root_node.conversation_id == conv_id
+    assert root_node.conversations_count is None
+    assert root_node.conversations_truncated
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    references = await reader.list_conversations_async(attack_result_id=ar_id)
+    assert references is not None
+    assert references.conversations == node.conversations
+    transcript = await reader.get_messages_async(attack_result_id=ar_id, conversation_id=conv_id, limit=2)
+    assert transcript is not None
+    assert len(transcript.messages) == min(saved_message_count, 2)
 
 
 async def test_bounded_conversation_messages_piece_budget_applied_at_sql_layer(
@@ -1939,35 +1859,30 @@ async def test_bounded_conversation_messages_piece_budget_applied_at_sql_layer(
     )
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
-    projs = await SavedConversationReadService(memory=sqlite_instance).get_legacy_projections_async(
-        attack_result_id=ar_id,
-        include_messages=True,
-        max_pieces_per_message=100,
-    )
-    assert len(projs.conversations) == 1
-    messages = projs.conversations[0].messages
-    assert len(messages) == 2
-
-    # Sequence 0 (1,001 pieces) is capped at 100 with pieces_truncated=True
-    msg0 = messages[0]
-    assert msg0.sequence == 0
-    assert len(msg0.pieces) == 100
-    assert msg0.pieces_truncated is True
-
-    # Sequence 1 (5 pieces) is fully returned with pieces_truncated=False
-    msg1 = messages[1]
-    assert msg1.sequence == 1
-    assert len(msg1.pieces) == 5
-    assert msg1.pieces_truncated is False
-
-    messages_capped_10, _, partial_sequences = await sqlite_instance.get_bounded_conversation_messages_async(
-        conversation_id=conv_id,
-        limit=10,
-        max_pieces_per_message=10,
-    )
-    assert len(messages_capped_10[0].message_pieces) == 10
-    assert len(messages_capped_10[1].message_pieces) == 5
-    assert partial_sequences == {0}
+    reader = SavedConversationReadService(memory=sqlite_instance)
+    with patch.object(
+        PromptMemoryEntry, "get_message_piece", autospec=True, side_effect=PromptMemoryEntry.get_message_piece
+    ) as hydrate:
+        page = await reader.get_messages_async(attack_result_id=ar_id, conversation_id=conv_id, limit=100)
+    # Canonical score lookup reads the same saved pieces once more.
+    assert hydrate.call_count <= 200
+    assert {str(call.args[0].id) for call in hydrate.call_args_list} == {str(piece.id) for piece in pieces_seq0[:100]}
+    assert page is not None
+    assert page.partial_message_sequences == [0]
+    returned: list[MessagePiece] = []
+    while True:
+        returned.extend(piece for message in page.messages for piece in message.message_pieces)
+        assert sum(len(message.message_pieces) for message in page.messages) <= 100
+        assert page.pagination is not None
+        if not page.pagination.has_more:
+            break
+        page = await reader.get_messages_async(
+            attack_result_id=ar_id, conversation_id=conv_id, limit=100, cursor=page.pagination.next_cursor
+        )
+        assert page is not None
+    assert [piece.id for piece in returned] == [piece.id for piece in pieces_seq0 + pieces_seq1]
+    assert [message.sequence for message in page.messages] == [0, 1]
+    assert len(page.messages[-1].message_pieces) == 5
 
 
 async def test_diagnostics_total_retries_count_event_mismatch_parity(
@@ -2030,8 +1945,7 @@ async def test_diagnostics_total_retries_count_event_mismatch_parity(
 
 
 @pytest.mark.asyncio
-async def test_clipped_tree_queries_actual_preview_node_conversation_stats(sqlite_instance: SQLiteMemory) -> None:
-    """Test that when child is saved before parent and max_nodes=1, the actual returned parent gets real stats."""
+async def test_clipped_tree_defers_stats_until_the_selected_node_is_opened_async(sqlite_instance: SQLiteMemory) -> None:
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
     scen = make_scenario_result(
@@ -2088,22 +2002,30 @@ async def test_clipped_tree_queries_actual_preview_node_conversation_stats(sqlit
 
     service = ScenarioRunService(memory=sqlite_instance)
 
-    # With max_nodes=1, parent root is returned. It must report real count=3, not 0!
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+    with patch.object(
+        sqlite_instance, "get_conversation_stats_async", wraps=sqlite_instance.get_conversation_stats_async
+    ) as stats:
+        hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id, max_nodes=1)
+        stats.assert_not_awaited()
+        node = await service.get_run_hierarchy_node_async(scenario_result_id=scenario_id, attack_result_id=parent_id)
+        stats.assert_awaited_once_with(conversation_ids=[parent_conv_id])
     assert hierarchy is not None
     assert hierarchy.truncated is True
     assert len(hierarchy.groups[0].roots) == 1
     root = hierarchy.groups[0].roots[0]
     assert root.attack_result_id == parent_id
-    assert len(root.conversations) == 1
-    assert root.conversations[0].conversation_id == parent_conv_id
-    assert root.conversations[0].message_count == 3
-    assert root.conversations[0].messages_truncated is True
+    assert root.conversation_id == parent_conv_id
+    assert root.conversations == []
+    assert root.conversations_count is None
+    assert root.conversations_truncated
+    assert node is not None
+    assert node.conversations[0].message_count == 3
 
 
-@pytest.mark.asyncio
-async def test_conversation_stats_query_failure_does_not_become_false_zero(sqlite_instance: SQLiteMemory) -> None:
-    """Test that a failed stats query does not turn uncounted conversations into message_count=0."""
+@pytest.mark.parametrize("metadata_count", [None, 0])
+async def test_conversation_stats_failure_is_deferred_and_never_becomes_false_zero_async(
+    sqlite_instance: SQLiteMemory, metadata_count: int | None
+) -> None:
     scenario_uuid = uuid.uuid4()
     scenario_id = str(scenario_uuid)
     scen = make_scenario_result(
@@ -2124,6 +2046,7 @@ async def test_conversation_stats_query_failure_does_not_become_false_zero(sqlit
         outcome=AttackOutcome.SUCCESS,
         attribution_parent_id=scenario_id,
         attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
+        metadata={} if metadata_count is None else {"conversation_message_count": metadata_count},
     )
     await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
 
@@ -2134,10 +2057,12 @@ async def test_conversation_stats_query_failure_does_not_become_false_zero(sqlit
     hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
     assert hierarchy is not None
     root = hierarchy.groups[0].roots[0]
-    assert len(root.conversations) == 1
-    # Must NOT become 0! Must be None and marked truncated/incomplete
-    assert root.conversations[0].message_count is None
-    assert root.conversations[0].messages_truncated is True
+    assert root.conversations == []
+    assert root.conversations_count is None
+    assert root.conversations_truncated
+    sqlite_instance.get_conversation_stats_async.assert_not_awaited()
+    with pytest.raises(RuntimeError, match="Database error"):
+        await service.get_run_hierarchy_node_async(scenario_result_id=scenario_id, attack_result_id=ar_id)
 
 
 @pytest.mark.asyncio
@@ -2266,7 +2191,7 @@ async def test_cold_hierarchy_hydration_bounded_by_max_nodes(sqlite_instance: SQ
 
 
 def test_build_scenario_hierarchy_unqueried_conversation_not_false_zero() -> None:
-    """Test that missing-key branch in build_scenario_hierarchy produces None and truncated=True, never false zero."""
+    """Unqueried conversation metadata stays unknown rather than reporting a fabricated zero."""
     delta = _make_test_delta(
         attack_result_id="root-1",
         role=AttackResultRole.TARGET_FACING,
@@ -2275,19 +2200,18 @@ def test_build_scenario_hierarchy_unqueried_conversation_not_false_zero() -> Non
         conversation_id="conv-unqueried",
     )
     snapshot = _make_test_snapshot(deltas=[delta])
-    # Empty stats passed (e.g. stats read failure or unqueried)
     projection = ScenarioProgressReadModel.build_scenario_hierarchy(
         scenario_result_id="scenario-run-1",
         scenario_name="TestScenario",
         scenario_version=1,
         status=ScenarioRunState.COMPLETED,
         snapshot=snapshot,
-        conversation_stats={},
     )
-    conv = projection.groups[0].roots[0].conversations[0]
-    # Must NOT report 0 and False!
-    assert conv.message_count is None
-    assert conv.messages_truncated is True
+    root = projection.groups[0].roots[0]
+    assert root.conversation_id == "conv-unqueried"
+    assert root.conversations == []
+    assert root.conversations_count is None
+    assert root.conversations_truncated
 
 
 @pytest.mark.asyncio
@@ -2452,65 +2376,6 @@ async def test_repeated_attempts_latest_error_beyond_cap_reported_correctly(sqli
     assert hierarchy.overall_counts.errors == 1
     assert hierarchy.overall_counts.succeeded == 499
     assert hierarchy.overall_counts.completed == 500
-
-
-@pytest.mark.asyncio
-async def test_failed_conversation_stats_read_never_falls_back_to_metadata(sqlite_instance: SQLiteMemory) -> None:
-    """Test that a failed stats query leaves counts unknown/incomplete even if count metadata is present."""
-    scenario_uuid = uuid.uuid4()
-    scenario_id = str(scenario_uuid)
-    scen = make_scenario_result(
-        id=scenario_uuid,
-        scenario_name="FailedStatsMetadataScenario",
-        scenario_version=1,
-        objective_target_identifier=get_mock_target_identifier(),
-        attack_results={},
-    )
-    await sqlite_instance.add_scenario_results_to_memory_async(scenario_results=[scen])
-
-    conv_id = str(uuid.uuid4())
-    ar_id = str(uuid.uuid4())
-    # 3 saved messages in SQLite
-    now = datetime.now(UTC)
-    for i in range(3):
-        piece = MessagePiece(
-            id=uuid.uuid4(),
-            conversation_id=conv_id,
-            role="user",
-            original_value_data_type="text",
-            original_value=f"msg {i}",
-            converted_value=f"msg {i}",
-            sequence=i,
-            timestamp=now + timedelta(seconds=i),
-        )
-        await set_message_piece_sha256_async(piece)
-        await sqlite_instance._run_database_operation_async(
-            sqlite_instance._insert_entry, PromptMemoryEntry(entry=piece)
-        )
-
-    # Attack result with metadata={"conversation_message_count": 0}
-    ar = AttackResult(
-        attack_result_id=ar_id,
-        conversation_id=conv_id,
-        objective="Failed stats metadata fallback test",
-        outcome=AttackOutcome.SUCCESS,
-        attribution_parent_id=scenario_id,
-        attribution_data={"parent_collection": "group_1", "result_role": AttackResultRole.TARGET_FACING.value},
-        metadata={"conversation_message_count": 0},
-    )
-    await sqlite_instance.add_attack_results_to_memory_async(attack_results=[ar])
-
-    service = ScenarioRunService(memory=sqlite_instance)
-    # Simulate DB query failure
-    sqlite_instance.get_conversation_stats_async = AsyncMock(side_effect=RuntimeError("DB query failure"))
-
-    hierarchy = await service.get_run_hierarchy_async(scenario_result_id=scenario_id)
-    assert hierarchy is not None
-    root = hierarchy.groups[0].roots[0]
-    assert len(root.conversations) == 1
-    # Must NOT return 0 or False from metadata! Must be None and truncated=True!
-    assert root.conversations[0].message_count is None
-    assert root.conversations[0].messages_truncated is True
 
 
 @pytest.mark.asyncio

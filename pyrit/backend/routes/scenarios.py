@@ -432,7 +432,6 @@ async def get_scenario_run_hierarchy_node(  # pyrit-async-suffix-exempt
     attack_result_id: IdentifierStr,
     limit: int = Query(200, ge=1, le=500, description="Maximum ordered child references in this page"),
     children_cursor: CursorStr | None = Query(None, description="Opaque ordered-child continuation cursor"),
-    include_messages: bool = Query(False, description="Explicitly include legacy clipped conversation previews"),
 ) -> ScenarioHierarchyNode:
     """
     Get single-node hierarchy details and generic conversation projections without full-run hydration.
@@ -447,7 +446,6 @@ async def get_scenario_run_hierarchy_node(  # pyrit-async-suffix-exempt
             attack_result_id=attack_result_id,
             max_immediate_children=limit,
             children_cursor=children_cursor,
-            include_messages=include_messages,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

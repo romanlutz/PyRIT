@@ -648,8 +648,9 @@ Until you expand or collapse the section, its default follows the current group 
 
 Compound-attack hierarchy browsing is a separate GUI follow-up. The backend provides
 paged roots and ordered child expansion, with exact run statistics independent of
-the displayed page. Node reads return conversation metadata by default; clients
-can page the selected saved transcript without loading every conversation.
+the displayed page. Tree previews defer conversation reads. Node expansion uses the
+same conversation metadata as the generic attack API; clients load transcript bodies
+only through the selected saved conversation's paginated message endpoint.
 See the [backend hierarchy API](../../pyrit/backend/README.md#scenario-result-hierarchy)
 for continuation and clipping semantics.
 

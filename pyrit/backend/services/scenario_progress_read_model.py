@@ -30,12 +30,11 @@ from pyrit.models import (
     AttackResultRole,
     AttackTechniqueIdentifier,
     ComponentIdentifier,
+    ConversationSummary,
     ScenarioAtomicGroupProgress,
-    ScenarioAttackResultConversations,
     ScenarioAttackResultDelta,
     ScenarioAttackTechniqueDetails,
     ScenarioComponentIdentity,
-    ScenarioConversationProjection,
     ScenarioDisplayGroupProgress,
     ScenarioExecutionUnit,
     ScenarioHierarchyDiagnostics,
@@ -928,7 +927,6 @@ class ScenarioProgressReadModel:
         status: ScenarioRunState,
         snapshot: ScenarioProgressSnapshot,
         max_nodes: int = _MAX_HIERARCHY_NODES,
-        conversation_stats: Mapping[str, Any] | None = None,
         overall_counts: ScenarioProgressCounts | None = None,
         exact_total_errors: int | None = None,
         exact_total_retries: int | None = None,
@@ -946,7 +944,6 @@ class ScenarioProgressReadModel:
             status: Terminal or running state of the scenario.
             snapshot: Hydrated progress snapshot containing deltas, mapped results, and summary.
             max_nodes: Maximum nodes to assemble in the hierarchy tree.
-            conversation_stats: Optional mapping of conversation IDs to stats for real message count previews.
             overall_counts: Optional exact run-wide progress counts overriding truncated snapshot totals.
             exact_total_errors: Optional exact run-wide error count from database aggregates.
             exact_total_retries: Optional exact run-wide retry count from database aggregates.
@@ -1030,57 +1027,11 @@ class ScenarioProgressReadModel:
                     else:
                         unresolved_children.append(c_id)
 
-            conversations: list[ScenarioConversationProjection] = []
-            if result.conversation_id:
-                msg_count: int | None = None
-                messages_truncated: bool = True
-                if conversation_stats is not None and result.conversation_id in conversation_stats:
-                    stat = conversation_stats[result.conversation_id]
-                    c = getattr(stat, "message_count", None)
-                    if c is None and isinstance(stat, int):
-                        c = stat
-                    if isinstance(c, int):
-                        msg_count = c
-                        messages_truncated = c > 0
-
-                conversations.append(
-                    ScenarioConversationProjection(
-                        conversation_id=result.conversation_id,
-                        conversation_type=str(delta.attack_metadata.get("conversation_type") or "main"),
-                        description=str(delta.attack_metadata.get("conversation_description") or "") or None,
-                        message_count=msg_count,
-                        messages=[],
-                        messages_truncated=messages_truncated,
-                    )
-                )
-
-            candidate_ids = (
-                result.related_conversation_ids
-                or getattr(result, "related_conversations", None)
-                or ScenarioProgressReadModel._read_related_conversation_ids(delta=delta)
-            )
-            has_other_conversations = False
-            if candidate_ids:
-                for c in candidate_ids:
-                    cid = getattr(c, "conversation_id", c)
-                    if isinstance(cid, str) and cid and cid != result.conversation_id:
-                        has_other_conversations = True
-                        break
-            if has_other_conversations:
-                node_conversations_count = None
-                node_conversations_truncated = True
-            else:
-                node_conversations_count = len(conversations)
-                node_conversations_truncated = False
-
             node.children = children
             node.unresolved_child_attack_result_ids = unresolved_children[:_MAX_CHILD_REFERENCES]
             node.unresolved_child_references_truncated = (
                 len(unresolved_children) > _MAX_CHILD_REFERENCES or node.child_references_truncated
             )
-            node.conversations = conversations
-            node.conversations_count = node_conversations_count
-            node.conversations_truncated = node_conversations_truncated
             return node
 
         roots_by_group: dict[str, list[ScenarioHierarchyNode]] = {}
@@ -1301,7 +1252,7 @@ class ScenarioProgressReadModel:
         result: ScenarioProgressResult,
         children_deltas: Sequence[ScenarioAttackResultDelta] = (),
         children_results: Sequence[ScenarioProgressResult] = (),
-        conversations: Sequence[ScenarioConversationProjection] | ScenarioAttackResultConversations = (),
+        conversations: Sequence[ConversationSummary] = (),
         conversations_count: int | None = None,
         conversations_truncated: bool = False,
         children_truncated: bool = False,
@@ -1311,14 +1262,14 @@ class ScenarioProgressReadModel:
         next_children_cursor: str | None = None,
     ) -> ScenarioHierarchyNode:
         """
-        Assemble a single hierarchy node with its immediate children and generic conversations.
+        Assemble a single hierarchy node with its immediate children and shared conversation metadata.
 
         Args:
             delta: The attack result delta for the target node.
             result: The mapped progress result for the target node.
             children_deltas: Deltas for immediate children resolved in a single batch.
             children_results: Mapped results for immediate children.
-            conversations: Generic read-only conversation projections.
+            conversations: Canonical read-only conversation summaries.
             conversations_count: Total conversations count for this node.
             conversations_truncated: Flag indicating if conversations list was truncated.
             children_truncated: Flag indicating if immediate children list was truncated.
@@ -1333,13 +1284,7 @@ class ScenarioProgressReadModel:
         node = ScenarioProgressReadModel._map_hierarchy_node(
             delta=delta, result=result, max_child_references=max_child_references
         )
-        if isinstance(conversations, ScenarioAttackResultConversations):
-            node.conversations = list(conversations.conversations)
-            if conversations_count is None:
-                conversations_count = conversations.total_count
-            conversations_truncated = conversations_truncated or conversations.truncated
-        else:
-            node.conversations = list(conversations)
+        node.conversations = list(conversations)
         node.conversations_count = conversations_count if conversations_count is not None else len(node.conversations)
         node.conversations_truncated = conversations_truncated
         children_deltas_by_id = {d.attack_result_id: d for d in children_deltas}

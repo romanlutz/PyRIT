@@ -27,6 +27,7 @@ from pyrit.models import (
     AttackResult,
     ChatMessageRole,
     ConversationReference,
+    ConversationSummary,
     Message,
     MessagePiece,
     PromptDataType,
@@ -561,16 +562,6 @@ class UpdateAttackRequest(BaseModel):
 # ============================================================================
 # Related Conversations
 # ============================================================================
-
-
-class ConversationSummary(BaseModel):
-    """Summary of a conversation (message count, preview, timestamp)."""
-
-    conversation_id: str = Field(..., description="Unique conversation identifier")
-    message_count: int = Field(0, description="Number of messages in this conversation")
-    last_message_preview: str | None = Field(None, description="Preview of the last message")
-    created_at: datetime | None = Field(None, description="Timestamp of the first message")
-    conversation_type: str | None = None
 
 
 class AttackConversationsResponse(BaseModel):

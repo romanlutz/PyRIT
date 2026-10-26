@@ -8237,80 +8237,6 @@ class MemoryInterface(abc.ABC):
             objective_score_id=str(row["objective_score_id"]) if row["objective_score_id"] is not None else None,
         )
 
-    def _fetch_bounded_conversation_messages(
-        self,
-        *,
-        conversation_id: str,
-        limit: int,
-        max_pieces_per_message: int = 100,
-    ) -> tuple[list[Message], bool, set[int]]:
-        """
-        Fetch conversation messages applying SQL LIMIT directly at the database layer.
-
-        Preserves all multimodal message pieces and raw stored roles.
-
-        Returns:
-            tuple[list[Message], bool, set[int]]: Canonical messages, more turns, and clipped turn sequences.
-        """
-        if not conversation_id or limit < 1:
-            return [], False, set()
-
-        with closing(self._get_session()) as session:
-            seq_stmt = (
-                select(PromptMemoryEntry.sequence)
-                .where(PromptMemoryEntry.conversation_id == str(conversation_id))
-                .distinct()
-                .order_by(PromptMemoryEntry.sequence.asc())
-                .limit(limit + 1)
-            )
-            seqs = [row[0] for row in session.execute(seq_stmt).all()]
-            if not seqs:
-                return [], False, set()
-
-            truncated = len(seqs) > limit
-            target_seqs = seqs[:limit]
-
-            piece_budget = max(1, max_pieces_per_message)
-            subq = (
-                select(
-                    PromptMemoryEntry.id.label("entry_id"),
-                    func.row_number()
-                    .over(
-                        partition_by=PromptMemoryEntry.sequence,
-                        order_by=(
-                            PromptMemoryEntry.timestamp.asc(),
-                            PromptMemoryEntry.id.asc(),
-                        ),
-                    )
-                    .label("rn"),
-                )
-                .where(
-                    and_(
-                        PromptMemoryEntry.conversation_id == str(conversation_id),
-                        PromptMemoryEntry.sequence.in_(target_seqs),
-                    )
-                )
-                .subquery()
-            )
-            pieces_stmt = (
-                select(PromptMemoryEntry, subq.c.rn)
-                .join(subq, PromptMemoryEntry.id == subq.c.entry_id)
-                .where(subq.c.rn <= piece_budget + 1)
-                .order_by(
-                    PromptMemoryEntry.sequence.asc(),
-                    PromptMemoryEntry.timestamp.asc(),
-                    PromptMemoryEntry.id.asc(),
-                )
-            )
-            rows = session.execute(pieces_stmt).all()
-            if not rows:
-                return [], False, set()
-
-            truncated_seqs: set[int] = {entry.sequence for entry, rn in rows if rn > piece_budget}
-            bounded_pieces = [entry.get_message_piece() for entry, rn in rows if rn <= piece_budget]
-            messages = list(group_conversation_message_pieces_by_sequence(message_pieces=bounded_pieces))
-            return messages, truncated, truncated_seqs
-
     def _execute_get_scenario_results(
         self,
         *,
@@ -11923,27 +11849,6 @@ class MemoryInterface(abc.ABC):
             conversation_id=conversation_id,
             cursor=cursor,
             limit=limit,
-        )
-
-    async def get_bounded_conversation_messages_async(
-        self, *, conversation_id: str, limit: int = 100, max_pieces_per_message: int = 100
-    ) -> tuple[list[Message], bool, set[int]]:
-        """
-        Read a bounded turn preview for compatibility with existing clipped detail views.
-
-        Returns:
-            tuple[list[Message], bool, set[int]]: Canonical messages, more turns, and clipped turn sequences.
-
-        Raises:
-            ValueError: If the turn or piece preview budget is invalid.
-        """
-        if not 1 <= limit <= 100 or not 1 <= max_pieces_per_message <= 500:
-            raise ValueError("Conversation previews allow 1 through 100 turns and 1 through 500 pieces per turn.")
-        return await self._run_database_operation_async(
-            self._fetch_bounded_conversation_messages,
-            conversation_id=conversation_id,
-            limit=limit,
-            max_pieces_per_message=max_pieces_per_message,
         )
 
     def get_scenario_results(

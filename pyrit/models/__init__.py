@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         StoredPreset,
     )
     from pyrit.models.conversation_stats import ConversationStats
+    from pyrit.models.conversation_summary import ConversationSummary
     from pyrit.models.embeddings import EmbeddingData, EmbeddingResponse, EmbeddingSupport, EmbeddingUsageInformation
     from pyrit.models.finding import Finding, FindingCreate, FindingEvidence, FindingSeverity
     from pyrit.models.harm_definition import HarmDefinition, ScaleDescription, get_all_harm_definitions
@@ -163,10 +164,6 @@ if TYPE_CHECKING:
         scenario_dataset_size_from_limit,
     )
     from pyrit.models.scenario_hierarchy import (
-        ScenarioAttackResultConversations,
-        ScenarioConversationMessagePieceProjection,
-        ScenarioConversationMessageProjection,
-        ScenarioConversationProjection,
         ScenarioHierarchyDiagnostics,
         ScenarioHierarchyGroup,
         ScenarioHierarchyNode,
@@ -367,6 +364,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ConversationRetry": "pyrit.models.messages.conversation_retry",
     "ConversationRetryReason": "pyrit.models.messages.conversation_retry",
     "ConversationStats": "pyrit.models.conversation_stats",
+    "ConversationSummary": "pyrit.models.conversation_summary",
     "Finding": "pyrit.models.finding",
     "FindingCreate": "pyrit.models.finding",
     "FindingEvidence": "pyrit.models.finding",
@@ -481,10 +479,6 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ScenarioDisplayGroupProgress": "pyrit.models.scenario_progress",
     "ScenarioExecutionStatistics": "pyrit.models.scenario_progress",
     "ScenarioExecutionUnit": "pyrit.models.scenario_progress",
-    "ScenarioConversationMessagePieceProjection": "pyrit.models.scenario_hierarchy",
-    "ScenarioAttackResultConversations": "pyrit.models.scenario_hierarchy",
-    "ScenarioConversationMessageProjection": "pyrit.models.scenario_hierarchy",
-    "ScenarioConversationProjection": "pyrit.models.scenario_hierarchy",
     "ScenarioHierarchyDiagnostics": "pyrit.models.scenario_hierarchy",
     "ScenarioHierarchyGroup": "pyrit.models.scenario_hierarchy",
     "ScenarioHierarchyNode": "pyrit.models.scenario_hierarchy",

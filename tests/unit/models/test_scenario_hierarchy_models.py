@@ -9,19 +9,15 @@ from pydantic import ValidationError
 from pyrit.models import (
     AttackOutcome,
     AttackResultRole,
+    ConversationSummary,
     RetryEvent,
-    ScenarioAttackResultConversations,
     ScenarioAttackTechniqueDetails,
-    ScenarioConversationMessagePieceProjection,
-    ScenarioConversationMessageProjection,
-    ScenarioConversationProjection,
     ScenarioHierarchyDiagnostics,
     ScenarioHierarchyGroup,
     ScenarioHierarchyNode,
     ScenarioHierarchyProjection,
     ScenarioOrchestrationParentSummary,
     ScenarioProgressCounts,
-    ScenarioProgressScore,
     ScenarioRunState,
 )
 from pyrit.models.catalog.scenario import AttackErrorSummary, AttackRetrySummary
@@ -76,37 +72,20 @@ def test_scenario_orchestration_parent_summary_validation() -> None:
     assert summary.retries_truncated is True
 
 
-def test_scenario_conversation_projections() -> None:
+def test_shared_conversation_summary_is_metadata_only() -> None:
     now = datetime.now(UTC)
-    msg = ScenarioConversationMessageProjection(
-        role="assistant",
-        content="Response text",
-        sequence=1,
-        timestamp=now,
-        scores=[
-            ScenarioProgressScore(
-                scorer_name="ObjectiveScorer",
-                score_type="float_scale",
-                status="complete",
-                score_value="0.9",
-            )
-        ],
-    )
-    assert msg.role == "assistant"
-    assert msg.content == "Response text"
-    assert len(msg.scores) == 1
-
-    conv = ScenarioConversationProjection(
+    conv = ConversationSummary(
         conversation_id="conv-1",
         conversation_type="main",
-        description="Main objective target conversation",
         message_count=1,
-        messages=[msg],
-        messages_truncated=False,
+        last_message_preview="Response text",
+        created_at=now,
     )
     assert conv.conversation_id == "conv-1"
     assert conv.conversation_type == "main"
-    assert len(conv.messages) == 1
+    assert conv.message_count == 1
+    assert conv.created_at == now
+    assert "messages" not in conv.model_dump()
 
 
 def test_scenario_hierarchy_node_recursive_tree() -> None:
@@ -245,33 +224,6 @@ def test_scenario_hierarchy_projection_envelope() -> None:
     assert projection.truncated is False
 
 
-def test_scenario_conversation_multimodal_pieces() -> None:
-    now = datetime.now(UTC)
-    pieces = [
-        ScenarioConversationMessagePieceProjection(
-            data_type="text",
-            content="Look at this image:",
-            converted_value="Look at this image:",
-        ),
-        ScenarioConversationMessagePieceProjection(
-            data_type="image_path",
-            content="/path/to/img.png",
-            converted_value="/path/to/img.png",
-        ),
-    ]
-    msg = ScenarioConversationMessageProjection(
-        role="simulated_assistant",
-        content="Look at this image:",
-        sequence=1,
-        timestamp=now,
-        pieces=pieces,
-    )
-    assert msg.role == "simulated_assistant"
-    assert len(msg.pieces) == 2
-    assert msg.pieces[0].data_type == "text"
-    assert msg.pieces[1].data_type == "image_path"
-
-
 def test_attack_retry_summary_bounded_fields() -> None:
     summary = AttackRetrySummary(
         attack_result_id="att-1",
@@ -312,7 +264,7 @@ def test_scenario_hierarchy_node_conversations_count_and_truncated() -> None:
         outcome=AttackOutcome.SUCCESS,
         timestamp=now,
         conversations=[
-            ScenarioConversationProjection(conversation_id="conv-1"),
+            ConversationSummary(conversation_id="conv-1"),
         ],
         conversations_count=55,
         conversations_truncated=True,
@@ -320,23 +272,6 @@ def test_scenario_hierarchy_node_conversations_count_and_truncated() -> None:
     assert node.conversations_count == 55
     assert node.conversations_truncated is True
     assert len(node.conversations) == 1
-
-
-def test_scenario_attack_result_conversations_namedtuple() -> None:
-    conv = ScenarioConversationProjection(conversation_id="conv-1")
-    result = ScenarioAttackResultConversations(
-        conversations=[conv],
-        total_count=55,
-        truncated=True,
-    )
-    assert result.conversations == [conv]
-    assert result.total_count == 55
-    assert result.truncated is True
-    # Verify tuple unpacking works
-    c_list, count, trunc = result
-    assert c_list == [conv]
-    assert count == 55
-    assert trunc is True
 
 
 def test_scenario_hierarchy_node_child_references_bounding() -> None:
@@ -373,28 +308,6 @@ def test_scenario_orchestration_parent_summary_child_references_bounding() -> No
     assert len(summary.child_attack_result_ids) == 500
     assert summary.child_references_truncated is True
     assert summary.child_attack_result_ids == child_ids[:500]
-
-
-def test_scenario_conversation_message_pieces_truncated_flag() -> None:
-    now = datetime.now(UTC)
-    pieces = [
-        ScenarioConversationMessagePieceProjection(
-            data_type="text",
-            content=f"piece-{i}",
-            converted_value=f"piece-{i}",
-        )
-        for i in range(100)
-    ]
-    msg = ScenarioConversationMessageProjection(
-        role="user",
-        content="test prompt",
-        sequence=0,
-        timestamp=now,
-        pieces=pieces,
-        pieces_truncated=True,
-    )
-    assert len(msg.pieces) == 100
-    assert msg.pieces_truncated is True
 
 
 def test_scenario_hierarchy_node_unresolved_child_references_bounding() -> None:

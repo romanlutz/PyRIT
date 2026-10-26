@@ -362,10 +362,11 @@ async def test_api_journey_loads_only_the_selected_saved_conversation_async(
         assert roots.json()["groups"][0]["roots"][0]["attack_result_id"] == parent.attack_result_id
         node = client.get(f"/api/scenarios/runs/{run_id}/hierarchy/nodes/{child.attack_result_id}")
         assert node.status_code == 200
-        assert node.json()["conversations"][0]["messages"] == []
+        assert "messages" not in node.json()["conversations"][0]
         references = client.get(f"/api/attacks/{child.attack_result_id}/conversations", params={"limit": 1})
         assert references.status_code == 200
         assert references.json()["conversations"][0]["message_count"] == 1
+        assert node.json()["conversations"] == references.json()["conversations"]
         messages_url = f"/api/attacks/{child.attack_result_id}/messages"
         first = client.get(messages_url, params={"conversation_id": child.conversation_id, "limit": 2})
         assert first.status_code == 200

@@ -2681,7 +2681,6 @@ class ScenarioRunService:
             status=header_result.scenario_run_state,
             snapshot=progress_snapshot,
             max_nodes=max_nodes,
-            conversation_stats=None,
             overall_counts=self._hierarchy_counts(aggregate=aggregate, planned=summary.overall.planned),
             exact_total_errors=aggregate.raw_total_errors,
             exact_total_retries=aggregate.raw_total_retries,
@@ -2704,58 +2703,6 @@ class ScenarioRunService:
             hierarchy.diagnostics.rootless_results_count = raw_attempts
             hierarchy.diagnostics.rootless_results_truncated = clipped
 
-        # Obtain real conversation counts for the actual bounded preview nodes
-        seen_conv_ids: set[str] = set()
-        actual_conv_ids: list[str] = []
-
-        def _collect_node_conv_ids(node: ScenarioHierarchyNode) -> None:
-            if node.conversation_id and node.conversation_id not in seen_conv_ids:
-                seen_conv_ids.add(node.conversation_id)
-                actual_conv_ids.append(node.conversation_id)
-            for c in node.conversations:
-                if c.conversation_id and c.conversation_id not in seen_conv_ids:
-                    seen_conv_ids.add(c.conversation_id)
-                    actual_conv_ids.append(c.conversation_id)
-            for child in node.children:
-                _collect_node_conv_ids(child)
-
-        for group in hierarchy.groups:
-            for root in group.roots:
-                _collect_node_conv_ids(root)
-
-        if actual_conv_ids:
-            conversation_stats: dict[str, Any] | None = None
-            try:
-                conversation_stats = await self._memory.get_conversation_stats_async(conversation_ids=actual_conv_ids)
-            except Exception:
-                logger.warning("Could not fetch conversation statistics for hierarchy preview.", exc_info=True)
-                conversation_stats = None
-
-            if conversation_stats is not None:
-                queried_set = set(actual_conv_ids)
-
-                def _apply_stats(node: ScenarioHierarchyNode) -> None:
-                    for conv in node.conversations:
-                        if conv.conversation_id in queried_set:
-                            if conv.conversation_id in conversation_stats:
-                                stat = conversation_stats[conv.conversation_id]
-                                c = getattr(stat, "message_count", None)
-                                if c is None and isinstance(stat, int):
-                                    c = stat
-                                if isinstance(c, int):
-                                    conv.message_count = c
-                                    conv.messages_truncated = c > 0
-                            else:
-                                # Queried successfully, but no messages exist in memory
-                                conv.message_count = 0
-                                conv.messages_truncated = False
-                    for child in node.children:
-                        _apply_stats(child)
-
-                for group in hierarchy.groups:
-                    for root in group.roots:
-                        _apply_stats(root)
-
         return hierarchy
 
     async def get_run_hierarchy_node_async(
@@ -2765,7 +2712,6 @@ class ScenarioRunService:
         attack_result_id: str,
         max_immediate_children: int = 200,
         children_cursor: str | None = None,
-        include_messages: bool = False,
     ) -> ScenarioHierarchyNode | None:
         """
         Get bounded single-node hierarchy details and generic conversation projections without full-run hydration.
@@ -2775,7 +2721,6 @@ class ScenarioRunService:
             attack_result_id: The target attack result ID.
             max_immediate_children: Maximum number of immediate child nodes to resolve.
             children_cursor: Continuation bound to this run, node, and stored child ordering.
-            include_messages: Explicitly include compatible clipped conversation previews.
 
         Returns:
             ScenarioHierarchyNode | None: The node details, or None if the node is not found in this run.
@@ -2853,17 +2798,22 @@ class ScenarioRunService:
                 self._progress_read_model._map_progress_delta(delta=d, plan_lookup=plan_lookup) for d in children_deltas
             ]
 
-        conversations = await self._saved_conversation_reader.get_legacy_projections_async(
-            attack_result_id=attack_result_id,
-            include_messages=include_messages,
+        conversations = await self._saved_conversation_reader.list_conversations_async(
+            attack_result_id=attack_result_id
         )
+        if conversations is None:
+            return None
 
         return self._progress_read_model.build_hierarchy_node(
             delta=target_delta,
             result=target_result,
             children_deltas=children_deltas,
             children_results=children_results,
-            conversations=conversations,
+            conversations=conversations.conversations,
+            conversations_count=conversations.total_count,
+            conversations_truncated=(
+                conversations.pagination.has_more if conversations.pagination is not None else False
+            ),
             children_truncated=child_offset > 0 or next_offset < len(child_ids),
             child_offset=child_offset,
             child_limit=max_immediate_children,

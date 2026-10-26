@@ -4,38 +4,22 @@
 """Bounded, read-only saved conversation views shared by attack and scenario APIs."""
 
 import uuid
-from typing import ClassVar
 
 from pyrit.backend.mappers._preview import format_last_message_preview
 from pyrit.backend.mappers.attack_mappers import pyrit_messages_to_dto_async
 from pyrit.backend.models.attacks import (
     AttackConversationsResponse,
     ConversationMessagesResponse,
-    ConversationSummary,
 )
 from pyrit.backend.models.common import PaginationInfo
 from pyrit.common.pagination import decode_keyset_cursor, encode_keyset_cursor, fingerprint_filters
 from pyrit.memory import MemoryInterface
 from pyrit.memory.memory_interface import MessagePieceKeysetCursor
-from pyrit.models import (
-    ConversationStats,
-    ConversationType,
-    ScenarioAttackResultConversations,
-    ScenarioConversationMessagePieceProjection,
-    ScenarioConversationMessageProjection,
-    ScenarioConversationProjection,
-)
+from pyrit.models import ConversationStats, ConversationSummary
 
 
 class SavedConversationReadService:
     """Read canonical saved references/messages without constructing an executable attack."""
-
-    _LEGACY_DETAILS: ClassVar[dict[ConversationType | None, tuple[str, str]]] = {
-        None: ("main", "Main objective target conversation"),
-        ConversationType.PRUNED: ("pruned", "Pruned conversation"),
-        ConversationType.ADVERSARIAL: ("adversarial_chat", "Adversarial chat conversation"),
-        ConversationType.PREPARATION: ("preparation", "Preparation conversation"),
-    }
 
     def __init__(self, *, memory: MemoryInterface) -> None:
         """Bind all saved reads to the caller's memory instance."""
@@ -180,84 +164,4 @@ class SavedConversationReadService:
             ),
             pagination=PaginationInfo(limit=limit, has_more=next_cursor is not None, next_cursor=next_cursor),
             partial_message_sequences=list(page.partial_message_sequences),
-        )
-
-    async def get_legacy_projections_async(
-        self,
-        *,
-        attack_result_id: str,
-        include_messages: bool = False,
-        limit_messages_per_conversation: int = 100,
-        max_conversations: int = 50,
-        max_pieces_per_message: int = 100,
-    ) -> ScenarioAttackResultConversations:
-        """
-        Adapt canonical saved records to the existing clipped hierarchy wire format.
-
-        New clients load a selected conversation through ``get_messages_async`` instead.
-
-        Returns:
-            ScenarioAttackResultConversations: Compatible bounded metadata and optional turn previews.
-        """
-        page = await self._memory.get_attack_conversation_page_async(
-            attack_result_id=attack_result_id, limit=max_conversations
-        )
-        if page is None:
-            return ScenarioAttackResultConversations(conversations=[], total_count=0, truncated=False)
-        stats = (
-            await self._memory.get_conversation_stats_async(
-                conversation_ids=[reference.conversation_id for reference in page.conversations]
-            )
-            if page.conversations
-            else {}
-        )
-        conversations: list[ScenarioConversationProjection] = []
-        for reference in page.conversations:
-            messages: list[ScenarioConversationMessageProjection] = []
-            message_count = stats.get(reference.conversation_id, ConversationStats(message_count=0)).message_count
-            truncated = message_count > 0
-            if include_messages:
-                (
-                    saved_messages,
-                    truncated,
-                    partial_sequences,
-                ) = await self._memory.get_bounded_conversation_messages_async(
-                    conversation_id=reference.conversation_id,
-                    limit=limit_messages_per_conversation,
-                    max_pieces_per_message=max_pieces_per_message,
-                )
-                for message in saved_messages:
-                    first = message.message_pieces[0]
-                    messages.append(
-                        ScenarioConversationMessageProjection(
-                            role=first.role,
-                            content=message.get_value(),
-                            sequence=first.sequence,
-                            timestamp=first.timestamp,
-                            pieces=[
-                                ScenarioConversationMessagePieceProjection(
-                                    data_type=piece.converted_value_data_type,
-                                    content=piece.original_value,
-                                    converted_value=piece.converted_value,
-                                )
-                                for piece in message.message_pieces
-                            ],
-                            pieces_truncated=first.sequence in partial_sequences,
-                        )
-                    )
-            kind, description = self._LEGACY_DETAILS[reference.conversation_type]
-            conversations.append(
-                ScenarioConversationProjection(
-                    conversation_id=reference.conversation_id,
-                    conversation_type=kind,
-                    description=description,
-                    message_count=message_count,
-                    messages=messages,
-                    messages_truncated=truncated,
-                )
-            )
-        return ScenarioAttackResultConversations(
-            conversations=conversations,
-            total_count=page.total_count,
-            truncated=page.total_count > len(conversations),
         )

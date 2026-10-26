@@ -97,10 +97,13 @@ remain explicit and consume positions, so even a wholly unresolved page can adva
 Child cursors validate the run, node, timestamp, and saved reference ordering;
 restart child paging after those references change.
 
-Node expansion returns conversation metadata only by default. Use the generic
-saved-conversation APIs above for continuation through any selected transcript.
-`include_messages=true` explicitly opts into the older clipped conversation
-previews, not a complete transcript.
+Tree previews leave conversation metadata deferred: `conversations` is empty,
+`conversations_count` is unknown, and `conversations_truncated` is true when saved
+references exist. The node's `conversation_id` still links to its main conversation.
+Node expansion returns up to 50 canonical conversation summaries, the exact reference
+count, and a clipping flag. These use the same metadata model as the generic attack API.
+Use the saved-conversation APIs above for reference continuation and all transcript
+bodies. There is no hierarchy-specific transcript format or conversation-preview mode.
 
 An entirely rootless saved graph, such as a closed cycle, returns a bounded
 `diagnostics.rootless_result_ids` sample with its total count and clipping flag.
