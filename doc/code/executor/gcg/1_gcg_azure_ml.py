@@ -29,9 +29,15 @@
 # %%
 import os
 
-from pyrit.setup.initialization import _load_environment_files
+from pyrit.setup import ConfigurationLoader, initialize_pyrit_async
 
-_load_environment_files(env_files=None)
+pyrit_config = ConfigurationLoader.load_with_overrides()
+await initialize_pyrit_async(
+    memory_db_type="InMemory",
+    load_defaults=False,
+    env_files=pyrit_config.resolve_env_files(),
+    env_akv_ref=pyrit_config.resolve_env_akv_ref(),
+)
 
 subscription_id = os.environ.get("AZURE_ML_SUBSCRIPTION_ID")
 resource_group = os.environ.get("AZURE_ML_RESOURCE_GROUP")
@@ -56,9 +62,9 @@ warnings.filterwarnings("ignore", module=r"azure\.ai\.ml.*")
 
 # %%
 from azure.ai.ml import MLClient
-from azure.identity import AzureCliCredential
+from azure.identity import DefaultAzureCredential
 
-ml_client = MLClient(AzureCliCredential(), subscription_id, resource_group, workspace)
+ml_client = MLClient(DefaultAzureCredential(), subscription_id, resource_group, workspace)
 
 # %% [markdown]
 # ## Create AML Environment
