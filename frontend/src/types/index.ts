@@ -483,6 +483,7 @@ export interface ConverterIdentifier {
 }
 
 export interface ConverterInstance {
+  parameters?: Parameter[]
   converter_id: string
   reconstructable?: boolean
   reconstruction_error?: string | null
@@ -507,6 +508,8 @@ export interface SourceInstanceSpec {
   params: Record<string, unknown>
   effective_hash?: string
 }
+
+export type ConverterSelection = string | SourceInstanceSpec
 
 export interface TargetBinding {
   version: 1
@@ -580,8 +583,8 @@ export type SimulationChanges = Partial<SimulationSettings>
 interface TechniqueSettingFields {
   description?: string | null
   params?: Record<string, unknown>
-  request_converters?: string[] | null
-  response_converters?: string[] | null
+  request_converters?: ConverterSelection[] | null
+  response_converters?: ConverterSelection[] | null
   adversarial_chat?: string | null
   adversarial_system_prompt?: string | null
   adversarial_seed_prompt?: string | null
@@ -614,6 +617,7 @@ export interface TechniqueConfiguration {
   supplied_parameters: string[]
   read_only: Record<string, string>
   supports_prepended_conversation: boolean
+  supports_prompt?: boolean
 }
 
 export interface TechniqueEditResponse {
@@ -1425,6 +1429,7 @@ export interface ScenarioDatasetLoadResponse {
 }
 
 export interface RegisteredScenario {
+  supports_objective_scorer?: boolean
   /** Maximum resolved concrete techniques, excluding baseline. Omitted/null means unrestricted. */
   max_concrete_techniques?: number | null
   scenario_name: string
@@ -1638,6 +1643,7 @@ export interface ScenarioSuiteExecutionSummary {
 }
 
 export interface RunScenarioRequest {
+  objective_scorer?: RegisteredComponentReference | null
   scenario_name: string
   target_name?: string | null
   adversarial_target_name?: string | null
@@ -1707,6 +1713,7 @@ export interface ScenarioRunSizeEstimateResponse {
 }
 
 export interface ScenarioRunSizeEstimateRequest {
+  objective_scorer?: RegisteredComponentReference | null
   target_name?: string | null
   adversarial_target_name?: string | null
   techniques?: string[] | null
