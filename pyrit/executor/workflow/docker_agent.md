@@ -7,6 +7,13 @@ use exact daemon exec/container identities; the tests use only mocked HTTP,
 byte streams and Compose control responses. **No actual Docker/CLI, model,
 credential, network or VM run qualifies this implementation.**
 
+The [concrete owned connector](docker_cli_connector.md) adds an explicit
+two-service/controller binding and an optional, separately qualified
+run-owned named task-volume profile. The default stop-only/tmpfs contract
+below is unchanged. Its source review also identifies why archive-view
+readback does not establish guest-visible tmpfs configuration or workspace
+handoff; concrete Codex readiness remains refused on that basis.
+
 ## Explicit profile and ownership
 
 `DockerStopOnlyAgentLease` subclasses the strict Compose lease without changing

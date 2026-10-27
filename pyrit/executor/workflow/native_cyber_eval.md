@@ -93,6 +93,236 @@ The binding caps TTL and explicitly allows converters and technique factories.
 Task-specific interfaces must further constrain instruction variants and protect
 the original grading rules, trust policy, fixture and credentials.
 
+## Opt-in unified Copilot SDK/model evidence
+
+`NativeCyberTaskBinding(..., evidence_contract=NativeCyberEvidenceContract.COPILOT_SDK_AND_MODEL)`
+selects unified capture explicitly. The default `SDK_EVENTS` contract retains
+the existing SDK-only behavior and **does not claim GHCP model-wire coverage**.
+The unified contract currently supports the literal attack and retained operator
+steps with `CopilotSdkAgentSession`; it does not create a Copilot SDK, model
+client, relay, credential, task image or alternate grader.
+
+Before dispatch, the controller declares `ghcp.sdk.events`,
+`ghcp.model.requests` and `ghcp.model.responses` as required sources in the
+existing `NativeCyberEvidenceStore` episode. It attaches one
+`CopilotSdkDatabaseEvidenceSink` to the session before any event, opens each
+outer turn and its raw streams, then calls the binding's
+`bind_model_observer(*, runtime, observer)` hook. A binding opting in without
+that trusted host-transport injection fails, rather than falling back to
+SDK-only completion.
+
+The injected `CopilotSdkModelObserver` has an immutable
+`CopilotSdkCaptureIdentity(run_id, session_id, turn_id, turn_index)` and two
+async observation methods:
+
+- `record_request_async(*, request_id, body: bytes, accepted: bool)` must finish
+  **before** the trusted transport dispatches the original request. Rejected
+  ingress is a HARNESS source and cannot satisfy model coverage.
+- `record_response_async(*, request_id, body: bytes, status_code, origin,
+  complete: bool)` must finish **before** that transport returns bytes to the
+  SDK. `CopilotModelResponseOrigin.PROVIDER`, `HOST` and `SYNTHETIC` are distinct.
+  Only a complete, paired, successful original provider response can satisfy
+  model coverage. This is a trusted source assertion, not inferred from a
+  response body or a 200 status.
+
+Only original bodies belong in these methods, not URLs, authorization headers,
+tokens or constructed success receipts. Raw bodies can still contain sensitive
+task data and remain in the existing private raw-stream store. Public model
+event summaries retain source request identity, byte count, digest, origin and
+status, never the body. This whole-body, bounded observation seam does not
+claim arbitrary provider or streaming-protocol compatibility.
+
+SDK callbacks synchronously enqueue detached original SDK envelopes. Their
+durable writes and the awaited model boundaries drain a single ordered queue.
+One run-wide controller sequence spans all sources and retained turns. SDK
+event IDs and model request IDs cannot be reused, including across turns;
+foreign run/session/turn identity, late observations, incomplete pairing,
+malformed events and failed or quota-limited writes latch required gaps.
+Cancellation joins an in-flight store write before sealing/finalizing so it
+cannot silently finish after the workflow returns.
+
+The controller owns turn creation, authentic normalizer-persisted request,
+response and tool `MessagePiece` links, finalization, and grading decisions.
+The target/session only forwards prepared instructions and observed SDK events;
+it has no DB, model dispatch or grading logic. In unified mode the legacy
+after-delivery SDK DB capture and SDK sidecar journal are not also run.
+There is one SDK stream per turn, not replayed cumulative session history.
+Model sources, host-rejected requests and host/synthetic responses have
+separate stream identities in the same turn.
+
+The recorder projects the canonical report into the same controller event
+order as the DB, preserving every original SDK ID/payload and remapping tool
+request/start/completion ordinals. Raw SDK ordinals remain in the session
+snapshot. The report's `scope="native_sdk_and_model"` explicitly distinguishes
+this projection from SDK-only evidence; no second event table or evidence DB
+is introduced. A watermark mismatch between the adapter and persisted SDK
+observations is incomplete capture, not a recovered success.
+
+After the final turn, the agent must successfully quiesce and the store's
+pre-grading coverage assessment must pass before the binding's original grader
+is called once. That call occurs while the owned environment still exists.
+Cancellation, missing actual model capture, tool-correlation gaps, failed
+quiescence or capture failures prevent grading. Late/post-grade capture failure
+or failed cleanup prevents a COMPLETE result. Only after owned cleanup does
+the existing atomic finalizer commit the report, standard Score and episode
+reference. A finalizer failure is surfaced without retrying the grader or
+manufacturing a published result.
+
+The regression suite uses explicitly **synthetic source fixtures** and isolated
+SQLite with network/provider/subprocess calls blocked during tests. It proves
+offline lifecycle/capture behavior, not a genuine JWT judgment, benchmark
+equivalence, live GHCP qualification or authorization to replay a prior task.
+
+### Trusted whole-body model observation transport
+
+`CopilotSdkModelTransport(observer=observer, forwarder=admitted_forwarder)`
+enforces the before-dispatch/before-return obligations above instead of leaving
+that ordering to every binding. A binding creates a fresh immutable adapter for
+each supplied observer; its already-admitted forwarder may be reused. There is
+no SDK, route, credential lookup, provider client, listener, authorization policy,
+tool executor, retry or run-budget allocator in this adapter.
+
+The caller supplies a `CopilotSdkModelRequest` with the exact observer identity,
+one original request ID, original `body: bytes`, and explicit `streaming=False`.
+`forward_async(*, request, deadline)` first durably records that body. Only then
+does it call the injected `CopilotSdkModelForwarder.forward_async(*, request,
+deadline, max_response_bytes)` once. The forwarder returns a
+`CopilotSdkModelResponse` with matching identity/request ID, original body,
+status, immutable ordered header pairs, explicit `CopilotModelResponseOrigin`
+and `complete` flag. Response capture finishes before the identical result
+object is returned. Headers are preserved for the caller, not sent to the
+recorder or included in representations. Request URLs/auth headers cannot be
+passed through this body-only request type.
+
+No JSON is parsed or reserialized. Fields such as `prompt_cache_key`, unknown
+body fields, whitespace and response header ordering are preserved. The caller
+must validate the exact upstream protocol and wire features before admission.
+Streaming requests are rejected rather than silently coerced into non-streaming
+requests. This whole-body boundary does **not** implement SSE, WebSocket or the
+Copilot SDK's request-handler types/call shape. No pinned SDK handler package is
+available in this implementation's local environment, so an independently
+qualified caller-owned SDK shim is still required. This is not proof that a
+particular CLI/SDK/provider combination works.
+
+An admitted forwarder must label HOST/SYNTHETIC responses explicitly, even at
+HTTP 200. They cannot satisfy MODEL coverage. For ingress the caller already
+rejected, `record_rejection_async(*, request, response, deadline)` records the
+original rejected request and supplied non-provider error response without ever
+calling the forwarder. The adapter never fabricates a provider or rejection
+body. Incomplete responses, wrong identities, oversize bodies, durable-write
+failure and forwarder exceptions fail closed; the observed request and any
+retained partial evidence remain available.
+
+`deadline` is one finite, absolute `asyncio` loop time supplied by the caller,
+covering request capture, forwarding and response capture. The same value and
+the store's body-size cap are passed to the forwarder. Boundaries are rechecked
+before forwarding and returning; there is no renewed timeout or implicit retry.
+Cancellation/expiry cancels and joins the one local forwarding task, including
+its cancellation cleanup, and latches a content-free evidence gap. In-flight
+durable writes are also joined. Joining can exceed the deadline: this is
+cooperative cancellation, not a hard wall-clock or remote-generation-stop
+guarantee. A trusted forwarder must honor cancellation, release its I/O, join
+its own workers and raise sanitized errors; an uncooperative implementation
+cannot be force-stopped by this library. The existing controller checkpoints
+the failure and retains ownership of grading/cleanup/publication decisions.
+
+## Harness-neutral task composition
+
+`NativeCyberEvaluation(..., harness=adapter)` explicitly selects an agent
+adapter independently of the original task binding and sandbox provider.
+Without that argument, the existing `SDK_EVENTS` and
+`COPILOT_SDK_AND_MODEL` paths retain their call contracts. Unknown adapters,
+non-literal attack loops and unsupported retained operator turns are rejected
+before allocating an environment or invoking a model.
+
+An explicitly adapted task supplies `NativeTaskRuntime`: immutable `run_id`,
+`environment_id`, `simulated`, the existing host-storage exclusion check, and
+`grade_async(*, evidence: NativeHarnessEvidence) -> NativeCyberJudgment`.
+The original task grader does not construct an SDK, select stream names or
+know a CLI parser. The task binding still owns instruction/response policy,
+the original judgment and artifact acquisition. The provider still owns
+allocation, stop/freeze guarantees and cleanup.
+
+Adapters declare capabilities and required sources before dispatch, attach a
+target/recorder to the exact allocated runtime, and expose an explicitly typed
+source snapshot. `NativeHarnessEvidence` holds an immutable
+`NativeHarnessIdentity(run_id, environment_id, harness_id, source_session_id)`,
+quiescence, source coverage/gaps and **either** unchanged SDK evidence **or**
+native CLI evidence. A CLI source session is absent until observed; a
+controller turn ID is not a fabricated provider session or event ID.
+
+| Adapter | Outer turns | Source and tool semantics | Model evidence |
+| --- | --- | --- | --- |
+| `CopilotSdkHarnessAdapter` | Retained steps only when explicitly qualified | Actual SDK callbacks and correlated request/start/completion, with original model-visible output | Unified SDK recorder plus trusted host model observer |
+| `ClaudeCliHarnessAdapter` | One-shot `-p --output-format stream-json --verbose` | Actual assistant `tool_use` and user `tool_result`; no invented execution-start/completion | Original Anthropic Messages bodies/SSE through the existing admitted gateway |
+| `CodexCliHarnessAdapter` | One-shot `exec --json` | Actual item start/completion and `aggregated_output`; no provable mapping from item ID to a model request | Original Responses bodies/SSE through the existing admitted gateway, or an admitted whole-body forwarder |
+
+Claude is the second tool-bearing conformance path because its existing
+transcript exposes the model request/result IDs. Codex tool-free episodes can
+complete, but **tool-bearing Codex episodes remain incomplete** under the
+existing causal-coverage rule. `aggregated_output` is an observed CLI tool
+receipt, not evidence that the model saw those exact bytes. This implementation
+does not relax that rule or manufacture SDK events/request IDs. CLI command
+and tool-output correlations remain source event links in the existing store;
+the target does not invent conversation `MessagePiece`s for them. Actual
+normalizer-persisted request/assistant pieces retain their IDs and content
+digests. Missing fields remain absent.
+
+The shared controller runs the same converter/normalizer/attack lifecycle for
+all adapters. It seals sources, confirms agent quiescence, and assesses
+required DB coverage **before** calling the task's original grader once while
+the target environment is alive. CLI PREGRADING validates raw pipes, actual
+parser/tool/model evidence and message links without requiring a future
+judgment or artifact. FINAL still requires the acquired judgment and verified
+closure. The CLI runner distinguishes observed guest exit from a successful
+owned stop barrier; exit zero alone cannot authorize grading.
+The explicit SDK connector also supplies a provider-owned
+`quiesce_agent_async` barrier, awaited after SDK disconnect and before grading.
+SDK disconnection alone is not treated as proof that guest tools stopped.
+
+After cleanup, the existing SDK or CLI atomic finalizer stores one native
+report, one standard Score and the episode reference. The CLI representation
+keeps its version/profile, original event fields, stdout offsets/digests and
+real process outcome, rather than translating them into SDK shapes. When the
+shared task returns a `NativeCyberJudgment`, its complete original object is
+retained inline in the CLI judgment with a verified `inline-sha256:` reference;
+this is an observed grading result, not a second invocation or invented
+artifact. Task-supplied artifact references remain unchanged. Artifact-only
+turns require explicit task policy and actual native terminal events, never
+a manufactured assistant answer.
+
+Canonical v1 CLI serialization omits only `environment_id`, `harness_id` and
+judgment `retained_evidence` when their value is `None`. Existing v1 null fields
+remain explicit, preserving pre-extension canonical bytes, hashes and stored
+Score/content links without rewriting historical records. Non-null extensions,
+including empty/false retained evidence, remain part of the bound digest.
+
+The raw capture sink now checks each write receipt and stops progress on
+quota loss or misattribution instead of allowing a clean parser exit after
+truncation. In-flight writes are joined under cancellation. Post-finish
+observations latch gaps; partial reports cannot acquire a COMPLETE Score.
+Read-only `get_episode`/`read_event_payloads`/`read_raw_chunks` expose the
+existing run identity, controller order, stream UUID/offset and verified
+digests. Sensitive payload reads still require `allow_sensitive=True`.
+
+The original-body wrapper is now `NativeModelTransport`, with
+`NativeModelObserver`, `NativeModelForwarder`, `NativeModelRequest`,
+`NativeModelResponse` and `NativeModelCaptureIdentity`. Old
+`CopilotSdkModel*` names and `CopilotSdkCaptureIdentity` remain aliases.
+Identity additionally binds an environment/harness; for CLI whole-body
+capture the observed session is explicitly `None` until CLI evidence supplies
+it. `NativeCliModelObserver` supports the admitted non-streaming Responses
+boundary only. Anthropic Messages retains its separate existing gateway
+contract, including approved headers and streaming semantics. Neither path
+coerces an unsupported wire protocol or adds auth, retries or budget windows.
+
+These are ordinary offline library implementations and synthetic source/store
+conformance tests. They do not qualify any actual CLI, SDK, image, model route,
+sandbox or original benchmark. A production connector must provide its
+already-admitted launcher/gateway and proven stop boundary. No private task
+implementation, accepted task result or operational database is copied into
+these adapters.
+
 ## Provider-neutral environment lease
 
 This path is native PyRIT only. It neither imports nor delegates to Inspect or

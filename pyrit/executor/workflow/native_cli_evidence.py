@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pyrit.models.native_cli_report import NativeCliReportEvent
 from pyrit.models.native_cyber_evidence import (
@@ -17,16 +17,19 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberRawKind,
     NativeCyberRawStreamKey,
     NativeCyberRawStreamStart,
+    NativeCyberRawWrite,
     NativeCyberResponseMode,
     NativeCyberToolPhase,
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
 )
+from pyrit.models.native_harness import NativeModelResponseOrigin
 from pyrit.prompt_target.gateway.messages_contract import MessagesCoverage, MessagesObservation
 from pyrit.prompt_target.gateway.responses_contract import GatewayCoverage, GatewayFrameKind, GatewayObservation
 from pyrit.prompt_target.native_cli_models import NativeCliEventKind, NativeCliProtocol, NativeCliStream
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from uuid import UUID
 
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
 
     from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
     from pyrit.prompt_target.native_cli_models import NativeCliEvent, NativeCliRawChunk, NativeCliRunOutcome
+
+ResultT = TypeVar("ResultT")
 
 
 class NativeCliDatabaseEvidenceSink:
@@ -59,6 +64,7 @@ class NativeCliDatabaseEvidenceSink:
         turn_index: int,
         protocol: NativeCliProtocol,
         include_model_gateway: bool = False,
+        environment_id: str | None = None,
     ) -> None:
         """
         Bind a sink to one caller-created episode and one outer turn.
@@ -82,6 +88,7 @@ class NativeCliDatabaseEvidenceSink:
         self._turn_id = turn_id
         self._turn_index = turn_index
         self._protocol = protocol
+        self.environment_id = environment_id
         self._streams = {
             stream: NativeCyberRawStreamStart(run_id=run_id, turn_index=turn_index, key=key)
             for stream, key in zip(
@@ -116,7 +123,46 @@ class NativeCliDatabaseEvidenceSink:
         self._started = False
         self._finished = False
         self._failed = False
+        self._gaps: list[str] = []
+        self._marked_gaps = 0
+        self._sealing = False
         self._lock = asyncio.Lock()
+
+    @property
+    def turn_open(self) -> bool:
+        """Whether the started source turn can still be sealed once."""
+        return self._started and not self._sealing
+
+    @property
+    def gaps(self) -> tuple[str, ...]:
+        """Irreversible local capture gaps, including observations after sealing."""
+        gaps = list(self._gaps)
+        if self._failed:
+            gaps.append("Native CLI capture failed.")
+        return tuple(dict.fromkeys(gaps))
+
+    @property
+    def max_body_bytes(self) -> int:
+        """The maximum single whole-body observation size."""
+        return self._store.MAX_APPEND_BYTES
+
+    def fail(self, reason: str) -> None:
+        """Latch a bounded content-free gap for the controller's next checkpoint."""
+        self._failed = True
+        self._gaps.append(reason[:512])
+
+    def ensure_active(self) -> None:
+        """Reject a source boundary outside this healthy turn."""
+        self._require_capture()
+
+    async def checkpoint_async(self) -> None:
+        """Persist late or interrupted capture gaps without replaying source writes."""
+        async with self._lock:
+            while self._marked_gaps < len(self._gaps):
+                await self._store_write_async(
+                    self._store.mark_capture_gap, run_id=self._run_id, reason=self._gaps[self._marked_gaps]
+                )
+                self._marked_gaps += 1
 
     @property
     def run_id(self) -> str:
@@ -191,7 +237,7 @@ class NativeCliDatabaseEvidenceSink:
                 raise ValueError("A CLI evidence sink can start only once.")
             self._started = True
             try:
-                await asyncio.to_thread(
+                await self._store_write_async(
                     self._store.begin_turn,
                     turn=NativeCyberTurnStart(
                         run_id=self._run_id,
@@ -202,9 +248,9 @@ class NativeCliDatabaseEvidenceSink:
                     ),
                 )
                 for stream in NativeCliStream:
-                    await asyncio.to_thread(self._store.open_raw_stream, stream=self._streams[stream])
+                    await self._store_write_async(self._store.open_raw_stream, stream=self._streams[stream])
                 for stream in self._gateway_streams.values():
-                    await asyncio.to_thread(self._store.open_raw_stream, stream=stream)
+                    await self._store_write_async(self._store.open_raw_stream, stream=stream)
             except (Exception, asyncio.CancelledError):
                 self._failed = True
                 raise
@@ -249,6 +295,87 @@ class NativeCliDatabaseEvidenceSink:
                 )
             except (Exception, asyncio.CancelledError):
                 self._failed = True
+                raise
+
+    async def record_model_body_async(
+        self,
+        *,
+        request_id: str,
+        body: bytes,
+        accepted: bool | None = None,
+        origin: NativeModelResponseOrigin | None = None,
+        status_code: int | None = None,
+        complete: bool | None = None,
+    ) -> None:
+        """
+        Capture a trusted, admitted whole Responses body without rewriting it or running a gateway.
+
+        Raises:
+            ValueError: If source, pairing, body size or explicit origin is invalid.
+            asyncio.CancelledError: If durable capture was interrupted.
+        """
+        async with self._lock:
+            self._require_capture()
+            try:
+                if self._protocol is not NativeCliProtocol.CODEX_EXEC_JSON or not self._include_model_gateway:
+                    raise ValueError("Whole Responses bodies require the explicit Codex model-capture profile.")
+                if not isinstance(body, bytes) or not 0 < len(body) <= self.max_body_bytes:
+                    raise ValueError("Native model bodies must be bounded original bytes.")
+                if accepted is False:
+                    if request_id in self._gateway_requests or not request_id or len(request_id) > 128:
+                        raise ValueError("Rejected model request identity is invalid or reused.")
+                    self._gateway_requests[request_id] = False
+                    await self._record_model_frame_async(
+                        request_id=request_id,
+                        kind=GatewayFrameKind.GATEWAY_ERROR,
+                        frame=body,
+                        coverage=["failed"],
+                        event_namespace="gateway",
+                        wire_protocol="openai_responses",
+                        terminal=True,
+                        completed=False,
+                        error_code="rejected_request",
+                        status_code=None,
+                        metadata={"origin": "host", "rejected_request": True},
+                    )
+                    self._gateway_terminal_requests.discard(request_id)
+                    return
+                if accepted is True:
+                    kind, flags = GatewayFrameKind.REQUEST, []
+                elif (
+                    accepted is None
+                    and isinstance(origin, NativeModelResponseOrigin)
+                    and type(complete) is bool
+                    and type(status_code) is int
+                    and 200 <= status_code <= 599
+                ):
+                    kind = (
+                        GatewayFrameKind.RESPONSE
+                        if origin is NativeModelResponseOrigin.PROVIDER
+                        else GatewayFrameKind.GATEWAY_ERROR
+                    )
+                    flags = (
+                        ["completed"]
+                        if complete and status_code == 200 and kind is GatewayFrameKind.RESPONSE
+                        else ["failed"]
+                    )
+                else:
+                    raise ValueError("Model capture requires explicit admission or original response provenance.")
+                await self._record_model_frame_async(
+                    request_id=request_id,
+                    kind=kind,
+                    frame=body,
+                    coverage=flags,
+                    event_namespace="gateway",
+                    wire_protocol="openai_responses",
+                    terminal=kind is not GatewayFrameKind.REQUEST,
+                    completed="completed" in flags,
+                    error_code=None if kind is not GatewayFrameKind.GATEWAY_ERROR else "non_provider",
+                    status_code=status_code,
+                    metadata={"origin": origin.value} if origin is not None else None,
+                )
+            except (Exception, asyncio.CancelledError):
+                self.fail("Native model body capture failed.")
                 raise
 
     async def record_messages_observation_async(self, observation: MessagesObservation) -> None:
@@ -365,9 +492,10 @@ class NativeCliDatabaseEvidenceSink:
         offset = self._gateway_received[name]
         for start in range(0, len(frame), self._store.MAX_APPEND_BYTES):
             data = frame[start : start + self._store.MAX_APPEND_BYTES]
-            await asyncio.to_thread(
+            write = await self._store_write_async(
                 self._store.append_raw, run_id=self._run_id, stream_id=raw_stream.stream_id, data=data
             )
+            self._verify_write(write=write, stream_id=raw_stream.stream_id, data=data)
             self._gateway_hashes[name].update(data)
             self._gateway_received[name] += len(data)
         await self._append_event_async(
@@ -392,7 +520,7 @@ class NativeCliDatabaseEvidenceSink:
         if kind is GatewayFrameKind.GATEWAY_ERROR:
             self._gateway_terminal_requests.add(request_id)
             self._gateway_failed = True
-            await asyncio.to_thread(
+            await self._store_write_async(
                 self._store.mark_capture_gap,
                 run_id=self._run_id,
                 reason="Model gateway produced a host-generated failure.",
@@ -424,9 +552,10 @@ class NativeCliDatabaseEvidenceSink:
                 offset = self._received[stream]
                 for start in range(0, len(chunk.data), self._store.MAX_APPEND_BYTES):
                     data = chunk.data[start : start + self._store.MAX_APPEND_BYTES]
-                    await asyncio.to_thread(
+                    write = await self._store_write_async(
                         self._store.append_raw, run_id=self._run_id, stream_id=raw_stream.stream_id, data=data
                     )
+                    self._verify_write(write=write, stream_id=raw_stream.stream_id, data=data)
                     self._hashes[stream].update(data)
                     self._received[stream] += len(data)
                 await self._append_event_async(
@@ -508,7 +637,7 @@ class NativeCliDatabaseEvidenceSink:
                 self._failed = True
                 raise
 
-    async def read_report_events_async(self) -> tuple[NativeCliReportEvent, ...]:
+    async def read_report_events_async(self, *, allow_partial: bool = False) -> tuple[NativeCliReportEvent, ...]:
         """
         Read verified stored observation summaries without reloading raw process frames.
 
@@ -520,7 +649,7 @@ class NativeCliDatabaseEvidenceSink:
             RuntimeError: If the turn has not been sealed or a page of DB events is missing.
         """
         async with self._lock:
-            if not self._finished:
+            if not self._finished and not allow_partial:
                 raise RuntimeError("CLI observations are not available before the turn is sealed.")
             cursor = 0
             summaries: list[NativeCliReportEvent] = []
@@ -600,9 +729,10 @@ class NativeCliDatabaseEvidenceSink:
             asyncio.CancelledError: If the caller interrupts final capture.
         """
         async with self._lock:
-            if not self._started or self._finished:
+            if not self._started or self._sealing:
                 raise ValueError("CLI evidence must be started and may finish only once.")
-            gaps: list[str] = []
+            self._sealing = True
+            gaps: list[str] = list(self._gaps)
             if outcome is None:
                 gaps.append("No native CLI outcome was observed.")
             else:
@@ -632,7 +762,7 @@ class NativeCliDatabaseEvidenceSink:
                     for name, raw_stream in self._gateway_streams.items()
                 )
                 for raw_stream, count, digest in (*sources, *gateway_sources):
-                    await asyncio.to_thread(
+                    await self._store_write_async(
                         self._store.close_raw_stream,
                         run_id=self._run_id,
                         stream_id=raw_stream.stream_id,
@@ -640,7 +770,7 @@ class NativeCliDatabaseEvidenceSink:
                         expected_bytes=count,
                         observed_sha256=digest.hexdigest(),
                     )
-                await asyncio.to_thread(
+                await self._store_write_async(
                     self._store.finish_turn,
                     finish=NativeCyberTurnFinish(
                         run_id=self._run_id,
@@ -683,7 +813,7 @@ class NativeCliDatabaseEvidenceSink:
             tool_call_id=tool_call_id,
             tool_phase=tool_phase,
         )
-        await asyncio.to_thread(
+        await self._store_write_async(
             self._store.append_events,
             run_id=self._run_id,
             turn_index=self._turn_index,
@@ -716,5 +846,37 @@ class NativeCliDatabaseEvidenceSink:
         return offset
 
     def _require_capture(self) -> None:
-        if not self._started or self._finished or self._failed:
+        if not self._started or self._sealing or self._failed:
+            self.fail("A CLI observation arrived outside an open healthy capture turn.")
             raise RuntimeError("Native CLI evidence is not open for capture.")
+
+    def _verify_write(self, *, write: NativeCyberRawWrite, stream_id: UUID, data: bytes) -> None:
+        if (
+            write.stream_id != stream_id
+            or write.received_bytes != len(data)
+            or write.stored_bytes != len(data)
+            or write.omitted_bytes
+            or write.truncated
+        ):
+            self.fail("Native CLI durable source capture lost or misattributed bytes.")
+            raise RuntimeError("Native CLI raw capture was truncated, omitted or misattributed.")
+
+    async def _store_write_async(self, operation: Callable[..., ResultT], **kwargs: Any) -> ResultT:
+        task = asyncio.create_task(asyncio.to_thread(operation, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            self.fail("A native CLI durable capture write was interrupted.")
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception as error:
+                    raise cancellation from error
+            if not task.cancelled():
+                try:
+                    task.result()
+                except Exception as error:
+                    raise cancellation from error
+            raise

@@ -11,20 +11,29 @@ import stat
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from functools import cache
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 import aiofiles
 
 from pyrit.executor.attack import PromptSendingAttack
 from pyrit.executor.attack.core import AttackConverterConfig, AttackScoringConfig
+from pyrit.executor.workflow.copilot_sdk_evidence import CopilotSdkDatabaseEvidenceSink, CopilotSdkModelObserver
 from pyrit.executor.workflow.environment_lease import EnvironmentLease
+from pyrit.executor.workflow.native_harness import (
+    NativeHarnessAdapter,
+    NativeHarnessReportContext,
+    NativeHarnessRun,
+    NativeTaskRuntime,
+)
 from pyrit.memory import CentralMemory
 from pyrit.models import ComponentIdentifier, ContentEntryScorable, Identifiable, Message, SeedPrompt
 from pyrit.models.environment_lease import EnvironmentLeaseSnapshot, EnvironmentResourceHandle, EnvironmentServiceHandle
+from pyrit.models.native_cli_report import NativeCliRunReport
 from pyrit.models.native_cyber import (
     NativeAgentEvidence,
     NativeCyberCleanup,
+    NativeCyberEvidenceContract,
     NativeCyberJudgment,
     NativeCyberReadiness,
     NativeCyberReport,
@@ -34,6 +43,7 @@ from pyrit.models.native_cyber import (
 )
 from pyrit.models.native_cyber_evidence import (
     NativeCyberCapturedEvent,
+    NativeCyberCoveragePhase,
     NativeCyberEpisodeStart,
     NativeCyberEvidenceSource,
     NativeCyberRawKind,
@@ -44,10 +54,13 @@ from pyrit.models.native_cyber_evidence import (
     NativeCyberTurnFinish,
     NativeCyberTurnStart,
 )
+from pyrit.models.native_harness import NativeHarnessEvidence
 from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
+from pyrit.prompt_target.native_agent_target import CopilotSdkAgentSession
 from pyrit.registry import ConverterRegistry
 from pyrit.registry.instance_registry import DefaultInstanceRegistry, InstanceRegistry
 from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
+from pyrit.score.float_scale.native_cli_report_scorer import build_native_cli_report_score
 from pyrit.score.float_scale.native_cyber_scorer import NativeCyberReportScorer
 
 if TYPE_CHECKING:
@@ -56,7 +69,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pyrit.models import AttackResult, Score
-    from pyrit.prompt_target import NativeAgentTarget
+    from pyrit.models.native_cyber_evidence import NativeCyberCoverageAssessment
+    from pyrit.prompt_target import NativeAgentTarget, PromptTarget
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +81,7 @@ _SDK_EVENT_RAW_KEY = NativeCyberRawStreamKey(
 )
 
 
+@runtime_checkable
 class NativeCyberRuntime(Protocol):
     """One lease-owned agent environment; original grading happens before context exit."""
 
@@ -81,7 +96,7 @@ class NativeCyberRuntime(Protocol):
         ...
 
 
-class _NativeRuntimeLease(EnvironmentLease[NativeCyberRuntime]):
+class _NativeRuntimeLease(EnvironmentLease[NativeCyberRuntime | NativeTaskRuntime]):
     """Adapt the existing single runtime context without moving task or grader logic."""
 
     def __init__(
@@ -89,14 +104,14 @@ class _NativeRuntimeLease(EnvironmentLease[NativeCyberRuntime]):
         *,
         run_id: str,
         provider: str,
-        context: AbstractAsyncContextManager[NativeCyberRuntime],
+        context: AbstractAsyncContextManager[NativeCyberRuntime | NativeTaskRuntime],
     ) -> None:
         super().__init__(run_id=run_id)
         self._provider = provider
         self._context = context
         self._context_entered = False
 
-    async def _acquire_async(self) -> NativeCyberRuntime:
+    async def _acquire_async(self) -> NativeCyberRuntime | NativeTaskRuntime:
         handle = EnvironmentResourceHandle(
             run_id=self.run_id, provider=self._provider, resource_id=self.lease_id, kind="runtime_context"
         )
@@ -106,7 +121,7 @@ class _NativeRuntimeLease(EnvironmentLease[NativeCyberRuntime]):
         self._register_service(EnvironmentServiceHandle(name="runtime", roles=frozenset({"agent"}), resource=handle))
         return runtime
 
-    async def _enter_async(self, handle: EnvironmentResourceHandle) -> NativeCyberRuntime:
+    async def _enter_async(self, handle: EnvironmentResourceHandle) -> NativeCyberRuntime | NativeTaskRuntime:
         runtime = await self._context.__aenter__()
         self._context_entered = True
         return runtime
@@ -130,6 +145,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         allowed_converter_names: tuple[str, ...] = (),
         techniques: tuple[AttackTechniqueFactory, ...] = (),
         response_policy: NativeCyberResponsePolicy | None = None,
+        evidence_contract: NativeCyberEvidenceContract = NativeCyberEvidenceContract.SDK_EVENTS,
     ) -> None:
         """
         Initialize public catalog metadata and allow-listed technique choices.
@@ -141,6 +157,8 @@ class NativeCyberTaskBinding(Identifiable, ABC):
             raise ValueError("A binding requires an identity and a bounded lease TTL.")
         if any(factory.name == "literal" for factory in techniques):
             raise ValueError("The literal PromptSendingAttack baseline is reserved.")
+        if not isinstance(evidence_contract, NativeCyberEvidenceContract):
+            raise ValueError("A native binding must declare a supported evidence contract.")
         self.name = name
         self.version = version
         self.description = description
@@ -148,6 +166,16 @@ class NativeCyberTaskBinding(Identifiable, ABC):
         self.allowed_converter_names = allowed_converter_names
         self.techniques = {factory.name: factory for factory in techniques}
         self.response_policy = response_policy or NativeCyberResponsePolicy()
+        self.evidence_contract = evidence_contract
+
+    def bind_model_observer(self, *, runtime: NativeCyberRuntime, observer: CopilotSdkModelObserver) -> None:
+        """
+        Inject a turn-bound recorder into the trusted host model transport of an opted-in binding.
+
+        Raises:
+            NotImplementedError: If unified model capture was requested without a transport binding.
+        """
+        raise NotImplementedError("Unified SDK/model evidence requires an explicit trusted model observer binding.")
 
     @abstractmethod
     async def readiness_async(self) -> NativeCyberReadiness:
@@ -182,7 +210,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
 
     def open_runtime(
         self, *, run_id: str, request: NativeCyberRequest
-    ) -> AbstractAsyncContextManager[NativeCyberRuntime]:
+    ) -> AbstractAsyncContextManager[NativeCyberRuntime | NativeTaskRuntime]:
         """
         Create the legacy single runtime context, including its own rollback on failed entry.
 
@@ -193,12 +221,12 @@ class NativeCyberTaskBinding(Identifiable, ABC):
 
     def create_environment_lease(
         self, *, run_id: str, request: NativeCyberRequest
-    ) -> EnvironmentLease[NativeCyberRuntime]:
+    ) -> EnvironmentLease[NativeCyberRuntime | NativeTaskRuntime]:
         """
         Build a provider-neutral lease; existing single-runtime bindings need no changes.
 
         Returns:
-            EnvironmentLease[NativeCyberRuntime]: An unused run-owned lease.
+            EnvironmentLease[NativeCyberRuntime | NativeTaskRuntime]: An unused run-owned lease.
         """
         return _NativeRuntimeLease(
             run_id=run_id,
@@ -239,6 +267,7 @@ class NativeCyberTaskBinding(Identifiable, ABC):
                 "allowed_converters": list(self.allowed_converter_names),
                 "techniques": ["literal", *self.techniques],
                 "response_policy": self.response_policy.model_dump(mode="json"),
+                "evidence_contract": self.evidence_contract.value,
             },
         )
 
@@ -288,12 +317,20 @@ class NativeCyberEvaluation:
         }
     )
 
-    def __init__(self, *, binding: NativeCyberTaskBinding, request: NativeCyberRequest, directory: Path) -> None:
+    def __init__(
+        self,
+        *,
+        binding: NativeCyberTaskBinding,
+        request: NativeCyberRequest,
+        directory: Path,
+        harness: NativeHarnessAdapter | None = None,
+    ) -> None:
         """
         Create a fresh run without opening an agent or executing a tool.
 
         Raises:
             ValueError: If edits exceed the binding's allow-list or lineage is not verified by ``rerun``.
+            TypeError: If harness selection is not an explicit adapter.
         """
         if request.parent_run_id is not None:
             raise ValueError(
@@ -305,6 +342,18 @@ class NativeCyberEvaluation:
             raise ValueError("This binding does not permit the requested attack technique.")
         if set(request.converter_names) - set(binding.allowed_converter_names):
             raise ValueError("This binding does not permit one or more requested converters.")
+        if harness is not None:
+            if not isinstance(harness, NativeHarnessAdapter):
+                raise TypeError("Select an explicit native harness adapter, not an arbitrary backend name.")
+            harness.validate_request(request)
+        if (
+            harness is None
+            and binding.evidence_contract is NativeCyberEvidenceContract.COPILOT_SDK_AND_MODEL
+            and request.technique != "literal"
+        ):
+            raise ValueError(
+                "Unified SDK/model capture currently supports the literal attack and retained operator steps."
+            )
         self.binding = binding
         self.request = request
         self.run_id = str(uuid4())
@@ -314,11 +363,11 @@ class NativeCyberEvaluation:
         self.status = NativeCyberStatus.PREPARING
         self.cancel_requested = False
         self.turn_count = 0
-        self.report: NativeCyberReport | None = None
+        self.report: NativeCyberReport | NativeCliRunReport | None = None
         self.score: Score | None = None
         self._readiness: NativeCyberReadiness | None = None
-        self._runtime: NativeCyberRuntime | None = None
-        self._context: EnvironmentLease[NativeCyberRuntime] | None = None
+        self._runtime: NativeCyberRuntime | NativeTaskRuntime | None = None
+        self._context: EnvironmentLease[NativeCyberRuntime | NativeTaskRuntime] | None = None
         self._lease_started = False
         self._closed = False
         self._cleanup = NativeCyberCleanup.NOT_OPENED
@@ -350,6 +399,24 @@ class NativeCyberEvaluation:
         self._directory_created = False
         self._host_storage_verified = False
         self._agent_storage_verified = False
+        self._evidence_contract = binding.evidence_contract
+        self._unified_capture: CopilotSdkDatabaseEvidenceSink | None = None
+        self._harness = harness
+        self._harness_run: NativeHarnessRun | None = None
+
+    @property
+    def _target(self) -> PromptTarget:
+        if self._harness_run is not None:
+            return self._harness_run.target
+        assert self._runtime is not None and self._harness is None
+        return self._legacy_runtime.target
+
+    @property
+    def _legacy_runtime(self) -> NativeCyberRuntime:
+        runtime = self._runtime
+        if not isinstance(runtime, NativeCyberRuntime):
+            raise TypeError("The legacy session contract requires its original native target runtime.")
+        return runtime
 
     @property
     def environment_lease(self) -> EnvironmentLeaseSnapshot | None:
@@ -366,6 +433,7 @@ class NativeCyberEvaluation:
         Raises:
             ValueError: If the run was already started.
             RuntimeError: If incomplete native evidence cannot be retained.
+            TypeError: If unified capture has an unsupported session adapter.
             OSError: If neither report-file nor memory retention succeeds.
             asyncio.CancelledError: If the caller cancels; owned cleanup is still attempted.
         """
@@ -380,8 +448,16 @@ class NativeCyberEvaluation:
                         run_id=self.run_id,
                         binding_name=self.binding.name,
                         binding_version=self.binding.version,
+                        task_id=self.binding.name if self._harness is not None else None,
+                        task_version=self.binding.version if self._harness is not None else None,
                         started_at=self.started_at,
-                        required_raw_streams=(_SDK_EVENT_RAW_KEY,),
+                        required_raw_streams=(
+                            self._harness.required_raw_streams()
+                            if self._harness is not None
+                            else CopilotSdkDatabaseEvidenceSink.required_raw_streams()
+                            if self._evidence_contract is NativeCyberEvidenceContract.COPILOT_SDK_AND_MODEL
+                            else (_SDK_EVENT_RAW_KEY,)
+                        ),
                         response_policy=self.binding.response_policy,
                     ),
                 )
@@ -398,6 +474,10 @@ class NativeCyberEvaluation:
                     await self.binding.validate_host_storage_async(directory=self.directory)
                     self._host_storage_verified = True
                     self._readiness = await self.binding.readiness_async()
+                    if self._harness is not None:
+                        self._readiness = self._readiness.model_copy(
+                            update={"capabilities": self._harness.capabilities}
+                        )
                 if not self._readiness.ready:
                     self.status = NativeCyberStatus.BLOCKED
                     await self._publish_async(judgment=None)
@@ -416,16 +496,52 @@ class NativeCyberEvaluation:
                 async with asyncio.timeout(self._remaining_seconds()):
                     await self._runtime.validate_agent_storage_async(directory=self.directory)
                 self._agent_storage_verified = True
-                if self._runtime.target.session.simulated != self._readiness.simulated:
+                if self._harness is not None:
+                    if not isinstance(self._runtime, NativeTaskRuntime):
+                        raise TypeError("An explicit harness requires a neutral run/environment task runtime.")
+                    if self._runtime.simulated != self._readiness.simulated:
+                        raise ValueError("Runtime provenance disagrees with task qualification.")
+                    if self._runtime.environment_id in self._seen_environments:
+                        raise ValueError("A fresh rerun cannot reuse a previous task environment.")
+                    if self._runtime.run_id != self.run_id:
+                        raise ValueError("The allocated runtime must belong to this exact run.")
+                    await asyncio.to_thread(
+                        self._evidence_store.bind_runtime_identity,
+                        run_id=self.run_id,
+                        environment_id=self._runtime.environment_id,
+                        simulated=self._runtime.simulated,
+                    )
+                    self._harness_run = await self._harness.attach_async(
+                        runtime=self._runtime, run_id=self.run_id, store=self._evidence_store
+                    )
+                    self._verify_harness_lineage()
+                elif self._legacy_runtime.target.session.simulated != self._readiness.simulated:
                     raise ValueError("Runtime provenance disagrees with binding qualification.")
-                if self._runtime.target.session.capabilities != self._readiness.capabilities:
+                if (
+                    self._harness is None
+                    and self._legacy_runtime.target.session.capabilities != self._readiness.capabilities
+                ):
                     raise ValueError("Runtime capabilities disagree with qualified binding capabilities.")
-                if self._runtime.target.session.environment_id in self._seen_environments:
+                if (
+                    self._harness is None
+                    and self._legacy_runtime.target.session.environment_id in self._seen_environments
+                ):
                     raise ValueError("A fresh rerun cannot reuse a previous task environment.")
-                if self._runtime.target.session.session_id in self._seen_sessions:
+                if self._harness is None and self._legacy_runtime.target.session.session_id in self._seen_sessions:
                     raise ValueError("A fresh rerun cannot reuse a previous native session.")
-                self._raw_stream = NativeCyberRawStreamStart(run_id=self.run_id, key=_SDK_EVENT_RAW_KEY)
-                await asyncio.to_thread(self._evidence_store.open_raw_stream, stream=self._raw_stream)
+                if self._harness is not None:
+                    pass
+                elif self._evidence_contract is NativeCyberEvidenceContract.COPILOT_SDK_AND_MODEL:
+                    session = self._legacy_runtime.target.session
+                    if not isinstance(session, CopilotSdkAgentSession):
+                        raise TypeError("Unified Copilot capture requires the observed Copilot SDK session adapter.")
+                    self._unified_capture = CopilotSdkDatabaseEvidenceSink(
+                        store=self._evidence_store, run_id=self.run_id, session_id=session.session_id
+                    )
+                    session.attach_event_observer(self._unified_capture)
+                else:
+                    self._raw_stream = NativeCyberRawStreamStart(run_id=self.run_id, key=_SDK_EVENT_RAW_KEY)
+                    await asyncio.to_thread(self._evidence_store.open_raw_stream, stream=self._raw_stream)
                 self.status = NativeCyberStatus.RUNNING
                 factory = self.binding.techniques.get(self.request.technique) or AttackTechniqueFactory(
                     name="literal",
@@ -435,7 +551,7 @@ class NativeCyberEvaluation:
                     attack_kwargs={"max_attempts_on_failure": 0},
                 )
                 technique = factory.create(
-                    objective_target=self._runtime.target,
+                    objective_target=self._target,
                     attack_scoring_config=AttackScoringConfig(),
                     attack_converter_config_override=AttackConverterConfig(request_converters=self._converters()),
                 )
@@ -446,7 +562,7 @@ class NativeCyberEvaluation:
                 seed = self.binding.seed(self.request)
                 self._seed = seed
                 await self._memory.add_seeds_to_memory_async(seeds=[seed], added_by="native_cyber")
-                self._pending_turn_started_at = datetime.now(UTC)
+                await self._begin_capture_turn_async()
                 async with asyncio.timeout(self._remaining_seconds()):
                     self._attack_result = await technique.attack.execute_async(
                         objective=seed.value,
@@ -454,12 +570,14 @@ class NativeCyberEvaluation:
                         memory_labels={"native_cyber_run_id": self.run_id},
                     )
                 self._conversation_id = self._attack_result.conversation_id
-                self.turn_count = 1
+                if self._unified_capture is None and self._harness_run is None:
+                    self.turn_count = 1
+                assert self._pending_turn_started_at is not None
                 await self._capture_turn_async(started_at=self._pending_turn_started_at)
                 self._pending_turn_started_at = None
                 await self._retain_events_async()
                 if self.request.operator_steps and not self.cancel_requested:
-                    if not self._runtime.target.session.evidence().coverage_complete:
+                    if not self._report_evidence().coverage_complete:
                         raise RuntimeError("The native turn did not produce complete retained event coverage.")
                     self.status = NativeCyberStatus.AWAITING_INSTRUCTION
                     self._expiry = asyncio.create_task(self._expire_async())
@@ -492,20 +610,22 @@ class NativeCyberEvaluation:
             assert self._runtime is not None and self._conversation_id is not None
             self.status = NativeCyberStatus.RUNNING
             try:
-                self._pending_turn_started_at = datetime.now(UTC)
+                await self._begin_capture_turn_async()
                 async with asyncio.timeout(min(self.request.turn_timeout_seconds, self._remaining_seconds())):
                     await self._normalizer.send_prompt_async(
                         message=Message.from_prompt(prompt=instruction, role="user"),
-                        target=self._runtime.target,
+                        target=self._target,
                         conversation_id=self._conversation_id,
                         request_converter_configurations=self._converters(),
                     )
-                self.turn_count += 1
+                if self._unified_capture is None and self._harness_run is None:
+                    self.turn_count += 1
+                assert self._pending_turn_started_at is not None
                 await self._capture_turn_async(started_at=self._pending_turn_started_at)
                 self._pending_turn_started_at = None
                 await self._retain_events_async()
                 self.status = NativeCyberStatus.AWAITING_INSTRUCTION
-                if not self._runtime.target.session.evidence().coverage_complete:
+                if not self._report_evidence().coverage_complete:
                     raise RuntimeError("The next native turn did not produce complete event coverage.")
                 if self.cancel_requested:
                     await self._finalize_async(cancelled=True)
@@ -565,13 +685,19 @@ class NativeCyberEvaluation:
             binding=self.binding,
             request=request.model_copy(update={"parent_run_id": None}),
             directory=self.directory.parent,
+            harness=self._harness,
         )
         child.request = request.model_copy(update={"parent_run_id": self.run_id})
         child._seen_environments = self._seen_environments.copy()
         child._seen_sessions = self._seen_sessions.copy()
-        if self.report.agent:
+        if isinstance(self.report, NativeCyberReport) and self.report.agent:
             child._seen_environments.add(self.report.agent.environment_id)
             child._seen_sessions.add(self.report.agent.session_id)
+        elif isinstance(self.report, NativeCliRunReport):
+            if self.report.environment_id:
+                child._seen_environments.add(self.report.environment_id)
+            if self.report.evidence.source_session_id:
+                child._seen_sessions.add(self.report.evidence.source_session_id)
         return child
 
     async def cancel_async(self) -> NativeCyberRunView:
@@ -645,29 +771,90 @@ class NativeCyberEvaluation:
         await self.binding.create_host_storage_async(directory=self.directory)
         self._directory_created = True
 
+    async def _begin_capture_turn_async(self) -> None:
+        self._pending_turn_started_at = datetime.now(UTC)
+        if self._harness_run is not None:
+            self.turn_count += 1
+            await self._harness_run.begin_turn_async(
+                turn_index=self.turn_count,
+                started_at=self._pending_turn_started_at,
+                response_mode=self.binding.response_mode(request=self.request, turn_index=self.turn_count),
+            )
+        elif self._unified_capture is not None:
+            assert self._runtime is not None
+            self.turn_count += 1
+            observer = await self._unified_capture.start_turn_async(
+                turn_id=str(uuid4()),
+                turn_index=self.turn_count,
+                started_at=self._pending_turn_started_at,
+                response_mode=self.binding.response_mode(request=self.request, turn_index=self.turn_count),
+            )
+            self.binding.bind_model_observer(runtime=self._legacy_runtime, observer=observer)
+
+    def _report_evidence(self) -> NativeAgentEvidence | NativeHarnessEvidence:
+        assert self._runtime is not None
+        if self._harness_run is not None:
+            return self._harness_run.evidence()
+        evidence = self._legacy_runtime.target.session.evidence()
+        return self._unified_capture.project_evidence(evidence) if self._unified_capture is not None else evidence
+
+    def _verify_harness_lineage(self) -> None:
+        assert self._harness_run is not None
+        identity = self._harness_run.identity
+        if identity.environment_id in self._seen_environments or (
+            identity.source_session_id is not None and identity.source_session_id in self._seen_sessions
+        ):
+            raise ValueError("A fresh rerun cannot reuse a previous harness environment or observed session.")
+
+    async def _assess_coverage_async(
+        self, *, report: NativeCyberReport | NativeCliRunReport, phase: NativeCyberCoveragePhase
+    ) -> NativeCyberCoverageAssessment:
+        if isinstance(report, NativeCliRunReport):
+            return await asyncio.to_thread(
+                self._evidence_store.assess_cli_coverage, report=report, expected_turns=self.turn_count, phase=phase
+            )
+        assessment = (
+            self._evidence_store.assess_pregrading_coverage
+            if phase is NativeCyberCoveragePhase.PREGRADING
+            else self._evidence_store.assess_required_coverage
+        )
+        return await asyncio.to_thread(assessment, report=report, expected_turns=self.turn_count)
+
     async def _finalize_async(self, *, cancelled: bool = False) -> None:
         if self.report is not None:
             return
         self.status = NativeCyberStatus.FINALIZING
         assert self._runtime is not None
-        await self._runtime.target.session.quiesce_async()
+        if self._harness_run is not None:
+            await self._harness_run.quiesce_async()
+        else:
+            await self._legacy_runtime.target.session.quiesce_async()
         await self._retain_events_async()
         await self._seal_raw_stream_async()
-        evidence = self._runtime.target.session.evidence()
-        coverage = await asyncio.to_thread(
-            self._evidence_store.assess_pregrading_coverage,
+        evidence = self._report_evidence()
+        coverage = await self._assess_coverage_async(
             report=self._build_report(None),
-            expected_turns=self.turn_count,
+            phase=NativeCyberCoveragePhase.PREGRADING,
         )
-        if not cancelled and evidence.coverage_complete and evidence.idle and coverage.required_complete:
+        cancelled = cancelled or self.cancel_requested
+        quiescent = evidence.quiescent if isinstance(evidence, NativeHarnessEvidence) else evidence.idle
+        if not cancelled and evidence.coverage_complete and quiescent and coverage.required_complete:
             if self._grading_started:
                 raise RuntimeError("Original grading was already attempted; it cannot be retried implicitly.")
             self._grading_started = True
             async with asyncio.timeout(self._remaining_seconds()):
-                self._judgment = await self._runtime.grade_async(evidence=evidence)
+                if isinstance(evidence, NativeHarnessEvidence):
+                    assert isinstance(self._runtime, NativeTaskRuntime)
+                    self._judgment = await self._runtime.grade_async(evidence=evidence)
+                else:
+                    self._judgment = await self._legacy_runtime.grade_async(evidence=evidence)
         elif not cancelled:
             self._errors.extend((*evidence.gaps, *coverage.required_gaps))
         await self._settle_async(self._close_async(), timeout_seconds=self._cleanup_budget_seconds() + 5)
+        await self._seal_raw_stream_async()
+        if self._unified_capture is not None or self._harness_run is not None:
+            self._errors.extend(self._report_evidence().gaps)
+        cancelled = cancelled or self.cancel_requested
         self.status = (
             NativeCyberStatus.CANCELLED
             if cancelled
@@ -692,9 +879,14 @@ class NativeCyberEvaluation:
             raise
 
     async def _retain_events_async(self) -> None:
-        if self._runtime is None or not self._agent_storage_verified:
+        if (
+            self._runtime is None
+            or not self._agent_storage_verified
+            or self._unified_capture is not None
+            or self._harness is not None
+        ):
             return
-        events = self._runtime.target.session.evidence().events
+        events = self._legacy_runtime.target.session.evidence().events
         async with aiofiles.open(self.directory / "native-events.jsonl", "a", encoding="utf-8", newline="\n") as stream:
             for event in events[self._events_written :]:
                 await stream.write(event.model_dump_json() + "\n")
@@ -702,7 +894,7 @@ class NativeCyberEvaluation:
         self._events_written = len(events)
 
     async def _capture_turn_async(self, *, started_at: datetime) -> None:
-        assert self._runtime is not None and self._raw_stream is not None
+        assert self._runtime is not None
         try:
             messages = (
                 await asyncio.to_thread(self._memory.get_conversation_messages, conversation_id=self._conversation_id)
@@ -721,6 +913,11 @@ class NativeCyberEvaluation:
                 for piece in pieces
                 if piece.role in {"assistant", "simulated_assistant"}
                 and piece.original_value_data_type not in {"function_call", "tool_call", "function_call_output"}
+                and (
+                    self._unified_capture is None
+                    and self._harness_run is None
+                    or piece.original_value_data_type != "error"
+                )
             )
             tool_requests = tuple(
                 piece.id
@@ -733,6 +930,31 @@ class NativeCyberEvaluation:
                 for piece in pieces
                 if piece.role == "tool" and piece.original_value_data_type == "function_call_output"
             )
+            if self._harness_run is not None:
+                await self._harness_run.finish_turn_async(
+                    request_piece_ids=requests,
+                    response_piece_ids=responses,
+                    tool_request_piece_ids=tool_requests,
+                    tool_result_piece_ids=tool_results,
+                    interrupted=self.status
+                    in {NativeCyberStatus.ERROR, NativeCyberStatus.CANCELLED, NativeCyberStatus.EXPIRED},
+                )
+                self._verify_harness_lineage()
+                self._linked_piece_ids.update(piece.id for piece in pieces)
+                return
+            if self._unified_capture is not None:
+                await self._unified_capture.finish_turn_async(
+                    evidence=self._legacy_runtime.target.session.evidence(),
+                    request_piece_ids=requests,
+                    response_piece_ids=responses,
+                    tool_request_piece_ids=tool_requests,
+                    tool_result_piece_ids=tool_results,
+                    interrupted=self.status
+                    in {NativeCyberStatus.ERROR, NativeCyberStatus.CANCELLED, NativeCyberStatus.EXPIRED},
+                )
+                self._linked_piece_ids.update(piece.id for piece in pieces)
+                return
+            assert self._raw_stream is not None
             await asyncio.to_thread(
                 self._evidence_store.begin_turn,
                 turn=NativeCyberTurnStart(
@@ -743,7 +965,7 @@ class NativeCyberEvaluation:
                     response_mode=self.binding.response_mode(request=self.request, turn_index=self.turn_count),
                 ),
             )
-            evidence = self._runtime.target.session.evidence()
+            evidence = self._legacy_runtime.target.session.evidence()
             new_events = evidence.events[self._db_events_written :]
             for offset in range(0, len(new_events), self._evidence_store.MAX_EVENT_BATCH):
                 batch = new_events[offset : offset + self._evidence_store.MAX_EVENT_BATCH]
@@ -798,10 +1020,16 @@ class NativeCyberEvaluation:
             raise
 
     async def _seal_raw_stream_async(self) -> None:
+        if self._harness_run is not None:
+            await self._harness_run.checkpoint_async()
+            return
+        if self._unified_capture is not None:
+            await self._unified_capture.checkpoint_async()
+            return
         if self._raw_stream is None or self._raw_sealed:
             return
         assert self._runtime is not None
-        evidence = self._runtime.target.session.evidence()
+        evidence = self._legacy_runtime.target.session.evidence()
         await asyncio.to_thread(
             self._evidence_store.close_raw_stream,
             run_id=self.run_id,
@@ -839,11 +1067,26 @@ class NativeCyberEvaluation:
         )
         try:
             if self._pending_turn_started_at is not None and not self._capture_failed and self._runtime is not None:
-                self._conversation_id = self._conversation_id or self._runtime.target.conversation_id
-                if self._conversation_id is not None or self._runtime.target.session.evidence().events:
-                    self.turn_count += 1
+                from pyrit.prompt_target import NativeAgentTarget, NativeCliTarget
+
+                target = self._target
+                if isinstance(target, (NativeAgentTarget, NativeCliTarget)):
+                    self._conversation_id = self._conversation_id or target.conversation_id
+                if (
+                    self._unified_capture is not None
+                    or self._harness_run is not None
+                    or self._conversation_id is not None
+                    or self._legacy_runtime.target.session.evidence().events
+                ):
+                    if self._unified_capture is None and self._harness_run is None:
+                        self.turn_count += 1
                     try:
-                        await self._capture_turn_async(started_at=self._pending_turn_started_at)
+                        if (
+                            self._harness_run.turn_open
+                            if self._harness_run is not None
+                            else self._unified_capture is None or self._unified_capture.turn_open
+                        ):
+                            await self._capture_turn_async(started_at=self._pending_turn_started_at)
                     except (Exception, asyncio.CancelledError) as capture_error:
                         self._errors.append(f"Native turn capture failed: {type(capture_error).__name__}")
                         logger.exception("Native turn capture could not be completed after a failed agent send.")
@@ -918,10 +1161,15 @@ class NativeCyberEvaluation:
             raise PermissionError("Cannot retain raw evidence while an unverified agent storage boundary remains open.")
         self._publication_in_progress = True
         await self._seal_raw_stream_async()
+        if self.status is NativeCyberStatus.COMPLETED and (
+            self._unified_capture is not None or self._harness_run is not None
+        ):
+            evidence = self._report_evidence()
+            if not evidence.coverage_complete:
+                self.status = NativeCyberStatus.ERROR
+                self._errors.extend(evidence.gaps)
         report = self._build_report(judgment)
-        coverage = await asyncio.to_thread(
-            self._evidence_store.assess_required_coverage, report=report, expected_turns=self.turn_count
-        )
+        coverage = await self._assess_coverage_async(report=report, phase=NativeCyberCoveragePhase.FINAL)
         if self.status is NativeCyberStatus.COMPLETED and not coverage.required_complete:
             self.status = NativeCyberStatus.ERROR
             self._errors.extend(coverage.required_gaps)
@@ -938,13 +1186,22 @@ class NativeCyberEvaluation:
                 self._errors.append(f"Report file retention failed: {type(error).__name__}: {error}")
                 logger.exception("Native report file retention failed; attempting undetermined memory retention.")
                 report = self._build_report(judgment)
-        score = NativeCyberReportScorer(report_sha256=report.sha256()).prepare_unpersisted_score(report=report)
-        snapshot = await asyncio.to_thread(
-            self._evidence_store.finalize_episode_atomic,
-            report=report,
-            score=score,
-            expected_turns=self.turn_count,
-        )
+        if isinstance(report, NativeCliRunReport):
+            score = build_native_cli_report_score(report=report)
+            snapshot = await asyncio.to_thread(
+                self._evidence_store.finalize_cli_episode_atomic,
+                report=report,
+                score=score,
+                expected_turns=self.turn_count,
+            )
+        else:
+            score = NativeCyberReportScorer(report_sha256=report.sha256()).prepare_unpersisted_score(report=report)
+            snapshot = await asyncio.to_thread(
+                self._evidence_store.finalize_episode_atomic,
+                report=report,
+                score=score,
+                expected_turns=self.turn_count,
+            )
         if snapshot.score_id is None or snapshot.report_content_id is None:
             raise RuntimeError("Native evidence finalization did not persist the report and its Score.")
         scores = await asyncio.to_thread(self._memory.get_scores, score_ids=[str(snapshot.score_id)])
@@ -956,7 +1213,33 @@ class NativeCyberEvaluation:
         if self._expiry is not None and self._expiry is not asyncio.current_task():
             self._expiry.cancel()
 
-    def _build_report(self, judgment: NativeCyberJudgment | None) -> NativeCyberReport:
+    def _build_report(self, judgment: NativeCyberJudgment | None) -> NativeCyberReport | NativeCliRunReport:
+        if self._harness_run is not None:
+            return self._harness_run.build_report(
+                NativeHarnessReportContext(
+                    run_id=self.run_id,
+                    binding_name=self.binding.name,
+                    binding_version=self.binding.version,
+                    request=self.request,
+                    input_sha256=hashlib.sha256(
+                        (self._seed.value if self._seed else self.request.instruction).encode()
+                    ).hexdigest(),
+                    seed_id=str(self._seed.id) if self._seed else None,
+                    status=self.status,
+                    readiness=self._readiness,
+                    started_at=self.started_at,
+                    expires_at=self.expires_at,
+                    ended_at=datetime.now(UTC),
+                    conversation_id=self._conversation_id,
+                    attack_result_id=self._attack_result.attack_result_id if self._attack_result else None,
+                    technique_identifier=self._technique_identifier,
+                    judgment=judgment,
+                    cleanup=self._cleanup,
+                    errors=tuple(self._errors),
+                )
+            )
+        agent = self._report_evidence() if self._runtime and self._harness is None else None
+        assert agent is None or isinstance(agent, NativeAgentEvidence)
         return NativeCyberReport(
             run_id=self.run_id,
             binding_name=self.binding.name,
@@ -975,7 +1258,7 @@ class NativeCyberEvaluation:
             conversation_id=self._conversation_id,
             attack_result_id=self._attack_result.attack_result_id if self._attack_result else None,
             technique_identifier=self._technique_identifier,
-            agent=self._runtime.target.session.evidence() if self._runtime else None,
+            agent=agent,
             judgment=judgment,
             cleanup=self._cleanup,
             errors=tuple(self._errors),

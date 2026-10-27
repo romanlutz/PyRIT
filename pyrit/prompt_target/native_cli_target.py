@@ -122,6 +122,13 @@ class NativeCliTarget(PromptTarget):
         self._invoked = False
         self._send_lock = asyncio.Lock()
         self._last_run: NativeCliTargetRun | None = None
+        self._stop_confirmed = False
+        self.conversation_id: str | None = None
+
+    @property
+    def stop_confirmed(self) -> bool:
+        """Whether the owned process stop barrier returned successfully, not merely CLI exit."""
+        return self._stop_confirmed
 
     @property
     def last_run(self) -> NativeCliTargetRun | None:
@@ -163,17 +170,22 @@ class NativeCliTarget(PromptTarget):
             if self._invoked:
                 raise RuntimeError("Native CLI targets are one-shot; create a new target and sandbox for another run.")
             self._invoked = True
+        self.conversation_id = request.get_piece().conversation_id
         observed_sink = _ObservedResponseSink(sink=self._evidence_sink)
-        outcome = await NativeCliRunner(launcher=self._launcher, sink=observed_sink).run_async(
-            config=self._run_config, prompt=request.get_piece().converted_value
-        )
+        runner = NativeCliRunner(launcher=self._launcher, sink=observed_sink)
+        try:
+            outcome = await runner.run_async(config=self._run_config, prompt=request.get_piece().converted_value)
+        finally:
+            self._stop_confirmed = runner.stop_confirmed
+            if runner.outcome is not None:
+                self._last_run = NativeCliTargetRun(
+                    outcome=runner.outcome,
+                    response_sources=observed_sink.response_sources(),
+                    evidence_sink=self._evidence_sink,
+                    conversation_id=request.get_piece().conversation_id,
+                )
         sources = observed_sink.response_sources()
-        self._last_run = NativeCliTargetRun(
-            outcome=outcome,
-            response_sources=sources,
-            evidence_sink=self._evidence_sink,
-            conversation_id=request.get_piece().conversation_id,
-        )
+        assert self._last_run is not None
         if not outcome.coverage_complete:
             raise NativeCliCoverageError(run=self._last_run)
         return [self._to_message(request_piece=request.get_piece(), observation=source) for source in sources]

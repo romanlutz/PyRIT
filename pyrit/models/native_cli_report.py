@@ -11,7 +11,7 @@ import math
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class NativeCliReportProtocol(str, Enum):
@@ -312,6 +312,7 @@ class NativeCliOriginalJudgment(BaseModel):
     value: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     complete: bool = Field(strict=True)
     rationale: str
+    retained_evidence: JsonValue = None
 
     @field_validator("value", mode="before")
     @classmethod
@@ -334,6 +335,12 @@ class NativeCliOriginalJudgment(BaseModel):
             raise ValueError("Only a complete original grader judgment may carry a numeric value.")
         if self.complete and not self.grader_evidence_ref:
             raise ValueError("A complete original judgment requires rationale and retained grader evidence.")
+        if self.grader_evidence_ref and self.grader_evidence_ref.startswith("inline-sha256:"):
+            digest = hashlib.sha256(
+                json.dumps(self.retained_evidence, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            ).hexdigest()
+            if self.retained_evidence is None or self.grader_evidence_ref != f"inline-sha256:{digest}":
+                raise ValueError("Inline original grader evidence must match its retained digest.")
         return self
 
 
@@ -350,6 +357,8 @@ class NativeCliRunReport(BaseModel):
     turn_index: int = Field(strict=True, ge=1)
     parent_run_id: str | None = Field(default=None, min_length=1)
     conversation_id: str | None = Field(default=None, min_length=1)
+    environment_id: str | None = Field(default=None, min_length=1, max_length=128)
+    harness_id: str | None = Field(default=None, min_length=1, max_length=128)
     protocol: NativeCliReportProtocol
     cli_version: str = Field(pattern=r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
     cli_profile: str = Field(pattern=r"^[a-z][a-z0-9._-]*$")
@@ -371,6 +380,8 @@ class NativeCliRunReport(BaseModel):
 
     @model_validator(mode="after")
     def _validate_status(self) -> NativeCliRunReport:
+        if self.harness_id is not None and self.harness_id != self.protocol.value:
+            raise ValueError("CLI harness identity must name the actual selected source protocol.")
         if any(not item.strip() for item in (self.task_id, self.task_version, self.run_id, self.turn_id, *self.errors)):
             raise ValueError("CLI task version, task/run/turn IDs, and errors must not be blank.")
         if any(item is not None and not item.strip() for item in (self.parent_run_id, self.conversation_id)):
@@ -480,12 +491,19 @@ class NativeCliRunReport(BaseModel):
 
     def canonical_json(self) -> str:
         """
-        Serialize the v1 evidence in stable key and event order.
+        Serialize v1 evidence, omitting only unset extensions added after the original v1 contract.
 
         Returns:
             str: Deterministic, compact, nonfinite-free JSON.
         """
-        return json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        payload = self.model_dump(mode="json")
+        for field in ("environment_id", "harness_id"):
+            if payload[field] is None:
+                del payload[field]
+        judgment = payload["judgment"]
+        if judgment is not None and judgment["retained_evidence"] is None:
+            del judgment["retained_evidence"]
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
     def sha256(self) -> str:
         """

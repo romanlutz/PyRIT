@@ -489,6 +489,66 @@ class NativeCyberEvidenceStore:
             phase=NativeCyberCoveragePhase.FINAL,
         )
 
+    def bind_runtime_identity(self, *, run_id: str, environment_id: str, simulated: bool) -> None:
+        """
+        Bind the allocated environment once, before source capture, without inventing a session ID.
+
+        Raises:
+            ValueError: If identity is invalid, changed, or source capture already began.
+        """
+        if not isinstance(environment_id, str) or not 0 < len(environment_id) <= 128 or type(simulated) is not bool:
+            raise ValueError("An allocated runtime requires an exact bounded environment and simulation provenance.")
+        with self._write_session(run_id=run_id) as session:
+            episode = self._lock_episode(session=session, run_id=run_id)
+            self._require_open(episode)
+            if (
+                episode.environment_id is not None
+                or session.scalar(
+                    select(NativeCyberTurnEntry.turn_index).where(NativeCyberTurnEntry.run_id == run_id).limit(1)
+                )
+                is not None
+            ):
+                raise ValueError("Runtime identity must be bound once before source capture.")
+            episode.environment_id = environment_id
+            episode.simulated = simulated
+
+    def assess_cli_coverage(
+        self, *, report: NativeCliRunReport, expected_turns: int, phase: NativeCyberCoveragePhase
+    ) -> NativeCyberCoverageAssessment:
+        """
+        Check actual CLI source rows before grading or final publication without publishing.
+
+        Returns:
+            NativeCyberCoverageAssessment: Required and optional source gaps in this phase.
+
+        Raises:
+            ValueError: If the phase, turn count, or pregrading judgment is invalid.
+        """
+        if not isinstance(phase, NativeCyberCoveragePhase) or expected_turns < 0:
+            raise ValueError("CLI coverage requires an explicit phase and nonnegative turn count.")
+        if phase is NativeCyberCoveragePhase.PREGRADING and report.judgment is not None:
+            raise ValueError("Pregrading CLI coverage cannot include an acquired judgment.")
+        report = NativeCliRunReport.model_validate(report.model_dump(mode="json"))
+        with self._write_session(run_id=report.run_id) as session:
+            episode = self._lock_episode(session=session, run_id=report.run_id)
+            self._require_open(episode)
+            required, optional = _NativeCliEvidenceValidator(
+                session=session,
+                episode=episode,
+                report=report,
+                expected_turns=expected_turns,
+                phase=phase,
+                digest_stream=lambda stream: self._hash_stream(session=session, stream=stream),
+                digest_event=self._hash_payload,
+                verify_pieces=lambda links: self._piece_links_intact(session=session, links=links),
+            ).validate()
+            return NativeCyberCoverageAssessment(
+                phase=phase,
+                required_complete=report.evidence.coverage_complete and not required,
+                required_gaps=tuple(required),
+                optional_gaps=tuple(optional),
+            )
+
     def assess_pregrading_coverage(
         self,
         *,
@@ -1725,7 +1785,13 @@ class NativeCyberEvidenceStore:
                 event.sequence
                 for event in events
                 if event.source == "harness"
-                and event.event_type in {"session.idle", "turn.completed"}
+                and (
+                    event.event_type in {"session.idle", "turn.completed"}
+                    or (
+                        event.event_type in {"native_cli.turn_completed", "native_cli.run_finished"}
+                        and event.payload.get("status") == "completed"
+                    )
+                )
                 and not (event.event_type == "session.idle" and event.payload.get("agentId"))
                 and not (isinstance(data := event.payload.get("data"), dict) and data.get("aborted") is True)
             ),

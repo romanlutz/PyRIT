@@ -36,6 +36,13 @@ class NativeCyberCleanup(str, Enum):
     UNKNOWN = "unknown"
 
 
+class NativeCyberEvidenceContract(str, Enum):
+    """Binding-selected required sources, fixed before any task dispatch."""
+
+    SDK_EVENTS = "sdk_events"
+    COPILOT_SDK_AND_MODEL = "copilot_sdk_and_model"
+
+
 class NativeAgentCapabilities(BaseModel):
     """Proven session abilities, not user-selectable promises."""
 
@@ -44,7 +51,7 @@ class NativeAgentCapabilities(BaseModel):
     retained_session: bool = False
     operator_steps: bool = False
     max_turns: int = Field(default=1, ge=1, le=100)
-    evidence_scope: Literal["native_session_events"] = "native_session_events"
+    evidence_scope: Literal["native_session_events", "native_cli_jsonl"] = "native_session_events"
 
     @model_validator(mode="after")
     def _validate_steps(self) -> NativeAgentCapabilities:
@@ -148,7 +155,7 @@ class NativeAgentEvidence(BaseModel):
     idle: bool
     coverage_complete: bool
     gaps: tuple[str, ...]
-    scope: Literal["native_session_events"] = "native_session_events"
+    scope: Literal["native_session_events", "native_sdk_and_model"] = "native_session_events"
     provenance: dict[str, JsonValue] = Field(default_factory=dict)
 
 

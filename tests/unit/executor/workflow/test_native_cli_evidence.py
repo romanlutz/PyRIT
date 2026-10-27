@@ -799,25 +799,27 @@ async def test_cli_sink_preserves_repeated_claude_message_id_and_distinct_tool_r
     assert repeated[0].stdout_offset_bytes == repeated[1].stdout_offset_bytes
 
 
-async def test_cli_sink_quota_loss_is_explicit_even_when_parser_exits_clean_async(
+async def test_cli_sink_quota_loss_stops_before_parser_or_model_progress_async(
     *, sqlite_instance: SQLiteMemory
 ) -> None:
     sink = await _start_sink_async(memory=sqlite_instance, raw_byte_limit=8)
     sandbox = _Sandbox(chunks=[NativeCliProcessChunk(stream=NativeCliStream.STDOUT, data=_codex())])
     target = NativeCliTarget(run_config=_config(), launcher=_Launcher(sandbox=sandbox), evidence_sink=sink)
     request = Message.from_prompt(prompt="Inert instruction", role="user")
-    response = await PromptNormalizer().send_prompt_async(message=request, target=target)
-    assert target.last_run and target.last_run.outcome.coverage_complete
+    with pytest.raises(Exception, match="Error sending prompt") as failure:
+        await PromptNormalizer().send_prompt_async(message=request, target=target)
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert target.last_run is None and target.stop_confirmed and sandbox.stop_count == 1
     await sink.finish_async(
-        outcome=target.last_run.outcome,
+        outcome=None,
         request_piece_ids=(request.get_piece().id,),
-        response_piece_ids=(response.get_piece().id,),
     )
     episode = await asyncio.to_thread(sqlite_instance.native_cyber_evidence.get_episode, run_id=sink.run_id)
     stdout = next(raw for raw in episode.raw_streams if raw.key.kind.value == "stdout")
     assert stdout.truncated and stdout.stored_bytes == 8
     assert stdout.omitted_bytes == stdout.received_bytes - 8
     assert not stdout.source_complete and stdout.gaps
+    assert not episode.turns[0].response_piece_ids
 
 
 async def test_cli_sink_failed_write_cannot_be_retried_as_complete_capture_async(

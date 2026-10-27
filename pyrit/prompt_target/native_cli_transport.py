@@ -118,6 +118,8 @@ class NativeCliJsonlParser:
         self._message_ids: set[str] = set()
         self._open_tools: dict[tuple[str | None, str], NativeCliEventKind] = {}
         self._completed_tools: dict[tuple[str | None, str], None] = {}
+        self._seen_tools: set[tuple[str | None, str]] = set()
+        self._codex_messages: set[str] = set()
         self._gaps: list[str] = []
         self._fatal_reason: str | None = None
 
@@ -271,6 +273,11 @@ class NativeCliJsonlParser:
         events = [self._event(observation=observation, raw=raw)]
         events.extend(self._order_gaps(observation=observation, raw=raw))
         kind = observation.kind
+        if self._config.protocol is NativeCliProtocol.CODEX_EXEC_JSON and kind is NativeCliEventKind.MODEL_MESSAGE:
+            if observation.source_event_id in self._codex_messages:
+                events.append(self._diagnostic(detail="Codex model item ID was repeated.", raw=raw))
+            elif observation.source_event_id is not None:
+                self._codex_messages.add(observation.source_event_id)
         if kind is NativeCliEventKind.SESSION_STARTED:
             if self._source_session_id is not None:
                 events.append(self._diagnostic(detail="Native CLI session start was repeated.", raw=raw))
@@ -331,8 +338,9 @@ class NativeCliJsonlParser:
         if tool_id is None:
             return (self._diagnostic(detail="Tool start/request lacks a source ID.", raw=raw),)
         key = (observation.parent_tool_use_id, tool_id)
-        if key in self._open_tools or key in self._completed_tools:
+        if key in self._seen_tools:
             return (self._diagnostic(detail=f"Tool {tool_id} has a repeated source ID.", raw=raw),)
+        self._seen_tools.add(key)
         self._open_tools[key] = observation.kind
         return ()
 
@@ -407,6 +415,8 @@ class NativeCliRunner:
         """Attach an injected sandbox launcher and durable evidence recorder."""
         self._launcher = launcher
         self._sink = sink
+        self.outcome: NativeCliRunOutcome | None = None
+        self.stop_confirmed = False
 
     async def run_async(self, *, config: NativeCliRunConfig, prompt: str) -> NativeCliRunOutcome:
         """
@@ -460,7 +470,7 @@ class NativeCliRunner:
                     await self._sink.record_event_async(
                         event=parser.abort(detail=f"Native CLI process exited with code {exit_code}.")
                     )
-                return NativeCliRunOutcome(
+                self.outcome = NativeCliRunOutcome(
                     exit_code=exit_code,
                     terminal_observed=parser.terminal_observed,
                     coverage_complete=exit_code == 0 and parser.coverage_complete,
@@ -472,6 +482,7 @@ class NativeCliRunner:
                     raw_stderr_bytes=stderr_bytes,
                     gaps=parser.gaps,
                 )
+                return self.outcome
         except TimeoutError as error:
             primary_error = error
             await self._record_abort_async(
@@ -498,6 +509,7 @@ class NativeCliRunner:
             if process is not None:
                 try:
                     await asyncio.wait_for(process.stop_async(), timeout=config.timeout_seconds)
+                    self.stop_confirmed = True
                 except (Exception, asyncio.CancelledError) as cleanup_error:
                     if primary_error is None:
                         raise

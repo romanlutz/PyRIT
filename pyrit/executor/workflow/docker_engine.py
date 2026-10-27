@@ -379,6 +379,111 @@ class DockerEngineClient:
         """Close host transport resources, not guest processes or the daemon."""
         await self._client.aclose()
 
+    async def inspect_volume_async(self, name: str) -> dict[str, Any] | None:
+        """
+        Inspect one generated workspace volume; only an actual HTTP 404 means absence.
+
+        Returns:
+            dict[str, Any] | None: Original metadata or observed absence.
+
+        Raises:
+            DockerEngineError: If status or metadata cannot be attributed.
+        """
+        self._validate_volume_name(name)
+        status, content = await self._volume_control_async("GET", f"/volumes/{name}", allowed={200, 404})
+        if status == 404:
+            return None
+        value = self._decode_volume_json(content)
+        if not isinstance(value, dict) or value.get("Name") != name:
+            raise DockerEngineError("Volume inspection returned a different resource identity.")
+        return value
+
+    async def create_volume_async(self, *, name: str, labels: dict[str, str]) -> dict[str, Any]:
+        """
+        Request a fresh local/no-options volume; POST itself does not prove atomic create uniqueness.
+
+        Returns:
+            dict[str, Any]: The daemon acknowledgement for independent ownership validation.
+        """
+        self._validate_volume_name(name)
+        return await self._json_async(
+            "POST",
+            "/volumes/create",
+            status=201,
+            body={"Name": name, "Driver": "local", "DriverOpts": {}, "Labels": labels},
+        )
+
+    async def remove_volume_async(self, name: str) -> None:
+        """
+        Delete exactly one named volume without force; callers must prove ownership and no attachments.
+
+        Raises:
+            DockerEngineError: If deletion is not acknowledged.
+        """
+        self._validate_volume_name(name)
+        _, content = await self._volume_control_async("DELETE", f"/volumes/{name}?force=false", allowed={204})
+        if content:
+            raise DockerEngineError("Volume delete acknowledgement contained unexpected data.")
+
+    async def containers_using_volume_async(self, name: str) -> tuple[str, ...]:
+        """
+        Observe all containers referring to this exact volume, including stopped containers.
+
+        Returns:
+            tuple[str, ...]: Full daemon container IDs, bounded and unique.
+
+        Raises:
+            DockerEngineError: If the attachment inventory is malformed or excessive.
+        """
+        self._validate_volume_name(name)
+        query = str(httpx.QueryParams({"all": "1", "filters": json.dumps({"volume": [name]})}))
+        _, content = await self._volume_control_async("GET", f"/containers/json?{query}", allowed={200})
+        value = self._decode_volume_json(content)
+        if not isinstance(value, list) or len(value) > 64:
+            raise DockerEngineError("Volume attachment inventory is missing or exceeds its bound.")
+        identifiers: list[str] = []
+        for item in value:
+            identifier = item.get("Id") if isinstance(item, dict) else None
+            if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
+                raise DockerEngineError("Volume attachment lacks a full container identity.")
+            identifiers.append(identifier)
+        if len(set(identifiers)) != len(identifiers):
+            raise DockerEngineError("Volume attachment inventory repeated a container identity.")
+        return tuple(identifiers)
+
+    async def _volume_control_async(self, method: str, path: str, *, allowed: set[int]) -> tuple[int, bytes]:
+        request = self._request(method=method, path=path, body=None)
+        try:
+            async with asyncio.timeout(self._control_timeout):
+                response = await self._client.send(request, stream=True)
+                try:
+                    if response.status_code not in allowed:
+                        raise DockerEngineError(
+                            "Volume control did not return an approved status; outcome is unconfirmed."
+                        )
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=16_384):
+                        if len(body) + len(chunk) > self._max_control_bytes:
+                            raise DockerEngineError("Volume control response exceeded its byte limit.")
+                        body.extend(chunk)
+                    return response.status_code, bytes(body)
+                finally:
+                    await response.aclose()
+        except httpx.HTTPError as error:
+            raise DockerEngineError("Volume control transport failed; outcome is unknown.") from error
+
+    @staticmethod
+    def _decode_volume_json(content: bytes) -> Any:
+        try:
+            return json.loads(content)
+        except (ValueError, UnicodeError) as error:
+            raise DockerEngineError("Volume control returned malformed JSON.") from error
+
+    @staticmethod
+    def _validate_volume_name(name: str) -> None:
+        if not isinstance(name, str) or not re.fullmatch(r"pyrit-workspace-[0-9a-f]{48}", name):
+            raise ValueError("Workspace volume operations require an exact generated nonce name.")
+
     async def _json_async(
         self, method: str, path: str, *, status: int = 200, body: dict[str, Any] | None = None
     ) -> dict[str, Any]:

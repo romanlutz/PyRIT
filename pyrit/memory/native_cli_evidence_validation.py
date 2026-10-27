@@ -29,7 +29,7 @@ from pyrit.models.native_cli_report import (
     NativeCliReportProtocol,
     NativeCliReportStatus,
 )
-from pyrit.models.native_cyber_evidence import NativeCyberResponseMode
+from pyrit.models.native_cyber_evidence import NativeCyberCoveragePhase, NativeCyberResponseMode
 
 if TYPE_CHECKING:
     import uuid
@@ -91,6 +91,7 @@ class _NativeCliEvidenceValidator:
         digest_stream: Callable[[NativeCyberRawStreamEntry], str],
         digest_event: Callable[[Mapping[str, object]], str],
         verify_pieces: Callable[[Sequence[NativeCyberTurnMessagePieceEntry]], bool],
+        phase: NativeCyberCoveragePhase = NativeCyberCoveragePhase.FINAL,
     ) -> None:
         """Bind one transaction to the caller-supplied report and integrity helpers."""
         self._session = session
@@ -100,6 +101,7 @@ class _NativeCliEvidenceValidator:
         self._digest_stream = digest_stream
         self._digest_event = digest_event
         self._verify_pieces = verify_pieces
+        self._phase = phase
         self._required: list[str] = list(episode.capture_gaps)
         self._optional: list[str] = list(episode.optional_gaps)
         if any("native evidence database write failed" in gap.lower() for gap in episode.optional_gaps):
@@ -133,6 +135,8 @@ class _NativeCliEvidenceValidator:
 
     def _validate_identity(self) -> None:
         report, episode = self._report, self._episode
+        if report.environment_id is not None and report.environment_id != episode.environment_id:
+            self._required.append("CLI report environment differs from the owned episode.")
         if episode.task_id is None or episode.task_version is None:
             self._required.append("CLI task ID and version were not declared before capture.")
         elif (episode.task_id, episode.task_version) != (report.task_id, report.task_version):
@@ -151,9 +155,11 @@ class _NativeCliEvidenceValidator:
             or episode.source_session_id != report.evidence.source_session_id
         ):
             self._required.append("CLI report source session does not match the observed episode.")
-        if report.status is not NativeCliReportStatus.COMPLETED or not report.evidence.coverage_complete:
+        if not report.evidence.coverage_complete or (
+            self._phase is NativeCyberCoveragePhase.FINAL and report.status is not NativeCliReportStatus.COMPLETED
+        ):
             self._required.append("CLI process or report did not declare complete source coverage.")
-        if report.judgment is None or not report.judgment.complete:
+        if self._phase is NativeCyberCoveragePhase.FINAL and (report.judgment is None or not report.judgment.complete):
             self._required.append("The original CLI grader judgment was not completely acquired.")
         if report.evidence.gaps:
             self._required.append(f"CLI parser reported {len(report.evidence.gaps)} source coverage gap(s).")
@@ -197,7 +203,9 @@ class _NativeCliEvidenceValidator:
                     self._required.append("CLI artifact-only turn lacks task-approved response policy.")
                 if not report.evidence.terminal_observed:
                     self._required.append("CLI artifact-only turn lacks a terminal source event.")
-                if not report.artifacts or report.judgment is None or not report.judgment.complete:
+                if self._phase is NativeCyberCoveragePhase.FINAL and (
+                    not report.artifacts or report.judgment is None or not report.judgment.complete
+                ):
                     self._required.append("CLI artifact-only turn lacks original grading and retained artifact.")
             else:
                 self._required.append("CLI outer turn has an unsupported response mode.")

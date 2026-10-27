@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -28,7 +29,7 @@ from pyrit.memory.memory_models import (
     ScorableContentEntry,
     ScoreEntry,
 )
-from pyrit.models import ContentEntryScorable, ContentScorable, MessagePiece, Score, ScoreStatus
+from pyrit.models import ContentEntryScorable, ContentScorable, MessagePiece, Score, ScorerIdentifier, ScoreStatus
 from pyrit.models.native_cli_report import (
     NativeCliOriginalJudgment,
     NativeCliReportCleanup,
@@ -53,7 +54,8 @@ from pyrit.prompt_target.native_cli_models import (
     NativeCliStream,
 )
 from pyrit.prompt_target.native_cli_transport import NativeCliJsonlParser
-from pyrit.score.float_scale.native_cli_report_scorer import build_native_cli_report_score
+from pyrit.score.float_scale.native_cli_report_scorer import NativeCliReportScoreBuilder, build_native_cli_report_score
+from unit.models.test_native_cli_report import LEGACY_V1_REPORT_JSON, LEGACY_V1_REPORT_SHA256
 from unit.prompt_target.target.test_native_cli_target import _claude, _codex, _config, _frame
 
 if TYPE_CHECKING:
@@ -61,6 +63,72 @@ if TYPE_CHECKING:
     from pyrit.memory.native_cyber_evidence import NativeCyberEvidenceStore
 
 pytestmark = pytest.mark.usefixtures("patch_central_database")
+
+
+async def test_old_v1_score_content_link_reconciles_without_rewriting_bytes_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    """Reopen a fixed legacy content/Score receipt; this does not assert source completeness."""
+    data = json.loads(LEGACY_V1_REPORT_JSON)
+    score = Score(
+        score_type="float_scale",
+        score_value="0.75",
+        status=ScoreStatus.COMPLETE,
+        score_rationale=data["judgment"]["rationale"],
+        scorable=ContentScorable(value=LEGACY_V1_REPORT_JSON),
+        scorer_class_identifier=ScorerIdentifier.of(
+            NativeCliReportScoreBuilder(),
+            scorer_type="float_scale",
+            params={"contract": "native-cli-run-v1", "report_sha256": LEGACY_V1_REPORT_SHA256},
+        ),
+        score_metadata={
+            "contract_version": "native-cli-run-v1",
+            "report_sha256": LEGACY_V1_REPORT_SHA256,
+            "task_id": data["task_id"],
+            "task_version": data["task_version"],
+            "run_id": data["run_id"],
+            "turn_id": data["turn_id"],
+            "turn_index": data["turn_index"],
+            "cli_protocol": data["protocol"],
+            "cli_version": data["cli_version"],
+            "cli_profile": data["cli_profile"],
+            "run_status": data["status"],
+            "publication_state": "unpersisted_candidate",
+        },
+    )
+    store = sqlite_instance.native_cyber_evidence
+    restored = NativeCliRunReport.model_validate_json(LEGACY_V1_REPORT_JSON)
+    store._validate_cli_score(report=restored, score=score)
+    await asyncio.to_thread(sqlite_instance.add_scores_to_memory, scores=[score])
+    stored = (await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)]))[0]
+    assert isinstance(stored.scorable, ContentEntryScorable)
+    content_id = stored.scorable.content_id
+    contents = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[content_id])
+    assert contents[content_id].value == LEGACY_V1_REPORT_JSON
+    reopened = NativeCliRunReport.model_validate_json(contents[content_id].value)
+    assert reopened.sha256() == stored.score_metadata["report_sha256"] == LEGACY_V1_REPORT_SHA256
+
+    def reconcile(report: NativeCliRunReport) -> None:
+        with sqlite_instance.get_session() as session:
+            row = session.get(ScoreEntry, score.id)
+            assert row is not None
+            store._validate_cli_stored_score(session=session, stored=row, report=report)
+
+    await asyncio.to_thread(reconcile, reopened)
+    replay = build_native_cli_report_score(report=reopened)
+    assert replay.scorable == ContentScorable(value=LEGACY_V1_REPORT_JSON)
+    assert score.scorable == stored.scorable
+    assert replay.get_value() == stored.get_value() == 0.75
+    assert replay.scorer_class_identifier == score.scorer_class_identifier
+    assert replay.score_metadata["report_sha256"] == LEGACY_V1_REPORT_SHA256
+    changed = reopened.model_dump(mode="json")
+    changed.update(environment_id="new-environment", harness_id="codex_exec_json")
+    changed["judgment"]["retained_evidence"] = {"new": "original fixture detail"}
+    with pytest.raises(ValueError, match="exact canonical report"):
+        await asyncio.to_thread(reconcile, NativeCliRunReport.model_validate(changed))
+    final_contents = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[content_id])
+    assert final_contents[content_id].value == LEGACY_V1_REPORT_JSON
+    assert len(await asyncio.to_thread(sqlite_instance.get_scores, score_ids=[str(score.id)])) == 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1059,19 +1127,31 @@ async def test_cli_missing_claude_tool_request_link_cannot_claim_result_causalit
     assert snapshot.tools[0].result_sequence is not None
 
 
-async def test_cli_raw_quota_loss_downgrades_original_numeric_grade_async(*, sqlite_instance: SQLiteMemory) -> None:
-    case = await _capture_case_async(memory=sqlite_instance, raw_byte_limit=64)
+async def test_cli_raw_quota_violation_downgrades_original_numeric_grade_async(
+    *, sqlite_instance: SQLiteMemory
+) -> None:
+    case = await _capture_case_async(memory=sqlite_instance)
     assert case.report.judgment is not None and case.report.judgment.value == 0.75
 
-    snapshot = case.store.finalize_cli_episode_atomic(report=case.report, score=case.score, expected_turns=1)
+    def lower_quota() -> None:
+        with sqlite_instance.get_session() as session:
+            session.execute(
+                update(NativeCyberEpisodeEntry)
+                .where(NativeCyberEpisodeEntry.run_id == case.report.run_id)
+                .values(raw_byte_limit=64)
+            )
+            session.commit()
+
+    await asyncio.to_thread(lower_quota)
+    snapshot = await asyncio.to_thread(
+        case.store.finalize_cli_episode_atomic, report=case.report, score=case.score, expected_turns=1
+    )
 
     assert snapshot.score_status is ScoreStatus.UNDETERMINED
     assert any("capped" in gap or "quota" in gap or "raw byte" in gap.lower() for gap in snapshot.gaps)
-    assert snapshot.stored_raw_bytes == 64
-    assert any(stream.omitted_bytes > 0 for stream in snapshot.raw_streams)
-    retained = sqlite_instance.get_scorable_content(content_ids=[snapshot.report_content_id])[
-        snapshot.report_content_id
-    ]
+    assert snapshot.stored_raw_bytes > 64
+    contents = await asyncio.to_thread(sqlite_instance.get_scorable_content, content_ids=[snapshot.report_content_id])
+    retained = contents[snapshot.report_content_id]
     assert NativeCliRunReport.model_validate_json(retained.value).judgment.value == 0.75
 
 

@@ -77,7 +77,7 @@ def build_native_cli_run_report(
     Raises:
         ValueError: If observations contradict their process outcome or final status.
     """
-    evidence = _project_evidence(outcome=outcome, events=events, raw_evidence_ref=raw_evidence_ref)
+    evidence = project_native_cli_evidence(outcome=outcome, events=events, raw_evidence_ref=raw_evidence_ref)
     return NativeCliRunReport(
         schema_version=1,
         task_id=task_id,
@@ -101,12 +101,18 @@ def build_native_cli_run_report(
     )
 
 
-def _project_evidence(
+def project_native_cli_evidence(
     *,
     outcome: NativeCliRunOutcome | None,
     events: Iterable[NativeCliEvent | NativeCliReportEvent],
     raw_evidence_ref: str | None,
 ) -> NativeCliReportEvidence:
+    """
+    Project observed CLI facts without inventing task, lifecycle or judgment metadata.
+
+    Returns:
+        NativeCliReportEvidence: The original process outcome and ordered source summaries.
+    """
     summaries = _project_events(events=events)
     observed_ids = {item.source_session_id for item in summaries if item.source_session_id}
     source_session_id = (

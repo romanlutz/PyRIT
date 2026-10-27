@@ -44,17 +44,21 @@ class WireStream(httpx.AsyncByteStream):
         chunks: tuple[bytes, ...],
         *,
         on_eof: Callable[[], None] | None = None,
+        on_read: Callable[[], Awaitable[None]] | None = None,
         pause: bool = False,
         failure: Exception | None = None,
     ) -> None:
         self.chunks = chunks
         self.on_eof = on_eof
+        self.on_read = on_read
         self.pause = pause
         self.failure = failure
         self.paused = asyncio.Event()
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
+        if self.on_read is not None:
+            await self.on_read()
         for chunk in self.chunks:
             await asyncio.sleep(0)
             yield chunk
@@ -66,7 +70,7 @@ class WireStream(httpx.AsyncByteStream):
         if self.on_eof:
             self.on_eof()
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> None:  # pyrit-async-suffix-exempt
         self.closed = True
 
 
@@ -147,12 +151,14 @@ class FakeEngine:
             assert json.loads(request.content) == {"Detach": False, "Tty": False}
             self.started = self.running = True
             self.start_entered.set()
-            if self.on_start is not None:
-                await self.on_start()
             if self.start_gate is not None:
                 await self.start_gate.wait()
             self.last_stream = WireStream(
-                self.wire, on_eof=self._exited, pause=self.pause_stream, failure=self.stream_failure
+                self.wire,
+                on_eof=self._exited,
+                on_read=self.on_start,
+                pause=self.pause_stream,
+                failure=self.stream_failure,
             )
             headers = {"content-type": self.content_type}
             if self.content_encoding:
@@ -241,7 +247,7 @@ class FakeConfigArchive:
         )
 
 
-async def create_exec(engine: DockerEngineClient) -> DockerExecHandle:
+async def create_exec_async(engine: DockerEngineClient) -> DockerExecHandle:
     return await engine.create_exec_async(
         container_id=CONTAINER_ID,
         argv=("/opt/cli", "--", "literal $(not-a-shell)"),
@@ -255,7 +261,7 @@ async def test_engine_exec_identity_direct_argv_and_raw_multiplex_order_async() 
     raw = wire_frame(1, b"out\xc3\xa9\n") + wire_frame(2, b"err\xff\r\n") + wire_frame(1, b"last")
     fake.wire = (raw[:3], raw[3:10], raw[10:19], raw[19:])
     engine = fake.client()
-    handle = await create_exec(engine)
+    handle = await create_exec_async(engine)
     stream = await engine.start_exec_async(handle)
     chunks = [chunk async for chunk in stream.read_chunks_async()]
     assert b"".join(chunk.data for chunk in chunks if chunk.stream is NativeCliStream.STDOUT) == b"out\xc3\xa9\nlast"
@@ -288,7 +294,7 @@ async def test_exec_create_requires_full_daemon_id_async(value: Any) -> None:
     fake.exec_id = value
     engine = fake.client()
     with pytest.raises(DockerEngineError, match="daemon-issued"):
-        await create_exec(engine)
+        await create_exec_async(engine)
     assert not fake.started
     await engine.close_async()
 
@@ -311,7 +317,7 @@ async def test_exec_inspection_cannot_misattribute_process_or_pipes_async(*, fie
     fake.inspection_change = lambda observed: observed.update({field: value})
     engine = fake.client()
     with pytest.raises(DockerEngineError, match="attribution"):
-        await create_exec(engine)
+        await create_exec_async(engine)
     assert not fake.started
     await engine.close_async()
 
@@ -332,7 +338,7 @@ async def test_exec_process_config_is_bound_to_the_approved_handle_async(*, fiel
     fake.inspection_change = lambda observed: observed["ProcessConfig"].update({field: value})
     engine = fake.client()
     with pytest.raises(DockerEngineError, match="process differs"):
-        await create_exec(engine)
+        await create_exec_async(engine)
     assert not fake.started
     await engine.close_async()
 
@@ -340,11 +346,11 @@ async def test_exec_process_config_is_bound_to_the_approved_handle_async(*, fiel
 async def test_forged_or_reused_exec_handle_cannot_start_async() -> None:
     fake = FakeEngine()
     engine = fake.client()
-    handle = await create_exec(engine)
+    handle = await create_exec_async(engine)
     with pytest.raises(DockerEngineError, match="exact"):
         await engine.start_exec_async(replace(handle, container_id="c" * 64))
     with pytest.raises(DockerEngineError, match="reused"):
-        await create_exec(engine)
+        await create_exec_async(engine)
     assert not fake.started
     await engine.close_async()
 
@@ -364,7 +370,7 @@ async def test_unsupported_attach_upgrade_or_encoding_fails_without_output_async
     fake = FakeEngine()
     fake.start_status, fake.content_type, fake.content_encoding = status, content_type, encoding
     engine = fake.client()
-    handle = await create_exec(engine)
+    handle = await create_exec_async(engine)
     with pytest.raises(DockerEngineError, match="no fallback"):
         await engine.start_exec_async(handle)
     assert fake.last_stream.closed
@@ -387,7 +393,7 @@ async def test_invalid_or_truncated_multiplex_stream_never_has_clean_eof_async(w
     fake = FakeEngine()
     fake.wire = (wire,)
     engine = fake.client()
-    stream = await engine.start_exec_async(await create_exec(engine))
+    stream = await engine.start_exec_async(await create_exec_async(engine))
     with pytest.raises(DockerEngineError):
         _ = [chunk async for chunk in stream.read_chunks_async()]
     assert not stream.eof_observed
@@ -400,7 +406,7 @@ async def test_output_limits_are_errors_not_successful_truncation_async(limit: s
     fake = FakeEngine()
     fake.wire = (wire_frame(1, b"x" * 40),)
     engine = fake.client(**({"max_frame_bytes": 8} if limit == "frame" else {"max_wire_bytes": 16}))
-    stream = await engine.start_exec_async(await create_exec(engine))
+    stream = await engine.start_exec_async(await create_exec_async(engine))
     with pytest.raises(DockerEngineError, match="limit"):
         _ = [chunk async for chunk in stream.read_chunks_async()]
     assert not stream.eof_observed
@@ -412,7 +418,7 @@ async def test_stream_network_error_is_not_guest_exit_async() -> None:
     fake = FakeEngine()
     fake.stream_failure = httpx.ReadError("inert failure")
     engine = fake.client()
-    stream = await engine.start_exec_async(await create_exec(engine))
+    stream = await engine.start_exec_async(await create_exec_async(engine))
     with pytest.raises(DockerEngineError, match="guest exit is unknown"):
         _ = [chunk async for chunk in stream.read_chunks_async()]
     assert not stream.eof_observed
@@ -455,7 +461,7 @@ async def test_engine_cookies_are_never_forwarded_into_exec_requests_async() -> 
         return response
 
     engine = DockerEngineClient(transport=httpx.MockTransport(cookie_response_async))
-    handle = await create_exec(engine)
+    handle = await create_exec_async(engine)
     stream = await engine.start_exec_async(handle)
     _ = [part async for part in stream.read_chunks_async()]
     await engine.inspect_exec_async(handle)

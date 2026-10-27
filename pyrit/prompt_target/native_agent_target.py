@@ -31,6 +31,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class NativeAgentEventObserver(Protocol):
+    """Caller-owned observation only; persistence and evidence policy are outside the target."""
+
+    def record_sdk_event(self, event: NativeAgentEvent) -> None:
+        """Observe the detached event synchronously without reordering SDK callbacks."""
+        ...
+
+    def fail(self, reason: str) -> None:
+        """Latch an observation gap without receiving private exception bodies."""
+        ...
+
+    async def flush_async(self) -> None:
+        """Await durable observation before returning a prepared send result."""
+        ...
+
+
 class NativeAgentSession(Protocol):
     """A retained agent owned by an external environment lease."""
 
@@ -115,9 +131,22 @@ class CopilotSdkAgentSession:
         self._event_lock = threading.RLock()
         self._max_events = max_events
         self._max_event_bytes = max_event_bytes
+        self._event_observer: NativeAgentEventObserver | None = None
         if max_events <= 0 or max_event_bytes <= 0:
             raise ValueError("Native event retention limits must be positive.")
         self._unsubscribe = session.on(self._receive)
+
+    def attach_event_observer(self, observer: NativeAgentEventObserver) -> None:
+        """
+        Attach one caller-owned recorder before any SDK event or task delivery.
+
+        Raises:
+            RuntimeError: If observations or a send already started or the session is closed.
+        """
+        with self._event_lock:
+            if self._event_observer is not None or self._events or self._gaps or self._lock.locked() or self._closed:
+                raise RuntimeError("Native evidence observation must be attached once before delivery.")
+            self._event_observer = observer
 
     async def send_async(self, *, prompt: str, timeout_seconds: float) -> tuple[NativeAgentEvent, ...]:
         """
@@ -136,6 +165,8 @@ class CopilotSdkAgentSession:
             self._idle = False
             async with asyncio.timeout(timeout_seconds):
                 await self._session.send_and_wait(prompt, timeout=timeout_seconds)
+                if self._event_observer is not None:
+                    await self._event_observer.flush_async()
             if not self.evidence().idle:
                 raise RuntimeError("The native CLI returned without an observed root session.idle event.")
             return tuple(self._events[start:])
@@ -184,6 +215,8 @@ class CopilotSdkAgentSession:
         await self._session.disconnect()
         self._unsubscribe()
         self._closed = True
+        if self._event_observer is not None:
+            await self._event_observer.flush_async()
 
     @staticmethod
     def docker_stdio_arguments(*, container_id: str, cli_path: str) -> tuple[str, ...]:
@@ -232,9 +265,13 @@ class CopilotSdkAgentSession:
                 payload=json.loads(encoded),
             )
             self._events.append(retained)
+            if self._event_observer is not None:
+                self._event_observer.record_sdk_event(retained.model_copy(deep=True))
             self._correlate(retained)
         except (ValueError, TypeError, KeyError) as error:
             self._gaps.append(str(error))
+            if self._event_observer is not None:
+                self._event_observer.fail("A native SDK event failed identity, shape or correlation validation.")
             logger.error("Native agent evidence is incomplete: %s", error)
 
     def _correlate(self, event: NativeAgentEvent) -> None:

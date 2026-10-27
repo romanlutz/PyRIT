@@ -24,6 +24,41 @@ from pyrit.models.native_cli_report import (
     NativeCliRunReport,
 )
 
+# Frozen synthetic v1 bytes from the model at ba22c3d91a42, before the three optional extensions.
+LEGACY_V1_REPORT_JSON = (
+    '{"artifacts":[{"evidence_ref":"fixture-retained-artifact","media_type":"application/octet-stream",'
+    '"name":"fixture.txt","sha256":"0b723f4bbe62017c14a09e8148858292518a907c35559473ed2aa3bcfc15cdf3",'
+    '"size_bytes":26}],"cleanup":"closed","cli_profile":"locked-workspace","cli_version":"0.115.0",'
+    '"conversation_id":null,"errors":[],"evidence":{"coverage_complete":true,"events":['
+    '{"detail":null,"exit_code":null,"frame_number":1,"kind":"session_started","name":null,'
+    '"parent_tool_use_id":null,"raw_frame_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+    '"raw_frame_size_bytes":50,"sequence":1,"source_event_id":"codex-thread","source_message_id":null,'
+    '"source_session_id":"codex-thread","source_status":null,"source_tool_id":null,"status":"unknown",'
+    '"stdout_offset_bytes":0},{"detail":null,"exit_code":null,"frame_number":2,"kind":"turn_started","name":null,'
+    '"parent_tool_use_id":null,"raw_frame_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+    '"raw_frame_size_bytes":70,"sequence":2,"source_event_id":null,"source_message_id":null,"source_session_id":null,'
+    '"source_status":null,"source_tool_id":null,"status":"running","stdout_offset_bytes":50},{"detail":null,'
+    '"exit_code":null,"frame_number":3,"kind":"model_message","name":null,"parent_tool_use_id":null,'
+    '"raw_frame_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",'
+    '"raw_frame_size_bytes":80,"sequence":3,"source_event_id":"msg-3","source_message_id":null,'
+    '"source_session_id":null,"source_status":null,"source_tool_id":null,"status":"unknown",'
+    '"stdout_offset_bytes":120},{"detail":null,"exit_code":null,"frame_number":4,"kind":"turn_completed","name":null,'
+    '"parent_tool_use_id":null,"raw_frame_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",'
+    '"raw_frame_size_bytes":90,"sequence":4,"source_event_id":null,"source_message_id":null,"source_session_id":null,'
+    '"source_status":null,"source_tool_id":null,"status":"completed","stdout_offset_bytes":200},'
+    '{"detail":"Stdout reached EOF.","exit_code":null,"frame_number":null,"kind":"eof","name":null,'
+    '"parent_tool_use_id":null,"raw_frame_sha256":null,"raw_frame_size_bytes":null,"sequence":5,'
+    '"source_event_id":null,"source_message_id":null,"source_session_id":null,"source_status":null,'
+    '"source_tool_id":null,"status":"unknown","stdout_offset_bytes":null}],"exit_code":0,"frame_count":4,"gaps":[],'
+    '"observed_steps":1,"raw_chunk_count":2,"raw_evidence_ref":"fixture-raw-chunks","raw_stderr_bytes":14,'
+    '"raw_stdout_bytes":290,"source_session_id":"codex-thread","terminal_observed":true},"judgment":{"complete":true,'
+    '"grader_evidence_ref":"fixture-original-feedback","grader_ref":"fixture-original-grader",'
+    '"rationale":"Original grader evaluated the fixture artifact.","value":0.75},"max_steps":4,"parent_run_id":null,'
+    '"protocol":"codex_exec_json","run_id":"fixture-run","schema_version":1,"simulated":true,"status":"completed",'
+    '"task_id":"fixture-task","task_version":"benchmark-v1","turn_id":"fixture-turn","turn_index":1}'
+)
+LEGACY_V1_REPORT_SHA256 = "7eb4faa44b73e2f02ba16160ae77df414feee70aaf5c7d48de4e0c3230550274"
+
 
 def _complete_report() -> NativeCliRunReport:
     events = (
@@ -122,7 +157,7 @@ def _complete_report() -> NativeCliRunReport:
 def test_canonical_json_and_sha256_are_deterministic_on_real_model_round_trip() -> None:
     report = _complete_report()
     canonical = report.canonical_json()
-    assert canonical == json.dumps(report.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    assert canonical == LEGACY_V1_REPORT_JSON
     assert report.sha256() == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert NativeCliRunReport.model_validate_json(canonical).canonical_json() == canonical
     reversed_fields = dict(reversed(list(report.model_dump(mode="json").items())))
@@ -132,6 +167,72 @@ def test_canonical_json_and_sha256_are_deterministic_on_real_model_round_trip() 
     changed = report.model_dump(mode="json")
     changed["judgment"]["rationale"] = "Different original feedback"
     assert NativeCliRunReport.model_validate(changed).sha256() != report.sha256()
+
+
+@pytest.mark.parametrize("explicit_null_extensions", [False, True])
+def test_pre_extension_v1_wire_and_digest_survive_current_model_round_trip(explicit_null_extensions: bool) -> None:
+    assert hashlib.sha256(LEGACY_V1_REPORT_JSON.encode()).hexdigest() == LEGACY_V1_REPORT_SHA256
+    payload = json.loads(LEGACY_V1_REPORT_JSON)
+    if explicit_null_extensions:
+        payload.update(environment_id=None, harness_id=None)
+        payload["judgment"]["retained_evidence"] = None
+    report = NativeCliRunReport.model_validate_json(json.dumps(payload))
+    assert report.canonical_json() == LEGACY_V1_REPORT_JSON
+    assert report.sha256() == LEGACY_V1_REPORT_SHA256
+    assert NativeCliRunReport.model_validate(report.model_dump(mode="json")).canonical_json() == LEGACY_V1_REPORT_JSON
+    canonical = json.loads(report.canonical_json())
+    assert canonical["conversation_id"] is None and canonical["parent_run_id"] is None
+    assert canonical["evidence"]["events"][0]["exit_code"] is None
+    assert canonical["evidence"]["events"][-1]["source_event_id"] is None
+
+
+@pytest.mark.parametrize("status", ["incomplete", "error", "cancelled"])
+def test_legacy_null_judgment_and_nullable_source_fields_are_not_omitted(status: str) -> None:
+    payload = json.loads(LEGACY_V1_REPORT_JSON)
+    payload.update(status=status, judgment=None, cleanup="unknown", errors=["Synthetic legacy interruption"])
+    old_wire = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    restored = NativeCliRunReport.model_validate_json(old_wire)
+    assert restored.canonical_json() == old_wire
+    assert restored.sha256() == hashlib.sha256(old_wire.encode()).hexdigest()
+    assert '"judgment":null' in restored.canonical_json()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("environment_id", "owned-fixture-environment"),
+        ("harness_id", "codex_exec_json"),
+        ("retained_evidence", {"fixture": True, "unknown": None}),
+        ("retained_evidence", {}),
+        ("retained_evidence", []),
+        ("retained_evidence", False),
+        ("retained_evidence", 0),
+        ("retained_evidence", ""),
+    ],
+)
+def test_nonnull_extensions_remain_in_canonical_bytes_and_bind_the_digest(field: str, value: object) -> None:
+    payload = json.loads(LEGACY_V1_REPORT_JSON)
+    (payload["judgment"] if field == "retained_evidence" else payload)[field] = value
+    expected_wire = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    report = NativeCliRunReport.model_validate(payload)
+    assert report.canonical_json() == expected_wire
+    assert report.sha256() == hashlib.sha256(expected_wire.encode()).hexdigest()
+    assert report.sha256() != LEGACY_V1_REPORT_SHA256
+    assert NativeCliRunReport.model_validate_json(expected_wire).canonical_json() == expected_wire
+
+
+def test_inline_judgment_extension_keeps_digest_and_receipt_validation_strict() -> None:
+    payload = json.loads(LEGACY_V1_REPORT_JSON)
+    retained = {"fixture": True, "value": 0.75, "unknown": None}
+    digest = hashlib.sha256(json.dumps(retained, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    payload["judgment"].update(retained_evidence=retained, grader_evidence_ref=f"inline-sha256:{digest}")
+    expected_wire = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    report = NativeCliRunReport.model_validate_json(expected_wire)
+    assert report.canonical_json() == expected_wire
+    assert report.sha256() != LEGACY_V1_REPORT_SHA256
+    payload["judgment"]["retained_evidence"]["fixture"] = False
+    with pytest.raises(ValueError, match="retained digest"):
+        NativeCliRunReport.model_validate(payload)
 
 
 @pytest.mark.parametrize("version", [None, "", "  ", 123, True])

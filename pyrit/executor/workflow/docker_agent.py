@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from pyrit.executor.workflow.docker_command import DockerCommandRunner
+    from pyrit.executor.workflow.docker_compose import ComposeServiceSpec
     from pyrit.executor.workflow.docker_engine import DockerExecStream
     from pyrit.models.environment_lease import EnvironmentHealth
     from pyrit.prompt_target.native_cli_models import NativeCliProcessChunk
@@ -187,7 +188,7 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         ):
             raise ValueError("The pinned CLI executable must remain on the approved read-only agent image.")
         if (
-            not any(profile.config.agent_workdir.is_relative_to(mount.path) for mount in agent.tmpfs_mounts)
+            not self._workspace_allowed(agent=agent, workdir=profile.config.agent_workdir)
             or not math.isfinite(stop_timeout_seconds)
             or not 0 < stop_timeout_seconds <= 180
             or profile.config.timeout_seconds < stop_timeout_seconds
@@ -210,6 +211,9 @@ class DockerStopOnlyAgentLease(DockerComposeEnvironmentLease):
         self._network_baseline: str | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._stop_observation: AgentStopObservation | None = None
+
+    def _workspace_allowed(self, *, agent: ComposeServiceSpec, workdir: PurePosixPath) -> bool:
+        return any(workdir.is_relative_to(mount.path) for mount in agent.tmpfs_mounts)
 
     @property
     def agent_stop(self) -> AgentStopObservation | None:
