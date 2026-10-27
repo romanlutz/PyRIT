@@ -112,6 +112,13 @@ the original launch configuration is available. It skips completed objectives
 with non-error outcomes, including `failure`. Retrying an unsuccessful technique
 is a separate setting in `technique.execute`.
 
+Compound-attack hierarchy browsing is a separate GUI follow-up. The
+[backend hierarchy API](../../pyrit/backend/README.md#scenario-result-hierarchy)
+provides paged roots and ordered child expansion without clipping run statistics.
+Conversation reads expose main and pruned conversations only; adversarial and
+preparation contexts remain internal. Transcript bodies load only for a selected
+saved conversation.
+
 ![History page with saved attacks](images/attack_history.png)
 
 ## Analytics
