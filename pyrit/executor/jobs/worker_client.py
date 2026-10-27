@@ -207,16 +207,24 @@ class EvaluationWorkerHttpClient:
         self, *, admission: EvaluationWorkerAdmission, binding: EvaluationWorkerBinding | None
     ) -> EvaluationWorkerSnapshot:
         """
-        Request cancellation; the HTTP response alone never proves guest closure.
+        Request cancellation within the installed join budget, not the ordinary request timeout.
+
+        The worker may join cleanup before responding. The runtime's single outer
+        deadline still covers this request, status observation and settlement.
+        The HTTP response alone never proves guest closure.
 
         Returns:
             EvaluationWorkerSnapshot: The observed execution state.
         """
+        timeout = self.settings.cancel_join_timeout_seconds
+        if timeout is None:
+            timeout = self.settings.settlement_timeout_seconds
         return await self._snapshot_async(
             method="POST",
             path=f"{self.PREFIX}/jobs/{admission.request.job_id}/cancel",
             admission=admission,
             binding=binding,
+            timeout=timeout,
         )
 
     async def control_async(
@@ -366,6 +374,7 @@ class EvaluationWorkerHttpClient:
         path: str,
         admission: EvaluationWorkerAdmission,
         binding: EvaluationWorkerBinding | None,
+        timeout: float | None = None,
     ) -> EvaluationWorkerSnapshot:
         result = await self._json_async(
             model=EvaluationWorkerSnapshot,
@@ -374,6 +383,7 @@ class EvaluationWorkerHttpClient:
             actor_id=admission.actor_id,
             admission=admission,
             binding=binding,
+            timeout=timeout,
         )
         self._verify_binding(admission=admission, binding=result.binding)
         if result.request != admission.request or (binding is not None and result.binding != binding):
@@ -441,7 +451,13 @@ class EvaluationWorkerHttpClient:
                 credentials = await self.credentials.credentials_async(context=context)
                 headers = credentials.headers()
                 headers.update({"Accept-Encoding": "identity", "Content-Type": "application/json"})
-                async with self._client.stream(method, path, content=content, headers=headers) as response:
+                async with self._client.stream(
+                    method,
+                    path,
+                    content=content,
+                    headers=headers,
+                    timeout=httpx.Timeout(self.settings.request_timeout_seconds, read=timeout),
+                ) as response:
                     response.raise_for_status()
                     if (
                         response.headers.get("content-encoding", "identity") != "identity"

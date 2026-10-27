@@ -916,8 +916,14 @@ Trusted host composition can explicitly raise `poll_deadline_seconds` up to
 1860 seconds, without changing the 60-second default. Its optional
 `cancel_join_timeout_seconds` bounds the entire cancellation/closure join
 separately, up to 360 seconds. If absent, the existing settlement timeout
-still bounds that join. Request and settlement ACK caps remain 30 and
-60 seconds. These are host transport limits, not producer input, guest
+still bounds that join. A worker may join cleanup before returning its cancel
+response, so that response uses the join budget for its total/read timeout;
+connect, write and pool limits remain the ordinary request limits. One runtime
+deadline starts before the cancel POST and is not restarted for status polling
+or settlement. A timeout, incomplete or foreign binding/closure, or failed
+settlement remains uncertain; cancellation is not automatically retried.
+Ordinary request and settlement ACK caps remain 30 and 60 seconds.
+These are host transport limits, not producer input, guest
 command timeouts, or permission to extend an execution budget.
 
 CoPyRIT/framework clients still use the public `/api/evaluation-jobs` producer
